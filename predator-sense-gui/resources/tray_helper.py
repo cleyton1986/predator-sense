@@ -34,8 +34,13 @@ APP_ID = "com.predator.sense"
 
 def find_icon():
     d = os.path.dirname(os.path.abspath(__file__))
-    for p in [os.path.join(d, "predator-icon.svg"),
-              os.path.join(d, "..", "resources", "predator-icon.svg")]:
+    candidates = [
+        os.path.join(d, "predator-icon.svg"),
+        os.path.join(d, "resources", "predator-icon.svg"),
+        os.path.join(d, "..", "resources", "predator-icon.svg"),
+        "/opt/predator-sense/resources/predator-icon.svg",
+    ]
+    for p in candidates:
         if os.path.exists(p):
             return os.path.dirname(os.path.abspath(p)), os.path.splitext(os.path.basename(p))[0]
     return None, "preferences-system"
