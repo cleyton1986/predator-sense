@@ -1,0 +1,616 @@
+/* ================================================
+   Predator Sense for Linux - Predator Gaming Theme
+   Matching nova-ui.html design
+   ================================================ */
+
+@define-color cyan #00cce6;
+@define-color cyan_dark #008899;
+@define-color bg_body #050505;
+@define-color bg_dark #111111;
+@define-color bg_panel #161718;
+@define-color bg_stripe #141414;
+@define-color bg_card #1a1a1a;
+@define-color border_dim #222222;
+@define-color border_mid #333333;
+@define-color text_main #ffffff;
+@define-color text_muted #888888;
+@define-color text_label #aaaaaa;
+@define-color danger #f85149;
+@define-color success #3fb950;
+@define-color warning #d29922;
+
+/* === Window === */
+.main-window {
+    background-color: @bg_body;
+    color: @text_main;
+}
+
+/* === Header Bar === */
+.custom-headerbar {
+    background-color: @bg_dark;
+    border-bottom: 1px solid @border_dim;
+    min-height: 50px;
+    padding: 0 16px;
+}
+
+/* Window control buttons (minimize, close) */
+.window-ctrl-btn {
+    background: transparent;
+    border: none;
+    color: #777777;
+    font-size: 14px;
+    min-width: 24px;
+    min-height: 24px;
+    padding: 2px 6px;
+    border-radius: 0;
+}
+
+.window-ctrl-btn:hover {
+    color: @cyan;
+    background: transparent;
+}
+
+.header-brand {
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: #cccccc;
+}
+
+.header-title-label {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: #cccccc;
+}
+
+.header-title-sense {
+    font-size: 16px;
+    font-weight: 400;
+    color: #aaaaaa;
+}
+
+/* === Sidebar === */
+.sidebar {
+    background-color: transparent;
+    padding: 0;
+}
+
+.sidebar-spacer {
+    min-height: 8px;
+}
+
+/* === Nav Labels (drawn over Cairo background) === */
+.nav-label {
+    color: @text_label;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.nav-label-active {
+    color: white;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+/* === Content Area === */
+.content-area {
+    background-color: transparent;
+}
+
+/* === Content Panel (inner border glow) === */
+.content-panel {
+    background-color: @bg_dark;
+    border: 1px solid rgba(0, 204, 230, 0.25);
+    border-radius: 2px;
+    padding: 0;
+}
+
+.page-content {
+    background-color: transparent;
+}
+
+/* === Section Titles === */
+.section-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: @text_muted;
+    letter-spacing: 0.5px;
+}
+
+.section-subtitle {
+    font-size: 12px;
+    color: @text_muted;
+}
+
+/* === Gauge Label === */
+.gauge-label {
+    font-size: 15px;
+    font-weight: 500;
+    color: @text_main;
+    margin-top: 8px;
+}
+
+/* === Fan Display === */
+.fan-display {
+    padding: 10px 20px;
+    background-color: transparent;
+    border: 1px solid @border_dim;
+    border-radius: 0;
+}
+
+.fan-rpm {
+    font-size: 16px;
+    font-weight: 700;
+    color: @cyan;
+}
+
+.fan-label {
+    font-size: 11px;
+    color: @text_muted;
+    margin-top: 2px;
+}
+
+/* === Info Cards (bottom settings area) === */
+.info-card {
+    padding: 12px 16px;
+    background-color: transparent;
+    border-bottom: 1px solid #444444;
+    border-radius: 0;
+    border-top: none;
+    border-left: none;
+    border-right: none;
+}
+
+.info-card-title {
+    font-size: 12px;
+    color: @text_muted;
+    font-weight: 400;
+}
+
+.info-card-value {
+    font-size: 15px;
+    font-weight: 500;
+    color: @text_main;
+    margin-top: 4px;
+}
+
+/* === Separator === */
+.dim-separator {
+    background-color: @border_dim;
+    min-height: 1px;
+    margin: 0 0;
+}
+
+/* === Mode Buttons (RGB) === */
+.mode-button {
+    background-color: rgba(20, 20, 20, 0.8);
+    color: @text_label;
+    border: 1px solid @border_dim;
+    border-radius: 0;
+    padding: 8px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    min-width: 85px;
+}
+
+.mode-button:hover {
+    background-color: rgba(40, 40, 40, 0.9);
+    color: @text_main;
+}
+
+.mode-active {
+    background: linear-gradient(90deg, @cyan, @cyan_dark);
+    color: white;
+    border-color: @cyan;
+    font-weight: 700;
+}
+
+/* === Control Labels === */
+.control-label {
+    font-size: 12px;
+    color: @text_muted;
+    font-weight: 500;
+}
+
+/* === Scales/Sliders === */
+.accent-scale trough {
+    background-color: #222;
+    border-radius: 0;
+    min-height: 4px;
+}
+
+.accent-scale highlight {
+    background-color: @cyan;
+    border-radius: 0;
+    min-height: 4px;
+}
+
+.accent-scale slider {
+    background-color: @cyan;
+    border-radius: 2px;
+    min-width: 14px;
+    min-height: 14px;
+}
+
+.color-scale trough {
+    background-color: #222;
+    border-radius: 0;
+    min-height: 4px;
+}
+
+.color-scale highlight {
+    background-color: @cyan;
+    border-radius: 0;
+}
+
+.color-scale slider {
+    background-color: @text_main;
+    border-radius: 2px;
+    min-width: 12px;
+    min-height: 12px;
+}
+
+.scale-value {
+    font-size: 12px;
+    font-weight: 600;
+    color: @cyan;
+    min-width: 30px;
+}
+
+/* === Direction Buttons === */
+.direction-button {
+    background-color: rgba(20, 20, 20, 0.8);
+    color: @text_label;
+    border: 1px solid @border_dim;
+    border-radius: 0;
+    padding: 6px 12px;
+    font-size: 11px;
+}
+
+.direction-button:checked {
+    background: linear-gradient(90deg, @cyan, @cyan_dark);
+    color: white;
+    border-color: @cyan;
+}
+
+/* === Color Preview === */
+.color-preview {
+    border-radius: 2px;
+    border: 1px solid @border_dim;
+    margin-top: 4px;
+}
+
+/* === Accent Button === */
+.accent-button {
+    background: linear-gradient(90deg, @cyan, @cyan_dark);
+    color: white;
+    border: none;
+    border-radius: 0;
+    padding: 8px 22px;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.accent-button:hover {
+    background: linear-gradient(90deg, #00e6ff, @cyan);
+}
+
+.accent-button:disabled {
+    background: linear-gradient(90deg, @cyan, @cyan_dark);
+    opacity: 0.7;
+}
+
+/* === Secondary Button === */
+.secondary-button {
+    background-color: rgba(20, 20, 20, 0.8);
+    color: @text_label;
+    border: 1px solid @border_dim;
+    border-left: 2px solid @cyan_dark;
+    border-radius: 0;
+    padding: 8px 18px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.secondary-button:hover {
+    color: @text_main;
+    border-left-color: @cyan;
+    background-color: rgba(30, 30, 30, 0.9);
+}
+
+.secondary-button:disabled {
+    opacity: 0.4;
+}
+
+/* === Status Label === */
+.status-label {
+    font-size: 12px;
+    margin-top: 10px;
+    padding: 8px 14px;
+    border-radius: 0;
+}
+
+.status-success {
+    color: @success;
+    background-color: alpha(@success, 0.1);
+    border-left: 2px solid @success;
+}
+
+.status-error {
+    color: @danger;
+    background-color: alpha(@danger, 0.1);
+    border-left: 2px solid @danger;
+}
+
+/* === Warning Banner === */
+.warning-banner {
+    padding: 10px 14px;
+    background-color: alpha(@warning, 0.08);
+    border: 1px solid alpha(@warning, 0.25);
+    border-left: 3px solid @warning;
+    border-radius: 0;
+}
+
+.warning-icon {
+    font-size: 14px;
+    font-weight: 800;
+    color: @warning;
+    min-width: 22px;
+    min-height: 22px;
+}
+
+.warning-text {
+    font-size: 11px;
+    color: @warning;
+}
+
+/* === Profile Cards === */
+.profile-card {
+    background-color: rgba(20, 20, 20, 0.8);
+    border: 1px solid @border_dim;
+    border-radius: 0;
+    padding: 16px;
+    border-left: 2px solid @cyan_dark;
+}
+
+.profile-card:hover {
+    background-color: rgba(30, 30, 30, 0.9);
+    border-left-color: @cyan;
+}
+
+.profile-active {
+    border-color: @cyan;
+    border-left: 2px solid @cyan;
+    background-color: rgba(0, 204, 230, 0.05);
+}
+
+.profile-badge {
+    font-size: 10px;
+    font-weight: 700;
+    color: #555;
+    letter-spacing: 1px;
+    padding: 2px 6px;
+    background-color: rgba(80, 80, 80, 0.15);
+    border-radius: 0;
+    margin-bottom: 4px;
+}
+
+.profile-badge-active {
+    color: @cyan;
+    background-color: alpha(@cyan, 0.15);
+}
+
+.profile-name {
+    font-size: 15px;
+    font-weight: 700;
+    color: @text_main;
+}
+
+.profile-description {
+    font-size: 10px;
+    color: @text_muted;
+    margin-top: 4px;
+    margin-bottom: 10px;
+}
+
+/* === Sidebar Info === */
+.info-text {
+    font-size: 11px;
+    color: @text_muted;
+}
+
+.info-text-dim {
+    font-size: 10px;
+    color: #555;
+}
+
+/* === Status Dots === */
+.status-dot-ok {
+    color: @cyan;
+    font-size: 9px;
+}
+
+.status-dot-off {
+    color: @danger;
+    font-size: 9px;
+}
+
+/* === Scrollbar === */
+scrollbar {
+    background-color: transparent;
+}
+
+scrollbar slider {
+    background-color: #333;
+    border-radius: 0;
+    min-width: 4px;
+}
+
+scrollbar slider:hover {
+    background-color: #555;
+}
+
+/* === Setup Page === */
+.setup-title {
+    font-size: 22px;
+    font-weight: 700;
+    color: @cyan;
+    letter-spacing: 1px;
+}
+
+.setup-description {
+    font-size: 13px;
+    color: @text_muted;
+    margin-top: 8px;
+}
+
+.setup-info {
+    font-size: 11px;
+    color: #555;
+    margin-top: 4px;
+}
+
+.setup-step {
+    padding: 8px 12px;
+    background-color: rgba(20, 20, 20, 0.8);
+    border: 1px solid @border_dim;
+    border-left: 2px solid @cyan_dark;
+    border-radius: 0;
+}
+
+.step-badge {
+    font-size: 10px;
+    font-weight: 700;
+    min-width: 26px;
+    min-height: 18px;
+    border-radius: 0;
+    padding: 2px 5px;
+}
+
+.step-pending { color: #555; background-color: rgba(80,80,80,0.15); }
+.step-running { color: @warning; background-color: alpha(@warning, 0.15); }
+.step-done { color: @success; background-color: alpha(@success, 0.15); }
+.step-failed { color: @danger; background-color: alpha(@danger, 0.15); }
+
+.step-text { font-size: 12px; color: @text_muted; }
+
+.setup-install-btn { padding: 10px 30px; font-size: 14px; }
+
+.flat-button {
+    background: transparent;
+    color: #555;
+    border: none;
+    font-size: 11px;
+    padding: 8px 14px;
+}
+.flat-button:hover { color: @text_muted; }
+
+/* === Log Area === */
+.log-area {
+    background-color: #0a0a0a;
+    border: 1px solid @border_dim;
+    border-radius: 0;
+}
+
+.log-text {
+    background-color: #0a0a0a;
+    color: #555;
+    font-size: 10px;
+    padding: 8px;
+}
+
+/* === Settings Page === */
+.settings-section-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: @cyan;
+    letter-spacing: 0.5px;
+}
+
+.settings-row {
+    padding: 12px 14px;
+    background-color: rgba(20, 20, 20, 0.8);
+    border: 1px solid @border_dim;
+    border-left: 2px solid @cyan_dark;
+    border-radius: 0;
+    margin-top: 6px;
+}
+
+.settings-row-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: @text_main;
+}
+
+.settings-row-desc {
+    font-size: 10px;
+    color: #555;
+    margin-top: 2px;
+}
+
+.about-text {
+    font-size: 11px;
+    color: @text_muted;
+}
+
+/* === Monitoring Page === */
+.monitor-section {
+    background-color: rgba(17, 17, 17, 0.9);
+    border: 1px solid rgba(0, 204, 230, 0.2);
+    border-radius: 0;
+    padding: 16px;
+}
+
+.monitor-title {
+    font-size: 17px;
+    font-weight: 700;
+    color: @cyan;
+}
+
+.monitor-subtitle {
+    font-size: 11px;
+    color: #555;
+    margin-left: 8px;
+}
+
+.graph-label {
+    font-size: 10px;
+    color: #555;
+    margin-bottom: 4px;
+}
+
+.temp-graph {
+    background-color: #0a0a0a;
+    border: 1px solid @border_dim;
+    border-radius: 0;
+}
+
+.monitor-temp-big {
+    font-size: 34px;
+    font-weight: 700;
+    color: @cyan;
+}
+
+.monitor-minmax {
+    font-size: 10px;
+    color: #555;
+}
+
+.stat-widget { padding: 4px 0; }
+.stat-title { font-size: 10px; color: @text_muted; }
+.stat-value { font-size: 20px; font-weight: 700; color: @text_main; }
+.stat-unit { font-size: 11px; color: @text_muted; margin-bottom: 4px; }
+
+/* === Pulsing green status dot === */
+@keyframes pulse-green {
+    0% { color: #3fb950; }
+    50% { color: #1a6b28; }
+    100% { color: #3fb950; }
+}
+
+.status-dot-pulse {
+    color: #3fb950;
+    font-size: 10px;
+    animation: pulse-green 2s ease-in-out infinite;
+}
