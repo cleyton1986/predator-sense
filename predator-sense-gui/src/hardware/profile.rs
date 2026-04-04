@@ -79,33 +79,39 @@ pub fn get_current_profile() -> Option<PowerProfile> {
 
 pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     let s = settings_for(profile);
-    let mut errors = Vec::new();
-
-    // CPU Governor
-    if set_governor_direct(s.governor).is_err() {
-        if let Err(e) = run_helper("set-governor", s.governor) { errors.push(e); }
-    }
-
-    // Intel EPP
-    if set_epp_direct(s.epp).is_err() {
-        if let Err(e) = run_helper("set-epp", s.epp) { errors.push(e); }
-    }
-
-    // Intel Pstate: turbo boost on/off
+    let is_root = std::process::Command::new("id").arg("-u").output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false);
     let turbo_val = if s.no_turbo { "1" } else { "0" };
-    if fs::write("/sys/devices/system/cpu/intel_pstate/no_turbo", turbo_val).is_err() {
-        let _ = run_helper("set-no-turbo", turbo_val);
-    }
-
-    // Intel Pstate: min performance percentage
     let min_pct = s.min_perf_pct.to_string();
-    if fs::write("/sys/devices/system/cpu/intel_pstate/min_perf_pct", &min_pct).is_err() {
-        let _ = run_helper("set-min-perf", &min_pct);
-    }
 
-    // GPU power limit
-    if set_nvidia_direct(s.gpu_watts).is_err() {
-        if let Err(e) = run_helper("set-gpu-power", &s.gpu_watts.to_string()) { errors.push(e); }
+    if is_root {
+        // Running as root: write directly
+        let _ = set_governor_direct(s.governor);
+        let _ = set_epp_direct(s.epp);
+        let _ = fs::write("/sys/devices/system/cpu/intel_pstate/no_turbo", turbo_val);
+        let _ = fs::write("/sys/devices/system/cpu/intel_pstate/min_perf_pct", &min_pct);
+        let _ = set_nvidia_direct(s.gpu_watts);
+    } else {
+        // Running as user: use a single pkexec call with all commands
+        let script = format!(
+            r#"
+for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo '{}' > "$c" 2>/dev/null; done
+for c in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do echo '{}' > "$c" 2>/dev/null; done
+echo '{}' > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null
+echo '{}' > /sys/devices/system/cpu/intel_pstate/min_perf_pct 2>/dev/null
+nvidia-smi -pm 1 2>/dev/null; nvidia-smi -pl {} 2>/dev/null
+"#,
+            s.governor, s.epp, turbo_val, min_pct, s.gpu_watts
+        );
+
+        let result = std::process::Command::new("pkexec")
+            .args(["bash", "-c", &script])
+            .output();
+
+        if let Err(e) = result {
+            return Err(format!("pkexec: {}", e));
+        }
     }
 
     // Save the selected profile to state file
@@ -116,7 +122,7 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
         let _ = fs::write(ps_dir.join("current_profile"), profile.to_id());
     }
 
-    if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+    Ok(())
 }
 
 fn set_governor_direct(gov: &str) -> Result<(), String> {
