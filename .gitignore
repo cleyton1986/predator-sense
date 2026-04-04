@@ -1,0 +1,56 @@
+# ══════════════════════════════════════
+#  Predator Sense for Linux - .gitignore
+# ══════════════════════════════════════
+
+# === Rust build artifacts ===
+predator-sense-gui/target/
+*.rlib
+
+# === Go build artifacts ===
+predator-sense-gui/installer/predator-sense-installer
+
+# === Kernel module build artifacts ===
+*.o
+*.ko
+*.obj
+*.elf
+*.mod
+*.mod.c
+*.mod.o
+.*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+
+# === Compiled binaries ===
+*.exe
+*.out
+*.app
+*.so
+*.dylib
+*.dll
+
+# === IDE / Editor ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.cproject
+.settings/
+
+# === OS files ===
+.DS_Store
+Thumbs.db
+*.tmp
+
+# === Debug ===
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# === Misc ===
+core
+.depend
