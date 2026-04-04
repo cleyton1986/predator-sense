@@ -137,26 +137,33 @@ fi
 msg clone
 rm -rf "$TMP_DIR"
 git clone --depth 1 -b "$BRANCH" "https://github.com/$REPO.git" "$TMP_DIR" 2>/dev/null
+# Fix permissions: clone was done as root, but cargo needs user ownership
+chown -R "$REAL_USER:$REAL_USER" "$TMP_DIR"
 msg ok "Source downloaded"
 
 # ─── 4. Build application ───
 msg build
 cd "$TMP_DIR/predator-sense-gui"
 sudo -u "$REAL_USER" bash -c "source \"\$HOME/.cargo/env\" && cd \"$TMP_DIR/predator-sense-gui\" && cargo build --release" 2>&1 | tail -1
+if [ ! -f "$TMP_DIR/predator-sense-gui/target/release/predator-sense" ]; then
+    msg fail "Build failed"
+    exit 1
+fi
 msg ok "Application compiled"
 
 # ─── 5. Install files ───
 msg install
+GUI_DIR="$TMP_DIR/predator-sense-gui"
 mkdir -p "$INSTALL_DIR/resources" "$INSTALL_DIR/kernel"
-cp target/release/predator-sense "$INSTALL_DIR/"
-cp resources/* "$INSTALL_DIR/resources/" 2>/dev/null || true
-cp kernel/facer.c kernel/Makefile kernel/dkms.conf "$INSTALL_DIR/kernel/" 2>/dev/null || true
+cp "$GUI_DIR/target/release/predator-sense" "$INSTALL_DIR/"
+cp "$GUI_DIR/resources/"* "$INSTALL_DIR/resources/" 2>/dev/null || true
+cp "$GUI_DIR/kernel/facer.c" "$GUI_DIR/kernel/Makefile" "$GUI_DIR/kernel/dkms.conf" "$INSTALL_DIR/kernel/" 2>/dev/null || true
 chmod +x "$INSTALL_DIR/predator-sense"
 
 # Icon
 mkdir -p /usr/share/icons/hicolor/128x128/apps/
-if [ -f resources/logo-128.png ]; then
-    cp resources/logo-128.png /usr/share/icons/hicolor/128x128/apps/predator-sense.png
+if [ -f "$GUI_DIR/resources/logo-128.png" ]; then
+    cp "$GUI_DIR/resources/logo-128.png" /usr/share/icons/hicolor/128x128/apps/predator-sense.png
 fi
 
 # Desktop entry
@@ -204,13 +211,14 @@ msg ok "Files installed"
 
 # ─── 6. Kernel module ───
 msg kernel
-cd "$TMP_DIR/predator-sense-gui/kernel"
-if make 2>/dev/null && [ -f facer.ko ]; then
-    cp facer.ko "$INSTALL_DIR/kernel/"
+KERNEL_DIR="$TMP_DIR/predator-sense-gui/kernel"
+cd "$KERNEL_DIR"
+if make 2>/dev/null && [ -f "$KERNEL_DIR/facer.ko" ]; then
+    cp "$KERNEL_DIR/facer.ko" "$INSTALL_DIR/kernel/"
     rmmod acer_wmi 2>/dev/null || true
     rmmod facer 2>/dev/null || true
     modprobe wmi sparse-keymap video 2>/dev/null || true
-    insmod facer.ko 2>/dev/null && msg ok "Kernel module loaded" || msg fail "Module load failed (may need reboot)"
+    insmod "$KERNEL_DIR/facer.ko" 2>/dev/null && msg ok "Kernel module loaded" || msg fail "Module load failed (may need reboot)"
 else
     msg fail "Kernel module compilation failed"
 fi
