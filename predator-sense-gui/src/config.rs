@@ -42,27 +42,36 @@ impl Default for AppConfig {
 
 /// Manage autostart desktop entry for the application
 pub fn set_autostart(enabled: bool) {
-    let autostart_dir = dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from(".config"))
-        .parent()
-        .unwrap_or(std::path::Path::new("."))
-        .join(".config/autostart");
-
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".into());
+    let autostart_dir = std::path::PathBuf::from(&home).join(".config/autostart");
     let _ = std::fs::create_dir_all(&autostart_dir);
-    let desktop_path = autostart_dir.join("predator-sense.desktop");
+
+    let app_path = autostart_dir.join("predator-sense.desktop");
+    let hotkey_path = autostart_dir.join("predator-sense-hotkey.desktop");
 
     if enabled {
-        let desktop = "[Desktop Entry]\n\
-            Type=Application\n\
-            Name=Predator Sense\n\
-            Exec=/opt/predator-sense/predator-sense\n\
-            Hidden=false\n\
-            NoDisplay=true\n\
-            X-GNOME-Autostart-enabled=true\n\
-            Comment=Predator Sense for Linux - Hardware Control\n";
-        let _ = std::fs::write(&desktop_path, desktop);
+        let app_desktop = "[Desktop Entry]\n\
+Type=Application\n\
+Name=Predator Sense\n\
+Exec=/opt/predator-sense/predator-sense\n\
+Hidden=false\n\
+NoDisplay=true\n\
+X-GNOME-Autostart-enabled=true\n\
+Comment=Predator Sense for Linux\n";
+        let _ = std::fs::write(&app_path, app_desktop);
+
+        let hotkey_desktop = "[Desktop Entry]\n\
+Type=Application\n\
+Name=Predator Sense Hotkey\n\
+Exec=/opt/predator-sense/hotkey-daemon.py\n\
+Hidden=false\n\
+NoDisplay=true\n\
+X-GNOME-Autostart-enabled=true\n\
+Comment=PredatorSense key listener\n";
+        let _ = std::fs::write(&hotkey_path, hotkey_desktop);
     } else {
-        let _ = std::fs::remove_file(&desktop_path);
+        let _ = std::fs::remove_file(&app_path);
+        let _ = std::fs::remove_file(&hotkey_path);
     }
 }
 

@@ -626,6 +626,17 @@ func installModule() error {
 		}
 	}
 
+	// Make module persistent across reboots
+	uname, _ := cmdOutput("uname", "-r")
+	kernel := strings.TrimSpace(uname)
+	extraDir := "/lib/modules/" + kernel + "/extra"
+	os.MkdirAll(extraDir, 0755)
+	copyFile(koPath, filepath.Join(extraDir, "facer.ko"))
+	run("depmod", "-a")
+	os.WriteFile("/etc/modules-load.d/facer.conf", []byte("facer\n"), 0644)
+	os.WriteFile("/etc/modprobe.d/predator-sense.conf", []byte("blacklist acer_wmi\n"), 0644)
+
+	// Load now
 	run("rmmod", "acer_wmi")
 	run("rmmod", "facer")
 	run("modprobe", "wmi")
@@ -635,7 +646,7 @@ func installModule() error {
 	if fileExists(koPath) {
 		return run("insmod", koPath)
 	}
-	return fmt.Errorf("facer.ko não encontrado")
+	return fmt.Errorf("facer.ko not found")
 }
 
 // ─── Main flows ───

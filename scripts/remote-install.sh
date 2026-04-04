@@ -217,6 +217,13 @@ KERNEL_DIR="$TMP_DIR/predator-sense-gui/kernel"
 cd "$KERNEL_DIR"
 if make 2>/dev/null && [ -f "$KERNEL_DIR/facer.ko" ]; then
     cp "$KERNEL_DIR/facer.ko" "$INSTALL_DIR/kernel/"
+    # Make module load on every boot
+    mkdir -p "/lib/modules/$(uname -r)/extra/"
+    cp "$KERNEL_DIR/facer.ko" "/lib/modules/$(uname -r)/extra/"
+    depmod -a 2>/dev/null
+    echo "facer" > /etc/modules-load.d/facer.conf
+    echo "blacklist acer_wmi" > /etc/modprobe.d/predator-sense.conf
+    # Load now
     rmmod acer_wmi 2>/dev/null || true
     rmmod facer 2>/dev/null || true
     modprobe wmi sparse-keymap video 2>/dev/null || true
