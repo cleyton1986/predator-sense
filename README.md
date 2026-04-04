@@ -384,13 +384,9 @@ predator-sense-gui/
 If this project was useful to you and you'd like to support its development, consider buying me a coffee:
 
 <p align="center">
-  <a href="https://www.paypal.com/donate/?hosted_button_id=YOUR_BUTTON_ID">
+  <a href="https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=cleyton1986%40gmail.com&currency_code=BRL&item_name=Predator+Sense+for+Linux">
     <img src="https://img.shields.io/badge/PayPal-Donate-00457C?logo=paypal&logoColor=white&style=for-the-badge" alt="Donate via PayPal">
   </a>
-</p>
-
-<p align="center">
-  <b>PayPal:</b> cleyton1986@gmail.com
 </p>
 
 Any contribution is voluntary and greatly appreciated! It helps keep the project alive and motivates new features.
