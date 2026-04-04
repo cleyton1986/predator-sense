@@ -609,6 +609,21 @@ fn build_settings_page(_app: &adw::Application) -> gtk::Box {
     auto_row.append(&auto_switch);
     page.append(&auto_row);
 
+    // Start on boot
+    let boot_row = create_setting_row(t("start_on_boot"), t("start_on_boot_desc"));
+    let boot_switch = gtk::Switch::new();
+    boot_switch.set_active(cfg.start_on_boot);
+    boot_switch.set_valign(gtk::Align::Center);
+    boot_switch.connect_state_set(move |_, active| {
+        let mut c = config::load_app_config();
+        c.start_on_boot = active;
+        let _ = config::save_app_config(&c);
+        config::set_autostart(active);
+        glib::Propagation::Proceed
+    });
+    boot_row.append(&boot_switch);
+    page.append(&boot_row);
+
     // Module status
     let mod_title = gtk::Label::new(Some(t("module_kernel")));
     mod_title.add_css_class("settings-section-title");

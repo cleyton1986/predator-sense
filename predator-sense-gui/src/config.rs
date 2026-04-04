@@ -25,6 +25,8 @@ pub struct AppConfig {
     pub last_profile: Option<String>,
     pub auto_apply_on_start: bool,
     pub minimize_on_close: bool,
+    #[serde(default)]
+    pub start_on_boot: bool,
 }
 
 impl Default for AppConfig {
@@ -33,7 +35,34 @@ impl Default for AppConfig {
             last_profile: None,
             auto_apply_on_start: false,
             minimize_on_close: false,
+            start_on_boot: false,
         }
+    }
+}
+
+/// Manage autostart desktop entry for the application
+pub fn set_autostart(enabled: bool) {
+    let autostart_dir = dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from(".config"))
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join(".config/autostart");
+
+    let _ = std::fs::create_dir_all(&autostart_dir);
+    let desktop_path = autostart_dir.join("predator-sense.desktop");
+
+    if enabled {
+        let desktop = "[Desktop Entry]\n\
+            Type=Application\n\
+            Name=Predator Sense\n\
+            Exec=/opt/predator-sense/predator-sense\n\
+            Hidden=false\n\
+            NoDisplay=true\n\
+            X-GNOME-Autostart-enabled=true\n\
+            Comment=Predator Sense for Linux - Hardware Control\n";
+        let _ = std::fs::write(&desktop_path, desktop);
+    } else {
+        let _ = std::fs::remove_file(&desktop_path);
     }
 }
 
