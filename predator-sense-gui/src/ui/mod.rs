@@ -1,0 +1,9 @@
+pub mod window;
+pub mod home_page;
+pub mod rgb_page;
+pub mod fan_page;
+pub mod fan_control_page;
+pub mod gpu_page;
+pub mod gauge_widget;
+pub mod setup_page;
+pub mod monitor_page;
