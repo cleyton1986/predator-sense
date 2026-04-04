@@ -1,0 +1,212 @@
+/// Simple internationalization module.
+/// Detects system locale and returns strings in the correct language.
+
+use std::sync::OnceLock;
+
+static LANG: OnceLock<Lang> = OnceLock::new();
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Lang { Pt, En }
+
+fn detect_lang() -> Lang {
+    let lang = std::env::var("LANG").unwrap_or_default();
+    let language = std::env::var("LANGUAGE").unwrap_or_default();
+    if lang.starts_with("pt") || language.starts_with("pt") {
+        Lang::Pt
+    } else {
+        Lang::En
+    }
+}
+
+pub fn lang() -> Lang {
+    *LANG.get_or_init(detect_lang)
+}
+
+pub fn is_pt() -> bool { lang() == Lang::Pt }
+
+/// Get translated string by key
+pub fn t(key: &str) -> &str {
+    if is_pt() { t_pt(key) } else { t_en(key) }
+}
+
+fn t_pt<'a>(key: &'a str) -> &'a str {
+    match key {
+        "temperature" => "Temperatura (°C)",
+        "lighting_profile" => "Perfil de iluminação",
+        "mode" => "Modo",
+        "default" => "Predefinição",
+        "module_kernel" => "Módulo Kernel",
+        "active" => "Ativo",
+        "inactive" => "Inativo",
+        "module_active" => "Módulo ativo",
+        "module_inactive" => "Módulo inativo",
+        "network" => "Rede",
+        "home_page" => "Página inicial",
+        "lighting" => "Iluminação",
+        "perf_mode" => "Modo",
+        "fan_control" => "Controlo de ventoinha",
+        "gpu_menu" => "GPU",
+        "monitoring" => "Monitorização",
+        "settings" => "Configurações",
+        "lighting_title" => "Perfil de iluminação",
+        "static_mode" => "Estático",
+        "dynamic_mode" => "Dinâmico",
+        "brightness" => "Brilho:",
+        "speed" => "Velocidade:",
+        "section" => "Secção",
+        "apply" => "Aplicar",
+        "applied" => "Iluminação aplicada!",
+        "breath" => "Respiração",
+        "neon" => "Neon",
+        "wave" => "Onda",
+        "shift" => "Deslizar",
+        "zoom" => "Zoom",
+        "color" => "Cor:",
+        "module_not_loaded" => "! Módulo kernel não carregado. Instale via Configurações.",
+        "perf_title" => "Modo de Desempenho",
+        "perf_subtitle" => "Selecione o perfil de desempenho que controla a velocidade do processador,\nconsumo de energia da GPU e comportamento geral do sistema.",
+        "quiet" => "Silencioso",
+        "balanced" => "Balanceado",
+        "performance" => "Performance",
+        "turbo" => "Turbo",
+        "select" => "Selecionar",
+        "profile_activated" => "Perfil ativado com sucesso!",
+        "quiet_desc" => "CPU em modo economia.\nGPU limitada a 40W.\nMenor ruído e temperatura.",
+        "balanced_desc" => "CPU dinâmico com equilíbrio.\nGPU a 80W (padrão).\nUso geral recomendado.",
+        "performance_desc" => "CPU em frequência máxima.\nGPU a 100W.\nIdeal para jogos.",
+        "turbo_desc" => "CPU e GPU no máximo.\nGPU a 110W (limite).\nMáxima performance.",
+        "fan_title" => "Veloc. ventoinha",
+        "automatic" => "Automático",
+        "max" => "Máx",
+        "custom" => "Personalizado",
+        "fan_note" => "As velocidades das ventoinhas são lidas do módulo kernel.\nSe não disponível, verifique se o módulo facer está carregado.",
+        "gpu_temperature" => "Temperatura",
+        "gpu_utilization" => "Utilização GPU",
+        "gpu_vram" => "VRAM Usada",
+        "gpu_power" => "Consumo",
+        "gpu_temp_graph" => "Temperatura (°C)",
+        "gpu_util_graph" => "Utilização (%)",
+        "clock_core" => "Clock Núcleo",
+        "clock_vram" => "Clock VRAM",
+        "mon_freq" => "Frequência",
+        "mon_fan_speed" => "Veloc. ventoinha",
+        "mon_utilization" => "Utilização",
+        "mon_power" => "Consumo",
+        "mon_core_clock" => "Relógio de Núcleo",
+        "mon_temp_load" => "Temperatura (°C) / Carga (%)",
+        "settings_title" => "Configurações",
+        "behavior" => "Comportamento",
+        "minimize_close" => "Minimizar ao fechar",
+        "minimize_desc" => "A aplicação continua em segundo plano na bandeja do sistema.",
+        "auto_apply" => "Aplicar último perfil ao iniciar",
+        "auto_apply_desc" => "Carrega automaticamente o último perfil de iluminação.",
+        "status" => "Status",
+        "install_module" => "Instalar Módulo",
+        "installing" => "Instalando...",
+        "installed" => "Instalado!",
+        "try_again" => "Tentar Novamente",
+        "about" => "Sobre",
+        "about_text" => "Predator Sense for Linux v0.1.0\nBaseado no módulo kernel facer | GPL-3.0",
+        "setup_title" => "Configuração Inicial",
+        "skip" => "Pular (usar sem módulo)",
+        "install_now" => "Instalar Agora",
+        "install_service" => "Instalar como Serviço (persistente)",
+        _ => key,
+    }
+}
+
+fn t_en<'a>(key: &'a str) -> &'a str {
+    match key {
+        "temperature" => "Temperature (°C)",
+        "lighting_profile" => "Lighting Profile",
+        "mode" => "Mode",
+        "default" => "Default",
+        "module_kernel" => "Kernel Module",
+        "active" => "Active",
+        "inactive" => "Inactive",
+        "module_active" => "Module active",
+        "module_inactive" => "Module inactive",
+        "network" => "Network",
+        "home_page" => "Home",
+        "lighting" => "Lighting",
+        "perf_mode" => "Mode",
+        "fan_control" => "Fan Control",
+        "gpu_menu" => "GPU",
+        "monitoring" => "Monitoring",
+        "settings" => "Settings",
+        "lighting_title" => "Lighting Profile",
+        "static_mode" => "Static",
+        "dynamic_mode" => "Dynamic",
+        "brightness" => "Brightness:",
+        "speed" => "Speed:",
+        "section" => "Section",
+        "apply" => "Apply",
+        "applied" => "Lighting applied!",
+        "breath" => "Breathing",
+        "neon" => "Neon",
+        "wave" => "Wave",
+        "shift" => "Shifting",
+        "zoom" => "Zoom",
+        "color" => "Color:",
+        "module_not_loaded" => "! Kernel module not loaded. Install via Settings.",
+        "perf_title" => "Performance Mode",
+        "perf_subtitle" => "Select the performance profile that controls processor speed,\nGPU power consumption and overall system behavior.",
+        "quiet" => "Quiet",
+        "balanced" => "Balanced",
+        "performance" => "Performance",
+        "turbo" => "Turbo",
+        "select" => "Select",
+        "profile_activated" => "Profile activated successfully!",
+        "quiet_desc" => "CPU in power saving mode.\nGPU limited to 40W.\nLess noise and heat.",
+        "balanced_desc" => "Dynamic CPU with balance.\nGPU at 80W (default).\nRecommended for general use.",
+        "performance_desc" => "CPU at max frequency.\nGPU at 100W.\nIdeal for gaming.",
+        "turbo_desc" => "CPU and GPU at maximum.\nGPU at 110W (limit).\nMaximum performance.",
+        "fan_title" => "Fan Speed",
+        "automatic" => "Automatic",
+        "max" => "Max",
+        "custom" => "Custom",
+        "fan_note" => "Fan speeds are read from the kernel module.\nIf unavailable, check if the facer module is loaded.",
+        "gpu_temperature" => "Temperature",
+        "gpu_utilization" => "GPU Utilization",
+        "gpu_vram" => "VRAM Used",
+        "gpu_power" => "Power Draw",
+        "gpu_temp_graph" => "Temperature (°C)",
+        "gpu_util_graph" => "Utilization (%)",
+        "clock_core" => "Core Clock",
+        "clock_vram" => "VRAM Clock",
+        "mon_freq" => "Frequency",
+        "mon_fan_speed" => "Fan Speed",
+        "mon_utilization" => "Utilization",
+        "mon_power" => "Power Draw",
+        "mon_core_clock" => "Core Clock",
+        "mon_temp_load" => "Temperature (°C) / Load (%)",
+        "settings_title" => "Settings",
+        "behavior" => "Behavior",
+        "minimize_close" => "Minimize on close",
+        "minimize_desc" => "The application continues running in the system tray.",
+        "auto_apply" => "Apply last profile on startup",
+        "auto_apply_desc" => "Automatically loads the last lighting profile.",
+        "status" => "Status",
+        "install_module" => "Install Module",
+        "installing" => "Installing...",
+        "installed" => "Installed!",
+        "try_again" => "Try Again",
+        "about" => "About",
+        "about_text" => "Predator Sense for Linux v0.1.0\nBased on the facer kernel module | GPL-3.0",
+        "setup_title" => "Initial Setup",
+        "skip" => "Skip (use without module)",
+        "install_now" => "Install Now",
+        "install_service" => "Install as Service (persistent)",
+        _ => key,
+    }
+}
+
+/// Translate with format argument (returns String)
+pub fn tf(key: &str, args: &[&str]) -> String {
+    let template = t(key);
+    let mut result = template.to_string();
+    for (i, arg) in args.iter().enumerate() {
+        result = result.replace(&format!("{{{}}}", i), arg);
+    }
+    result
+}
