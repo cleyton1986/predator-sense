@@ -29,14 +29,32 @@ impl PowerProfile {
     }
 }
 
-struct ProfileSettings { governor: &'static str, epp: &'static str, gpu_watts: u32 }
+struct ProfileSettings {
+    governor: &'static str,
+    epp: &'static str,
+    gpu_watts: u32,
+    min_perf_pct: u32,
+    no_turbo: bool, // false = turbo ON, true = turbo OFF
+}
 
 fn settings_for(p: PowerProfile) -> ProfileSettings {
     match p {
-        PowerProfile::Quiet => ProfileSettings { governor: "powersave", epp: "power", gpu_watts: 40 },
-        PowerProfile::Balanced => ProfileSettings { governor: "powersave", epp: "balance_performance", gpu_watts: 80 },
-        PowerProfile::Performance => ProfileSettings { governor: "performance", epp: "performance", gpu_watts: 100 },
-        PowerProfile::Turbo => ProfileSettings { governor: "performance", epp: "performance", gpu_watts: 110 },
+        PowerProfile::Quiet => ProfileSettings {
+            governor: "powersave", epp: "power", gpu_watts: 40,
+            min_perf_pct: 10, no_turbo: true,
+        },
+        PowerProfile::Balanced => ProfileSettings {
+            governor: "powersave", epp: "balance_performance", gpu_watts: 80,
+            min_perf_pct: 17, no_turbo: false,
+        },
+        PowerProfile::Performance => ProfileSettings {
+            governor: "performance", epp: "performance", gpu_watts: 100,
+            min_perf_pct: 50, no_turbo: false,
+        },
+        PowerProfile::Turbo => ProfileSettings {
+            governor: "performance", epp: "performance", gpu_watts: 110,
+            min_perf_pct: 100, no_turbo: false,
+        },
     }
 }
 
@@ -63,21 +81,35 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     let s = settings_for(profile);
     let mut errors = Vec::new();
 
+    // CPU Governor
     if set_governor_direct(s.governor).is_err() {
         if let Err(e) = run_helper("set-governor", s.governor) { errors.push(e); }
     }
 
+    // Intel EPP
     if set_epp_direct(s.epp).is_err() {
         if let Err(e) = run_helper("set-epp", s.epp) { errors.push(e); }
     }
 
+    // Intel Pstate: turbo boost on/off
+    let turbo_val = if s.no_turbo { "1" } else { "0" };
+    if fs::write("/sys/devices/system/cpu/intel_pstate/no_turbo", turbo_val).is_err() {
+        let _ = run_helper("set-no-turbo", turbo_val);
+    }
+
+    // Intel Pstate: min performance percentage
+    let min_pct = s.min_perf_pct.to_string();
+    if fs::write("/sys/devices/system/cpu/intel_pstate/min_perf_pct", &min_pct).is_err() {
+        let _ = run_helper("set-min-perf", &min_pct);
+    }
+
+    // GPU power limit
     if set_nvidia_direct(s.gpu_watts).is_err() {
         if let Err(e) = run_helper("set-gpu-power", &s.gpu_watts.to_string()) { errors.push(e); }
     }
 
     // Save the selected profile to state file
     let _ = fs::write(PROFILE_STATE_FILE, profile.to_id());
-    // Also try user-writable location as fallback
     if let Some(config_dir) = dirs::config_dir() {
         let ps_dir = config_dir.join("predator-sense");
         let _ = fs::create_dir_all(&ps_dir);
