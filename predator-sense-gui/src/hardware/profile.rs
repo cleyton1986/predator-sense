@@ -1,14 +1,30 @@
 use std::fs;
 use std::process::Command;
 
+const PROFILE_STATE_FILE: &str = "/opt/predator-sense/current_profile";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PowerProfile { Quiet, Balanced, Performance, Turbo }
 
 impl PowerProfile {
     pub fn label(&self) -> &str {
         match self {
-            Self::Quiet => "Silencioso", Self::Balanced => "Balanceado",
-            Self::Performance => "Performance", Self::Turbo => "Turbo",
+            Self::Quiet => crate::i18n::t("quiet"),
+            Self::Balanced => crate::i18n::t("balanced"),
+            Self::Performance => crate::i18n::t("performance"),
+            Self::Turbo => crate::i18n::t("turbo"),
+        }
+    }
+
+    fn to_id(&self) -> &str {
+        match self { Self::Quiet => "quiet", Self::Balanced => "balanced", Self::Performance => "performance", Self::Turbo => "turbo" }
+    }
+
+    fn from_id(id: &str) -> Option<Self> {
+        match id.trim() {
+            "quiet" => Some(Self::Quiet), "balanced" => Some(Self::Balanced),
+            "performance" => Some(Self::Performance), "turbo" => Some(Self::Turbo),
+            _ => None,
         }
     }
 }
@@ -25,15 +41,20 @@ fn settings_for(p: PowerProfile) -> ProfileSettings {
 }
 
 pub fn get_current_profile() -> Option<PowerProfile> {
+    // First: check saved state file (most reliable)
+    if let Ok(saved) = fs::read_to_string(PROFILE_STATE_FILE) {
+        if let Some(profile) = PowerProfile::from_id(&saved) {
+            return Some(profile);
+        }
+    }
+
+    // Fallback: detect from hardware state
     let gov = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").ok()?;
     let epp = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference").unwrap_or_default();
     match (gov.trim(), epp.trim()) {
         ("powersave", "power") => Some(PowerProfile::Quiet),
         ("powersave", _) => Some(PowerProfile::Balanced),
-        ("performance", _) => {
-            let gpu = read_nvidia_power_limit().unwrap_or(80);
-            if gpu >= 105 { Some(PowerProfile::Turbo) } else { Some(PowerProfile::Performance) }
-        }
+        ("performance", _) => Some(PowerProfile::Performance),
         _ => Some(PowerProfile::Balanced),
     }
 }
@@ -42,9 +63,7 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     let s = settings_for(profile);
     let mut errors = Vec::new();
 
-    // Try direct write first (works if running as root)
     if set_governor_direct(s.governor).is_err() {
-        // Fallback: use pkexec helper
         if let Err(e) = run_helper("set-governor", s.governor) { errors.push(e); }
     }
 
@@ -54,6 +73,15 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
 
     if set_nvidia_direct(s.gpu_watts).is_err() {
         if let Err(e) = run_helper("set-gpu-power", &s.gpu_watts.to_string()) { errors.push(e); }
+    }
+
+    // Save the selected profile to state file
+    let _ = fs::write(PROFILE_STATE_FILE, profile.to_id());
+    // Also try user-writable location as fallback
+    if let Some(config_dir) = dirs::config_dir() {
+        let ps_dir = config_dir.join("predator-sense");
+        let _ = fs::create_dir_all(&ps_dir);
+        let _ = fs::write(ps_dir.join("current_profile"), profile.to_id());
     }
 
     if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
@@ -78,7 +106,6 @@ fn set_epp_direct(epp: &str) -> Result<(), String> {
 
 fn set_nvidia_direct(watts: u32) -> Result<(), String> {
     let _ = Command::new("nvidia-smi").args(["-pm", "1"]).output();
-    // Power limit may not be supported on laptop GPUs - treat as non-critical
     let _ = Command::new("nvidia-smi").args(["-pl", &watts.to_string()]).output();
     Ok(())
 }
@@ -88,7 +115,7 @@ fn run_helper(action: &str, value: &str) -> Result<(), String> {
     let o = Command::new("pkexec").args([helper, action, value]).output()
         .map_err(|e| format!("pkexec: {}", e))?;
     if o.status.success() { Ok(()) } else {
-        Err(format!("Helper falhou: {}", String::from_utf8_lossy(&o.stderr).trim()))
+        Err(format!("Helper failed: {}", String::from_utf8_lossy(&o.stderr).trim()))
     }
 }
 
@@ -96,10 +123,4 @@ fn cpu_count() -> usize {
     let mut c = 0;
     while std::path::Path::new(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor", c)).exists() { c += 1; }
     c.max(1)
-}
-
-fn read_nvidia_power_limit() -> Option<u32> {
-    let o = Command::new("nvidia-smi").args(["--query-gpu=power.limit", "--format=csv,noheader,nounits"]).output().ok()?;
-    if !o.status.success() { return None; }
-    String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().ok().map(|v| v as u32)
 }
