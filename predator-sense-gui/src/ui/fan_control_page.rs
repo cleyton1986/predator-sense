@@ -130,9 +130,12 @@ fn draw_animated_fan(cr: &gtk4::cairo::Context, w: f64, h: f64, rotation: f64, t
     let outer_r = 70.0;
     let inner_r = 30.0;
 
-    // Fan RPM not available via hwmon on this model
-    // Show temperature instead - fan speed is proportional to it
-    let rpm: Option<u32> = None; // Real RPM not accessible
+    // Read real RPM from hwmon (now available after kernel module fix)
+    let rpm = if _label == "CPU" {
+        crate::hardware::sensors::read_all_sensors().cpu_fan_rpm
+    } else {
+        crate::hardware::sensors::read_all_sensors().gpu_fan_rpm
+    };
 
     // Dark background circle
     cr.arc(cx, cy, outer_r, 0.0, 2.0 * PI);
@@ -193,15 +196,29 @@ fn draw_animated_fan(cr: &gtk4::cairo::Context, w: f64, h: f64, rotation: f64, t
     cr.set_line_width(1.5);
     let _ = cr.stroke();
 
-    // Center text: show temperature
+    // Center: RPM if available, otherwise temperature
     cr.set_source_rgb(1.0, 1.0, 1.0);
     cr.select_font_face("Sans", gtk4::cairo::FontSlant::Normal, gtk4::cairo::FontWeight::Bold);
 
-    cr.set_font_size(22.0);
-    let temp_text = format!("{}°", temp as i32);
-    let ext = cr.text_extents(&temp_text).unwrap();
-    cr.move_to(cx - ext.width() / 2.0, cy + 4.0);
-    let _ = cr.show_text(&temp_text);
+    if let Some(r) = rpm {
+        cr.set_font_size(20.0);
+        let rpm_text = format!("{}", r);
+        let ext = cr.text_extents(&rpm_text).unwrap();
+        cr.move_to(cx - ext.width() / 2.0, cy + 2.0);
+        let _ = cr.show_text(&rpm_text);
+
+        cr.set_font_size(9.0);
+        cr.set_source_rgba(1.0, 1.0, 1.0, 0.5);
+        let ext2 = cr.text_extents("RPM").unwrap();
+        cr.move_to(cx - ext2.width() / 2.0, cy + 14.0);
+        let _ = cr.show_text("RPM");
+    } else {
+        cr.set_font_size(22.0);
+        let temp_text = format!("{}°", temp as i32);
+        let ext = cr.text_extents(&temp_text).unwrap();
+        cr.move_to(cx - ext.width() / 2.0, cy + 4.0);
+        let _ = cr.show_text(&temp_text);
+    }
 
     // Temperature below hub
     cr.set_font_size(11.0);

@@ -497,6 +497,10 @@ static void __init set_quirks(void)
 	if (quirks->predator_v4)
 		interface->capability |= ACER_CAP_PLATFORM_PROFILE |
 					 ACER_CAP_FAN_SPEED_READ;
+
+	/* Enable fan speed reading for models with cpu_fans/gpu_fans even without predator_v4 */
+	if (quirks->cpu_fans || quirks->gpu_fans)
+		interface->capability |= ACER_CAP_FAN_SPEED_READ;
 }
 
 static int __init dmi_matched(const struct dmi_system_id *dmi)
@@ -2664,7 +2668,7 @@ static int acer_gsensor_event(void)
 
 static int acer_get_fan_speed(int fan)
 {
-	if (quirks->predator_v4) {
+	if (has_cap(ACER_CAP_FAN_SPEED_READ)) {
 		acpi_status status;
 		u64 fanspeed;
 
