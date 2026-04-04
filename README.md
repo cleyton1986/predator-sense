@@ -389,6 +389,10 @@ If this project was useful to you and you'd like to support its development, con
   </a>
 </p>
 
+<p align="center">
+  <b>PIX (Brazil):</b> <code>cleyton1986@gmail.com</code>
+</p>
+
 Any contribution is voluntary and greatly appreciated! It helps keep the project alive and motivates new features.
 
 ---

@@ -389,6 +389,10 @@ Se este projeto foi útil para você e gostaria de apoiar o desenvolvimento, con
   </a>
 </p>
 
+<p align="center">
+  <b>PIX:</b> <code>cleyton1986@gmail.com</code>
+</p>
+
 Qualquer contribuição é voluntária e muito apreciada! Ajuda a manter o projeto vivo e motiva novas funcionalidades.
 
 ---
