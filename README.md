@@ -379,6 +379,24 @@ predator-sense-gui/
 - **GUI Application** built with [Rust](https://www.rust-lang.org/) + [GTK4](https://gtk.org/) + [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/)
 - **Installer** built with [Go](https://go.dev/)
 
+## Support the Project
+
+If this project was useful to you and you'd like to support its development, consider buying me a coffee:
+
+<p align="center">
+  <a href="https://www.paypal.com/donate/?hosted_button_id=YOUR_BUTTON_ID">
+    <img src="https://img.shields.io/badge/PayPal-Donate-00457C?logo=paypal&logoColor=white&style=for-the-badge" alt="Donate via PayPal">
+  </a>
+</p>
+
+<p align="center">
+  <b>PayPal:</b> cleyton1986@gmail.com
+</p>
+
+Any contribution is voluntary and greatly appreciated! It helps keep the project alive and motivates new features.
+
+---
+
 ## License
 
 This project is licensed under the **GNU General Public License v3.0** — see the [LICENSE](LICENSE) file for details.
