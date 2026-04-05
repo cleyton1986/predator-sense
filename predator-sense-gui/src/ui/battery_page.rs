@@ -121,6 +121,7 @@ pub fn build() -> gtk::Box {
     let stat_tech = create_stat_label(t("bat_tech"), "--");
     let stat_mfr = create_stat_label(t("bat_manufacturer"), "--");
     let stat_model = create_stat_label(t("bat_model"), "--");
+    let stat_bat_temp = create_stat_label(t("bat_temp"), "--");
 
     charge_stats.append(&stat_now.0);
     charge_stats.append(&stat_full.0);
@@ -128,6 +129,7 @@ pub fn build() -> gtk::Box {
     charge_stats.append(&stat_tech.0);
     charge_stats.append(&stat_mfr.0);
     charge_stats.append(&stat_model.0);
+    charge_stats.append(&stat_bat_temp.0);
     top_row.append(&charge_stats);
 
     page.append(&top_row);
@@ -160,6 +162,7 @@ pub fn build() -> gtk::Box {
         stat_now: stat_now.1, stat_full: stat_full.1,
         stat_design: stat_design.1, stat_tech: stat_tech.1,
         stat_mfr: stat_mfr.1, stat_model: stat_model.1,
+        stat_bat_temp: stat_bat_temp.1,
         graph,
     };
     let bp = bat_pct.clone();
@@ -189,6 +192,7 @@ struct AllWidgets {
     stat_now: gtk::Label, stat_full: gtk::Label,
     stat_design: gtk::Label, stat_tech: gtk::Label,
     stat_mfr: gtk::Label, stat_model: gtk::Label,
+    stat_bat_temp: gtk::Label,
     graph: gtk::DrawingArea,
 }
 
@@ -219,6 +223,16 @@ fn update(w: &AllWidgets, pct: &Rc<RefCell<u32>>, chg: &Rc<RefCell<bool>>, hist:
     w.stat_tech.set_text(&d.technology);
     w.stat_mfr.set_text(&d.manufacturer);
     w.stat_model.set_text(&d.model);
+
+    // Battery temperature from acer-wmi-battery module
+    let bat_temp = fs::read_to_string("/sys/bus/wmi/drivers/acer-wmi-battery/temperature")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .map(|t| t / 1000.0);
+    w.stat_bat_temp.set_text(&match bat_temp {
+        Some(t) => format!("{:.1}°C", t),
+        None => "--".into(),
+    });
 
     let mut h = hist.borrow_mut();
     if h.len() >= HISTORY { h.pop_front(); }
