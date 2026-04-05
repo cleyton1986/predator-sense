@@ -1,4 +1,4 @@
-obj-m	:= facer.o
+obj-m	:= facer.o acer-wmi-battery.o
 
 KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 PWD       := $(shell pwd)
@@ -19,6 +19,7 @@ default:
 
 	if [ -f "$(KEY)" ] && [ -f "$(X509)" ]; then \
 		sudo kmodsign sha512 $(KEY) $(X509) facer.ko; \
+		sudo kmodsign sha512 $(KEY) $(X509) acer-wmi-battery.ko; \
 	fi
 
 install:
@@ -38,6 +39,7 @@ dkms: dkmsclean
 
 onboot:
 	echo "facer" > /etc/modules-load.d/facer.conf
+	echo "acer-wmi-battery" >> /etc/modules-load.d/facer.conf
 
 noboot:
 	rm -f /etc/modules-load.d/facer.conf
