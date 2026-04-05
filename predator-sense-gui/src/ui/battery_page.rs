@@ -134,6 +134,114 @@ pub fn build() -> gtk::Box {
 
     page.append(&top_row);
 
+    // === Battery WMI Controls ===
+    let wmi_path = "/sys/bus/wmi/drivers/acer-wmi-battery";
+    let wmi_available = std::path::Path::new(wmi_path).exists();
+
+    if wmi_available {
+        let controls_box = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+        controls_box.set_halign(gtk::Align::Center);
+        controls_box.set_margin_top(6);
+
+        // Health Mode (80% charge limit)
+        let health_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        health_box.add_css_class("fan-display");
+        let health_label = gtk::Label::new(Some(t("bat_health_mode")));
+        health_label.add_css_class("control-label");
+        let health_switch = gtk::Switch::new();
+        health_switch.set_valign(gtk::Align::Center);
+        let health_val = fs::read_to_string(format!("{}/health_mode", wmi_path))
+            .unwrap_or_default().trim().to_string();
+        health_switch.set_active(health_val == "1");
+        {
+            let wmi = wmi_path.to_string();
+            health_switch.connect_state_set(move |_, active| {
+                let val = if active { "1" } else { "0" };
+                let path = format!("{}/health_mode", wmi);
+                if fs::write(&path, val).is_err() {
+                    let _ = std::process::Command::new("pkexec")
+                        .args(["bash", "-c", &format!("echo {} > {}", val, path)])
+                        .output();
+                }
+                glib::Propagation::Proceed
+            });
+        }
+        health_box.append(&health_label);
+        health_box.append(&health_switch);
+        controls_box.append(&health_box);
+
+        // Calibration button
+        let cal_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        cal_box.add_css_class("fan-display");
+        let cal_status = gtk::Label::new(None);
+        cal_status.add_css_class("info-text-dim");
+
+        let cal_start = gtk::Button::with_label(t("bat_calibrate"));
+        cal_start.add_css_class("secondary-button");
+
+        let cal_stop = gtk::Button::with_label(t("bat_calibrate_stop"));
+        cal_stop.add_css_class("secondary-button");
+
+        let cal_val = fs::read_to_string(format!("{}/calibration_mode", wmi_path))
+            .unwrap_or_default().trim().to_string();
+        if cal_val == "1" {
+            cal_status.set_text(t("bat_calibrating"));
+            cal_status.add_css_class("status-success");
+            cal_start.set_visible(false);
+        } else {
+            cal_stop.set_visible(false);
+        }
+
+        {
+            let wmi = wmi_path.to_string();
+            let st = cal_status.clone();
+            let stop = cal_stop.clone();
+            let start_ref = cal_start.clone();
+            cal_start.connect_clicked(move |_| {
+                let path = format!("{}/calibration_mode", wmi);
+                let r = if fs::write(&path, "1").is_err() {
+                    std::process::Command::new("pkexec")
+                        .args(["bash", "-c", &format!("echo 1 > {}", path)])
+                        .output().map(|_| ()).map_err(|e| e.to_string())
+                } else { Ok(()) };
+                match r {
+                    Ok(()) => {
+                        st.set_text(crate::i18n::t("bat_calibrating"));
+                        st.remove_css_class("status-error");
+                        st.add_css_class("status-success");
+                        start_ref.set_visible(false);
+                        stop.set_visible(true);
+                    }
+                    Err(e) => { st.set_text(&e); st.add_css_class("status-error"); }
+                }
+            });
+        }
+        {
+            let wmi = wmi_path.to_string();
+            let st = cal_status.clone();
+            let start = cal_start.clone();
+            let stop_ref = cal_stop.clone();
+            cal_stop.connect_clicked(move |_| {
+                let path = format!("{}/calibration_mode", wmi);
+                let _ = fs::write(&path, "0").or_else(|_|
+                    std::process::Command::new("pkexec")
+                        .args(["bash", "-c", &format!("echo 0 > {}", path)])
+                        .output().map(|_| ()).map_err(|e| e.to_string()));
+                st.set_text(crate::i18n::t("bat_calibrate_done"));
+                st.remove_css_class("status-success");
+                stop_ref.set_visible(false);
+                start.set_visible(true);
+            });
+        }
+
+        cal_box.append(&cal_start);
+        cal_box.append(&cal_stop);
+        cal_box.append(&cal_status);
+        controls_box.append(&cal_box);
+
+        page.append(&controls_box);
+    }
+
     // Charge history graph
     let graph_label = gtk::Label::new(Some(t("bat_charge_history")));
     graph_label.add_css_class("graph-label");
