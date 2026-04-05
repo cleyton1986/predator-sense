@@ -371,9 +371,13 @@ fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) 
     content_wrapper.set_hexpand(true);
     content_wrapper.set_vexpand(true);
 
-    stack.set_hexpand(true);
-    stack.set_vexpand(true);
-    content_wrapper.append(&stack);
+    // Wrap stack in ScrolledWindow so pages with lots of content don't break layout
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_child(Some(&stack));
+    scroll.set_hexpand(true);
+    scroll.set_vexpand(true);
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    content_wrapper.append(&scroll);
 
     panel_wrapper.add_overlay(&content_wrapper);
     layout.append(&panel_wrapper);
