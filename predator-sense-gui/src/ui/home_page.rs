@@ -73,32 +73,30 @@ pub fn build(sensor_data: &SensorData) -> gtk::Box {
     gauges_container.append(&row2);
     page.append(&gauges_container);
 
-    // Network speed display (if available)
-    if sensor_data.net_download_kbps.is_some() || sensor_data.net_upload_kbps.is_some() {
-        let net_box = gtk::Box::new(gtk::Orientation::Horizontal, 20);
-        net_box.set_halign(gtk::Align::Center);
-        net_box.set_margin_top(6);
-        net_box.add_css_class("fan-display");
+    // Network speed display
+    let net_box = gtk::Box::new(gtk::Orientation::Horizontal, 20);
+    net_box.set_halign(gtk::Align::Center);
+    net_box.set_margin_top(6);
+    net_box.add_css_class("fan-display");
 
-        let dl = sensor_data.net_download_kbps.unwrap_or(0.0);
-        let ul = sensor_data.net_upload_kbps.unwrap_or(0.0);
-        let dl_text = if dl > 1024.0 { format!("↓ {:.1} MB/s", dl / 1024.0) }
-                      else { format!("↓ {:.0} KB/s", dl) };
-        let ul_text = if ul > 1024.0 { format!("↑ {:.1} MB/s", ul / 1024.0) }
-                      else { format!("↑ {:.0} KB/s", ul) };
+    let dl = sensor_data.net_download_kbps.unwrap_or(0.0);
+    let ul = sensor_data.net_upload_kbps.unwrap_or(0.0);
+    let dl_text = if dl > 1024.0 { format!("↓ {:.1} MB/s", dl / 1024.0) }
+                  else { format!("↓ {:.0} KB/s", dl) };
+    let ul_text = if ul > 1024.0 { format!("↑ {:.1} MB/s", ul / 1024.0) }
+                  else { format!("↑ {:.0} KB/s", ul) };
 
-        let dl_label = gtk::Label::new(Some(&dl_text));
-        dl_label.add_css_class("fan-rpm");
-        let ul_label = gtk::Label::new(Some(&ul_text));
-        ul_label.add_css_class("fan-rpm");
-        let net_title = gtk::Label::new(Some(crate::i18n::t("network")));
-        net_title.add_css_class("fan-label");
+    let net_title = gtk::Label::new(Some(crate::i18n::t("network")));
+    net_title.add_css_class("fan-label");
+    let dl_label = gtk::Label::new(Some(&dl_text));
+    dl_label.add_css_class("fan-rpm");
+    let ul_label = gtk::Label::new(Some(&ul_text));
+    ul_label.add_css_class("fan-rpm");
 
-        net_box.append(&net_title);
-        net_box.append(&dl_label);
-        net_box.append(&ul_label);
-        page.append(&net_box);
-    }
+    net_box.append(&net_title);
+    net_box.append(&dl_label);
+    net_box.append(&ul_label);
+    page.append(&net_box);
 
     // Separator
     let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
