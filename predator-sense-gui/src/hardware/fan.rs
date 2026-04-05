@@ -9,12 +9,9 @@ pub enum FanMode {
 }
 
 /// Set fan mode using the predator-sense-helper (requires pkexec)
-/// WARNING: EC register offsets may vary between models.
-/// Currently disabled for safety - fans are controlled by BIOS/EC automatically.
+/// Auto and Max use firmware modes (safe). Custom is disabled for safety.
 pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
-    // Safety: fan control via EC is risky on untested models
-    // Only allow Auto mode (restore to safe state)
-    if mode != FanMode::Auto {
+    if let FanMode::Custom(_, _) = mode {
         return Err(crate::i18n::t("fan_note").to_string());
     }
     let (action, args) = match mode {
