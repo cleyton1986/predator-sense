@@ -5,6 +5,7 @@
 # === Rust build artifacts ===
 predator-sense-gui/target/
 *.rlib
+outros/
 
 # === Go build artifacts ===
 predator-sense-gui/installer/predator-sense-installer
