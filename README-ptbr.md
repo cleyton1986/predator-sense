@@ -132,7 +132,7 @@ Inspirado e baseado no projeto [acer-predator-turbo-and-rgb-keyboard-linux-modul
 Abra um terminal e execute:
 
 ```bash
-curl -H "Cache-Control: no-cache" -fsSL https://raw.githubusercontent.com/cleyton1986/predator-sense/main/scripts/remote-install.sh -o /tmp/ps-install.sh && sudo bash /tmp/ps-install.sh
+sudo rm -f /tmp/ps-install.sh && curl -fsSL https://raw.githubusercontent.com/cleyton1986/predator-sense/main/scripts/remote-install.sh -o /tmp/ps-install.sh && sudo bash /tmp/ps-install.sh
 ```
 
 Pronto! Tudo é baixado, compilado e configurado automaticamente.
