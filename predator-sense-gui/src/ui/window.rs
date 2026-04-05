@@ -371,13 +371,9 @@ fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) 
     content_wrapper.set_hexpand(true);
     content_wrapper.set_vexpand(true);
 
-    // Wrap stack in ScrolledWindow so pages with lots of content don't break layout
-    let scroll = gtk::ScrolledWindow::new();
-    scroll.set_child(Some(&stack));
-    scroll.set_hexpand(true);
-    scroll.set_vexpand(true);
-    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    content_wrapper.append(&scroll);
+    stack.set_hexpand(true);
+    stack.set_vexpand(true);
+    content_wrapper.append(&stack);
 
     panel_wrapper.add_overlay(&content_wrapper);
     layout.append(&panel_wrapper);
@@ -566,7 +562,12 @@ fn draw_brand_mark(cr: &gtk4::cairo::Context, w: f64, h: f64) {
     let _ = cr.fill();
 }
 
-fn build_settings_page(_app: &adw::Application) -> gtk::Box {
+fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_hexpand(true);
+    scroll.set_vexpand(true);
+
     let page = gtk::Box::new(gtk::Orientation::Vertical, 16);
     page.set_margin_top(24);
     page.set_margin_bottom(24);
@@ -738,7 +739,8 @@ fn build_settings_page(_app: &adw::Application) -> gtk::Box {
     about_t.set_halign(gtk::Align::Start);
     page.append(&about_t);
 
-    page
+    scroll.set_child(Some(&page));
+    scroll
 }
 
 fn create_setting_row(title: &str, desc: &str) -> gtk::Box {
