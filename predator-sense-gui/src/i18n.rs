@@ -44,7 +44,7 @@ fn t_pt<'a>(key: &'a str) -> &'a str {
         "home_page" => "Página inicial",
         "lighting" => "Iluminação",
         "perf_mode" => "Modo",
-        "fan_control" => "Controlo de ventoinha",
+        "fan_control" => "Controle de ventoinha",
         "gpu_menu" => "GPU",
         "monitoring" => "Monitorização",
         "settings" => "Configurações",

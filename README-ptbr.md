@@ -52,6 +52,11 @@ Esta aplicação foi criada para **uso pessoal**, para tirar o máximo proveito 
   <br><i>GPU — Dashboard NVIDIA com gráficos em tempo real, clock, utilização, VRAM e consumo</i>
 </p>
 
+<p align="center">
+  <img src="assets/psense-4.png" width="800" alt="Controle de Ventoinha">
+  <br><i>Controle de Ventoinha — RPM real com animação girando, CoolBoost e modos de ventilação</i>
+</p>
+
 ---
 
 ## Sobre

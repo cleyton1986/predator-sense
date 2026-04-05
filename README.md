@@ -52,6 +52,11 @@ This application was created for **personal use**, to get the most out of an Ace
   <br><i>GPU — NVIDIA dashboard with live graphs, clock speeds, utilization, VRAM and power draw</i>
 </p>
 
+<p align="center">
+  <img src="assets/psense-4.png" width="800" alt="Fan Control">
+  <br><i>Fan Control — Real-time RPM with animated spinning fans, CoolBoost toggle and fan modes</i>
+</p>
+
 ---
 
 ## About
