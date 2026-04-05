@@ -8,7 +8,7 @@ use std::rc::Rc;
 use crate::config;
 use crate::hardware::{rgb, sensors, setup};
 use crate::tray::TrayManager;
-use crate::ui::{fan_control_page, fan_page, gpu_page, home_page, monitor_page, rgb_page, setup_page};
+use crate::ui::{battery_page, fan_control_page, fan_page, gpu_page, home_page, monitor_page, rgb_page, setup_page};
 
 thread_local! {
     static HOLD_GUARD: RefCell<Option<gio::ApplicationHoldGuard>> = RefCell::new(None);
@@ -231,6 +231,7 @@ fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) 
     let rgb = rgb_page::build();
     let fan = fan_page::build();
     let fan_ctrl = fan_control_page::build();
+    let battery = battery_page::build();
     let gpu = gpu_page::build();
     let monitor = monitor_page::build();
     let settings = build_settings_page(app);
@@ -239,6 +240,7 @@ fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) 
     stack.add_named(&rgb, Some("lighting"));
     stack.add_named(&fan, Some("fan"));
     stack.add_named(&fan_ctrl, Some("fan_ctrl"));
+    stack.add_named(&battery, Some("battery"));
     stack.add_named(&gpu, Some("gpu"));
     stack.add_named(&monitor, Some("monitor"));
     stack.add_named(&settings, Some("settings"));
@@ -249,6 +251,7 @@ fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) 
         (crate::i18n::t("lighting"), "lighting"),
         (crate::i18n::t("perf_mode"), "fan"),
         (crate::i18n::t("fan_control"), "fan_ctrl"),
+        (crate::i18n::t("battery"), "battery"),
         (crate::i18n::t("gpu_menu"), "gpu"),
         (crate::i18n::t("monitoring"), "monitor"),
         (crate::i18n::t("settings"), "settings"),

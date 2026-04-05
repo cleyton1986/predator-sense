@@ -7,3 +7,4 @@ pub mod gpu_page;
 pub mod gauge_widget;
 pub mod setup_page;
 pub mod monitor_page;
+pub mod battery_page;
