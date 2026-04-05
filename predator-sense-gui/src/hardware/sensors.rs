@@ -95,14 +95,15 @@ fn read_network_speed() -> (Option<f64>, Option<f64>) {
     let result = if let Some((prev_rx, prev_tx, prev_time)) = prev.as_ref() {
         let dt = now.duration_since(*prev_time).as_secs_f64();
         if dt > 0.1 {
-            let dl = (rx.saturating_sub(*prev_rx) as f64 / dt) / 1024.0; // KB/s
+            let dl = (rx.saturating_sub(*prev_rx) as f64 / dt) / 1024.0;
             let ul = (tx.saturating_sub(*prev_tx) as f64 / dt) / 1024.0;
             (Some(dl), Some(ul))
         } else {
-            (None, None)
+            (Some(0.0), Some(0.0))
         }
     } else {
-        (None, None)
+        // First read: store baseline, return 0
+        (Some(0.0), Some(0.0))
     };
 
     *prev = Some((rx, tx, now));
@@ -110,11 +111,24 @@ fn read_network_speed() -> (Option<f64>, Option<f64>) {
 }
 
 fn find_active_interface() -> Option<String> {
-    for entry in fs::read_dir("/sys/class/net").ok()?.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with("wlp") || name.starts_with("enp") {
-            if let Ok(state) = fs::read_to_string(format!("/sys/class/net/{}/operstate", name)) {
-                if state.trim() == "up" { return Some(name); }
+    // Try wifi first (wlp*), then ethernet (enp*)
+    let entries = fs::read_dir("/sys/class/net").ok()?;
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.starts_with("wlp") || n.starts_with("enp"))
+        .collect();
+    // Sort so wlp comes first (wifi priority)
+    names.sort_by(|a, b| {
+        let aw = a.starts_with("wlp");
+        let bw = b.starts_with("wlp");
+        bw.cmp(&aw)
+    });
+    for name in names {
+        let path = format!("/sys/class/net/{}/operstate", name);
+        if let Ok(state) = fs::read_to_string(&path) {
+            if state.trim() == "up" {
+                return Some(name);
             }
         }
     }
