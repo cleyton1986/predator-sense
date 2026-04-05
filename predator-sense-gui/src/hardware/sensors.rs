@@ -110,12 +110,12 @@ fn read_network_speed() -> (Option<f64>, Option<f64>) {
 }
 
 fn find_active_interface() -> Option<String> {
-    // Prefer wlp* (wifi) or enp* (ethernet) that's UP
     for entry in fs::read_dir("/sys/class/net").ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with("wlp") || name.starts_with("enp") {
-            let state = fs::read_to_string(format!("/sys/class/net/{}/operstate", name)).ok()?;
-            if state.trim() == "up" { return Some(name); }
+            if let Ok(state) = fs::read_to_string(format!("/sys/class/net/{}/operstate", name)) {
+                if state.trim() == "up" { return Some(name); }
+            }
         }
     }
     None
