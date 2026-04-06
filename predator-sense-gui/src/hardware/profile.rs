@@ -59,14 +59,24 @@ fn settings_for(p: PowerProfile) -> ProfileSettings {
 }
 
 pub fn get_current_profile() -> Option<PowerProfile> {
-    // First: check saved state file (most reliable)
+    // 1st: user config dir (always writable)
+    if let Some(config_dir) = dirs::config_dir() {
+        let user_file = config_dir.join("predator-sense/current_profile");
+        if let Ok(saved) = fs::read_to_string(&user_file) {
+            if let Some(profile) = PowerProfile::from_id(&saved) {
+                return Some(profile);
+            }
+        }
+    }
+
+    // 2nd: system state file (root-owned)
     if let Ok(saved) = fs::read_to_string(PROFILE_STATE_FILE) {
         if let Some(profile) = PowerProfile::from_id(&saved) {
             return Some(profile);
         }
     }
 
-    // Fallback: detect from hardware state
+    // 3rd: detect from hardware state
     let gov = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").ok()?;
     let epp = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference").unwrap_or_default();
     match (gov.trim(), epp.trim()) {
