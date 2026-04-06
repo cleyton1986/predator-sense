@@ -632,8 +632,15 @@ func installModule() error {
 	extraDir := "/lib/modules/" + kernel + "/extra"
 	os.MkdirAll(extraDir, 0755)
 	copyFile(koPath, filepath.Join(extraDir, "facer.ko"))
+
+	// Also install acer-wmi-battery module
+	batKo := filepath.Join(kernelDir, "acer-wmi-battery.ko")
+	if fileExists(batKo) {
+		copyFile(batKo, filepath.Join(extraDir, "acer-wmi-battery.ko"))
+	}
+
 	run("depmod", "-a")
-	os.WriteFile("/etc/modules-load.d/facer.conf", []byte("facer\n"), 0644)
+	os.WriteFile("/etc/modules-load.d/facer.conf", []byte("facer\nacer-wmi-battery\n"), 0644)
 	os.WriteFile("/etc/modprobe.d/predator-sense.conf", []byte("blacklist acer_wmi\n"), 0644)
 
 	// Load now
@@ -644,9 +651,12 @@ func installModule() error {
 	run("modprobe", "video")
 
 	if fileExists(koPath) {
-		return run("insmod", koPath)
+		run("insmod", koPath)
 	}
-	return fmt.Errorf("facer.ko not found")
+	if fileExists(batKo) {
+		run("insmod", batKo)
+	}
+	return nil
 }
 
 // ─── Main flows ───

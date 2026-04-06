@@ -221,13 +221,20 @@ if make 2>/dev/null && [ -f "$KERNEL_DIR/facer.ko" ]; then
     mkdir -p "/lib/modules/$(uname -r)/extra/"
     cp "$KERNEL_DIR/facer.ko" "/lib/modules/$(uname -r)/extra/"
     depmod -a 2>/dev/null
-    echo "facer" > /etc/modules-load.d/facer.conf
+    # Also install acer-wmi-battery module
+    if [ -f "$KERNEL_DIR/acer-wmi-battery.ko" ]; then
+        cp "$KERNEL_DIR/acer-wmi-battery.ko" "$INSTALL_DIR/kernel/"
+        cp "$KERNEL_DIR/acer-wmi-battery.ko" "/lib/modules/$(uname -r)/extra/"
+    fi
+    printf "facer\nacer-wmi-battery\n" > /etc/modules-load.d/facer.conf
     echo "blacklist acer_wmi" > /etc/modprobe.d/predator-sense.conf
+    depmod -a 2>/dev/null
     # Load now
     rmmod acer_wmi 2>/dev/null || true
     rmmod facer 2>/dev/null || true
     modprobe wmi sparse-keymap video 2>/dev/null || true
-    insmod "$KERNEL_DIR/facer.ko" 2>/dev/null && msg ok "Kernel module loaded" || msg fail "Module load failed (may need reboot)"
+    insmod "$KERNEL_DIR/facer.ko" 2>/dev/null && msg ok "facer loaded" || msg fail "facer load failed"
+    insmod "$KERNEL_DIR/acer-wmi-battery.ko" 2>/dev/null && msg ok "acer-wmi-battery loaded" || msg skip "acer-wmi-battery not available"
 else
     msg fail "Kernel module compilation failed"
 fi
