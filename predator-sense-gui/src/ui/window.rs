@@ -95,21 +95,30 @@ pub fn build(app: &adw::Application) {
         build_main_ui(app, &window);
     }
 
-    // Also handle native close-request for tray
+    // Handle ALL close events (native X button, our custom button, Alt+F4, etc.)
     let app_clone = app.clone();
     window.connect_close_request(move |win| {
         let cfg = config::load_app_config();
+        eprintln!("[close] minimize_on_close={}", cfg.minimize_on_close);
         if cfg.minimize_on_close {
+            // Hide window instead of closing
             win.set_visible(false);
-            HOLD_GUARD.with(|g| *g.borrow_mut() = Some(app_clone.hold()));
+            // Keep the GTK app alive
+            HOLD_GUARD.with(|g| {
+                if g.borrow().is_none() {
+                    *g.borrow_mut() = Some(app_clone.hold());
+                }
+            });
+            // Start tray icon if not already running
             TRAY.with(|t| {
                 let mut tray = t.borrow_mut();
-                if tray.is_none() {
+                if tray.is_none() || !tray.as_ref().map(|t| t.started).unwrap_or(false) {
                     let mut tm = TrayManager::new();
                     tm.start();
                     *tray = Some(tm);
                 }
             });
+            // Prevent the window from being destroyed
             glib::Propagation::Stop
         } else {
             glib::Propagation::Proceed

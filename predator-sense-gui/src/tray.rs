@@ -1,81 +1,75 @@
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::Command;
 
-/// Manages the system tray helper process
+/// Manages the system tray helper process.
+/// The tray runs as a detached process so it survives even if the main app hides.
 pub struct TrayManager {
-    child: Option<Child>,
+    pub started: bool,
 }
 
 impl TrayManager {
     pub fn new() -> Self {
-        Self { child: None }
+        Self { started: false }
     }
 
-    /// Start the tray helper Python script
+    /// Start the tray helper as a detached background process
     pub fn start(&mut self) {
-        if self.child.is_some() {
+        if self.started {
             return;
         }
 
+        // Kill any existing tray first to avoid duplicates
+        let _ = Command::new("pkill").args(["-f", "tray_helper.py"]).output();
+
         let script = find_tray_script();
         if let Some(path) = script {
+            // Spawn detached - won't be killed when TrayManager is dropped
             match Command::new("python3")
                 .arg(&path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn()
             {
-                Ok(child) => {
-                    self.child = Some(child);
-                    eprintln!("[tray] Helper started (pid={})", self.child.as_ref().unwrap().id());
+                Ok(_child) => {
+                    self.started = true;
+                    eprintln!("[tray] Helper started");
                 }
                 Err(e) => {
-                    eprintln!("[tray] Failed to start helper: {}", e);
+                    eprintln!("[tray] Failed to start: {}", e);
                 }
             }
         } else {
             eprintln!("[tray] tray_helper.py not found");
         }
     }
-
-    /// Stop the tray helper
-    pub fn stop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-
-    pub fn is_running(&self) -> bool {
-        self.child.is_some()
-    }
 }
 
-impl Drop for TrayManager {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
+// No Drop implementation - tray process lives independently
 
-/// Find the tray_helper.py script
 fn find_tray_script() -> Option<PathBuf> {
-    // Try relative to executable
-    if let Ok(exe) = std::env::current_exe() {
-        let dir = exe.parent()?;
-        // release binary: target/release/predator-sense -> ../../resources/tray_helper.py
-        let p = dir.join("../../resources/tray_helper.py");
-        if p.exists() {
-            return Some(p.canonicalize().ok()?);
-        }
-        // Installed: same dir as binary
-        let p = dir.join("tray_helper.py");
+    let candidates = [
+        "/opt/predator-sense/tray_helper.py",
+        "/opt/predator-sense/resources/tray_helper.py",
+    ];
+
+    for path in &candidates {
+        let p = PathBuf::from(path);
         if p.exists() {
             return Some(p);
         }
     }
 
-    // Known development path
-    let dev_path = PathBuf::from("/opt/predator-sense/resources/tray_helper.py");
-    if dev_path.exists() {
-        return Some(dev_path);
+    // Try relative to executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for rel in &["tray_helper.py", "resources/tray_helper.py", "../../resources/tray_helper.py"] {
+                let p = dir.join(rel);
+                if p.exists() {
+                    return p.canonicalize().ok();
+                }
+            }
+        }
     }
 
     None
