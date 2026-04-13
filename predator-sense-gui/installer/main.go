@@ -419,6 +419,21 @@ func installFiles() error {
 		dst := filepath.Join(installDir, "resources", filepath.Base(r))
 		copyFile(r, dst)
 	}
+
+	// Copy kernel sources so the GUI's setup wizard can recompile after kernel updates
+	os.MkdirAll(installDir+"/kernel", 0755)
+	kernelSrc, _ := filepath.Glob(filepath.Join(guiDir, "kernel/*"))
+	for _, k := range kernelSrc {
+		base := filepath.Base(k)
+		// Skip build artifacts
+		if strings.HasSuffix(base, ".o") || strings.HasSuffix(base, ".ko") ||
+			strings.HasSuffix(base, ".mod") || strings.HasSuffix(base, ".mod.c") ||
+			strings.HasSuffix(base, ".mod.o") || strings.HasSuffix(base, ".cmd") ||
+			base == "modules.order" || base == "Module.symvers" || base == ".tmp_versions" {
+			continue
+		}
+		copyFile(k, filepath.Join(installDir, "kernel", base))
+	}
 	return nil
 }
 
