@@ -544,7 +544,7 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "predator-sense"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dirs",
  "gtk4",
