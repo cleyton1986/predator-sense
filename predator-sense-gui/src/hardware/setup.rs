@@ -229,7 +229,7 @@ pub fn load_module() -> SetupResult {
     let _ = Command::new("rmmod").arg("facer").output();
 
     // Ensure dependencies are loaded
-    for dep in &["wmi", "sparse-keymap", "video"] {
+    for dep in &["wmi", "sparse-keymap", "video", "platform_profile"] {
         let _ = Command::new("modprobe").arg(dep).output();
     }
 

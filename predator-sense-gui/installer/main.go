@@ -661,6 +661,7 @@ func installModule() error {
 	run("modprobe", "wmi")
 	run("modprobe", "sparse-keymap")
 	run("modprobe", "video")
+	run("modprobe", "platform_profile")
 
 	if fileExists(koPath) {
 		run("insmod", koPath)
@@ -750,6 +751,7 @@ func reloadModule() {
 			run("modprobe", "wmi")
 			run("modprobe", "sparse-keymap")
 			run("modprobe", "video")
+			run("modprobe", "platform_profile")
 			ko := filepath.Join(repoDir, "kernel/facer.ko")
 			if fileExists(ko) {
 				return run("insmod", ko)
