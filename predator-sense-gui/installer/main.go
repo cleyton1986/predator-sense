@@ -374,17 +374,20 @@ func getModel() string {
 // ─── Installation steps ───
 
 func installDeps() error {
-	// Detect package manager
-	if commandExists("apt-get") {
-		return run("apt-get", "install", "-y",
-			"libgtk-4-dev", "libadwaita-1-dev", "pkg-config", "build-essential",
-			"gcc", "make", "dkms", "libayatana-appindicator3-dev")
-	} else if commandExists("dnf") {
+	// Detect package manager. dnf/pacman checked before apt-get: Fedora ships
+	// /usr/bin/apt as a DNF compat wrapper, which would otherwise be
+	// misdetected as Debian/Ubuntu. No Debian/Ubuntu/Arch system ships dnf
+	// or pacman by default, so this ordering is safe.
+	if commandExists("dnf") {
 		return run("dnf", "install", "-y",
 			"gtk4-devel", "libadwaita-devel", "pkg-config", "gcc", "make", "dkms")
 	} else if commandExists("pacman") {
 		return run("pacman", "-S", "--noconfirm", "--needed",
 			"gtk4", "libadwaita", "pkgconf", "gcc", "make", "dkms")
+	} else if commandExists("apt-get") {
+		return run("apt-get", "install", "-y",
+			"libgtk-4-dev", "libadwaita-1-dev", "pkg-config", "build-essential",
+			"gcc", "make", "dkms", "libayatana-appindicator3-dev")
 	}
 	return fmt.Errorf("gerenciador de pacotes não detectado (apt/dnf/pacman)")
 }
@@ -395,12 +398,12 @@ func installKernelHeaders() error {
 	}
 	uname, _ := cmdOutput("uname", "-r")
 	kernel := strings.TrimSpace(uname)
-	if commandExists("apt-get") {
-		return run("apt-get", "install", "-y", "linux-headers-"+kernel)
-	} else if commandExists("dnf") {
+	if commandExists("dnf") {
 		return run("dnf", "install", "-y", "kernel-devel-"+kernel)
 	} else if commandExists("pacman") {
 		return run("pacman", "-S", "--noconfirm", "linux-headers")
+	} else if commandExists("apt-get") {
+		return run("apt-get", "install", "-y", "linux-headers-"+kernel)
 	}
 	return fmt.Errorf("instale manualmente: linux-headers-%s", kernel)
 }
@@ -1070,22 +1073,22 @@ func fileContains(path, substr string) bool {
 }
 
 func installClang() {
-	if commandExists("apt-get") {
-		run("apt-get", "install", "-y", "clang")
-	} else if commandExists("dnf") {
+	if commandExists("dnf") {
 		run("dnf", "install", "-y", "clang")
 	} else if commandExists("pacman") {
 		run("pacman", "-S", "--noconfirm", "--needed", "clang")
+	} else if commandExists("apt-get") {
+		run("apt-get", "install", "-y", "clang")
 	}
 }
 
 func installLLD() {
-	if commandExists("apt-get") {
-		run("apt-get", "install", "-y", "lld")
-	} else if commandExists("dnf") {
+	if commandExists("dnf") {
 		run("dnf", "install", "-y", "lld")
 	} else if commandExists("pacman") {
 		run("pacman", "-S", "--noconfirm", "--needed", "lld")
+	} else if commandExists("apt-get") {
+		run("apt-get", "install", "-y", "lld")
 	}
 }
 

@@ -92,12 +92,16 @@ msg header
 msg checking
 
 # ─── Detect package manager ───
-if command -v apt-get &>/dev/null; then
-    PKG="apt"
-elif command -v dnf &>/dev/null; then
+# dnf/pacman checked before apt-get: Fedora ships /usr/bin/apt as a
+# DNF compat wrapper, which would otherwise be misdetected as Debian/Ubuntu.
+# No Debian/Ubuntu/Arch system ships dnf or pacman by default, so this
+# ordering is safe.
+if command -v dnf &>/dev/null; then
     PKG="dnf"
 elif command -v pacman &>/dev/null; then
     PKG="pacman"
+elif command -v apt-get &>/dev/null; then
+    PKG="apt"
 else
     msg fail "No supported package manager found (apt/dnf/pacman)"
     exit 1
