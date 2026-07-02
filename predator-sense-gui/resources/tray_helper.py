@@ -108,7 +108,18 @@ class PredatorTray:
     def on_quit(self, _w):
         cleanup()
         try:
-            os.kill(os.getppid(), signal.SIGTERM)
+            # NEVER signal getppid() here: the tray is launched via `setsid --fork`
+            # to fully detach from the Rust app, so once the launcher exits this
+            # process is reparented to init/systemd. Killing the parent used to
+            # mean killing the user's session manager, causing a full logout.
+            # Find the actual predator-sense process by name instead.
+            out = subprocess.run(["pgrep", "-f", "/opt/predator-sense/predator-sense"],
+                                  capture_output=True, text=True)
+            for pid_str in out.stdout.split():
+                try:
+                    os.kill(int(pid_str), signal.SIGTERM)
+                except Exception:
+                    pass
         except Exception:
             pass
         Gtk.main_quit()
