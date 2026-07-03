@@ -3,6 +3,7 @@ use gtk4::{self as gtk};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::hardware::hid_rgb;
 use crate::hardware::rgb::{self, Direction, RgbConfig, RgbMode, StaticZoneConfig};
 
 struct RgbState {
@@ -289,7 +290,21 @@ pub fn build() -> gtk::Box {
                         break;
                     }
                 }
-                match last_err { Some(e) => Err(e), None => Ok(()) }
+                let wmi_result = match last_err { Some(e) => Err(e), None => Ok(()) };
+
+                // On hardware where the WMI static path is a confirmed no-op
+                // (e.g. PHN16-73), the real RGB controller is a separate
+                // I2C-HID chip (ENEK5130) reachable directly, bypassing WMI
+                // entirely. Try it whenever present - it has no per-zone
+                // concept (one color for the whole keyboard), so zone 1's
+                // color is used. Runs alongside the WMI path above, which is
+                // harmless where it's a no-op and unaffected where it isn't.
+                if hid_rgb::is_available() {
+                    let (r, g, b) = st.zone_colors[0];
+                    hid_rgb::set_static_color(r, g, b, st.brightness)
+                } else {
+                    wmi_result
+                }
             } else {
                 rgb::apply_dynamic_effect(&RgbConfig {
                     mode: st.mode, speed: st.speed, brightness: st.brightness,

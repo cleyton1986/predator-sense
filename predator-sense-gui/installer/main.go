@@ -574,7 +574,25 @@ esac`
 
 	// Add to input group
 	run("usermod", "-aG", "input", realUser)
+
+	installHidRgbUdevRule()
 	return nil
+}
+
+// Some Predator generations (confirmed: PHN16-73) route static RGB color
+// through an I2C-HID controller (ENEK5130, HID_ID 0018:00000CF2:00005130)
+// instead of WMI - see hardware/hid_rgb.rs. /dev/hidraw* defaults to
+// root-only; this rule grants the "input" group (which the user was just
+// added to, above) read/write access, matching hid_rgb.rs's direct-open path.
+func installHidRgbUdevRule() {
+	rule := `SUBSYSTEM=="hidraw", ENV{HID_ID}=="0018:00000CF2:00005130", MODE="0660", GROUP="input"
+`
+	os.MkdirAll("/etc/udev/rules.d", 0755)
+	if err := os.WriteFile("/etc/udev/rules.d/99-predator-hid-rgb.rules", []byte(rule), 0644); err != nil {
+		return
+	}
+	run("udevadm", "control", "--reload-rules")
+	run("udevadm", "trigger")
 }
 
 func installDesktopEntry() error {

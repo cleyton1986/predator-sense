@@ -549,6 +549,7 @@ dependencies = [
  "dirs",
  "gtk4",
  "libadwaita",
+ "libc",
  "serde",
  "serde_json",
 ]

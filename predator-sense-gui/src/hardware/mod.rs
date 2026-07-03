@@ -3,6 +3,7 @@ pub mod capabilities;
 pub mod hwmon;
 pub mod power_profile;
 pub mod rgb;
+pub mod hid_rgb;
 pub mod sensors;
 pub mod profile;
 pub mod setup;
