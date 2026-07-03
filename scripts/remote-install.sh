@@ -274,8 +274,11 @@ if make $MAKE_EXTRA > "$MAKE_LOG" 2>&1 && [ -f "$KERNEL_DIR/facer.ko" ]; then
     # "facer" module name ambiguously on boot, which can leave a stale
     # module loaded (breaking things like the WMI hotkey input device).
     if command -v dkms &>/dev/null && dkms status facer 2>/dev/null | grep -q .; then
-        dkms remove -m facer -v 0.2 --all 2>/dev/null || true
-        rm -rf /usr/src/facer-0.2 2>/dev/null || true
+        # Remove ALL versions of facer from DKMS (not just a hardcoded version)
+        for ver in $(dkms status facer 2>/dev/null | sed -n 's|^facer/\([^,]*\),.*|\1|p'); do
+            dkms remove -m facer -v "$ver" --all 2>/dev/null || true
+            rm -rf "/usr/src/facer-$ver" 2>/dev/null || true
+        done
     fi
 
     # Make module load on every boot
