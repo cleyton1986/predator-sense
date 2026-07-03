@@ -299,6 +299,20 @@ fi
 if make $MAKE_EXTRA > "$MAKE_LOG" 2>&1 && [ -f "$KERNEL_DIR/facer.ko" ]; then
     MODULE_OK=1
     cp "$KERNEL_DIR/facer.ko" "$INSTALL_DIR/kernel/"
+
+    # If a DKMS-managed facer module exists from a previous install (e.g. via
+    # the Go installer), remove it first. Leaving both a DKMS copy and this
+    # raw insmod copy on disk causes depmod/modprobe to resolve the bare
+    # "facer" module name ambiguously on boot, which can leave a stale
+    # module loaded (breaking things like the WMI hotkey input device).
+    if command -v dkms &>/dev/null && dkms status facer 2>/dev/null | grep -q .; then
+        # Remove ALL versions of facer from DKMS (not just a hardcoded version)
+        for ver in $(dkms status facer 2>/dev/null | sed -n 's|^facer/\([^,]*\),.*|\1|p'); do
+            dkms remove -m facer -v "$ver" --all 2>/dev/null || true
+            rm -rf "/usr/src/facer-$ver" 2>/dev/null || true
+        done
+    fi
+
     # Make module load on every boot
     mkdir -p "/lib/modules/$(uname -r)/extra/"
     cp "$KERNEL_DIR/facer.ko" "/lib/modules/$(uname -r)/extra/"
