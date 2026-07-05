@@ -4292,7 +4292,6 @@ static int __init acer_wmi_init(void)
 			gaming_interface->capability |= ACER_CAP_GAMINGKB | ACER_CAP_GAMINGKB_STATIC;
 			gaming_kbbl_cdev_init();
 			gaming_kbbl_static_cdev_init();
-			gaming_kbbl_poll_and_enable_zones();
 		}
 	}
 
@@ -4325,6 +4324,18 @@ static int __init acer_wmi_init(void)
 		if (err && err != -ENODEV)
 			pr_warn("Cannot enable accelerometer\n");
 	}
+
+	/*
+	 * Experimental (issue #4, PHN16-73): moved from before input/notify
+	 * setup to after it. Programming the gaming LED zones this early was
+	 * the prime suspect for suppressing the PredatorSense hotkey WMI
+	 * event, since the macro-toggle key handler above documents that this
+	 * same method also "selects which events are generated" by hardware
+	 * keys - and the vanilla kernel acer_wmi driver, which never touches
+	 * this method, doesn't have the hotkey bug.
+	 */
+	if (wmi_has_guid(WMID_GUID4))
+		gaming_kbbl_poll_and_enable_zones();
 
 	err = platform_driver_register(&acer_platform_driver);
 	if (err) {

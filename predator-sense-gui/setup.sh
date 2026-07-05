@@ -171,7 +171,7 @@ EOF
     # defaults to root-only; grant the "input" group read/write access.
     mkdir -p /etc/udev/rules.d
     cat > /etc/udev/rules.d/99-predator-hid-rgb.rules << 'EOF'
-SUBSYSTEM=="hidraw", ENV{HID_ID}=="0018:00000CF2:00005130", MODE="0660", GROUP="input"
+SUBSYSTEM=="hidraw", ATTRS{name}=="ENEK5130:00", MODE="0660", GROUP="input"
 EOF
     udevadm control --reload-rules 2>/dev/null || true
     udevadm trigger 2>/dev/null || true

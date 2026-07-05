@@ -237,7 +237,7 @@ usermod -aG input "$REAL_USER" 2>/dev/null || true
 # defaults to root-only; grant the "input" group read/write access.
 mkdir -p /etc/udev/rules.d
 cat > /etc/udev/rules.d/99-predator-hid-rgb.rules << 'EOF'
-SUBSYSTEM=="hidraw", ENV{HID_ID}=="0018:00000CF2:00005130", MODE="0660", GROUP="input"
+SUBSYSTEM=="hidraw", ATTRS{name}=="ENEK5130:00", MODE="0660", GROUP="input"
 EOF
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger 2>/dev/null || true
@@ -246,13 +246,44 @@ gtk-update-icon-cache /usr/share/icons/hicolor/ 2>/dev/null || true
 update-desktop-database /usr/share/applications/ 2>/dev/null || true
 msg ok "Files installed"
 
-# ─── 6. Kernel module ───
+# ─── 6. Kernel module (DKMS) ───
+# Built via DKMS (not raw insmod) so AUTOINSTALL=yes in dkms.conf rebuilds
+# the module automatically on future kernel upgrades — a bare insmod copy
+# in /lib/modules/$(uname -r)/extra/ goes stale the moment the kernel
+# updates and never gets rebuilt, silently breaking facer on next boot.
 msg kernel
 KERNEL_DIR="$TMP_DIR/predator-sense-gui/kernel"
 MAKE_LOG="$TMP_DIR/make.log"
 MODULE_OK=0
-cd "$KERNEL_DIR"
-# If the running kernel was built with Clang, use Clang to build the module too
+DKMS_MODULE="facer"
+DKMS_VERSION="0.2"
+SRC_DIR="/usr/src/${DKMS_MODULE}-${DKMS_VERSION}"
+
+if ! command -v dkms &>/dev/null; then
+    case "$PKG" in
+        pacman) pacman -S --noconfirm --needed dkms 2>/dev/null ;;
+        apt)    apt-get install -y -qq dkms 2>/dev/null ;;
+        dnf)    dnf install -y dkms 2>/dev/null ;;
+    esac
+fi
+
+# Remove any prior DKMS registration (any version, not just 0.2) so stale
+# sources from an older release don't leak into the new build.
+for ver in $(dkms status "$DKMS_MODULE" 2>/dev/null | sed -n "s|^${DKMS_MODULE}/\([^,]*\),.*|\1|p"); do
+    dkms remove -m "$DKMS_MODULE" -v "$ver" --all 2>/dev/null || true
+    rm -rf "/usr/src/${DKMS_MODULE}-${ver}" 2>/dev/null || true
+done
+
+# Remove any loose (non-DKMS) copy from an older remote-install.sh version
+# that used raw insmod — leaving both makes depmod/modprobe resolve the
+# bare "facer" module name ambiguously on boot.
+rm -f "/lib/modules/$(uname -r)/extra/facer.ko"
+depmod -a 2>/dev/null
+
+mkdir -p "$SRC_DIR"
+cp "$KERNEL_DIR"/facer.c "$KERNEL_DIR"/acer-wmi-battery.c "$KERNEL_DIR"/Makefile "$KERNEL_DIR"/dkms.conf "$SRC_DIR/" 2>/dev/null || true
+
+# If the running kernel was built with Clang/LLD, dkms must use the same
 KERNEL_CONFIG="/lib/modules/$(uname -r)/build/.config"
 MAKE_EXTRA=""
 if grep -q "^CONFIG_CC_IS_CLANG=y" "$KERNEL_CONFIG" 2>/dev/null; then
@@ -275,41 +306,20 @@ if grep -q "^CONFIG_LD_IS_LLD=y" "$KERNEL_CONFIG" 2>/dev/null; then
     fi
     MAKE_EXTRA="$MAKE_EXTRA LD=ld.lld"
 fi
-if make $MAKE_EXTRA > "$MAKE_LOG" 2>&1 && [ -f "$KERNEL_DIR/facer.ko" ]; then
+
+if dkms add -m "$DKMS_MODULE" -v "$DKMS_VERSION" > "$MAKE_LOG" 2>&1 \
+    && env $MAKE_EXTRA dkms build -m "$DKMS_MODULE" -v "$DKMS_VERSION" >> "$MAKE_LOG" 2>&1 \
+    && env $MAKE_EXTRA dkms install -m "$DKMS_MODULE" -v "$DKMS_VERSION" --force >> "$MAKE_LOG" 2>&1; then
     MODULE_OK=1
-    cp "$KERNEL_DIR/facer.ko" "$INSTALL_DIR/kernel/"
-
-    # If a DKMS-managed facer module exists from a previous install (e.g. via
-    # the Go installer), remove it first. Leaving both a DKMS copy and this
-    # raw insmod copy on disk causes depmod/modprobe to resolve the bare
-    # "facer" module name ambiguously on boot, which can leave a stale
-    # module loaded (breaking things like the WMI hotkey input device).
-    if command -v dkms &>/dev/null && dkms status facer 2>/dev/null | grep -q .; then
-        # Remove ALL versions of facer from DKMS (not just a hardcoded version)
-        for ver in $(dkms status facer 2>/dev/null | sed -n 's|^facer/\([^,]*\),.*|\1|p'); do
-            dkms remove -m facer -v "$ver" --all 2>/dev/null || true
-            rm -rf "/usr/src/facer-$ver" 2>/dev/null || true
-        done
-    fi
-
-    # Make module load on every boot
-    mkdir -p "/lib/modules/$(uname -r)/extra/"
-    cp "$KERNEL_DIR/facer.ko" "/lib/modules/$(uname -r)/extra/"
-    depmod -a 2>/dev/null
-    # Also install acer-wmi-battery module
-    if [ -f "$KERNEL_DIR/acer-wmi-battery.ko" ]; then
-        cp "$KERNEL_DIR/acer-wmi-battery.ko" "$INSTALL_DIR/kernel/"
-        cp "$KERNEL_DIR/acer-wmi-battery.ko" "/lib/modules/$(uname -r)/extra/"
-    fi
-    printf "facer\nacer-wmi-battery\n" > /etc/modules-load.d/facer.conf
+    printf "wmi\nsparse-keymap\nvideo\nplatform_profile\nfacer\nacer-wmi-battery\n" > /etc/modules-load.d/facer.conf
     echo "blacklist acer_wmi" > /etc/modprobe.d/predator-sense.conf
     depmod -a 2>/dev/null
     # Load now
     rmmod acer_wmi 2>/dev/null || true
     rmmod facer 2>/dev/null || true
-    modprobe wmi sparse-keymap video 2>/dev/null || true
-    insmod "$KERNEL_DIR/facer.ko" 2>/dev/null && msg ok "facer loaded" || msg fail "facer load failed"
-    insmod "$KERNEL_DIR/acer-wmi-battery.ko" 2>/dev/null && msg ok "acer-wmi-battery loaded" || msg skip "acer-wmi-battery not available"
+    modprobe wmi sparse-keymap video platform_profile 2>/dev/null || true
+    modprobe facer 2>/dev/null && msg ok "facer loaded" || msg fail "facer load failed"
+    modprobe acer-wmi-battery 2>/dev/null && msg ok "acer-wmi-battery loaded" || msg skip "acer-wmi-battery not available"
 else
     msg fail "Kernel module compilation failed"
     echo ""
