@@ -160,6 +160,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         let cfg = config::load_app_config();
         crate::hardware::alerts::set_enabled(cfg.temp_alerts);
         crate::hardware::power_profile::set_auto(cfg.auto_profile_ac);
+        crate::hardware::power_profile::set_target_profiles(cfg.profile_ac, cfg.profile_battery);
         glib::timeout_add_seconds_local(5, || {
             let (cpu, gpu) = sensors::read_critical_temps();
             crate::hardware::alerts::check(cpu, gpu);
@@ -376,7 +377,7 @@ fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) 
     model.set_halign(gtk::Align::Center);
     info_box.append(&model);
 
-    let ver = gtk::Label::new(Some("v0.2.18 • Linux"));
+    let ver = gtk::Label::new(Some("v0.2.19 • Linux"));
     ver.add_css_class("info-text-dim");
     ver.set_halign(gtk::Align::Center);
     info_box.append(&ver);
@@ -717,6 +718,48 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     });
     acp_row.append(&acp_switch);
     page.append(&acp_row);
+
+    let profile_choices: [(&str, crate::hardware::profile::PowerProfile); 4] = [
+        ("quiet", crate::hardware::profile::PowerProfile::Quiet),
+        ("balanced", crate::hardware::profile::PowerProfile::Balanced),
+        ("performance", crate::hardware::profile::PowerProfile::Performance),
+        ("turbo", crate::hardware::profile::PowerProfile::Turbo),
+    ];
+    let profile_labels: Vec<&str> = profile_choices.iter().map(|(k, _)| t(k)).collect();
+
+    let ac_profile_row = create_setting_row(t("profile_when_ac"), t("profile_when_ac_desc"));
+    let ac_profile_dd = gtk::DropDown::from_strings(&profile_labels);
+    ac_profile_dd.set_selected(cfg.profile_ac.index() as u32);
+    ac_profile_dd.set_valign(gtk::Align::Center);
+    ac_profile_dd.connect_selected_notify(move |dd| {
+        let sel = dd.selected();
+        if sel >= 4 {
+            return; // GTK_INVALID_LIST_POSITION or other transient state, not a real user pick
+        }
+        let mut c = config::load_app_config();
+        c.profile_ac = crate::hardware::profile::PowerProfile::from_index(sel as i8);
+        let _ = config::save_app_config(&c);
+        crate::hardware::power_profile::set_target_profiles(c.profile_ac, c.profile_battery);
+    });
+    ac_profile_row.append(&ac_profile_dd);
+    page.append(&ac_profile_row);
+
+    let battery_profile_row = create_setting_row(t("profile_when_battery"), t("profile_when_battery_desc"));
+    let battery_profile_dd = gtk::DropDown::from_strings(&profile_labels);
+    battery_profile_dd.set_selected(cfg.profile_battery.index() as u32);
+    battery_profile_dd.set_valign(gtk::Align::Center);
+    battery_profile_dd.connect_selected_notify(move |dd| {
+        let sel = dd.selected();
+        if sel >= 4 {
+            return; // GTK_INVALID_LIST_POSITION or other transient state, not a real user pick
+        }
+        let mut c = config::load_app_config();
+        c.profile_battery = crate::hardware::profile::PowerProfile::from_index(sel as i8);
+        let _ = config::save_app_config(&c);
+        crate::hardware::power_profile::set_target_profiles(c.profile_ac, c.profile_battery);
+    });
+    battery_profile_row.append(&battery_profile_dd);
+    page.append(&battery_profile_row);
 
     // Module status
     // === Hardware Settings Section ===

@@ -27,6 +27,14 @@ impl PowerProfile {
             _ => None,
         }
     }
+
+    pub fn index(&self) -> i8 {
+        match self { Self::Quiet => 0, Self::Balanced => 1, Self::Performance => 2, Self::Turbo => 3 }
+    }
+
+    pub fn from_index(i: i8) -> Self {
+        match i { 0 => Self::Quiet, 2 => Self::Performance, 3 => Self::Turbo, _ => Self::Balanced }
+    }
 }
 
 struct ProfileSettings {
