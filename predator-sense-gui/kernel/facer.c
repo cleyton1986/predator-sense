@@ -52,6 +52,7 @@
 #include <linux/hwmon.h>
 #include <linux/bitfield.h>
 #include <linux/version.h>
+#include <linux/delay.h>
 
 #if RTLNX_VER_MIN(6, 14, 0)
 #include <linux/unaligned.h>
@@ -411,6 +412,7 @@ static u8 commun_fn_key_number;
 static u8 macro_key_state = 0;
 static bool cycle_gaming_thermal_profile = true;
 static bool predator_v4;
+static bool enable_all;
 
 module_param(mailled, int, 0444);
 module_param(brightness, int, 0444);
@@ -420,6 +422,7 @@ module_param(force_caps, int, 0444);
 module_param(ec_raw_mode, bool, 0444);
 module_param(cycle_gaming_thermal_profile, bool, 0644);
 module_param(predator_v4, bool, 0444);
+module_param(enable_all, bool, 0444);
 MODULE_PARM_DESC(mailled, "Set initial state of Mail LED");
 MODULE_PARM_DESC(brightness, "Set initial LCD backlight brightness");
 MODULE_PARM_DESC(threeg, "Set initial state of 3G hardware");
@@ -430,6 +433,8 @@ MODULE_PARM_DESC(cycle_gaming_thermal_profile,
 	"Set thermal mode key in cycle mode. Disabling it sets the mode key in turbo toggle mode");
 MODULE_PARM_DESC(predator_v4,
 	"Enable features for predator laptops that use predator sense v4");
+MODULE_PARM_DESC(enable_all,
+	"EXPERIMENTAL: force all optional predator_v4 features on (turbo, fan read/PWM, gaming keyboard) on hardware with no matching DMI quirk. Try this on unsupported models and report what works.");
 
 #ifdef lts
 int platform_profile_remove()
@@ -1374,6 +1379,25 @@ static void __init find_quirks(void)
 
 	if (quirks == NULL)
 		quirks = &quirk_unknown;
+
+	/*
+	 * enable_all: force every optional predator_v4-family feature on,
+	 * regardless of DMI match. Meant as an explicit opt-in escape hatch
+	 * for models with no quirk entry yet - not a default behavior change
+	 * for anyone else, and every feature it turns on is WMI-gated (BIOS
+	 * validates/rejects calls it doesn't understand), not a raw EC/offset
+	 * write, so the failure mode on unsupported hardware is "no-op", not
+	 * a bad write.
+	 */
+	if (enable_all) {
+		pr_info("enable_all: forcing predator_v4/turbo/fan/pwm/four_zone_kb on (experimental, unquirked hardware)\n");
+		quirks->predator_v4 = 1;
+		quirks->turbo = 1;
+		quirks->cpu_fans = 1;
+		quirks->gpu_fans = 1;
+		quirks->pwm = 1;
+		quirks->four_zone_kb = 1;
+	}
 }
 
 /*
@@ -3093,6 +3117,15 @@ acer_predator_v4_platform_profile_set(struct platform_profile_handler *pprof,
 	return 0;
 }
 
+/*
+ * On some systems the platform_profile class isn't fully initialized yet
+ * when facer probes (boot-order race, more common on newer kernels), so
+ * registration can fail transiently even though nothing is actually wrong
+ * with the hardware. Retry a few times before giving up.
+ */
+#define ACER_PLATFORM_PROFILE_MAX_RETRIES 10
+#define ACER_PLATFORM_PROFILE_RETRY_DELAY_MS 100
+
 #if RTLNX_VER_MIN(6, 14, 0)
 static int
 acer_predator_v4_platform_profile_probe(void *drvdata, unsigned long *choices)
@@ -3159,10 +3192,22 @@ static const struct platform_profile_ops acer_predator_v4_platform_profile_ops =
 static int acer_platform_profile_setup(struct platform_device *device)
 {
 	if (quirks->predator_v4) {
-		platform_profile_device = devm_platform_profile_register(
-			&device->dev, "acer-wmi", NULL, &acer_predator_v4_platform_profile_ops);
-		if (IS_ERR(platform_profile_device))
+		int retry;
+
+		for (retry = 0; retry < ACER_PLATFORM_PROFILE_MAX_RETRIES; retry++) {
+			platform_profile_device = devm_platform_profile_register(
+				&device->dev, "acer-wmi", NULL, &acer_predator_v4_platform_profile_ops);
+			if (!IS_ERR(platform_profile_device))
+				break;
+			msleep(ACER_PLATFORM_PROFILE_RETRY_DELAY_MS);
+		}
+		if (IS_ERR(platform_profile_device)) {
+			pr_warn("platform profile registration failed after %d retries\n",
+				ACER_PLATFORM_PROFILE_MAX_RETRIES);
 			return PTR_ERR(platform_profile_device);
+		}
+		if (retry > 0)
+			pr_info("platform profile registered on attempt %d\n", retry + 1);
 
 		platform_profile_support = true;
 
@@ -3178,6 +3223,7 @@ static int acer_platform_profile_setup(void)
 {
 	if (quirks->predator_v4) {
 		int err;
+		int retry;
 
 		platform_profile_handler.profile_get =
 			acer_predator_v4_platform_profile_get;
@@ -3195,9 +3241,19 @@ static int acer_platform_profile_setup(void)
 		set_bit(PLATFORM_PROFILE_LOW_POWER,
 			platform_profile_handler.choices);
 
-		err = platform_profile_register(&platform_profile_handler);
-		if (err)
+		for (retry = 0; retry < ACER_PLATFORM_PROFILE_MAX_RETRIES; retry++) {
+			err = platform_profile_register(&platform_profile_handler);
+			if (!err)
+				break;
+			msleep(ACER_PLATFORM_PROFILE_RETRY_DELAY_MS);
+		}
+		if (err) {
+			pr_warn("platform profile registration failed after %d retries\n",
+				ACER_PLATFORM_PROFILE_MAX_RETRIES);
 			return err;
+		}
+		if (retry > 0)
+			pr_info("platform profile registered on attempt %d\n", retry + 1);
 
 		platform_profile_support = true;
 
