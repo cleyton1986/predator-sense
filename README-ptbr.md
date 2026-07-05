@@ -96,7 +96,8 @@ Inspirado e baseado no projeto [acer-predator-turbo-and-rgb-keyboard-linux-modul
 | **Gráficos** | Histórico detalhado de CPU e GPU com tracking de mínimas e máximas |
 | **Detecção automática de recursos** | Detecta o que cada modelo suporta e adapta a interface — recursos sem suporte aparecem como "não disponível neste modelo" em vez de erro. Os recursos suportados são listados nas Configurações |
 | **Alertas de temperatura** | Notificação no desktop quando CPU/GPU passam de 90°C (funciona na bandeja) |
-| **Perfil automático por energia** | Troca para Performance na tomada e Balanceado na bateria automaticamente |
+| **Perfil automático por energia** | Troca de perfil automaticamente ao conectar/desconectar o carregador — perfil de cada estado é configurável em Configurações (padrão: Performance na tomada, Balanceado na bateria) |
+| **Log de depuração** | Toggle opcional em Configurações — grava eventos do daemon e do app em `~/.local/share/predator-sense/` (rotacionado, 5MB×3) pra diagnóstico remoto. Desligado por padrão |
 | **Bandeja do Sistema** | Minimizar para a bandeja com o ícone Predator — app continua vivo em segundo plano |
 | **Tecla PredatorSense** | Mapeamento da tecla física — a tecla ao lado do NumLock abre a aplicação |
 | **DKMS** | Módulos do kernel recompilam automaticamente em atualizações do kernel |
@@ -369,6 +370,20 @@ sudo usermod -aG input $USER
 nvidia-smi
 # Se não, instale os drivers proprietários da NVIDIA
 ```
+</details>
+
+<details>
+<summary><b>Meu modelo não tem quirk correspondente (sem perfis/leitura de fan/PWM)</b></summary>
+
+Se seu modelo exato ainda não está na lista de compatibilidade, tente forçar todos os recursos opcionais da família `predator_v4` e veja o que funciona no seu hardware:
+
+```bash
+sudo modprobe facer enable_all=1
+# persistente entre reboots:
+echo "options facer enable_all=1" | sudo tee /etc/modprobe.d/facer-options.conf
+```
+
+É só WMI (sem escrita raw na EC), então em hardware que não implementa determinado recurso isso é um no-op seguro, não uma escrita ruim. Por favor [abra uma issue](https://github.com/cleyton1986/predator-sense/issues) com seu modelo e o que funcionou/não funcionou — é assim que novos quirks são adicionados.
 </details>
 
 ---
