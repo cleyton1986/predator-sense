@@ -54,7 +54,10 @@ pub fn set_static_color(red: u8, green: u8, blue: u8, brightness_pct: u8) -> Res
         .read(true)
         .write(true)
         .open(&path)
-        .map_err(|e| format!("Erro ao abrir {}: {}. Execute como root (sudo).", path.display(), e))?;
+        .map_err(|e| {
+            crate::hardware::applog::error(&format!("Cannot open {}: {}", path.display(), e));
+            format!("Erro ao abrir {}: {}. Execute como root (sudo).", path.display(), e)
+        })?;
 
     // Protocol brightness range is 0x01-0x0f; map from the app's 0-100% slider.
     let brightness = (((brightness_pct.min(100) as u32) * 15 + 50) / 100).clamp(1, 15) as u8;
@@ -66,11 +69,15 @@ pub fn set_static_color(red: u8, green: u8, blue: u8, brightness_pct: u8) -> Res
     let ret = unsafe { libc::ioctl(file.as_raw_fd(), HIDIOCSFEATURE_11, packet.as_mut_ptr()) };
 
     if ret < 0 {
-        return Err(format!(
-            "ioctl HIDIOCSFEATURE falhou: {}",
-            io::Error::last_os_error()
-        ));
+        let e = io::Error::last_os_error();
+        crate::hardware::applog::error(&format!("HIDIOCSFEATURE failed on {}: {}", path.display(), e));
+        return Err(format!("ioctl HIDIOCSFEATURE falhou: {}", e));
     }
+
+    crate::hardware::applog::info(&format!(
+        "Set color R={} G={} B={} via {}",
+        red, green, blue, path.display()
+    ));
 
     Ok(())
 }

@@ -161,6 +161,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         crate::hardware::alerts::set_enabled(cfg.temp_alerts);
         crate::hardware::power_profile::set_auto(cfg.auto_profile_ac);
         crate::hardware::power_profile::set_target_profiles(cfg.profile_ac, cfg.profile_battery);
+        crate::hardware::applog::set_enabled(cfg.debug_logging);
         glib::timeout_add_seconds_local(5, || {
             let (cpu, gpu) = sensors::read_critical_temps();
             crate::hardware::alerts::check(cpu, gpu);
@@ -377,7 +378,7 @@ fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) 
     model.set_halign(gtk::Align::Center);
     info_box.append(&model);
 
-    let ver = gtk::Label::new(Some("v0.2.21-preview • Linux"));
+    let ver = gtk::Label::new(Some("v0.2.22-preview • Linux"));
     ver.add_css_class("info-text-dim");
     ver.set_halign(gtk::Align::Center);
     info_box.append(&ver);
@@ -760,6 +761,29 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     });
     battery_profile_row.append(&battery_profile_dd);
     page.append(&battery_profile_row);
+
+    // Persistent debug log (issue #7) - off by default, only meant for
+    // remote debugging sessions like the one that motivated it.
+    let log_row = create_setting_row(t("debug_logging"), t("debug_logging_desc"));
+    let log_switch = gtk::Switch::new();
+    log_switch.set_active(cfg.debug_logging);
+    log_switch.set_valign(gtk::Align::Center);
+    log_switch.connect_state_set(move |_, active| {
+        let mut c = config::load_app_config();
+        c.debug_logging = active;
+        let _ = config::save_app_config(&c);
+        crate::hardware::applog::set_enabled(active);
+        // Best-effort: the hotkey daemon is a separate process and reads
+        // this same config.json only at its own startup, so restart it to
+        // pick the toggle up immediately. Harmless no-op if the service
+        // isn't installed (e.g. running without the module).
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "restart", "predator-sense-hotkey.service"])
+            .output();
+        glib::Propagation::Proceed
+    });
+    log_row.append(&log_switch);
+    page.append(&log_row);
 
     // === Accessibility Section ===
     let acc_title = gtk::Label::new(Some(t("accessibility")));

@@ -1,4 +1,5 @@
 pub mod alerts;
+pub mod applog;
 pub mod capabilities;
 pub mod hwmon;
 pub mod power_profile;

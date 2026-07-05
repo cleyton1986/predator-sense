@@ -64,5 +64,12 @@ pub fn check() {
     } else {
         BATTERY_PROFILE.load(Ordering::Relaxed)
     });
-    let _ = set_profile(target);
+    crate::hardware::applog::info(&format!(
+        "Thermal profile changed: power source -> {}, profile -> {}",
+        if ac { "AC" } else { "battery" },
+        target.to_id()
+    ));
+    if let Err(e) = set_profile(target) {
+        crate::hardware::applog::error(&format!("Failed to apply profile {}: {}", target.to_id(), e));
+    }
 }
