@@ -21,6 +21,10 @@
   <img src="https://img.shields.io/badge/Platform-Linux-yellow?logo=linux" alt="Linux">
 </p>
 
+<p align="center">
+  Created and maintained by <a href="https://github.com/cleyton1986">Cleyton Alves</a>
+</p>
+
 ---
 
 ## Disclaimer
@@ -447,6 +451,10 @@ predator-sense-gui/
 - **Kernel module `acpi_ec`** by [Sayafdine Said (MusiKid)](https://github.com/MusiKid/acpi_ec) — exposes `/dev/ec` for raw EC read/write. Used by the helper to set fan modes, CoolBoost, LCD overdrive, USB charging and boot animation.
 - **GUI Application** built with [Rust](https://www.rust-lang.org/) + [GTK4](https://gtk.org/) + [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/)
 - **Installer** built with [Go](https://go.dev/)
+
+### Forking or reusing this project
+
+This project is licensed under GPL-3.0, so you're free to fork, modify and redistribute it under the same license. If you do — especially if you build a derivative app or reuse significant parts of the GUI/kernel module — **please keep a visible credit to the original author** (a mention of [Cleyton Alves](https://github.com/cleyton1986) / this repo in your README, About screen, or credits section is all that's needed). It's a small ask that goes a long way for an independent, unpaid side project.
 
 ## Support the Project
 
