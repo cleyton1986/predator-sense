@@ -38,6 +38,8 @@ pub struct AppConfig {
     pub profile_battery: PowerProfile,
     #[serde(default = "default_font_scale")]
     pub font_scale: f64,
+    #[serde(default)]
+    pub debug_logging: bool,
 }
 
 fn default_true() -> bool {
@@ -68,6 +70,7 @@ impl Default for AppConfig {
             profile_ac: default_profile_ac(),
             profile_battery: default_profile_battery(),
             font_scale: 1.0,
+            debug_logging: false,
         }
     }
 }

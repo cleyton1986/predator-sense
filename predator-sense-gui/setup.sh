@@ -198,9 +198,26 @@ install_hotkey() {
     # Daemon script
     cat > "$INSTALL_DIR/hotkey-daemon.py" << 'PYEOF'
 #!/usr/bin/env python3
-import struct, subprocess, os, signal, sys, time
+import struct, subprocess, os, signal, sys, time, logging, json
+from logging.handlers import RotatingFileHandler
 KEY_CODE = 425; EV_KEY = 1; KEY_PRESS = 1
 KB_NAMES = ['Acer WMI hotkeys', 'AT Translated Set 2 keyboard']
+CONFIG_PATH = os.path.expanduser('~/.config/predator-sense/config.json')
+def _log_enabled():
+    try:
+        with open(CONFIG_PATH) as f: return bool(json.load(f).get('debug_logging', False))
+    except Exception:
+        return False
+if _log_enabled():
+    LOG_DIR = os.path.expanduser('~/.local/share/predator-sense')
+    os.makedirs(LOG_DIR, exist_ok=True)
+    logging.basicConfig(
+        level=logging.DEBUG if os.environ.get('PREDATOR_LOG_LEVEL') == 'debug' else logging.INFO,
+        format='%(asctime)s %(levelname)s %(message)s',
+        handlers=[RotatingFileHandler(os.path.join(LOG_DIR, 'daemon.log'), maxBytes=5*1024*1024, backupCount=3)],
+    )
+else:
+    logging.disable(logging.CRITICAL)
 def find_kb():
     with open('/proc/bus/input/devices') as f: content = f.read()
     for name in KB_NAMES:
@@ -213,26 +230,39 @@ def find_kb():
     return None
 def open_app():
     env = {**os.environ, 'DISPLAY': ':0'}
-    try: subprocess.Popen(["gdbus","call","--session","--dest","com.predator.sense","--object-path","/com/predator/sense","--method","org.gtk.Application.Activate","[]"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
-    except: pass
+    try:
+        subprocess.Popen(["gdbus","call","--session","--dest","com.predator.sense","--object-path","/com/predator/sense","--method","org.gtk.Application.Activate","[]"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    except Exception as e:
+        logging.error('gdbus activate failed: %s', e)
     try:
         if subprocess.run(['pgrep','-f','/opt/predator-sense/predator-sense'], capture_output=True).returncode != 0:
             subprocess.Popen(['/opt/predator-sense/predator-sense'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except: pass
+            logging.info('App launched (was not running)')
+        else:
+            logging.info('App activated (already running)')
+    except Exception as e:
+        logging.error('App launch failed: %s', e)
 def main():
+    logging.info('Daemon started, PID %d', os.getpid())
     dev = find_kb()
-    if not dev: sys.exit(1)
+    if not dev:
+        logging.error('No hotkey device found among %s', KB_NAMES)
+        sys.exit(1)
+    logging.info('Found hotkey device at %s', dev)
     last = 0
     with open(dev, 'rb') as f:
         while True:
             d = f.read(24)
-            if len(d) < 24: break
+            if len(d) < 24:
+                logging.error('Device closed unexpectedly')
+                break
             _,_,t,c,v = struct.unpack('QQHHi', d)
             if t == EV_KEY and c == KEY_CODE and v == KEY_PRESS:
+                logging.debug('Keycode %d pressed', KEY_CODE)
                 now = time.time()
                 if now - last > 1.0: last = now; open_app()
-signal.signal(signal.SIGTERM, lambda s,f: sys.exit(0))
-signal.signal(signal.SIGINT, lambda s,f: sys.exit(0))
+signal.signal(signal.SIGTERM, lambda s,f: (logging.info('Daemon stopped (SIGTERM)'), sys.exit(0)))
+signal.signal(signal.SIGINT, lambda s,f: (logging.info('Daemon stopped (SIGINT)'), sys.exit(0)))
 if __name__ == '__main__': main()
 PYEOF
     chmod +x "$INSTALL_DIR/hotkey-daemon.py"
