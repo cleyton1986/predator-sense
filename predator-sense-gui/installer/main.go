@@ -17,7 +17,7 @@ const (
 	desktopFile = "/usr/share/applications/predator-sense.desktop"
 	iconPath    = "/usr/share/icons/hicolor/128x128/apps/predator-sense.png"
 	polkitRule  = "/usr/share/polkit-1/actions/com.predator.sense.policy"
-	appVersion  = "0.2.19-preview"
+	appVersion  = "0.2.20-preview"
 )
 
 // ─── Colors ───
@@ -585,7 +585,7 @@ esac`
 // root-only; this rule grants the "input" group (which the user was just
 // added to, above) read/write access, matching hid_rgb.rs's direct-open path.
 func installHidRgbUdevRule() {
-	rule := `SUBSYSTEM=="hidraw", ENV{HID_ID}=="0018:00000CF2:00005130", MODE="0660", GROUP="input"
+	rule := `SUBSYSTEM=="hidraw", ATTRS{name}=="ENEK5130:00", MODE="0660", GROUP="input"
 `
 	os.MkdirAll("/etc/udev/rules.d", 0755)
 	if err := os.WriteFile("/etc/udev/rules.d/99-predator-hid-rgb.rules", []byte(rule), 0644); err != nil {

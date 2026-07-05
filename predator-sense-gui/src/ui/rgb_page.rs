@@ -129,14 +129,26 @@ pub fn build() -> gtk::Box {
     page.append(&keyboard_da);
 
     // === Zone controls (visible in static mode) ===
+    // Some Predator generations (confirmed: PHN16-73) route static color
+    // through an I2C-HID chip (ENEK5130, see hardware/hid_rgb.rs) that has
+    // no per-zone concept - only one color for the whole keyboard. Showing
+    // 4 independent zone pickers there would be misleading, so collapse to
+    // a single control and mirror it across all 4 zone_colors internally
+    // (draw_keyboard and the WMI zone loop stay untouched).
+    let single_zone = hid_rgb::is_available();
     let zones_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     zones_row.set_halign(gtk::Align::Center);
 
-    for zone in 0..4 {
+    let zone_count = if single_zone { 1 } else { 4 };
+    for zone in 0..zone_count {
         let zb = gtk::Box::new(gtk::Orientation::Vertical, 3);
         zb.set_size_request(140, -1);
 
-        let lbl = gtk::Label::new(Some(&format!("{} {}", crate::i18n::t("section"), zone + 1)));
+        let lbl = if single_zone {
+            gtk::Label::new(Some(crate::i18n::t("color")))
+        } else {
+            gtk::Label::new(Some(&format!("{} {}", crate::i18n::t("section"), zone + 1)))
+        };
         lbl.add_css_class("rgb-zone-label");
         zb.append(&lbl);
 
@@ -177,7 +189,10 @@ pub fn build() -> gtk::Box {
             sl.connect_value_changed(move |sc| {
                 let v = sc.value() as u8;
                 let mut st = s.borrow_mut();
-                match ch { 0 => st.zone_colors[z].0 = v, 1 => st.zone_colors[z].1 = v, _ => st.zone_colors[z].2 = v }
+                let targets: &[usize] = if single_zone { &[0, 1, 2, 3] } else { std::slice::from_ref(&z) };
+                for &t in targets {
+                    match ch { 0 => st.zone_colors[t].0 = v, 1 => st.zone_colors[t].1 = v, _ => st.zone_colors[t].2 = v }
+                }
                 drop(st);
                 da.queue_draw();
                 kb.queue_draw();
@@ -189,6 +204,12 @@ pub fn build() -> gtk::Box {
         zones_row.append(&zb);
     }
     zone_controls.append(&zones_row);
+    if single_zone {
+        let note = gtk::Label::new(Some(crate::i18n::t("single_zone_note")));
+        note.add_css_class("dim-label");
+        note.set_margin_top(4);
+        zone_controls.append(&note);
+    }
     page.append(&zone_controls);
 
     // === Dynamic effect controls (hidden initially) ===
