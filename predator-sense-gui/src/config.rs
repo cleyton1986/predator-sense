@@ -1,3 +1,4 @@
+use crate::hardware::profile::PowerProfile;
 use crate::hardware::rgb::RgbConfig;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -31,12 +32,24 @@ pub struct AppConfig {
     pub temp_alerts: bool,
     #[serde(default)]
     pub auto_profile_ac: bool,
+    #[serde(default = "default_profile_ac")]
+    pub profile_ac: PowerProfile,
+    #[serde(default = "default_profile_battery")]
+    pub profile_battery: PowerProfile,
     #[serde(default = "default_font_scale")]
     pub font_scale: f64,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_profile_ac() -> PowerProfile {
+    PowerProfile::Performance
+}
+
+fn default_profile_battery() -> PowerProfile {
+    PowerProfile::Balanced
 }
 
 fn default_font_scale() -> f64 {
@@ -52,6 +65,8 @@ impl Default for AppConfig {
             start_on_boot: false,
             temp_alerts: true,
             auto_profile_ac: false,
+            profile_ac: default_profile_ac(),
+            profile_battery: default_profile_battery(),
             font_scale: 1.0,
         }
     }
