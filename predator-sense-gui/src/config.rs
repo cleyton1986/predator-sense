@@ -36,6 +36,8 @@ pub struct AppConfig {
     pub profile_ac: PowerProfile,
     #[serde(default = "default_profile_battery")]
     pub profile_battery: PowerProfile,
+    #[serde(default)]
+    pub debug_logging: bool,
 }
 
 fn default_true() -> bool {
@@ -61,6 +63,7 @@ impl Default for AppConfig {
             auto_profile_ac: false,
             profile_ac: default_profile_ac(),
             profile_battery: default_profile_battery(),
+            debug_logging: false,
         }
     }
 }

@@ -16,7 +16,7 @@ impl PowerProfile {
         }
     }
 
-    fn to_id(&self) -> &str {
+    pub fn to_id(&self) -> &str {
         match self { Self::Quiet => "quiet", Self::Balanced => "balanced", Self::Performance => "performance", Self::Turbo => "turbo" }
     }
 
