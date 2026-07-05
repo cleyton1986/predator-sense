@@ -96,7 +96,8 @@ Inspired by and based on the [acer-predator-turbo-and-rgb-keyboard-linux-module]
 | **Graphs** | Detailed CPU and GPU history charts with min/max tracking |
 | **Auto capability detection** | Detects what each model supports and adapts the UI — unsupported features are shown as "not available on this model" instead of erroring. Supported features are listed in Settings |
 | **Temperature alerts** | Desktop notification when CPU/GPU exceed 90°C (works in the tray) |
-| **Auto power profile** | Switches to Performance on AC and Balanced on battery automatically |
+| **Auto power profile** | Switches profile automatically on AC/battery change — target profile for each state is configurable in Settings (default: Performance on AC, Balanced on battery) |
+| **Debug logging** | Optional toggle in Settings — logs daemon and app events to `~/.local/share/predator-sense/` (rotated, 5MB×3) for remote troubleshooting. Off by default |
 | **System Tray** | Minimize to tray with the Predator icon — app stays alive in background |
 | **PredatorSense Key** | Hardware key mapping — the key next to NumLock opens the app |
 | **DKMS** | Kernel modules rebuild automatically across kernel upgrades |
@@ -369,6 +370,20 @@ sudo usermod -aG input $USER
 nvidia-smi
 # If not, install NVIDIA proprietary drivers
 ```
+</details>
+
+<details>
+<summary><b>My model has no matching quirk (missing profiles/fan-read/PWM)</b></summary>
+
+If your exact model isn't in the compatibility list yet, try forcing every optional `predator_v4`-family feature on and see what actually works on your hardware:
+
+```bash
+sudo modprobe facer enable_all=1
+# persistent across reboots:
+echo "options facer enable_all=1" | sudo tee /etc/modprobe.d/facer-options.conf
+```
+
+This is WMI-only (no raw EC writes), so on hardware that doesn't implement a given feature it's a safe no-op, not a bad write. Please [open an issue](https://github.com/cleyton1986/predator-sense/issues) with your model and what worked/didn't — that's how new quirks get added.
 </details>
 
 ---
