@@ -281,7 +281,17 @@ rm -f "/lib/modules/$(uname -r)/extra/facer.ko"
 depmod -a 2>/dev/null
 
 mkdir -p "$SRC_DIR"
-cp "$KERNEL_DIR"/facer.c "$KERNEL_DIR"/acer-wmi-battery.c "$KERNEL_DIR"/Makefile "$KERNEL_DIR"/dkms.conf "$SRC_DIR/" 2>/dev/null || true
+# Copy every kernel source file via glob (not a hardcoded list) so a new file
+# added to kernel/ (e.g. acpi_ec.c, added in v0.2.8) can never be silently
+# left out again - a hardcoded list here previously omitted acpi_ec.c even
+# though dkms.conf/Makefile reference it, breaking the build (issue #4).
+for f in "$KERNEL_DIR"/*; do
+    base="$(basename "$f")"
+    case "$base" in
+        *.o|*.ko|*.mod|*.mod.c|*.mod.o|.*|modules.order|Module.symvers) continue ;;
+    esac
+    cp "$f" "$SRC_DIR/" 2>/dev/null || true
+done
 
 # If the running kernel was built with Clang/LLD, dkms must use the same
 KERNEL_CONFIG="/lib/modules/$(uname -r)/build/.config"
