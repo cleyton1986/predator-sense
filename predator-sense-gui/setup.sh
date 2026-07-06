@@ -198,7 +198,7 @@ install_hotkey() {
     # Daemon script
     cat > "$INSTALL_DIR/hotkey-daemon.py" << 'PYEOF'
 #!/usr/bin/env python3
-import struct, subprocess, os, signal, sys, time, logging, json
+import struct, subprocess, os, signal, sys, time, logging, json, select
 from logging.handlers import RotatingFileHandler
 KEY_CODE = 425; EV_KEY = 1; KEY_PRESS = 1
 KB_NAMES = ['Acer WMI hotkeys', 'AT Translated Set 2 keyboard']
@@ -218,16 +218,24 @@ if _log_enabled():
     )
 else:
     logging.disable(logging.CRITICAL)
-def find_kb():
+def find_kbs():
+    # Return ALL matching devices, not just the first name match - on hardware
+    # where more than one exists (e.g. facer.ko exposes "Acer WMI hotkeys" even
+    # when the real PredatorSense key event only ever fires on "AT Translated
+    # Set 2 keyboard"), picking a single "first match" device can permanently
+    # bind to the wrong one and never see the key at all.
     with open('/proc/bus/input/devices') as f: content = f.read()
+    devs = []
     for name in KB_NAMES:
         for block in content.split('\n\n'):
             if name in block:
                 for line in block.split('\n'):
                     if line.startswith('H: Handlers='):
                         for p in line.split():
-                            if p.startswith('event'): return f'/dev/input/{p}'
-    return None
+                            if p.startswith('event'):
+                                path = f'/dev/input/{p}'
+                                if path not in devs: devs.append(path)
+    return devs
 def open_app():
     env = {**os.environ, 'DISPLAY': ':0'}
     try:
@@ -244,21 +252,30 @@ def open_app():
         logging.error('App launch failed: %s', e)
 def main():
     logging.info('Daemon started, PID %d', os.getpid())
-    dev = find_kb()
-    if not dev:
+    devs = find_kbs()
+    if not devs:
         logging.error('No hotkey device found among %s', KB_NAMES)
         sys.exit(1)
-    logging.info('Found hotkey device at %s', dev)
+    logging.info('Watching hotkey devices: %s', devs)
+    fds = {}
+    for path in devs:
+        try: fds[os.open(path, os.O_RDONLY)] = path
+        except OSError as e: logging.error('Failed to open %s: %s', path, e)
+    if not fds:
+        sys.exit(1)
     last = 0
-    with open(dev, 'rb') as f:
-        while True:
-            d = f.read(24)
-            if len(d) < 24:
-                logging.error('Device closed unexpectedly')
-                break
-            _,_,t,c,v = struct.unpack('QQHHi', d)
+    while fds:
+        ready, _, _ = select.select(list(fds.keys()), [], [])
+        for fd in ready:
+            try: data = os.read(fd, 24)
+            except OSError: data = b''
+            if len(data) < 24:
+                logging.error('Device %s closed unexpectedly', fds[fd])
+                os.close(fd); del fds[fd]
+                continue
+            _,_,t,c,v = struct.unpack('QQHHi', data)
             if t == EV_KEY and c == KEY_CODE and v == KEY_PRESS:
-                logging.debug('Keycode %d pressed', KEY_CODE)
+                logging.debug('Keycode %d pressed on %s', KEY_CODE, fds[fd])
                 now = time.time()
                 if now - last > 1.0: last = now; open_app()
 signal.signal(signal.SIGTERM, lambda s,f: (logging.info('Daemon stopped (SIGTERM)'), sys.exit(0)))

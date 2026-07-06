@@ -17,7 +17,7 @@ const (
 	desktopFile = "/usr/share/applications/predator-sense.desktop"
 	iconPath    = "/usr/share/icons/hicolor/128x128/apps/predator-sense.png"
 	polkitRule  = "/usr/share/polkit-1/actions/com.predator.sense.policy"
-	appVersion  = "0.2.23-preview"
+	appVersion  = "0.2.24-preview"
 )
 
 // ─── Colors ───
@@ -615,7 +615,7 @@ StartupWMClass=com.predator.sense`
 func installHotkey() error {
 	// Daemon script
 	daemon := `#!/usr/bin/env python3
-import struct,subprocess,os,signal,sys,time,logging,json
+import struct,subprocess,os,signal,sys,time,logging,json,select
 from logging.handlers import RotatingFileHandler
 KEY_CODE=425;EV_KEY=1;KEY_PRESS=1
 KB_NAMES=['Acer WMI hotkeys','AT Translated Set 2 keyboard']
@@ -631,16 +631,24 @@ if _log_enabled():
     logging.basicConfig(level=logging.DEBUG if os.environ.get('PREDATOR_LOG_LEVEL')=='debug' else logging.INFO,format='%(asctime)s %(levelname)s %(message)s',handlers=[RotatingFileHandler(os.path.join(LOG_DIR,'daemon.log'),maxBytes=5*1024*1024,backupCount=3)])
 else:
     logging.disable(logging.CRITICAL)
-def find_kb():
+def find_kbs():
+    # Return ALL matching devices, not just the first name match - on hardware
+    # where more than one exists (e.g. facer.ko exposes "Acer WMI hotkeys" even
+    # when the real PredatorSense key event only ever fires on "AT Translated
+    # Set 2 keyboard"), picking a single "first match" device can permanently
+    # bind to the wrong one and never see the key at all.
     with open('/proc/bus/input/devices') as f: c=f.read()
+    devs=[]
     for name in KB_NAMES:
         for b in c.split('\n\n'):
             if name in b:
                 for l in b.split('\n'):
                     if l.startswith('H: Handlers='):
                         for p in l.split():
-                            if p.startswith('event'): return f'/dev/input/{p}'
-    return None
+                            if p.startswith('event'):
+                                path=f'/dev/input/{p}'
+                                if path not in devs: devs.append(path)
+    return devs
 def open_app():
     e={**os.environ,'DISPLAY':':0'}
     try: subprocess.Popen(["gdbus","call","--session","--dest","com.predator.sense","--object-path","/com/predator/sense","--method","org.gtk.Application.Activate","[]"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=e)
@@ -654,21 +662,30 @@ def open_app():
     except Exception as ex: logging.error('App launch failed: %s',ex)
 def main():
     logging.info('Daemon started, PID %d',os.getpid())
-    d=find_kb()
-    if not d:
+    devs=find_kbs()
+    if not devs:
         logging.error('No hotkey device found among %s',KB_NAMES)
         sys.exit(1)
-    logging.info('Found hotkey device at %s',d)
+    logging.info('Watching hotkey devices: %s',devs)
+    fds={}
+    for path in devs:
+        try: fds[os.open(path,os.O_RDONLY)]=path
+        except OSError as ex: logging.error('Failed to open %s: %s',path,ex)
+    if not fds:
+        sys.exit(1)
     last=0
-    with open(d,'rb') as f:
-        while True:
-            data=f.read(24)
+    while fds:
+        ready,_,_=select.select(list(fds.keys()),[],[])
+        for fd in ready:
+            try: data=os.read(fd,24)
+            except OSError: data=b''
             if len(data)<24:
-                logging.error('Device closed unexpectedly')
-                break
+                logging.error('Device %s closed unexpectedly',fds[fd])
+                os.close(fd); del fds[fd]
+                continue
             _,_,t,c,v=struct.unpack('QQHHi',data)
             if t==EV_KEY and c==KEY_CODE and v==KEY_PRESS:
-                logging.debug('Keycode %d pressed',KEY_CODE)
+                logging.debug('Keycode %d pressed on %s',KEY_CODE,fds[fd])
                 n=time.time()
                 if n-last>1.0: last=n; open_app()
 signal.signal(signal.SIGTERM,lambda s,f:(logging.info('Daemon stopped (SIGTERM)'),sys.exit(0)))
