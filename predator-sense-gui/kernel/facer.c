@@ -4382,15 +4382,21 @@ static int __init acer_wmi_init(void)
 	}
 
 	/*
-	 * Experimental (issue #4, PHN16-73): moved from before input/notify
-	 * setup to after it. Programming the gaming LED zones this early was
-	 * the prime suspect for suppressing the PredatorSense hotkey WMI
-	 * event, since the macro-toggle key handler above documents that this
-	 * same method also "selects which events are generated" by hardware
-	 * keys - and the vanilla kernel acer_wmi driver, which never touches
-	 * this method, doesn't have the hotkey bug.
+	 * Experimental (issue #4, PHN16-73), 2nd attempt: reordering this call
+	 * after input/notify setup (1st attempt) did NOT fix the hotkey -
+	 * confirmed 100% reproducible by the reporter (facer loaded = hotkey
+	 * dead always, regardless of order; vanilla acer_wmi, which never
+	 * calls this method at all = hotkey always works). So it's not about
+	 * WHEN this runs, it's that it runs at all on this hardware.
+	 *
+	 * GetGamingSysInfo + "turn on all 4 zones" is only meaningful for the
+	 * real WMI-driven 4-zone RGB keyboards (e.g. AN515-57). Hardware under
+	 * the four_zone_kb quirk (PHN16-73 and similar) doesn't have a 4-zone
+	 * WMI keyboard at all - its RGB is a single global color driven over
+	 * I2C-HID (see hid_rgb.rs), completely bypassing this WMI method. So
+	 * skip the call for that quirk instead of guessing about ordering.
 	 */
-	if (wmi_has_guid(WMID_GUID4))
+	if (wmi_has_guid(WMID_GUID4) && !quirks->four_zone_kb)
 		gaming_kbbl_poll_and_enable_zones();
 
 	err = platform_driver_register(&acer_platform_driver);
