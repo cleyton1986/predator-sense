@@ -129,26 +129,18 @@ pub fn build() -> gtk::Box {
     page.append(&keyboard_da);
 
     // === Zone controls (visible in static mode) ===
-    // Some Predator generations (confirmed: PHN16-73) route static color
-    // through an I2C-HID chip (ENEK5130, see hardware/hid_rgb.rs) that has
-    // no per-zone concept - only one color for the whole keyboard. Showing
-    // 4 independent zone pickers there would be misleading, so collapse to
-    // a single control and mirror it across all 4 zone_colors internally
-    // (draw_keyboard and the WMI zone loop stay untouched).
-    let single_zone = hid_rgb::is_available();
+    // ENEK5130 (I2C-HID, e.g. PHN16-73) turned out to be a real 4-zone
+    // controller after all (issue #4) - an earlier revision of hid_rgb.rs had
+    // the brightness/zone-mask packet bytes swapped, which looked like a
+    // single global color. Same 4-zone UI as the WMI path now for both.
     let zones_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     zones_row.set_halign(gtk::Align::Center);
 
-    let zone_count = if single_zone { 1 } else { 4 };
-    for zone in 0..zone_count {
+    for zone in 0..4 {
         let zb = gtk::Box::new(gtk::Orientation::Vertical, 3);
         zb.set_size_request(140, -1);
 
-        let lbl = if single_zone {
-            gtk::Label::new(Some(crate::i18n::t("color")))
-        } else {
-            gtk::Label::new(Some(&format!("{} {}", crate::i18n::t("section"), zone + 1)))
-        };
+        let lbl = gtk::Label::new(Some(&format!("{} {}", crate::i18n::t("section"), zone + 1)));
         lbl.add_css_class("rgb-zone-label");
         zb.append(&lbl);
 
@@ -189,10 +181,7 @@ pub fn build() -> gtk::Box {
             sl.connect_value_changed(move |sc| {
                 let v = sc.value() as u8;
                 let mut st = s.borrow_mut();
-                let targets: &[usize] = if single_zone { &[0, 1, 2, 3] } else { std::slice::from_ref(&z) };
-                for &t in targets {
-                    match ch { 0 => st.zone_colors[t].0 = v, 1 => st.zone_colors[t].1 = v, _ => st.zone_colors[t].2 = v }
-                }
+                match ch { 0 => st.zone_colors[z].0 = v, 1 => st.zone_colors[z].1 = v, _ => st.zone_colors[z].2 = v }
                 drop(st);
                 da.queue_draw();
                 kb.queue_draw();
@@ -204,12 +193,6 @@ pub fn build() -> gtk::Box {
         zones_row.append(&zb);
     }
     zone_controls.append(&zones_row);
-    if single_zone {
-        let note = gtk::Label::new(Some(crate::i18n::t("single_zone_note")));
-        note.add_css_class("dim-label");
-        note.set_margin_top(4);
-        zone_controls.append(&note);
-    }
     page.append(&zone_controls);
 
     // === Dynamic effect controls (hidden initially) ===
@@ -316,16 +299,40 @@ pub fn build() -> gtk::Box {
                 // On hardware where the WMI static path is a confirmed no-op
                 // (e.g. PHN16-73), the real RGB controller is a separate
                 // I2C-HID chip (ENEK5130) reachable directly, bypassing WMI
-                // entirely. Try it whenever present - it has no per-zone
-                // concept (one color for the whole keyboard), so zone 1's
-                // color is used. Runs alongside the WMI path above, which is
-                // harmless where it's a no-op and unaffected where it isn't.
-                if hid_rgb::is_available() {
-                    let (r, g, b) = st.zone_colors[0];
-                    hid_rgb::set_static_color(r, g, b, st.brightness)
+                // entirely. Try it whenever present - one HID write per zone,
+                // confirmed to be a real 4-zone controller (issue #4). Runs
+                // alongside the WMI path above, which is harmless where it's
+                // a no-op and unaffected where it isn't.
+                let hid_result = if hid_rgb::is_available() {
+                    let mut last_err = None;
+                    for (i, &(r, g, b)) in st.zone_colors.iter().enumerate() {
+                        if let Err(e) = hid_rgb::set_zone_color(hid_rgb::ZONE_MASKS[i], r, g, b, st.brightness) {
+                            last_err = Some(e);
+                            break;
+                        }
+                    }
+                    match last_err { Some(e) => Err(e), None => Ok(()) }
                 } else {
                     wmi_result
+                };
+
+                // Persist so hotkey-daemon.py can reapply it after a full
+                // power cycle (issue #11) - the keyboard controller has no
+                // memory of its own and resets to the default pulsing effect.
+                // Only the HID path is replayable at boot (hotkey-daemon.py
+                // speaks raw HID, not WMI), so only persist when it applied.
+                if hid_rgb::is_available() && hid_result.is_ok() {
+                    let mut cfg = crate::config::load_app_config();
+                    cfg.rgb_static_zones = Some(
+                        st.zone_colors.iter().enumerate().map(|(i, &(r, g, b))| {
+                            crate::config::ZoneColor { zone: (i + 1) as u8, red: r, green: g, blue: b }
+                        }).collect()
+                    );
+                    cfg.rgb_brightness = st.brightness;
+                    let _ = crate::config::save_app_config(&cfg);
                 }
+
+                hid_result
             } else {
                 rgb::apply_dynamic_effect(&RgbConfig {
                     mode: st.mode, speed: st.speed, brightness: st.brightness,

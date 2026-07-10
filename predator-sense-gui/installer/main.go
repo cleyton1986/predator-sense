@@ -17,7 +17,7 @@ const (
 	desktopFile = "/usr/share/applications/predator-sense.desktop"
 	iconPath    = "/usr/share/icons/hicolor/128x128/apps/predator-sense.png"
 	polkitRule  = "/usr/share/polkit-1/actions/com.predator.sense.policy"
-	appVersion  = "0.2.25-preview"
+	appVersion  = "0.2.26-preview"
 )
 
 // ─── Colors ───
@@ -569,6 +569,19 @@ case "$1" in
   pwm-gpu-enable) d=$(acer_hwmon) && echo "$2" > "$d/pwm2_enable" 2>/dev/null ;;
   pwm-cpu-enable-read) d=$(acer_hwmon) && cat "$d/pwm1_enable" 2>/dev/null ;;
   pwm-gpu-enable-read) d=$(acer_hwmon) && cat "$d/pwm2_enable" 2>/dev/null ;;
+  # Re-applies the battery-limit settings the GUI persisted to config.json
+  # (issue #11) - both mechanisms reset on a full power cycle and need
+  # root, so this runs from a system-level (not user) boot service instead
+  # of the interactive pkexec path the GUI uses. $2 = the real user's home.
+  boot-reapply-battery)
+    CONF="$2/.config/predator-sense/config.json"
+    [ -f "$CONF" ] || exit 0
+    LIMITER=$(python3 -c "import json;print(1 if json.load(open('$CONF')).get('battery_limiter') else 0)" 2>/dev/null)
+    HEALTH=$(python3 -c "import json;print(1 if json.load(open('$CONF')).get('battery_health_mode') else 0)" 2>/dev/null)
+    [ "$LIMITER" = "1" ] && { echo 80 > /sys/class/power_supply/BAT1/charge_control_end_threshold; } 2>/dev/null
+    [ "$HEALTH" = "1" ] && { echo 1 > /sys/bus/wmi/drivers/acer-wmi-battery/health_mode; } 2>/dev/null
+    exit 0
+    ;;
 esac`
 	os.WriteFile(installDir+"/predator-sense-helper", []byte(helper), 0755)
 
@@ -660,8 +673,51 @@ def open_app():
         else:
             logging.info('App activated (already running)')
     except Exception as ex: logging.error('App launch failed: %s',ex)
+HID_ZONE_MASKS=[0x01,0x02,0x04,0x08]
+HIDIOCSFEATURE_11=0xC00B4806
+def _find_enek5130():
+    try:
+        for name in os.listdir('/sys/class/hidraw'):
+            try:
+                with open(f'/sys/class/hidraw/{name}/device/uevent') as f: c=f.read()
+            except Exception:
+                continue
+            if any(l.startswith('HID_NAME=') and 'ENEK5130' in l for l in c.splitlines()):
+                return f'/dev/{name}'
+    except Exception:
+        pass
+    return None
+def reapply_rgb():
+    # The ENEK5130 controller has no memory of its own - a full power cycle
+    # always resets the keyboard to its default pulsing effect (issue #11).
+    # Replays the last static color the GTK app applied, read from the same
+    # config.json it writes to. No root needed (udev grants the "input"
+    # group hidraw access), so this can run unconditionally at daemon start.
+    try:
+        with open(CONFIG_PATH) as f: cfg=json.load(f)
+    except Exception:
+        return
+    zones=cfg.get('rgb_static_zones')
+    if not zones: return
+    dev=_find_enek5130()
+    if not dev: return
+    pct=max(0,min(100,cfg.get('rgb_brightness',100)))
+    brightness=max(1,min(15,(pct*15+50)//100))
+    try:
+        import fcntl
+        with open(dev,'r+b',buffering=0) as f:
+            for z in zones:
+                idx=z.get('zone',1)-1
+                if not (0<=idx<4): continue
+                mask=HID_ZONE_MASKS[idx]
+                packet=bytearray([0xa4,0x21,0x02,brightness,0x00,0x00,z.get('red',0)&0xff,z.get('green',0)&0xff,z.get('blue',0)&0xff,mask,0x00])
+                fcntl.ioctl(f,HIDIOCSFEATURE_11,packet)
+        logging.info('Reapplied RGB static zones from config via %s',dev)
+    except Exception as ex:
+        logging.error('RGB reapply failed: %s',ex)
 def main():
     logging.info('Daemon started, PID %d',os.getpid())
+    reapply_rgb()
     devs=find_kbs()
     if not devs:
         logging.error('No hotkey device found among %s',KB_NAMES)
@@ -726,6 +782,25 @@ WantedBy=default.target`
 	// without DBUS, leading to duplicate hotkey listeners.
 	runAsUser("systemctl", "--user", "daemon-reload")
 	runAsUser("systemctl", "--user", "enable", "--now", "predator-sense-hotkey.service")
+
+	// System-level (root) boot service: re-applies persisted battery-limit
+	// settings on every boot (issue #11). Needs root, so it's separate from
+	// the user-level hotkey service above (which handles the RGB side, no
+	// root needed there). realHome is baked in at install time since a
+	// system service has no access to the desktop user's environment.
+	sysService := fmt.Sprintf(`[Unit]
+Description=Predator Sense - Reapply persisted battery settings at boot
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/predator-sense/predator-sense-helper boot-reapply-battery %s
+
+[Install]
+WantedBy=multi-user.target`, realHome)
+	os.WriteFile("/etc/systemd/system/predator-sense-boot-apply.service", []byte(sysService), 0644)
+	run("systemctl", "daemon-reload")
+	run("systemctl", "enable", "--now", "predator-sense-boot-apply.service")
 
 	return nil
 }
