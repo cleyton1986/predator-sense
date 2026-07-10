@@ -40,13 +40,21 @@ pub fn is_available() -> bool {
     find_enek5130_hidraw().is_some()
 }
 
-/// Apply a single static color across the whole keyboard via the ENEK5130
-/// HID feature report. This device has no per-zone concept - unlike the
-/// (non-working) WMI static path, this only supports one color globally.
+/// Zone mask byte (offset 9 in the packet): one bit per physical zone, or
+/// 0x0f to set all 4 at once.
+pub const ZONE_ALL: u8 = 0x0f;
+pub const ZONE_MASKS: [u8; 4] = [0x01, 0x02, 0x04, 0x08];
+
+/// Apply a static color to one or more zones via the ENEK5130 HID feature
+/// report. Confirmed by community testing (issue #4) to be a real 4-zone
+/// controller - earlier revisions of this function had the brightness and
+/// zone-mask byte offsets swapped (always sending the brightness value where
+/// the zone mask belongs), which by coincidence often evaluated to ZONE_ALL
+/// or a similar overlapping mask and made it look like a single global color.
 ///
 /// SAFETY: writes a fixed-size 11-byte feature report via HIDIOCSFEATURE,
 /// the same call/packet format verified working on real PHN16-73 hardware.
-pub fn set_static_color(red: u8, green: u8, blue: u8, brightness_pct: u8) -> Result<(), String> {
+pub fn set_zone_color(zone_mask: u8, red: u8, green: u8, blue: u8, brightness_pct: u8) -> Result<(), String> {
     let path = find_enek5130_hidraw()
         .ok_or_else(|| "Dispositivo ENEK5130 (I2C-HID) não encontrado".to_string())?;
 
@@ -63,7 +71,7 @@ pub fn set_static_color(red: u8, green: u8, blue: u8, brightness_pct: u8) -> Res
     let brightness = (((brightness_pct.min(100) as u32) * 15 + 50) / 100).clamp(1, 15) as u8;
 
     let mut packet: [u8; 11] = [
-        0xa4, 0x21, 0x02, 0x64, 0x00, 0x00, red, green, blue, brightness, 0x00,
+        0xa4, 0x21, 0x02, brightness, 0x00, 0x00, red, green, blue, zone_mask, 0x00,
     ];
 
     let ret = unsafe { libc::ioctl(file.as_raw_fd(), HIDIOCSFEATURE_11, packet.as_mut_ptr()) };
@@ -75,8 +83,8 @@ pub fn set_static_color(red: u8, green: u8, blue: u8, brightness_pct: u8) -> Res
     }
 
     crate::hardware::applog::info(&format!(
-        "Set color R={} G={} B={} via {}",
-        red, green, blue, path.display()
+        "Set zone_mask={:#04x} R={} G={} B={} via {}",
+        zone_mask, red, green, blue, path.display()
     ));
 
     Ok(())

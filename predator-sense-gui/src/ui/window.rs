@@ -378,7 +378,7 @@ fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) 
     model.set_halign(gtk::Align::Center);
     info_box.append(&model);
 
-    let ver = gtk::Label::new(Some("v0.2.25-preview • Linux"));
+    let ver = gtk::Label::new(Some("v0.2.26-preview • Linux"));
     ver.add_css_class("info-text-dim");
     ver.set_halign(gtk::Align::Center);
     info_box.append(&ver);
@@ -839,6 +839,11 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
         bat_switch.set_valign(gtk::Align::Center);
         bat_switch.connect_state_set(|_, active| {
             let _ = crate::hardware::extras::set_battery_limiter(active);
+            // Persist so it can be re-applied on boot (issue #11) - the EC
+            // resets charge_control_end_threshold on a full power cycle.
+            let mut cfg = config::load_app_config();
+            cfg.battery_limiter = active;
+            let _ = config::save_app_config(&cfg);
             glib::Propagation::Proceed
         });
         bat_row.append(&bat_switch);

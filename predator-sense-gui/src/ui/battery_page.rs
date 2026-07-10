@@ -163,6 +163,12 @@ pub fn build() -> gtk::Box {
                         .args(["bash", "-c", &format!("echo {} > {}", val, path)])
                         .output();
                 }
+                // Persist so it can be re-applied on boot (issue #11) - the
+                // EC resets health_mode on a full power cycle, this sysfs
+                // write alone doesn't survive it.
+                let mut cfg = crate::config::load_app_config();
+                cfg.battery_health_mode = active;
+                let _ = crate::config::save_app_config(&cfg);
                 glib::Propagation::Proceed
             });
         }

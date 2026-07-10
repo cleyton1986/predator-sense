@@ -40,6 +40,21 @@ pub struct AppConfig {
     pub font_scale: f64,
     #[serde(default)]
     pub debug_logging: bool,
+    /// Last-applied static RGB zone colors (issue #11: nothing persisted this
+    /// before, so a full power cycle always reset the keyboard to its default
+    /// pulsing effect). Reapplied at boot by hotkey-daemon.py.
+    #[serde(default)]
+    pub rgb_static_zones: Option<Vec<ZoneColor>>,
+    #[serde(default = "default_rgb_brightness")]
+    pub rgb_brightness: u8,
+    /// Settings page "Limite de carga da bateria (80%)" (charge_control_end_threshold).
+    #[serde(default)]
+    pub battery_limiter: bool,
+    /// Battery page "Limite 80%" (Acer WMI health_mode attr) - a separate
+    /// mechanism from battery_limiter above; some hardware only has one or
+    /// the other. Neither was reapplied at boot before (issue #11).
+    #[serde(default)]
+    pub battery_health_mode: bool,
 }
 
 fn default_true() -> bool {
@@ -58,6 +73,10 @@ fn default_font_scale() -> f64 {
     1.0
 }
 
+fn default_rgb_brightness() -> u8 {
+    100
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -71,6 +90,10 @@ impl Default for AppConfig {
             profile_battery: default_profile_battery(),
             font_scale: 1.0,
             debug_logging: false,
+            rgb_static_zones: None,
+            rgb_brightness: 100,
+            battery_limiter: false,
+            battery_health_mode: false,
         }
     }
 }
