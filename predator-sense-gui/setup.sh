@@ -291,8 +291,8 @@ def reapply_rgb():
     if not zones: return
     dev = _find_enek5130()
     if not dev: return
-    pct = max(0, min(100, cfg.get('rgb_brightness', 100)))
-    brightness = max(1, min(15, (pct * 15 + 50) // 100))
+    # Brightness byte is 0-100 (a direct percentage), not 0x01-0x0f (issue #12).
+    brightness = max(0, min(100, cfg.get('rgb_brightness', 100)))
     try:
         import fcntl
         with open(dev, 'r+b', buffering=0) as f:
