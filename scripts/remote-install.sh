@@ -206,6 +206,22 @@ cat > /usr/share/polkit-1/actions/com.predator.sense.policy << 'POLKIT'
 </policyconfig>
 POLKIT
 
+# No password prompt for this app's own narrowly-scoped hardware helper
+# (CPU governor/EPP/turbo/min-perf, GPU power limit, EC battery bytes).
+# auth_admin_keep alone still re-prompts every few minutes, disruptive for
+# the AI assistant's periodic background checks. Scoped ONLY to this one
+# action ID, for whichever user is active on the local seat - not a
+# hardcoded account, works per-user on every install.
+mkdir -p /etc/polkit-1/rules.d
+cat > /etc/polkit-1/rules.d/49-predator-sense.rules << 'POLKITRULE'
+polkit.addRule(function(action, subject) {
+    if (action.id == "com.predator.sense.helper" && subject.active && subject.local) {
+        return polkit.Result.YES;
+    }
+});
+POLKITRULE
+chmod 644 /etc/polkit-1/rules.d/49-predator-sense.rules
+
 cat > "$INSTALL_DIR/predator-sense-helper" << 'HELPER'
 #!/bin/bash
 case "$1" in
@@ -216,10 +232,13 @@ case "$1" in
   set-min-perf) echo "$2" > /sys/devices/system/cpu/intel_pstate/min_perf_pct 2>/dev/null ;;
   fan-auto) python3 -c "f=open('/dev/ec','rb+');f.seek(0x21);f.write(bytes([0x50]));f.seek(0x22);f.write(bytes([0x54]));f.close()" 2>/dev/null ;;
   fan-max) python3 -c "f=open('/dev/ec','rb+');f.seek(0x21);f.write(bytes([0x60]));f.seek(0x22);f.write(bytes([0x58]));f.close()" 2>/dev/null ;;
+  fan-mode-read) python3 -c "f=open('/dev/ec','rb');f.seek(0x21);b1=ord(f.read(1));f.close();print('max' if b1==0x60 else ('auto' if b1==0x50 else 'unknown'))" 2>/dev/null ;;
   coolboost) python3 -c "f=open('/dev/ec','rb+');f.seek(0x10);f.write(bytes([int('$2')]));f.close()" 2>/dev/null ;;
   coolboost-read) python3 -c "f=open('/dev/ec','rb');f.seek(0x10);print(ord(f.read(1)));f.close()" 2>/dev/null ;;
   bat-limit) if [ "$2" = "1" ]; then echo 80 > /sys/class/power_supply/BAT1/charge_control_end_threshold 2>/dev/null; else echo 100 > /sys/class/power_supply/BAT1/charge_control_end_threshold 2>/dev/null; fi ;;
   bat-limit-read) VAL=$(cat /sys/class/power_supply/BAT1/charge_control_end_threshold 2>/dev/null || echo 100); [ "$VAL" -le 80 ] && echo 1 || echo 0 ;;
+  bat-health) echo "$2" > /sys/bus/wmi/drivers/acer-wmi-battery/health_mode 2>/dev/null ;;
+  bat-health-read) cat /sys/bus/wmi/drivers/acer-wmi-battery/health_mode 2>/dev/null || echo 0 ;;
   lcd-overdrive) python3 -c "f=open('/dev/ec','rb+');f.seek(0x29);f.write(bytes([int('$2')]));f.close()" 2>/dev/null ;;
   lcd-overdrive-read) python3 -c "f=open('/dev/ec','rb');f.seek(0x29);print(ord(f.read(1)));f.close()" 2>/dev/null ;;
   boot-anim) python3 -c "f=open('/dev/ec','rb+');v=1 if '$2'=='1' else 0;f.seek(0x1A);f.write(bytes([v]));f.close()" 2>/dev/null ;;
@@ -251,6 +270,15 @@ usermod -aG input "$REAL_USER" 2>/dev/null || true
 mkdir -p /etc/udev/rules.d
 cat > /etc/udev/rules.d/99-predator-hid-rgb.rules << 'EOF'
 SUBSYSTEM=="hidraw", ATTRS{name}=="ENEK5130:00", MODE="0660", GROUP="input"
+EOF
+
+# /dev/ec (acpi_ec module) defaults to root-only with no group access at
+# all. The app polls fan mode/CoolBoost state every few seconds through it -
+# read-only group access avoids spawning a pkexec process on every single
+# tick. Writes (fan mode, CoolBoost, battery bytes, etc) still go through
+# pkexec + predator-sense-helper on purpose, unaffected by this rule.
+cat > /etc/udev/rules.d/99-predator-ec.rules << 'EOF'
+SUBSYSTEM=="chardev", KERNEL=="ec", MODE="0640", GROUP="input"
 EOF
 udevadm control --reload-rules 2>/dev/null || true
 udevadm trigger 2>/dev/null || true

@@ -55,6 +55,25 @@ pub struct AppConfig {
     /// the other. Neither was reapplied at boot before (issue #11).
     #[serde(default)]
     pub battery_health_mode: bool,
+    /// Opt-in local-AI assistant: off by default. The app feeds it periodic
+    /// hardware-state snapshots (never the user typing raw commands) and it
+    /// replies with commentary and/or one action from a fixed allow-list of
+    /// already-validated hardware:: setters (see hardware::ai_assistant).
+    /// Never touches raw hardware/EC access.
+    #[serde(default)]
+    pub ai_assistant_enabled: bool,
+    /// false (default) = every AI-suggested action needs explicit
+    /// confirmation before it's applied. true = applied immediately.
+    #[serde(default)]
+    pub ai_auto_apply: bool,
+    #[serde(default = "default_ai_ollama_url")]
+    pub ai_ollama_url: String,
+    #[serde(default = "default_ai_model")]
+    pub ai_model: String,
+    /// How often (minutes) the background monitor snapshots state and asks
+    /// for a verdict. Only runs while ai_assistant_enabled is true.
+    #[serde(default = "default_ai_check_interval_min")]
+    pub ai_check_interval_min: u32,
 }
 
 fn default_true() -> bool {
@@ -77,6 +96,18 @@ fn default_rgb_brightness() -> u8 {
     100
 }
 
+fn default_ai_ollama_url() -> String {
+    crate::hardware::ai_assistant::DEFAULT_OLLAMA_URL.to_string()
+}
+
+fn default_ai_model() -> String {
+    crate::hardware::ai_assistant::DEFAULT_MODEL.to_string()
+}
+
+fn default_ai_check_interval_min() -> u32 {
+    15
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -94,6 +125,11 @@ impl Default for AppConfig {
             rgb_brightness: 100,
             battery_limiter: false,
             battery_health_mode: false,
+            ai_assistant_enabled: false,
+            ai_auto_apply: false,
+            ai_ollama_url: default_ai_ollama_url(),
+            ai_model: default_ai_model(),
+            ai_check_interval_min: default_ai_check_interval_min(),
         }
     }
 }

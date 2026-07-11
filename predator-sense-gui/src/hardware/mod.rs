@@ -14,3 +14,6 @@ pub mod sysinfo;
 pub mod procs;
 pub mod storage;
 pub mod gpu;
+pub mod ai_assistant;
+pub mod ai_snapshot;
+pub mod ai_actionlog;
