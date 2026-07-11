@@ -1,7 +1,53 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk};
+use gtk4::{self as gtk, glib};
+use std::cell::Cell;
+use std::rc::Rc;
 
 use crate::hardware::profile::{self, PowerProfile};
+
+const PROFILES_ORDER: [PowerProfile; 4] = [
+    PowerProfile::Quiet, PowerProfile::Balanced,
+    PowerProfile::Performance, PowerProfile::Turbo,
+];
+
+/// Updates every card's active/inactive styling and button to match
+/// `current` - shared by the click handler (immediate feedback after a
+/// manual pick) and the periodic refresh below (for changes that happen
+/// elsewhere: the AI assistant, or the existing auto-profile-by-power-source
+/// feature, both of which call `profile::set_profile` directly with no way
+/// to reach into this page's widgets - this page used to just go stale
+/// until the app was restarted).
+fn apply_active_visuals(profiles_box: &gtk::Box, current: Option<PowerProfile>) {
+    let mut child = profiles_box.first_child();
+    let mut idx = 0;
+    while let Some(widget) = child {
+        if let Some(card) = widget.downcast_ref::<gtk::Box>() {
+            let is_now_active = current == Some(PROFILES_ORDER[idx]);
+            if is_now_active {
+                card.add_css_class("profile-active");
+            } else {
+                card.remove_css_class("profile-active");
+            }
+            if let Some(btn_w) = card.last_child() {
+                if let Some(btn) = btn_w.downcast_ref::<gtk::Button>() {
+                    if is_now_active {
+                        btn.set_label(crate::i18n::t("active"));
+                        btn.add_css_class("accent-button");
+                        btn.remove_css_class("secondary-button");
+                        btn.set_sensitive(false);
+                    } else {
+                        btn.set_label(crate::i18n::t("select"));
+                        btn.remove_css_class("accent-button");
+                        btn.add_css_class("secondary-button");
+                        btn.set_sensitive(true);
+                    }
+                }
+            }
+            idx += 1;
+        }
+        child = widget.next_sibling();
+    }
+}
 
 /// Build the performance profile control page
 pub fn build() -> gtk::Box {
@@ -111,43 +157,7 @@ pub fn build() -> gtk::Box {
                     ));
                     status_clone.remove_css_class("status-error");
                     status_clone.add_css_class("status-success");
-
-                    // Update visual state of all cards
-                    let new_current = profile::get_current_profile();
-                    let mut child = profiles_box_c.first_child();
-                    let profiles_list = [
-                        PowerProfile::Quiet, PowerProfile::Balanced,
-                        PowerProfile::Performance, PowerProfile::Turbo,
-                    ];
-                    let mut idx = 0;
-                    while let Some(widget) = child {
-                        if let Some(card) = widget.downcast_ref::<gtk::Box>() {
-                            let is_now_active = new_current == Some(profiles_list[idx]);
-                            if is_now_active {
-                                card.add_css_class("profile-active");
-                            } else {
-                                card.remove_css_class("profile-active");
-                            }
-                            // Update the button inside the card (last child)
-                            if let Some(btn_w) = card.last_child() {
-                                if let Some(btn) = btn_w.downcast_ref::<gtk::Button>() {
-                                    if is_now_active {
-                                        btn.set_label(crate::i18n::t("active"));
-                                        btn.add_css_class("accent-button");
-                                        btn.remove_css_class("secondary-button");
-                                        btn.set_sensitive(false);
-                                    } else {
-                                        btn.set_label(crate::i18n::t("select"));
-                                        btn.remove_css_class("accent-button");
-                                        btn.add_css_class("secondary-button");
-                                        btn.set_sensitive(true);
-                                    }
-                                }
-                            }
-                            idx += 1;
-                        }
-                        child = widget.next_sibling();
-                    }
+                    apply_active_visuals(&profiles_box_c, profile::get_current_profile());
                 }
                 Err(e) => {
                     status_clone.set_text(&format!("Erro: {}", e));
@@ -186,6 +196,36 @@ pub fn build() -> gtk::Box {
     info_box.append(&info_label);
 
     page.append(&info_box);
+
+    // This page is built once at app startup and never rebuilt (unlike the
+    // temperatures page, which window.rs already rebuilds live) - so a
+    // profile change from anywhere OTHER than clicking a card here (the AI
+    // assistant, or the existing auto-profile-by-power-source feature)
+    // used to leave these cards showing whatever was active at launch until
+    // a full app restart. Poll and reconcile instead.
+    let last_known = Rc::new(Cell::new(profile::get_current_profile()));
+    glib::timeout_add_seconds_local(3, move || {
+        let now = profile::get_current_profile();
+        if now != last_known.get() {
+            last_known.set(now);
+            apply_active_visuals(&profiles_box, now);
+
+            let governor = std::fs::read_to_string(
+                "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
+            )
+            .unwrap_or_else(|_| "N/D".into());
+            let epp = std::fs::read_to_string(
+                "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference",
+            )
+            .unwrap_or_else(|_| "N/D".into());
+            info_label.set_text(&format!(
+                "CPU Governor: {}  |  EPP: {}",
+                governor.trim(),
+                epp.trim()
+            ));
+        }
+        glib::ControlFlow::Continue
+    });
 
     page
 }

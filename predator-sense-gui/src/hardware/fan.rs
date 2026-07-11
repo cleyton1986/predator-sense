@@ -46,6 +46,23 @@ pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
     }
 }
 
+/// Reads back the firmware fan mode actually active right now (EC offsets
+/// 0x21/0x22, the same ones `set_fan_mode`'s Auto/Max write) - `None` if
+/// unreadable or the bytes don't match either known written value. This is
+/// what makes the fan-control page trustworthy: the physical Predator key
+/// on the keyboard also flips this mode directly at the EC level (through
+/// facer.ko, entirely outside this app), so "whatever we last wrote"
+/// wouldn't be enough - only reading the EC back catches that too.
+/// Verified by hand: writing Auto then reading back gives (0x50, 0x54)
+/// exactly; writing Max gives (0x60, 0x58) exactly, both stable.
+pub fn get_fan_mode() -> Option<FanMode> {
+    match helper_read("fan-mode-read")?.as_str() {
+        "auto" => Some(FanMode::Auto),
+        "max" => Some(FanMode::Max),
+        _ => None,
+    }
+}
+
 /// Toggle CoolBoost on/off
 pub fn set_coolboost(enabled: bool) -> Result<(), String> {
     let val = if enabled { "1" } else { "0" };
@@ -61,20 +78,27 @@ pub fn set_coolboost(enabled: bool) -> Result<(), String> {
 
 /// Read CoolBoost state from EC
 pub fn get_coolboost() -> bool {
-    // Try reading via helper
-    let o = Command::new("/opt/predator-sense/predator-sense-helper")
-        .args(["coolboost-read"])
-        .output();
-    match o {
-        Ok(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).trim() == "1"
-        }
-        _ => false,
-    }
+    helper_read("coolboost-read").map(|v| v == "1").unwrap_or(false)
 }
 
 const HELPER: &str = "/opt/predator-sense/predator-sense-helper";
 
+/// `/dev/ec` used to be root-only (`crw------- root root`, no group access
+/// at all) - calling the helper directly as a normal user made every
+/// EC-backed read silently fail every time (python's PermissionError made
+/// it exit non-zero, so `o.status.success()` below was always false). This
+/// was invisible until now because nothing had ever compared a
+/// `helper_read()` result against live behavior - `get_coolboost()` (same
+/// bug, same root cause) has likely always shown "off" at startup
+/// regardless of actual EC state, and `get_fan_mode()` (new this session)
+/// always returned `None`, silently skipping every fan-control-page
+/// refresh tick. Fixed at the source instead of by adding pkexec here: a
+/// new udev rule (99-predator-ec.rules) grants the "input" group read-only
+/// access to /dev/ec (root keeps read+write, group gets read only - writes
+/// still go through the vetted helper+pkexec path in helper_write below).
+/// Reads are called from a few-second poll timer, so avoiding a pkexec
+/// process spawn on every single tick matters here in a way it doesn't
+/// for the much rarer, user-triggered writes.
 fn helper_read(action: &str) -> Option<String> {
     let o = Command::new(HELPER).arg(action).output().ok()?;
     if o.status.success() {

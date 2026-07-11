@@ -150,22 +150,11 @@ pub fn build() -> gtk::Box {
         health_label.add_css_class("control-label");
         let health_switch = gtk::Switch::new();
         health_switch.set_valign(gtk::Align::Center);
-        let health_val = fs::read_to_string(format!("{}/health_mode", wmi_path))
-            .unwrap_or_default().trim().to_string();
-        health_switch.set_active(health_val == "1");
-        {
-            let wmi = wmi_path.to_string();
-            health_switch.connect_state_set(move |_, active| {
-                let val = if active { "1" } else { "0" };
-                let path = format!("{}/health_mode", wmi);
-                if fs::write(&path, val).is_err() {
-                    let _ = std::process::Command::new("pkexec")
-                        .args(["bash", "-c", &format!("echo {} > {}", val, path)])
-                        .output();
-                }
-                glib::Propagation::Proceed
-            });
-        }
+        health_switch.set_active(crate::hardware::extras::get_battery_health_mode());
+        health_switch.connect_state_set(move |_, active| {
+            let _ = crate::hardware::extras::set_battery_health_mode(active);
+            glib::Propagation::Proceed
+        });
         health_box.append(&health_label);
         health_box.append(&health_switch);
         controls_box.append(&health_box);

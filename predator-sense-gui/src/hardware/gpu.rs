@@ -141,3 +141,45 @@ pub fn set_power_limit(watts: u32) -> Result<(), String> {
         Err(e) => Err(e.to_string()),
     }
 }
+
+fn clamp_watts(watts: u32, min_w: f64, max_w: f64) -> u32 {
+    (watts as f64).clamp(min_w, max_w).round() as u32
+}
+
+/// Same as `set_power_limit` but clamps `watts` into the hardware's actual
+/// min/max TGP range first (`set_power_limit` itself has no clamp - the range
+/// is otherwise only enforced at the UI slider layer in ui/gpu_page.rs). This
+/// is the only GPU power entry point the AI assistant's tool dispatcher is
+/// allowed to call - re-reads live metrics on every call so a stale/cached
+/// bound can never push an out-of-range value.
+pub fn set_power_limit_clamped(watts: u32) -> Result<(), String> {
+    let m = read_gpu_metrics();
+    let min_w = if m.power_min_w > 0.0 { m.power_min_w } else { 20.0 };
+    let max_w = if m.power_max_w > min_w { m.power_max_w } else { min_w + 50.0 };
+    set_power_limit(clamp_watts(watts, min_w, max_w))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamp_watts;
+
+    #[test]
+    fn clamps_below_min() {
+        assert_eq!(clamp_watts(5, 20.0, 100.0), 20);
+    }
+
+    #[test]
+    fn clamps_above_max() {
+        assert_eq!(clamp_watts(500, 20.0, 100.0), 100);
+    }
+
+    #[test]
+    fn passes_through_in_range() {
+        assert_eq!(clamp_watts(80, 20.0, 100.0), 80);
+    }
+
+    #[test]
+    fn handles_min_equals_max() {
+        assert_eq!(clamp_watts(50, 60.0, 60.0), 60);
+    }
+}

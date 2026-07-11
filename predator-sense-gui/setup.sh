@@ -152,6 +152,23 @@ install_permissions() {
 </policyconfig>
 EOF
 
+    # No password prompt for this app's own narrowly-scoped hardware helper
+    # (CPU governor/EPP/turbo/min-perf, GPU power limit, EC battery bytes -
+    # see predator-sense-helper above). auth_admin_keep alone still re-prompts
+    # every few minutes, which is disruptive for the AI assistant's periodic
+    # background checks (issue: password asked on every automated tick).
+    # Scoped ONLY to this one action ID, for whichever user is active on the
+    # local seat - not a hardcoded account, works per-user on every install.
+    mkdir -p /etc/polkit-1/rules.d
+    cat > /etc/polkit-1/rules.d/49-predator-sense.rules << 'EOF'
+polkit.addRule(function(action, subject) {
+    if (action.id == "com.predator.sense.helper" && subject.active && subject.local) {
+        return polkit.Result.YES;
+    }
+});
+EOF
+    chmod 644 /etc/polkit-1/rules.d/49-predator-sense.rules
+
     # Helper for privileged ops
     cat > "$INSTALL_DIR/predator-sense-helper" << 'EOF'
 #!/bin/bash
@@ -161,10 +178,25 @@ case "$1" in
     set-gpu-power) nvidia-smi -pm 1 2>/dev/null; nvidia-smi -pl "$2" 2>/dev/null ;;
   set-no-turbo) echo "$2" > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null ;;
   set-min-perf) echo "$2" > /sys/devices/system/cpu/intel_pstate/min_perf_pct 2>/dev/null ;;
+  bat-limit) if [ "$2" = "1" ]; then echo 80 > /sys/class/power_supply/BAT1/charge_control_end_threshold 2>/dev/null; else echo 100 > /sys/class/power_supply/BAT1/charge_control_end_threshold 2>/dev/null; fi ;;
+  bat-limit-read) VAL=$(cat /sys/class/power_supply/BAT1/charge_control_end_threshold 2>/dev/null || echo 100); [ "$VAL" -le 80 ] && echo 1 || echo 0 ;;
+  bat-health) echo "$2" > /sys/bus/wmi/drivers/acer-wmi-battery/health_mode 2>/dev/null ;;
+  bat-health-read) cat /sys/bus/wmi/drivers/acer-wmi-battery/health_mode 2>/dev/null || echo 0 ;;
 esac
 EOF
     chmod +x "$INSTALL_DIR/predator-sense-helper"
     usermod -aG input "$REAL_USER" 2>/dev/null || true
+
+    # /dev/ec (acpi_ec module) defaults to root-only with no group access
+    # at all. The app polls fan mode/CoolBoost state every few seconds
+    # through it - read-only group access avoids spawning a pkexec process
+    # on every single tick. Writes still go through pkexec + the helper.
+    mkdir -p /etc/udev/rules.d
+    cat > /etc/udev/rules.d/99-predator-ec.rules << 'EOF'
+SUBSYSTEM=="chardev", KERNEL=="ec", MODE="0640", GROUP="input"
+EOF
+    udevadm control --reload-rules 2>/dev/null || true
+    udevadm trigger 2>/dev/null || true
 }
 
 install_desktop_entry() {
@@ -365,6 +397,7 @@ do_uninstall() {
     rm -f "$DESKTOP_FILE"
     rm -f "$ICON_PATH"
     rm -f "$POLKIT_RULE"
+    rm -f /etc/polkit-1/rules.d/49-predator-sense.rules
     rm -f /tmp/predator-sense-tray.lock
 
     update-desktop-database /usr/share/applications/ 2>/dev/null || true

@@ -288,8 +288,10 @@ fn push_history(h: &mut VecDeque<f64>, v: f64) {
     h.push_back(v);
 }
 
-/// Create a small gauge widget: (container, drawing_area, value_label)
-fn create_gpu_gauge(title: &str) -> (gtk::Box, gtk::DrawingArea, gtk::Label) {
+/// Create a small gauge widget: (container, drawing_area, value_label).
+/// `pub(crate)` so other pages (e.g. ai_page's model resource monitor) can
+/// draw the exact same gauge style instead of a one-off duplicate.
+pub(crate) fn create_gpu_gauge(title: &str) -> (gtk::Box, gtk::DrawingArea, gtk::Label) {
     let container = gtk::Box::new(gtk::Orientation::Vertical, 2);
     container.set_halign(gtk::Align::Center);
 
@@ -313,7 +315,7 @@ fn create_gpu_gauge(title: &str) -> (gtk::Box, gtk::DrawingArea, gtk::Label) {
     (container, da, val)
 }
 
-fn set_gauge_draw(da: &gtk::DrawingArea, frac: f64) {
+pub(crate) fn set_gauge_draw(da: &gtk::DrawingArea, frac: f64) {
     let f = frac;
     da.set_draw_func(move |_a, cr, w, h| {
         draw_gauge_arc(cr, w as f64, h as f64, f);
