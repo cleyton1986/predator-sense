@@ -71,8 +71,11 @@ Esta aplicação foi criada para **uso pessoal**, para tirar o máximo proveito 
 <p align="center"><b>Gráficos</b> — Histórico detalhado de CPU e GPU com tracking de mínimas e máximas.</p>
 <p align="center"><img src="assets/psense-10.png" width="800" alt="Gráficos"></p>
 
-<p align="center"><b>Configurações</b> — Minimizar para a bandeja, iniciar com o sistema, aplicar perfil automaticamente no início, preferências de idioma.</p>
-<p align="center"><img src="assets/psense-11.png" width="800" alt="Configurações"></p>
+<p align="center"><b>Assistente de IA (beta)</b> — Assistente de IA local via Ollama: chat, gerenciador de modelos (listar instalados, baixar novos, escolher qual roda), consumo de recurso/VRAM ao vivo enquanto ele pensa, e log de ações persistente.</p>
+<p align="center"><img src="assets/psense-11.png" width="800" alt="Assistente de IA"></p>
+
+<p align="center"><b>Configurações</b> — Minimizar para a bandeja, iniciar com o sistema, aplicar perfil automaticamente no início, preferências de idioma, e lista de recursos suportados por modelo.</p>
+<p align="center"><img src="assets/psense-12.png" width="800" alt="Configurações"></p>
 
 ---
 
@@ -98,6 +101,7 @@ Inspirado e baseado no projeto [acer-predator-turbo-and-rgb-keyboard-linux-modul
 | **Bateria** | Estatísticas de carga, ciclos, saúde, fabricante e limite de carga em 80% para preservar a longevidade |
 | **Dashboard GPU** | Métricas NVIDIA: temperatura, utilização, VRAM, clocks, consumo, info PCIe com gráficos ao vivo, e **slider de limite de potência (TGP)** |
 | **Gráficos** | Histórico detalhado de CPU e GPU com tracking de mínimas e máximas |
+| **Assistente de IA** 🧪 | Assistente de IA local e opt-in via [Ollama](https://ollama.com) — lê o estado do hardware em tempo real e sugere ou aplica mudanças através de um conjunto fixo de ações já validadas (perfil térmico, modo de ventoinha, CoolBoost, RGB, limite de potência da GPU, bateria). Chat, gerenciador de modelos (baixar/selecionar), monitor de recurso/VRAM ao vivo e log de ações persistente. Aplicar automaticamente ou sempre confirmar, você escolhe. Requer o Ollama instalado separadamente — veja [Assistente de IA](#assistente-de-ia-beta) abaixo |
 | **Detecção automática de recursos** | Detecta o que cada modelo suporta e adapta a interface — recursos sem suporte aparecem como "não disponível neste modelo" em vez de erro. Os recursos suportados são listados nas Configurações |
 | **Alertas de temperatura** | Notificação no desktop quando CPU/GPU passam de 90°C (funciona na bandeja) |
 | **Perfil automático por energia** | Troca de perfil automaticamente ao conectar/desconectar o carregador — perfil de cada estado é configurável em Configurações (padrão: Performance na tomada, Balanceado na bateria) |
@@ -291,6 +295,16 @@ Monitoramento NVIDIA em tempo real:
 - Gráficos de histórico de temperatura e utilização (janela de 2 minutos)
 - Clock do núcleo, clock da memória, P-State, link PCIe, versão do VBIOS
 
+### Assistente de IA (beta)
+
+Um assistente de IA local e opt-in, via [Ollama](https://ollama.com) rodando inteiramente na sua máquina — nada é enviado pra lugar nenhum.
+
+1. Instale o Ollama separadamente: `curl -fsSL https://ollama.com/install.sh | sh`
+2. Vá em **IA** no menu lateral e baixe um modelo pelo gerenciador de modelos integrado (`smollm2:1.7b` ou maior — modelos menores não suportam tool-calling de forma confiável)
+3. Ative o assistente em **Configurações** e escolha **Aplicar automaticamente** (aplica sugestões na hora) ou **Sempre confirmar** (padrão — toda mudança sugerida espera sua aprovação)
+
+O assistente lê o estado do hardware em tempo real (temperatura, ventoinha, perfil térmico, bateria) e pode sugerir ou aplicar mudanças através de um conjunto fixo de ações já validadas — nunca acessa hardware/EC diretamente, e cada ação corresponde 1:1 a uma função que esta aplicação já usava antes mesmo da IA existir. O modelo carrega só pra rodar uma análise e depois descarrega — não fica parado consumindo memória. Toda atividade da IA fica registrada num log de ações persistente e revisável, na mesma página.
+
 ---
 
 ## Opções do Instalador
@@ -422,6 +436,9 @@ predator-sense-gui/
 │   │   ├── fan.rs               # Modo de ventoinha + CoolBoost
 │   │   ├── extras.rs            # Limite de bateria, LCD overdrive, USB charging, boot anim
 │   │   ├── profile.rs           # CPU governor + EPP + GPU power
+│   │   ├── ai_assistant.rs      # Tool-calling do Ollama: allow-list fixa mapeada pras funções hardware:: já existentes
+│   │   ├── ai_snapshot.rs       # Snapshot efêmero do estado, alimentado à IA e apagado a cada leitura
+│   │   ├── ai_actionlog.rs      # Log persistente e revisável de tudo que a IA sugeriu/aplicou
 │   │   └── setup.rs             # Gerenciamento do módulo kernel
 │   └── ui/                      # Páginas GTK4 (widgets Cairo customizados)
 │       ├── window.rs            # Janela principal, sidebar, barras neon, hide-to-tray
@@ -435,6 +452,7 @@ predator-sense-gui/
 │       ├── battery_page.rs      # Stats da bateria + limite de carga
 │       ├── gpu_page.rs          # Dashboard NVIDIA GPU
 │       ├── monitor_page.rs      # Gráficos detalhados de histórico CPU/GPU
+│       ├── ai_page.rs           # Assistente de IA: chat, gerenciador de modelos, monitor de recurso, log de ações
 │       ├── setup_page.rs        # Wizard de setup do módulo kernel
 │       └── gauge_widget.rs      # Widget de gauge circular tracejado
 └── resources/

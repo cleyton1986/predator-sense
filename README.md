@@ -71,8 +71,11 @@ This application was created for **personal use**, to get the most out of an Ace
 <p align="center"><b>Graphs</b> — Detailed CPU and GPU history charts with min/max tracking.</p>
 <p align="center"><img src="assets/psense-10.png" width="800" alt="Graphs"></p>
 
-<p align="center"><b>Settings</b> — Minimize to tray, start on boot, auto-apply profile on start, language preferences.</p>
-<p align="center"><img src="assets/psense-11.png" width="800" alt="Settings"></p>
+<p align="center"><b>AI Assistant (beta)</b> — Local AI assistant powered by Ollama: chat, model manager (list installed models, download new ones, pick which one runs), live VRAM/GPU resource usage while it's thinking, and a persistent action log.</p>
+<p align="center"><img src="assets/psense-11.png" width="800" alt="AI Assistant"></p>
+
+<p align="center"><b>Settings</b> — Minimize to tray, start on boot, auto-apply profile on start, language preferences, and per-model supported-features list.</p>
+<p align="center"><img src="assets/psense-12.png" width="800" alt="Settings"></p>
 
 ---
 
@@ -98,6 +101,7 @@ Inspired by and based on the [acer-predator-turbo-and-rgb-keyboard-linux-module]
 | **Battery** | Charge stats, cycles, health, manufacturer info and 80% charge limit for longevity |
 | **GPU Dashboard** | NVIDIA metrics: temperature, utilization, VRAM, clocks, power draw, PCIe info with live graphs, plus a **power limit (TGP) slider** |
 | **Graphs** | Detailed CPU and GPU history charts with min/max tracking |
+| **AI Assistant** 🧪 | Local, opt-in AI assistant powered by [Ollama](https://ollama.com) — reads live hardware state and suggests or applies changes through a fixed, already-validated set of actions (thermal profile, fan mode, CoolBoost, RGB, GPU power limit, battery). Chat, model manager (download/select), live resource/VRAM monitor and a persistent action log. Auto-apply or always-confirm, your choice. Requires Ollama installed separately — see [AI Assistant](#ai-assistant-beta) below |
 | **Auto capability detection** | Detects what each model supports and adapts the UI — unsupported features are shown as "not available on this model" instead of erroring. Supported features are listed in Settings |
 | **Temperature alerts** | Desktop notification when CPU/GPU exceed 90°C (works in the tray) |
 | **Auto power profile** | Switches profile automatically on AC/battery change — target profile for each state is configurable in Settings (default: Performance on AC, Balanced on battery) |
@@ -291,6 +295,16 @@ Real-time NVIDIA GPU monitoring:
 - Live temperature and utilization history graphs (2 min window)
 - Core clock, memory clock, P-State, PCIe link info, VBIOS version
 
+### AI Assistant (beta)
+
+An opt-in local AI assistant, powered by [Ollama](https://ollama.com) running entirely on your machine — nothing is sent anywhere.
+
+1. Install Ollama separately: `curl -fsSL https://ollama.com/install.sh | sh`
+2. Go to **AI** in the sidebar and download a model from the built-in model manager (`smollm2:1.7b` or larger — smaller models don't reliably support tool-calling)
+3. Enable the assistant in **Settings** and choose **Auto-apply** (applies suggestions immediately) or **Always confirm** (default — every suggested change waits for your approval)
+
+The assistant reads live hardware state (temperature, fan, thermal profile, battery) and can suggest or apply changes through a fixed, already-validated set of actions — it never touches raw hardware/EC access directly, and every action maps 1:1 to a function this app already used before the AI feature existed. The model loads only to run an analysis, then unloads — it doesn't sit idle in memory. All AI activity is recorded in a persistent, reviewable action log on the same page.
+
 ---
 
 ## Installer Options
@@ -422,6 +436,9 @@ predator-sense-gui/
 │   │   ├── fan.rs               # Fan mode + CoolBoost
 │   │   ├── extras.rs            # Battery limit, LCD overdrive, USB charging, boot anim
 │   │   ├── profile.rs           # CPU governor + EPP + GPU power
+│   │   ├── ai_assistant.rs      # Ollama tool-calling: fixed allow-list mapped to existing hardware:: setters
+│   │   ├── ai_snapshot.rs       # Ephemeral hardware-state snapshot fed to the AI, cleared after each read
+│   │   ├── ai_actionlog.rs      # Persistent, reviewable log of everything the AI suggested/applied
 │   │   └── setup.rs             # Kernel module management
 │   └── ui/                      # GTK4 pages (Cairo custom widgets)
 │       ├── window.rs            # Main window, sidebar, neon bars, hide-to-tray
@@ -435,6 +452,7 @@ predator-sense-gui/
 │       ├── battery_page.rs      # Battery stats + charge limit
 │       ├── gpu_page.rs          # NVIDIA GPU dashboard
 │       ├── monitor_page.rs      # Detailed CPU/GPU history graphs
+│       ├── ai_page.rs           # AI Assistant: chat, model manager, resource monitor, action log
 │       ├── setup_page.rs        # Kernel module setup wizard
 │       └── gauge_widget.rs      # Dashed circular gauge widget
 └── resources/
