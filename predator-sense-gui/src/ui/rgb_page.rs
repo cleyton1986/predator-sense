@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk};
+use gtk4::{self as gtk, glib};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -16,6 +16,7 @@ struct RgbState {
     is_static: bool,
     status: gtk::Label,
     keyboard_da: gtk::DrawingArea,
+    anim_phase: f64,
 }
 
 pub fn build() -> gtk::Box {
@@ -43,6 +44,15 @@ pub fn build() -> gtk::Box {
     keyboard_da.set_hexpand(true);
     keyboard_da.set_halign(gtk::Align::Fill);
 
+    // Module-free HID-only hardware (e.g. PHN16S-71 without facer.ko, see
+    // issue #12) has no real dynamic-effect device to write to - only static
+    // per-zone color via ENEK5130. Rather than block the Dynamic tab
+    // entirely, show an on-screen-only animated simulation of the effect
+    // (no hardware writes at all) so users can still see what each mode
+    // looks like. Decided once at build time since hardware doesn't change
+    // while the app runs.
+    let preview_only = hid_rgb::is_available() && !rgb::is_module_loaded();
+
     let state = Rc::new(RefCell::new(RgbState {
         mode: RgbMode::Breath,
         speed: 4,
@@ -53,6 +63,7 @@ pub fn build() -> gtk::Box {
         is_static: true,
         status: status.clone(),
         keyboard_da: keyboard_da.clone(),
+        anim_phase: 0.0,
     }));
 
     // Toggle: Estático / Dinâmico + brightness
@@ -123,10 +134,65 @@ pub fn build() -> gtk::Box {
     {
         let s = state.clone();
         keyboard_da.set_draw_func(move |_a, cr, w, h| {
-            draw_keyboard(cr, w as f64, h as f64, &s.borrow().zone_colors);
+            let st = s.borrow();
+            if !st.is_static && preview_only {
+                let colors = preview_zone_colors(st.mode, st.anim_phase, st.direction, st.dyn_color);
+                draw_keyboard(cr, w as f64, h as f64, &colors);
+            } else {
+                draw_keyboard(cr, w as f64, h as f64, &st.zone_colors);
+            }
         });
     }
     page.append(&keyboard_da);
+
+    // Preview-only note (module-free HID hardware, Dynamic tab)
+    let preview_note = gtk::Label::new(Some(crate::i18n::t("rgb_preview_note")));
+    preview_note.add_css_class("warning-text");
+    preview_note.set_margin_top(2);
+    preview_note.set_wrap(true);
+    preview_note.set_visible(false);
+    page.append(&preview_note);
+
+    // Animation timer for the preview: only ticks while Dynamic is selected
+    // on module-free HID hardware, self-cancels once the page is torn down
+    // (widget.root() goes None), same pattern as ai_page.rs's timers.
+    if preview_only {
+        let s = state.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+            let da = { s.borrow().keyboard_da.clone() };
+            if da.root().is_none() {
+                return glib::ControlFlow::Break;
+            }
+            let mut st = s.borrow_mut();
+            if !st.is_static {
+                let speed_factor = 0.03 + (st.speed as f64) * 0.02;
+                st.anim_phase += speed_factor;
+                da.queue_draw();
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    // Toggle the preview note + redraw immediately on mode switch (module-free
+    // HID hardware only - on any other hardware this note never applies).
+    if preview_only {
+        let note = preview_note.clone();
+        let da = keyboard_da.clone();
+        static_btn.connect_toggled(move |b| {
+            if b.is_active() {
+                note.set_visible(false);
+                da.queue_draw();
+            }
+        });
+        let note = preview_note.clone();
+        let da = keyboard_da.clone();
+        dynamic_btn.connect_toggled(move |b| {
+            if b.is_active() {
+                note.set_visible(true);
+                da.queue_draw();
+            }
+        });
+    }
 
     // === Zone controls (visible in static mode) ===
     // ENEK5130 (I2C-HID, e.g. PHN16-73) turned out to be a real 4-zone
@@ -333,6 +399,11 @@ pub fn build() -> gtk::Box {
                 }
 
                 hid_result
+            } else if preview_only {
+                // Module-free HID hardware has no real dynamic-effect device
+                // to write to (see issue #12) - the animation is on-screen
+                // only, nothing to send here.
+                Ok(())
             } else {
                 rgb::apply_dynamic_effect(&RgbConfig {
                     mode: st.mode, speed: st.speed, brightness: st.brightness,
@@ -340,7 +411,13 @@ pub fn build() -> gtk::Box {
                     red: st.dyn_color.0, green: st.dyn_color.1, blue: st.dyn_color.2,
                 })
             };
+            let preview_applied = !st.is_static && preview_only;
             match result {
+                Ok(()) if preview_applied => {
+                    st.status.set_text(crate::i18n::t("rgb_preview_applied"));
+                    st.status.remove_css_class("status-error");
+                    st.status.add_css_class("status-success");
+                }
                 Ok(()) => {
                     st.status.set_text(crate::i18n::t("applied"));
                     st.status.remove_css_class("status-error");
@@ -356,16 +433,32 @@ pub fn build() -> gtk::Box {
     }
     btn_box.append(&apply_btn);
 
-    // Fallback: turn off backlight via brightness-only WMI call (method 20,
-    // minimal payload). Useful on models where static/dynamic color control
-    // doesn't apply correctly but brightness does - e.g. as an accessibility
-    // mitigation for pulsing effects that can't otherwise be stopped.
+    // Turn off backlight. On hardware with the facer.ko dynamic device,
+    // uses the brightness-only WMI call (method 20, minimal payload) -
+    // useful on models where static/dynamic color control doesn't apply
+    // correctly but brightness does, e.g. as an accessibility mitigation for
+    // pulsing effects that can't otherwise be stopped. On module-free HID
+    // hardware (no facer.ko, see issue #12) that device doesn't exist, so
+    // fall back to the same ENEK5130 HID path the static page already uses,
+    // writing black (0,0,0) to every zone instead.
     let off_btn = gtk::Button::with_label(crate::i18n::t("kbd_backlight_off"));
     {
         let s = state.clone();
         off_btn.connect_clicked(move |_| {
             let st = s.borrow();
-            match rgb::apply_brightness_only(0) {
+            let result = if !rgb::is_module_loaded() && hid_rgb::is_available() {
+                let mut last_err = None;
+                for &mask in hid_rgb::ZONE_MASKS.iter() {
+                    if let Err(e) = hid_rgb::set_zone_color(mask, 0, 0, 0, 0) {
+                        last_err = Some(e);
+                        break;
+                    }
+                }
+                match last_err { Some(e) => Err(e), None => Ok(()) }
+            } else {
+                rgb::apply_brightness_only(0)
+            };
+            match result {
                 Ok(()) => {
                     st.status.set_text(crate::i18n::t("kbd_backlight_off_applied"));
                     st.status.remove_css_class("status-error");
@@ -392,6 +485,74 @@ pub fn build() -> gtk::Box {
     }
 
     page
+}
+
+/// Purely cosmetic simulation of what a dynamic effect would look like,
+/// used only on module-free HID hardware that has no real dynamic-effect
+/// device to drive (issue #12). No hardware is touched here - this only
+/// feeds `draw_keyboard`'s existing per-zone color array with an animated
+/// pattern instead of the static config colors.
+fn preview_zone_colors(mode: RgbMode, phase: f64, direction: Direction, color: (u8, u8, u8)) -> [(u8, u8, u8); 4] {
+    use std::f64::consts::FRAC_PI_2;
+    use std::f64::consts::FRAC_PI_4;
+
+    match mode {
+        RgbMode::Static => [color; 4],
+        RgbMode::Breath => {
+            let level = 0.15 + 0.85 * (0.5 + 0.5 * phase.sin());
+            [scale(color, level); 4]
+        }
+        RgbMode::Neon => {
+            let level = if phase.sin() > 0.0 { 1.0 } else { 0.12 };
+            [scale(color, level); 4]
+        }
+        RgbMode::Wave => {
+            let sign = if direction == Direction::RightToLeft { 1.0 } else { -1.0 };
+            let mut out = [(0u8, 0u8, 0u8); 4];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let offset = sign * i as f64 * FRAC_PI_2;
+                let level = 0.15 + 0.85 * (0.5 + 0.5 * (phase + offset).sin());
+                *slot = scale(color, level);
+            }
+            out
+        }
+        RgbMode::Shifting => {
+            // Color-cycling look (blends toward the inverse color), distinct
+            // from Wave's brightness-only pulse.
+            let sign = if direction == Direction::RightToLeft { 1.0 } else { -1.0 };
+            let inv = (255 - color.0, 255 - color.1, 255 - color.2);
+            let mut out = [(0u8, 0u8, 0u8); 4];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let offset = sign * i as f64 * FRAC_PI_2;
+                let t = 0.5 + 0.5 * (phase * 1.6 + offset).sin();
+                *slot = lerp(color, inv, t);
+            }
+            out
+        }
+        RgbMode::Zoom => {
+            let mut out = [(0u8, 0u8, 0u8); 4];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let dist = if i == 0 || i == 3 { 1.0 } else { 0.0 };
+                let level = 0.15 + 0.85 * (0.5 + 0.5 * (phase - dist * FRAC_PI_4).sin());
+                *slot = scale(color, level);
+            }
+            out
+        }
+    }
+}
+
+fn scale(color: (u8, u8, u8), factor: f64) -> (u8, u8, u8) {
+    let f = factor.clamp(0.0, 1.0);
+    ((color.0 as f64 * f) as u8, (color.1 as f64 * f) as u8, (color.2 as f64 * f) as u8)
+}
+
+fn lerp(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
+    let t = t.clamp(0.0, 1.0);
+    (
+        (a.0 as f64 + (b.0 as f64 - a.0 as f64) * t) as u8,
+        (a.1 as f64 + (b.1 as f64 - a.1 as f64) * t) as u8,
+        (a.2 as f64 + (b.2 as f64 - a.2 as f64) * t) as u8,
+    )
 }
 
 fn draw_keyboard(cr: &gtk4::cairo::Context, w: f64, h: f64, colors: &[(u8, u8, u8); 4]) {
