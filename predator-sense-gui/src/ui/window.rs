@@ -378,7 +378,7 @@ fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) 
     model.set_halign(gtk::Align::Center);
     info_box.append(&model);
 
-    let ver = gtk::Label::new(Some("v0.2.22 • Linux"));
+    let ver = gtk::Label::new(Some("v0.2.23 • Linux"));
     ver.add_css_class("info-text-dim");
     ver.set_halign(gtk::Align::Center);
     info_box.append(&ver);
@@ -784,6 +784,37 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     });
     log_row.append(&log_switch);
     page.append(&log_row);
+
+    // === Accessibility Section ===
+    let acc_title = gtk::Label::new(Some(t("accessibility")));
+    acc_title.add_css_class("settings-section-title");
+    acc_title.set_halign(gtk::Align::Start);
+    acc_title.set_margin_top(20);
+    page.append(&acc_title);
+
+    let font_row = create_setting_row(t("font_scale"), t("font_scale_desc"));
+    let font_scale_label = gtk::Label::new(Some(&format!("{}%", (cfg.font_scale * 100.0).round() as i32)));
+    font_scale_label.add_css_class("settings-row-desc");
+    let font_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 100.0, 150.0, 5.0);
+    font_scale.set_value(cfg.font_scale * 100.0);
+    font_scale.set_size_request(160, -1);
+    font_scale.set_valign(gtk::Align::Center);
+    font_scale.add_css_class("accent-scale");
+    {
+        let lbl = font_scale_label.clone();
+        font_scale.connect_value_changed(move |sc| {
+            let pct = sc.value();
+            let scale = pct / 100.0;
+            lbl.set_text(&format!("{}%", pct.round() as i32));
+            crate::apply_font_scale(scale);
+            let mut c = config::load_app_config();
+            c.font_scale = scale;
+            let _ = config::save_app_config(&c);
+        });
+    }
+    font_row.append(&font_scale_label);
+    font_row.append(&font_scale);
+    page.append(&font_row);
 
     // Module status
     // === Hardware Settings Section ===

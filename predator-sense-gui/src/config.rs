@@ -38,6 +38,8 @@ pub struct AppConfig {
     pub profile_battery: PowerProfile,
     #[serde(default)]
     pub debug_logging: bool,
+    #[serde(default = "default_font_scale")]
+    pub font_scale: f64,
 }
 
 fn default_true() -> bool {
@@ -52,6 +54,10 @@ fn default_profile_battery() -> PowerProfile {
     PowerProfile::Balanced
 }
 
+fn default_font_scale() -> f64 {
+    1.0
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -64,6 +70,7 @@ impl Default for AppConfig {
             profile_ac: default_profile_ac(),
             profile_battery: default_profile_battery(),
             debug_logging: false,
+            font_scale: 1.0,
         }
     }
 }

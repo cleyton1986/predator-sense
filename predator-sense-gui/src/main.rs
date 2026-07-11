@@ -8,9 +8,25 @@ mod ui;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gdk, glib};
 use libadwaita as adw;
+use std::cell::RefCell;
 
 const APP_ID: &str = "com.predator.sense";
 const CSS_THEME: &str = include_str!("../resources/style.css");
+
+thread_local! {
+    static CSS_PROVIDER: RefCell<Option<gtk::CssProvider>> = RefCell::new(None);
+}
+
+/// Re-applies the base stylesheet scaled by `scale` (see `ui::font_scale`).
+/// Safe to call at any time after startup - takes effect immediately.
+pub fn apply_font_scale(scale: f64) {
+    let scaled_css = ui::font_scale::scale_css(CSS_THEME, scale);
+    CSS_PROVIDER.with(|p| {
+        if let Some(provider) = p.borrow().as_ref() {
+            provider.load_from_data(&scaled_css);
+        }
+    });
+}
 
 fn main() {
     let app = adw::Application::builder()
@@ -19,12 +35,14 @@ fn main() {
 
     app.connect_startup(|_| {
         let provider = gtk::CssProvider::new();
-        provider.load_from_data(CSS_THEME);
+        let scale = config::load_app_config().font_scale;
+        provider.load_from_data(&ui::font_scale::scale_css(CSS_THEME, scale));
         gtk::style_context_add_provider_for_display(
             &gdk::Display::default().expect("Could not get default display"),
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+        CSS_PROVIDER.with(|p| *p.borrow_mut() = Some(provider));
 
         // Set application window icon via icon theme search path
         if let Some(path) = find_icon_path() {

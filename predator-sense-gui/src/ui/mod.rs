@@ -11,3 +11,4 @@ pub mod gauge_widget;
 pub mod setup_page;
 pub mod monitor_page;
 pub mod battery_page;
+pub mod font_scale;
