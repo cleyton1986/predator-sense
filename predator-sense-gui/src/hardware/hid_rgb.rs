@@ -40,9 +40,10 @@ pub fn is_available() -> bool {
     find_enek5130_hidraw().is_some()
 }
 
-/// Zone mask byte (offset 9 in the packet): one bit per physical zone, or
-/// 0x0f to set all 4 at once.
-pub const ZONE_ALL: u8 = 0x0f;
+/// Zone mask byte (offset 9 in the packet): one bit per physical zone. The
+/// "all zones at once" mask (0x0f) is deliberately not exposed - community
+/// testing (issue #12) found it produces dim/incorrect output on some EC
+/// revisions; writing each zone individually is the only path confirmed safe.
 pub const ZONE_MASKS: [u8; 4] = [0x01, 0x02, 0x04, 0x08];
 
 /// Apply a static color to one or more zones via the ENEK5130 HID feature
@@ -67,8 +68,12 @@ pub fn set_zone_color(zone_mask: u8, red: u8, green: u8, blue: u8, brightness_pc
             format!("Erro ao abrir {}: {}. Execute como root (sudo).", path.display(), e)
         })?;
 
-    // Protocol brightness range is 0x01-0x0f; map from the app's 0-100% slider.
-    let brightness = (((brightness_pct.min(100) as u32) * 15 + 50) / 100).clamp(1, 15) as u8;
+    // Brightness byte is 0-100 (a direct percentage), not 0x01-0x0f as first
+    // assumed - that 1-15 range came from an earlier packet layout where this
+    // byte and the zone mask were misidentified (see issue #4). Community
+    // testing (issue #12, PHN16S-71) confirmed 100 = full brightness, matching
+    // the constant 0x64 (100 decimal) seen in the very first working capture.
+    let brightness = brightness_pct.min(100);
 
     let mut packet: [u8; 11] = [
         0xa4, 0x21, 0x02, brightness, 0x00, 0x00, red, green, blue, zone_mask, 0x00,
