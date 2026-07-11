@@ -2992,6 +2992,22 @@ static int acer_get_fan_speed(int fan)
 /*
  *  Predator series turbo button
  */
+
+/*
+ * Read-only sysfs attribute exposing turbo_state to userspace. The physical
+ * Predator/Turbo key toggles this entirely inside the kernel via WMI
+ * (fan mode, overclock, LED) with no input event reported and no change to
+ * the standard cpufreq governor/EPP files, so userspace previously had no
+ * way at all to know the key had been pressed. Read-only and best-effort:
+ * if creating it fails, the driver still loads and works exactly as before,
+ * just without this one extra attribute.
+ */
+static ssize_t turbo_state_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", turbo_state);
+}
+static DEVICE_ATTR_RO(turbo_state);
+
 static void acer_toggle_turbo(void)
 {
 	if (turbo_state) {
@@ -3952,6 +3968,12 @@ static int acer_platform_probe(struct platform_device *device)
 			goto error_hwmon;
 	}
 
+	/* Best-effort - see the comment above turbo_state_show(). Not part of
+	 * the probe error-goto chain on purpose: this attribute is a bonus,
+	 * not something anything else here depends on. */
+	if (device_create_file(&device->dev, &dev_attr_turbo_state))
+		dev_warn(&device->dev, "failed to create turbo_state sysfs attribute\n");
+
 	return 0;
 
 	error_hwmon:
@@ -3969,6 +3991,8 @@ static int acer_platform_probe(struct platform_device *device)
 
 static void acer_platform_remove(struct platform_device *device)
 {
+	device_remove_file(&device->dev, &dev_attr_turbo_state);
+
 	if (has_cap(ACER_CAP_MAILLED))
 		acer_led_exit();
 	if (has_cap(ACER_CAP_BRIGHTNESS))

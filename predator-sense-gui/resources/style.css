@@ -421,6 +421,18 @@
     color: @text_main;
 }
 
+/* === Sidebar "BETA" ribbon badge (AI assistant nav item) === */
+.nav-beta-badge {
+    font-size: 9px;
+    font-weight: 800;
+    color: #ffffff;
+    letter-spacing: 0.5px;
+    padding: 1px 7px;
+    background-color: #e0212b;
+    border-radius: 2px;
+    transform: rotate(-16deg);
+}
+
 .profile-description {
     font-size: 10px;
     color: @text_muted;
@@ -561,6 +573,28 @@ scrollbar slider:hover {
     font-size: 10px;
     color: #555;
     margin-top: 2px;
+}
+
+/* === AI model manager list (zebra rows) === */
+.model-row {
+    padding: 8px 12px;
+    background-color: rgba(20, 20, 20, 0.8);
+    border-left: 2px solid @cyan_dark;
+    border-radius: 0;
+}
+
+.model-row-alt {
+    background-color: rgba(28, 28, 28, 0.8);
+}
+
+.model-row-name {
+    font-size: 12px;
+    color: @text_main;
+}
+
+.model-row-meta {
+    font-size: 10px;
+    color: #666;
 }
 
 .about-text {

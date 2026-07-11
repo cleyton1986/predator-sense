@@ -54,6 +54,32 @@ pub fn set_battery_limiter(enabled: bool) -> Result<(), String> {
     helper_write("bat-limit", val)
 }
 
+const BATTERY_HEALTH_PATH: &str = "/sys/bus/wmi/drivers/acer-wmi-battery/health_mode";
+
+/// Battery "Health Mode" - a separate WMI mechanism from `set_battery_limiter`
+/// above (some hardware only exposes one or the other). Extracted from what
+/// was inline UI logic in battery_page.rs so the Battery page switch and the
+/// AI assistant's tool dispatcher share one implementation.
+pub fn get_battery_health_mode() -> bool {
+    if let Ok(v) = fs::read_to_string(BATTERY_HEALTH_PATH) {
+        return v.trim() == "1";
+    }
+    helper_read("bat-health-read").map(|v| v.trim() == "1").unwrap_or(false)
+}
+
+pub fn set_battery_health_mode(enabled: bool) -> Result<(), String> {
+    let val = if enabled { "1" } else { "0" };
+    // Try sysfs first (works if already root or if udev grants write access).
+    if fs::write(BATTERY_HEALTH_PATH, val).is_ok() {
+        return Ok(());
+    }
+    // Through the registered predator-sense-helper polkit action
+    // (auth_admin_keep, cached for a few minutes) rather than an ad-hoc
+    // `pkexec bash -c "echo ..."`, which is a different, uncached polkit
+    // action and prompted for a password on every single call.
+    helper_write("bat-health", val)
+}
+
 /// LCD Overdrive - reduces ghosting on the display
 pub fn get_lcd_overdrive() -> bool {
     if let Ok(v) = fs::read_to_string("/sys/bus/platform/drivers/acer-wmi/acer-wmi/predator_sense/lcd_override") {

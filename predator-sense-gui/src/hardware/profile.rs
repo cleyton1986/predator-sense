@@ -3,6 +3,27 @@ use std::process::Command;
 
 const PROFILE_STATE_FILE: &str = "/opt/predator-sense/current_profile";
 
+/// Read-only sysfs attribute the kernel module exposes for the physical
+/// Predator/Turbo keyboard key - see the `turbo_state` patch in
+/// kernel/facer.c. Verified by hand: pressing the key on real hardware
+/// flips this 0->1 (and the WMI call it makes also happens to write the
+/// exact same EC bytes `fan::set_fan_mode`'s own Max writes, 0x60/0x58 -
+/// confirmed by reading /dev/ec immediately after a press). The key only
+/// ever touches fan mode/OC/LED through WMI though - it never touches
+/// cpufreq governor/EPP/min_perf at all, so on its own it can never make
+/// the thermal-profile "Modo" page show Turbo. This attribute is what lets
+/// the app *notice* the key was pressed at all and react on purpose (see
+/// `hardware::turbo_button` in window.rs).
+const TURBO_BUTTON_SYSFS: &str = "/sys/devices/platform/acer-wmi/turbo_state";
+
+/// `None` if the attribute doesn't exist (unpatched/older facer.ko, or a
+/// model that never sends this WMI event at all - not every Predator
+/// generation has this dedicated key).
+pub fn get_turbo_button_state() -> Option<bool> {
+    let v = fs::read_to_string(TURBO_BUTTON_SYSFS).ok()?;
+    Some(v.trim() == "1")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PowerProfile { Quiet, Balanced, Performance, Turbo }
 
@@ -67,7 +88,23 @@ fn settings_for(p: PowerProfile) -> ProfileSettings {
 }
 
 pub fn get_current_profile() -> Option<PowerProfile> {
-    // 1st: user config dir (always writable)
+    // Live hardware state is checked FIRST and is the source of truth. The
+    // cached files below only remember what THIS app itself last wrote via
+    // set_profile() - they never learn about a change made outside it (the
+    // physical Predator/Turbo key on the keyboard, which some models toggle
+    // straight at the EC/governor level through facer.ko, entirely bypassing
+    // this app). Checking the cache first meant that once ANY profile had
+    // ever been set through the app, that stale cached value would win
+    // forever after - a hardware key press changed the real governor/EPP/
+    // turbo/min-perf values but the UI kept reporting the old cached guess,
+    // since the cache file always existed and always "matched" from then on.
+    if let Some(p) = detect_from_hardware() {
+        return Some(p);
+    }
+
+    // Fallback only when live hardware doesn't cleanly match one of the 4
+    // known profile signatures (e.g. read failed, or some third party left
+    // the machine in a custom/intermediate state).
     if let Some(config_dir) = dirs::config_dir() {
         let user_file = config_dir.join("predator-sense/current_profile");
         if let Ok(saved) = fs::read_to_string(&user_file) {
@@ -76,23 +113,41 @@ pub fn get_current_profile() -> Option<PowerProfile> {
             }
         }
     }
-
-    // 2nd: system state file (root-owned)
     if let Ok(saved) = fs::read_to_string(PROFILE_STATE_FILE) {
         if let Some(profile) = PowerProfile::from_id(&saved) {
             return Some(profile);
         }
     }
+    None
+}
 
-    // 3rd: detect from hardware state
+/// Matches live governor/EPP/turbo/min-perf against each of the 4 known
+/// profile presets (`settings_for`) and returns the one that matches
+/// exactly, if any. The old version of this fallback only ever compared
+/// governor+EPP and defaulted anything "performance"-flavored straight to
+/// `Performance` - it could never actually detect `Turbo` at all, since
+/// Performance and Turbo share the same governor/EPP/turbo bit and only
+/// differ in min_perf_pct (50 vs 100), which wasn't being checked.
+fn detect_from_hardware() -> Option<PowerProfile> {
     let gov = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").ok()?;
-    let epp = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference").unwrap_or_default();
-    match (gov.trim(), epp.trim()) {
-        ("powersave", "power") => Some(PowerProfile::Quiet),
-        ("powersave", _) => Some(PowerProfile::Balanced),
-        ("performance", _) => Some(PowerProfile::Performance),
-        _ => Some(PowerProfile::Balanced),
+    let epp = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference")
+        .unwrap_or_default();
+    let no_turbo = fs::read_to_string("/sys/devices/system/cpu/intel_pstate/no_turbo").unwrap_or_default();
+    let min_perf = fs::read_to_string("/sys/devices/system/cpu/intel_pstate/min_perf_pct").unwrap_or_default();
+    let (gov, epp, no_turbo, min_perf) = (gov.trim(), epp.trim(), no_turbo.trim(), min_perf.trim());
+
+    for p in [PowerProfile::Quiet, PowerProfile::Balanced, PowerProfile::Performance, PowerProfile::Turbo] {
+        let s = settings_for(p);
+        let expect_no_turbo = if s.no_turbo { "1" } else { "0" };
+        if gov == s.governor
+            && epp == s.epp
+            && no_turbo == expect_no_turbo
+            && min_perf == s.min_perf_pct.to_string()
+        {
+            return Some(p);
+        }
     }
+    None
 }
 
 pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
@@ -111,25 +166,20 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
         let _ = fs::write("/sys/devices/system/cpu/intel_pstate/min_perf_pct", &min_pct);
         let _ = set_nvidia_direct(s.gpu_watts);
     } else {
-        // Running as user: use a single pkexec call with all commands
-        let script = format!(
-            r#"
-for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo '{}' > "$c" 2>/dev/null; done
-for c in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do echo '{}' > "$c" 2>/dev/null; done
-echo '{}' > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null
-echo '{}' > /sys/devices/system/cpu/intel_pstate/min_perf_pct 2>/dev/null
-nvidia-smi -pm 1 2>/dev/null; nvidia-smi -pl {} 2>/dev/null
-"#,
-            s.governor, s.epp, turbo_val, min_pct, s.gpu_watts
-        );
-
-        let result = std::process::Command::new("pkexec")
-            .args(["bash", "-c", &script])
-            .output();
-
-        if let Err(e) = result {
-            return Err(format!("pkexec: {}", e));
-        }
+        // Running as user: through the registered predator-sense-helper
+        // polkit action (auth_admin_keep - one prompt, then cached for a
+        // few minutes) instead of an ad-hoc `pkexec bash -c <script>`,
+        // which (a) is a DIFFERENT, uncached polkit action so it prompted
+        // for a password on every single call, and (b) had its exit status
+        // completely ignored below, so a cancelled/failed authorization was
+        // silently treated as a successful profile change. Both real bugs,
+        // not just this feature's problem - just never surfaced clearly
+        // until the AI assistant started calling this path unattended.
+        run_helper("set-governor", s.governor)?;
+        run_helper("set-epp", s.epp)?;
+        run_helper("set-no-turbo", turbo_val)?;
+        run_helper("set-min-perf", &min_pct)?;
+        let _ = run_helper("set-gpu-power", &s.gpu_watts.to_string()); // no-op, harmless if no NVIDIA GPU
     }
 
     // Save the selected profile to state file

@@ -9,7 +9,7 @@ use crate::config;
 use crate::hardware::{rgb, sensors, setup};
 use crate::tray::TrayManager;
 use crate::ui::{
-    battery_page, dashboard_page, fan_control_page, fan_page, gpu_page, monitor_page,
+    ai_page, battery_page, dashboard_page, fan_control_page, fan_page, gpu_page, monitor_page,
     network_page, rgb_page, setup_page, temperatures_page, usage_page,
 };
 
@@ -170,6 +170,73 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         });
     }
 
+    // AI assistant background monitor (opt-in, off unless ai_assistant_enabled).
+    // Snapshots hardware state every minute; once `ai_check_interval_min`
+    // minutes' worth of snapshots have accumulated, asks Ollama for a
+    // verdict (same confirm-or-auto-apply gate as the manual/chat triggers
+    // on the AI page). Re-reads the interval from config on every tick, so
+    // changing it in Settings takes effect on the next tick - no restart.
+    {
+        let window_c = window.clone();
+        let minutes_since_check: Rc<std::cell::Cell<u32>> = Rc::new(std::cell::Cell::new(0));
+        glib::timeout_add_seconds_local(60, move || {
+            let cfg = config::load_app_config();
+            if !cfg.ai_assistant_enabled {
+                minutes_since_check.set(0);
+                return glib::ControlFlow::Continue;
+            }
+            crate::hardware::ai_snapshot::append_snapshot();
+            let elapsed = minutes_since_check.get() + 1;
+            if elapsed >= cfg.ai_check_interval_min.max(1) {
+                minutes_since_check.set(0);
+                ai_page::run_periodic_check(&window_c);
+            } else {
+                minutes_since_check.set(elapsed);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    // Physical Predator/Turbo keyboard key reaction (see profile.rs's
+    // TURBO_BUTTON_SYSFS doc comment and kernel/facer.c's turbo_state sysfs
+    // patch). The key itself only ever toggles fan mode/OC/LED at the WMI
+    // level - it never touches cpufreq governor/EPP/min_perf, so on its own
+    // it can never make the "Modo" page show Turbo. Polling this attribute
+    // and calling our own set_profile()/set_fan_mode() on a transition is
+    // what makes the key match "press it, everything becomes consistently
+    // Turbo" - both pages then update on their own via the live-refresh
+    // polling already in fan_page.rs/fan_control_page.rs, no direct
+    // knowledge of this timer needed there.
+    {
+        use crate::hardware::{fan, profile};
+        let last_state: Rc<std::cell::Cell<Option<bool>>> = Rc::new(std::cell::Cell::new(None));
+        glib::timeout_add_seconds_local(2, move || {
+            let Some(now) = profile::get_turbo_button_state() else {
+                return glib::ControlFlow::Continue; // no such attribute on this hardware/kernel module
+            };
+            if last_state.get() == Some(now) {
+                return glib::ControlFlow::Continue;
+            }
+            let first_read = last_state.get().is_none();
+            last_state.set(Some(now));
+            if first_read {
+                // Don't act on whatever the state happened to be at app
+                // startup - only react to an actual transition from here on.
+                return glib::ControlFlow::Continue;
+            }
+            if now {
+                let _ = profile::set_profile(profile::PowerProfile::Turbo);
+                let _ = fan::set_fan_mode(fan::FanMode::Max);
+                crate::hardware::applog::info("Turbo key: pressed, forced profile=Turbo fan=Max");
+            } else {
+                let _ = profile::set_profile(profile::PowerProfile::Balanced);
+                let _ = fan::set_fan_mode(fan::FanMode::Auto);
+                crate::hardware::applog::info("Turbo key: released, restored profile=Balanced fan=Auto");
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
     // Wrap in overlay with neon edge bars drawn on top
     let root_overlay = gtk::Overlay::new();
     root_overlay.set_child(Some(&main_content));
@@ -213,7 +280,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
 }
 
 /// Build main area matching nova-ui.html: main-area with padding, sidebar + content-panel
-fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) -> gtk::Overlay {
+fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -> gtk::Overlay {
     // Main area overlay (for the diagonal stripe background)
     let main_overlay = gtk::Overlay::new();
     main_overlay.set_hexpand(true);
@@ -274,6 +341,7 @@ fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) 
     let battery = battery_page::build();
     let gpu = gpu_page::build();
     let monitor = monitor_page::build();
+    let ai = ai_page::build(window);
     let settings = build_settings_page(app);
 
     stack.add_named(&dashboard, Some("home"));
@@ -286,6 +354,7 @@ fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) 
     stack.add_named(&battery, Some("battery"));
     stack.add_named(&gpu, Some("gpu"));
     stack.add_named(&monitor, Some("monitor"));
+    stack.add_named(&ai, Some("ai"));
     stack.add_named(&settings, Some("settings"));
 
     // Menu items
@@ -300,6 +369,7 @@ fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) 
         (crate::i18n::t("battery"), "battery"),
         (crate::i18n::t("gpu_menu"), "gpu"),
         (crate::i18n::t("monitoring"), "monitor"),
+        (crate::i18n::t("ai_page_nav"), "ai"),
         (crate::i18n::t("settings"), "settings"),
     ];
 
@@ -330,6 +400,38 @@ fn build_main_content(app: &adw::Application, _window: &gtk::ApplicationWindow) 
             lbl.add_css_class("nav-label");
         }
         item_overlay.add_overlay(&lbl);
+
+        // "BETA" ribbon badge - only on the AI assistant nav item, a heads
+        // up that it's an opt-in, experimental feature (small model
+        // reliability isn't guaranteed - see hardware/ai_assistant.rs).
+        // Pulses opacity slowly so it stays noticeable without being a
+        // distracting constant blink, same idea as the header's neon-edge
+        // pulse animation further down this file.
+        if *page_name == "ai" {
+            let badge = gtk::Label::new(Some("BETA"));
+            badge.add_css_class("nav-beta-badge");
+            badge.set_halign(gtk::Align::End);
+            badge.set_valign(gtk::Align::Start);
+            badge.set_margin_end(14);
+            badge.set_margin_top(4);
+            item_overlay.add_overlay(&badge);
+
+            let badge_c = badge.clone();
+            let phase: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
+            glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+                if !crate::app_state::is_window_visible() {
+                    return glib::ControlFlow::Continue;
+                }
+                let mut p = phase.borrow_mut();
+                *p += 0.04;
+                if *p > std::f64::consts::TAU {
+                    *p -= std::f64::consts::TAU;
+                }
+                let opacity = 0.55 + 0.45 * ((p.sin() + 1.0) / 2.0);
+                badge_c.set_opacity(opacity);
+                glib::ControlFlow::Continue
+            });
+        }
 
         // Click
         let gesture = gtk::GestureClick::new();
@@ -815,6 +917,69 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     font_row.append(&font_scale_label);
     font_row.append(&font_scale);
     page.append(&font_row);
+
+    // === AI Assistant Section (opt-in) ===
+    // Enable/permission toggles live here (Settings), matching every other
+    // opt-in feature's pattern; the actual chat/model-manager UI lives on
+    // its own page (see ui/ai_page.rs) since it needs a lot more room.
+    let ai_title = gtk::Label::new(Some(t("ai_assistant_title")));
+    ai_title.add_css_class("settings-section-title");
+    ai_title.set_halign(gtk::Align::Start);
+    ai_title.set_margin_top(20);
+    page.append(&ai_title);
+
+    let ai_desc = gtk::Label::new(Some(t("ai_assistant_desc")));
+    ai_desc.add_css_class("info-note");
+    ai_desc.set_halign(gtk::Align::Start);
+    ai_desc.set_wrap(true);
+    page.append(&ai_desc);
+
+    let ai_enable_row = create_setting_row(t("ai_assistant_enable"), t("ai_assistant_enable_desc"));
+    let ai_enable_switch = gtk::Switch::new();
+    ai_enable_switch.set_active(cfg.ai_assistant_enabled);
+    ai_enable_switch.set_valign(gtk::Align::Center);
+    ai_enable_row.append(&ai_enable_switch);
+    page.append(&ai_enable_row);
+
+    let ai_auto_row = create_setting_row(t("ai_auto_apply"), t("ai_auto_apply_desc"));
+    let ai_auto_switch = gtk::Switch::new();
+    ai_auto_switch.set_active(cfg.ai_auto_apply);
+    ai_auto_switch.set_valign(gtk::Align::Center);
+    ai_auto_switch.set_sensitive(cfg.ai_assistant_enabled);
+    ai_auto_row.append(&ai_auto_switch);
+    page.append(&ai_auto_row);
+    ai_auto_switch.connect_state_set(move |_, active| {
+        let mut c = config::load_app_config();
+        c.ai_auto_apply = active;
+        let _ = config::save_app_config(&c);
+        glib::Propagation::Proceed
+    });
+
+    let ai_interval_row = create_setting_row(t("ai_check_interval"), t("ai_check_interval_desc"));
+    let ai_interval_spin = gtk::SpinButton::with_range(1.0, 180.0, 1.0);
+    ai_interval_spin.set_value(cfg.ai_check_interval_min as f64);
+    ai_interval_spin.set_valign(gtk::Align::Center);
+    ai_interval_spin.set_sensitive(cfg.ai_assistant_enabled);
+    ai_interval_row.append(&ai_interval_spin);
+    page.append(&ai_interval_row);
+    ai_interval_spin.connect_value_changed(move |sp| {
+        let mut c = config::load_app_config();
+        c.ai_check_interval_min = sp.value() as u32;
+        let _ = config::save_app_config(&c);
+    });
+
+    {
+        let ai_auto_switch = ai_auto_switch.clone();
+        let ai_interval_spin = ai_interval_spin.clone();
+        ai_enable_switch.connect_state_set(move |_, active| {
+            let mut c = config::load_app_config();
+            c.ai_assistant_enabled = active;
+            let _ = config::save_app_config(&c);
+            ai_auto_switch.set_sensitive(active);
+            ai_interval_spin.set_sensitive(active);
+            glib::Propagation::Proceed
+        });
+    }
 
     // Module status
     // === Hardware Settings Section ===
