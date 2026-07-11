@@ -135,7 +135,7 @@ pub fn build() -> gtk::Box {
         let s = state.clone();
         keyboard_da.set_draw_func(move |_a, cr, w, h| {
             let st = s.borrow();
-            if !st.is_static && preview_only {
+            if !st.is_static {
                 let colors = preview_zone_colors(st.mode, st.anim_phase, st.direction, st.dyn_color);
                 draw_keyboard(cr, w as f64, h as f64, &colors);
             } else {
@@ -145,7 +145,10 @@ pub fn build() -> gtk::Box {
     }
     page.append(&keyboard_da);
 
-    // Preview-only note (module-free HID hardware, Dynamic tab)
+    // Preview-only note: only shown on module-free HID hardware, where the
+    // on-screen animation below is the ONLY place the effect shows up (the
+    // physical keyboard doesn't animate there). On hardware with the kernel
+    // module, the physical keyboard is genuinely animating too, so no note.
     let preview_note = gtk::Label::new(Some(crate::i18n::t("rgb_preview_note")));
     preview_note.add_css_class("warning-text");
     preview_note.set_margin_top(2);
@@ -153,10 +156,12 @@ pub fn build() -> gtk::Box {
     preview_note.set_visible(false);
     page.append(&preview_note);
 
-    // Animation timer for the preview: only ticks while Dynamic is selected
-    // on module-free HID hardware, self-cancels once the page is torn down
-    // (widget.root() goes None), same pattern as ai_page.rs's timers.
-    if preview_only {
+    // Animation timer for the on-screen keyboard visual: ticks whenever
+    // Dynamic is selected, on any hardware, so the UI reflects the chosen
+    // effect (Breathing/Neon/Wave/Shifting/Zoom) even where the physical
+    // keyboard is also animating for real. Self-cancels once the page is
+    // torn down (widget.root() goes None), same pattern as ai_page.rs.
+    {
         let s = state.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
             let da = { s.borrow().keyboard_da.clone() };
@@ -173,9 +178,10 @@ pub fn build() -> gtk::Box {
         });
     }
 
-    // Toggle the preview note + redraw immediately on mode switch (module-free
-    // HID hardware only - on any other hardware this note never applies).
-    if preview_only {
+    // Redraw immediately on mode switch (so it doesn't wait up to 60ms for
+    // the timer tick), on any hardware. The preview note itself only ever
+    // becomes visible on module-free HID hardware.
+    {
         let note = preview_note.clone();
         let da = keyboard_da.clone();
         static_btn.connect_toggled(move |b| {
@@ -188,7 +194,7 @@ pub fn build() -> gtk::Box {
         let da = keyboard_da.clone();
         dynamic_btn.connect_toggled(move |b| {
             if b.is_active() {
-                note.set_visible(true);
+                note.set_visible(preview_only);
                 da.queue_draw();
             }
         });
@@ -487,11 +493,11 @@ pub fn build() -> gtk::Box {
     page
 }
 
-/// Purely cosmetic simulation of what a dynamic effect would look like,
-/// used only on module-free HID hardware that has no real dynamic-effect
-/// device to drive (issue #12). No hardware is touched here - this only
-/// feeds `draw_keyboard`'s existing per-zone color array with an animated
-/// pattern instead of the static config colors.
+/// On-screen animation of the selected dynamic effect, shown on the
+/// keyboard visual whenever Dynamic mode is active (real hardware or the
+/// module-free HID preview from issue #12, same math either way). Follows
+/// `RgbMode::needs_color()`: Neon and Wave are hardware-autonomous rainbow
+/// patterns that ignore the color picker, the rest use the picked color.
 fn preview_zone_colors(mode: RgbMode, phase: f64, direction: Direction, color: (u8, u8, u8)) -> [(u8, u8, u8); 4] {
     use std::f64::consts::FRAC_PI_2;
     use std::f64::consts::FRAC_PI_4;
@@ -503,29 +509,32 @@ fn preview_zone_colors(mode: RgbMode, phase: f64, direction: Direction, color: (
             [scale(color, level); 4]
         }
         RgbMode::Neon => {
-            let level = if phase.sin() > 0.0 { 1.0 } else { 0.12 };
-            [scale(color, level); 4]
+            // Hardware-autonomous rainbow flicker, ignores the color picker
+            // (needs_color() == false for this mode).
+            let level = if phase.sin() > 0.0 { 1.0 } else { 0.25 };
+            let hue = (phase * 0.1).rem_euclid(1.0);
+            [hsv_to_rgb(hue, 1.0, level); 4]
         }
         RgbMode::Wave => {
+            // Hardware-autonomous colorful traveling band, ignores the
+            // color picker (needs_color() == false for this mode).
+            let sign = if direction == Direction::RightToLeft { 1.0 } else { -1.0 };
+            let mut out = [(0u8, 0u8, 0u8); 4];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let offset = sign * i as f64 * 0.15;
+                let hue = (phase * 0.12 + offset).rem_euclid(1.0);
+                *slot = hsv_to_rgb(hue, 1.0, 0.9);
+            }
+            out
+        }
+        RgbMode::Shifting => {
+            // Picked color, traveling brightness wave across zones.
             let sign = if direction == Direction::RightToLeft { 1.0 } else { -1.0 };
             let mut out = [(0u8, 0u8, 0u8); 4];
             for (i, slot) in out.iter_mut().enumerate() {
                 let offset = sign * i as f64 * FRAC_PI_2;
                 let level = 0.15 + 0.85 * (0.5 + 0.5 * (phase + offset).sin());
                 *slot = scale(color, level);
-            }
-            out
-        }
-        RgbMode::Shifting => {
-            // Color-cycling look (blends toward the inverse color), distinct
-            // from Wave's brightness-only pulse.
-            let sign = if direction == Direction::RightToLeft { 1.0 } else { -1.0 };
-            let inv = (255 - color.0, 255 - color.1, 255 - color.2);
-            let mut out = [(0u8, 0u8, 0u8); 4];
-            for (i, slot) in out.iter_mut().enumerate() {
-                let offset = sign * i as f64 * FRAC_PI_2;
-                let t = 0.5 + 0.5 * (phase * 1.6 + offset).sin();
-                *slot = lerp(color, inv, t);
             }
             out
         }
@@ -546,13 +555,22 @@ fn scale(color: (u8, u8, u8), factor: f64) -> (u8, u8, u8) {
     ((color.0 as f64 * f) as u8, (color.1 as f64 * f) as u8, (color.2 as f64 * f) as u8)
 }
 
-fn lerp(a: (u8, u8, u8), b: (u8, u8, u8), t: f64) -> (u8, u8, u8) {
-    let t = t.clamp(0.0, 1.0);
-    (
-        (a.0 as f64 + (b.0 as f64 - a.0 as f64) * t) as u8,
-        (a.1 as f64 + (b.1 as f64 - a.1 as f64) * t) as u8,
-        (a.2 as f64 + (b.2 as f64 - a.2 as f64) * t) as u8,
-    )
+fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
+    let h = h.rem_euclid(1.0) * 6.0;
+    let i = h.floor() as i32;
+    let f = h - h.floor();
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    let (r, g, b) = match i.rem_euclid(6) {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
 fn draw_keyboard(cr: &gtk4::cairo::Context, w: f64, h: f64, colors: &[(u8, u8, u8); 4]) {
