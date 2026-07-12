@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk};
+use gtk4::{self as gtk, glib};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -15,6 +15,7 @@ struct RgbState {
     is_static: bool,
     status: gtk::Label,
     keyboard_da: gtk::DrawingArea,
+    anim_phase: f64,
 }
 
 pub fn build() -> gtk::Box {
@@ -52,6 +53,7 @@ pub fn build() -> gtk::Box {
         is_static: true,
         status: status.clone(),
         keyboard_da: keyboard_da.clone(),
+        anim_phase: 0.0,
     }));
 
     // Toggle: Estático / Dinâmico + brightness
@@ -85,6 +87,7 @@ pub fn build() -> gtk::Box {
         let db = dynamic_btn.clone();
         let dc = dyn_controls.clone();
         let zc = zone_controls.clone();
+        let da = keyboard_da.clone();
         static_btn.connect_toggled(move |b| {
             if b.is_active() {
                 db.set_active(false);
@@ -93,6 +96,7 @@ pub fn build() -> gtk::Box {
                 s.borrow_mut().is_static = true;
                 zc.set_visible(true);
                 dc.set_visible(false);
+                da.queue_draw();
             }
         });
     }
@@ -101,6 +105,7 @@ pub fn build() -> gtk::Box {
         let sb = static_btn.clone();
         let dc = dyn_controls.clone();
         let zc = zone_controls.clone();
+        let da = keyboard_da.clone();
         dynamic_btn.connect_toggled(move |b| {
             if b.is_active() {
                 sb.set_active(false);
@@ -109,6 +114,7 @@ pub fn build() -> gtk::Box {
                 s.borrow_mut().is_static = false;
                 zc.set_visible(false);
                 dc.set_visible(true);
+                da.queue_draw();
             }
         });
     }
@@ -118,14 +124,41 @@ pub fn build() -> gtk::Box {
     toggle_box.append(&bright_box);
     page.append(&toggle_box);
 
-    // Keyboard visual
+    // Keyboard visual. In Dynamic mode, animates on screen to match the
+    // selected effect (Breathing/Neon/Wave/Shifting/Zoom) - purely a UI
+    // simulation, doesn't change what Apply actually sends to hardware.
     {
         let s = state.clone();
         keyboard_da.set_draw_func(move |_a, cr, w, h| {
-            draw_keyboard(cr, w as f64, h as f64, &s.borrow().zone_colors);
+            let st = s.borrow();
+            if !st.is_static {
+                let colors = preview_zone_colors(st.mode, st.anim_phase, st.direction, st.dyn_color);
+                draw_keyboard(cr, w as f64, h as f64, &colors);
+            } else {
+                draw_keyboard(cr, w as f64, h as f64, &st.zone_colors);
+            }
         });
     }
     page.append(&keyboard_da);
+
+    // Animation timer: ticks while Dynamic is selected, self-cancels once
+    // the page is torn down (widget.root() goes None).
+    {
+        let s = state.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+            let da = { s.borrow().keyboard_da.clone() };
+            if da.root().is_none() {
+                return glib::ControlFlow::Break;
+            }
+            let mut st = s.borrow_mut();
+            if !st.is_static {
+                let speed_factor = 0.03 + (st.speed as f64) * 0.02;
+                st.anim_phase += speed_factor;
+                da.queue_draw();
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     // === Zone controls (visible in static mode) ===
     let zones_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -323,6 +356,85 @@ pub fn build() -> gtk::Box {
     }
 
     page
+}
+
+/// On-screen animation of the selected dynamic effect, shown on the
+/// keyboard visual whenever Dynamic mode is active. Follows
+/// `RgbMode::needs_color()`: Neon and Wave are hardware-autonomous rainbow
+/// patterns that ignore the color picker, the rest use the picked color.
+fn preview_zone_colors(mode: RgbMode, phase: f64, direction: Direction, color: (u8, u8, u8)) -> [(u8, u8, u8); 4] {
+    use std::f64::consts::FRAC_PI_2;
+    use std::f64::consts::FRAC_PI_4;
+
+    match mode {
+        RgbMode::Static => [color; 4],
+        RgbMode::Breath => {
+            let level = 0.15 + 0.85 * (0.5 + 0.5 * phase.sin());
+            [scale(color, level); 4]
+        }
+        RgbMode::Neon => {
+            // Hardware-autonomous rainbow flicker, ignores the color picker
+            // (needs_color() == false for this mode).
+            let level = if phase.sin() > 0.0 { 1.0 } else { 0.25 };
+            let hue = (phase * 0.1).rem_euclid(1.0);
+            [hsv_to_rgb(hue, 1.0, level); 4]
+        }
+        RgbMode::Wave => {
+            // Hardware-autonomous colorful traveling band, ignores the
+            // color picker (needs_color() == false for this mode).
+            let sign = if direction == Direction::RightToLeft { 1.0 } else { -1.0 };
+            let mut out = [(0u8, 0u8, 0u8); 4];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let offset = sign * i as f64 * 0.15;
+                let hue = (phase * 0.12 + offset).rem_euclid(1.0);
+                *slot = hsv_to_rgb(hue, 1.0, 0.9);
+            }
+            out
+        }
+        RgbMode::Shifting => {
+            // Picked color, traveling brightness wave across zones.
+            let sign = if direction == Direction::RightToLeft { 1.0 } else { -1.0 };
+            let mut out = [(0u8, 0u8, 0u8); 4];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let offset = sign * i as f64 * FRAC_PI_2;
+                let level = 0.15 + 0.85 * (0.5 + 0.5 * (phase + offset).sin());
+                *slot = scale(color, level);
+            }
+            out
+        }
+        RgbMode::Zoom => {
+            let mut out = [(0u8, 0u8, 0u8); 4];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let dist = if i == 0 || i == 3 { 1.0 } else { 0.0 };
+                let level = 0.15 + 0.85 * (0.5 + 0.5 * (phase - dist * FRAC_PI_4).sin());
+                *slot = scale(color, level);
+            }
+            out
+        }
+    }
+}
+
+fn scale(color: (u8, u8, u8), factor: f64) -> (u8, u8, u8) {
+    let f = factor.clamp(0.0, 1.0);
+    ((color.0 as f64 * f) as u8, (color.1 as f64 * f) as u8, (color.2 as f64 * f) as u8)
+}
+
+fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
+    let h = h.rem_euclid(1.0) * 6.0;
+    let i = h.floor() as i32;
+    let f = h - h.floor();
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    let (r, g, b) = match i.rem_euclid(6) {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
 fn draw_keyboard(cr: &gtk4::cairo::Context, w: f64, h: f64, colors: &[(u8, u8, u8); 4]) {
