@@ -1,6 +1,6 @@
 [package]
 name = "predator-sense"
-version = "0.2.29-preview"
+version = "0.2.30-preview"
 edition = "2021"
 description = "Predator Sense for Linux - Hardware control for Acer gaming laptops"
 license = "GPL-3.0"
