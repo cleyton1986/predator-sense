@@ -168,7 +168,7 @@ msg install
 GUI_DIR="$TMP_DIR/predator-sense-gui"
 mkdir -p "$INSTALL_DIR/resources" "$INSTALL_DIR/kernel"
 cp "$GUI_DIR/target/release/predator-sense" "$INSTALL_DIR/"
-cp "$GUI_DIR/resources/"* "$INSTALL_DIR/resources/" 2>/dev/null || true
+cp -r "$GUI_DIR/resources/"* "$INSTALL_DIR/resources/" 2>/dev/null || true
 cp "$GUI_DIR/kernel/facer.c" "$GUI_DIR/kernel/Makefile" "$GUI_DIR/kernel/dkms.conf" "$INSTALL_DIR/kernel/" 2>/dev/null || true
 chmod +x "$INSTALL_DIR/predator-sense"
 

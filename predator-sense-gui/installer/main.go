@@ -17,7 +17,7 @@ const (
 	desktopFile = "/usr/share/applications/predator-sense.desktop"
 	iconPath    = "/usr/share/icons/hicolor/128x128/apps/predator-sense.png"
 	polkitRule  = "/usr/share/polkit-1/actions/com.predator.sense.policy"
-	appVersion  = "0.2.33-preview"
+	appVersion  = "0.2.34-preview"
 )
 
 // ─── Colors ───
@@ -479,11 +479,15 @@ func installFiles() error {
 	}
 	os.Chmod(installDir+"/predator-sense", 0755)
 
-	// Copy resources
+	// Copy resources (files and subdirectories, e.g. resources/models/)
 	resources, _ := filepath.Glob(filepath.Join(guiDir, "resources/*"))
 	for _, r := range resources {
 		dst := filepath.Join(installDir, "resources", filepath.Base(r))
-		copyFile(r, dst)
+		if info, err := os.Stat(r); err == nil && info.IsDir() {
+			copyDir(r, dst)
+		} else {
+			copyFile(r, dst)
+		}
 	}
 
 	// Copy kernel sources so the GUI's setup wizard can recompile after kernel updates
@@ -1243,6 +1247,26 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, data, 0644)
+}
+
+func copyDir(src, dst string) error {
+	os.MkdirAll(dst, 0755)
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		srcPath := filepath.Join(src, e.Name())
+		dstPath := filepath.Join(dst, e.Name())
+		if e.IsDir() {
+			if err := copyDir(srcPath, dstPath); err != nil {
+				return err
+			}
+		} else if err := copyFile(srcPath, dstPath); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func chownToUser(path string) {

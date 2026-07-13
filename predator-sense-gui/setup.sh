@@ -116,7 +116,7 @@ build_app() {
 install_files() {
     mkdir -p "$INSTALL_DIR/resources"
     cp "$SCRIPT_DIR/target/release/predator-sense" "$INSTALL_DIR/"
-    cp "$SCRIPT_DIR/resources/"* "$INSTALL_DIR/resources/" 2>/dev/null || true
+    cp -r "$SCRIPT_DIR/resources/"* "$INSTALL_DIR/resources/" 2>/dev/null || true
     chmod +x "$INSTALL_DIR/predator-sense"
 }
 
