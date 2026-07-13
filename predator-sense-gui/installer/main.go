@@ -17,7 +17,7 @@ const (
 	desktopFile = "/usr/share/applications/predator-sense.desktop"
 	iconPath    = "/usr/share/icons/hicolor/128x128/apps/predator-sense.png"
 	polkitRule  = "/usr/share/polkit-1/actions/com.predator.sense.policy"
-	appVersion  = "0.2.27"
+	appVersion  = "0.2.28"
 )
 
 // ─── Colors ───
@@ -380,14 +380,14 @@ func installDeps() error {
 	// or pacman by default, so this ordering is safe.
 	if commandExists("dnf") {
 		return run("dnf", "install", "-y",
-			"gtk4-devel", "libadwaita-devel", "pkg-config", "gcc", "make", "dkms")
+			"gtk4-devel", "libadwaita-devel", "pkg-config", "gcc", "make", "dkms", "python3")
 	} else if commandExists("pacman") {
 		return run("pacman", "-S", "--noconfirm", "--needed",
-			"gtk4", "libadwaita", "pkgconf", "gcc", "make", "dkms")
+			"gtk4", "libadwaita", "pkgconf", "gcc", "make", "dkms", "python")
 	} else if commandExists("apt-get") {
 		return run("apt-get", "install", "-y",
 			"libgtk-4-dev", "libadwaita-1-dev", "pkg-config", "build-essential",
-			"gcc", "make", "dkms", "libayatana-appindicator3-dev")
+			"gcc", "make", "dkms", "libayatana-appindicator3-dev", "python3")
 	}
 	return fmt.Errorf("gerenciador de pacotes não detectado (apt/dnf/pacman)")
 }
@@ -767,6 +767,33 @@ func installTray() error {
 const dkmsModule = "facer"
 const dkmsVersion = "0.2"
 
+// dkmsRegisteredVersions returns every version of dkmsModule currently
+// registered with DKMS (not just dkmsVersion) - a prior release may have
+// registered a different version string (manually, or via an older
+// installer), and leaving it behind means kernel upgrades keep rebuilding
+// a stale module that's no longer installed anywhere else.
+func dkmsRegisteredVersions() []string {
+	out := runOutput("dkms", "status", dkmsModule)
+	if out == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var versions []string
+	for _, line := range strings.Split(out, "\n") {
+		prefix := dkmsModule + "/"
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(line, prefix)
+		ver := strings.SplitN(rest, ",", 2)[0]
+		if ver != "" && !seen[ver] {
+			seen[ver] = true
+			versions = append(versions, ver)
+		}
+	}
+	return versions
+}
+
 func installModule() error {
 	if repoDir == "" || !fileExists(filepath.Join(repoDir, "kernel/facer.c")) {
 		return fmt.Errorf("código fonte do módulo não encontrado")
@@ -777,9 +804,13 @@ func installModule() error {
 
 	srcDir := fmt.Sprintf("/usr/src/%s-%s", dkmsModule, dkmsVersion)
 
-	// Sync sources into /usr/src/<module>-<version>/. Remove any prior copy so
-	// stale files from an older release don't leak into the new build.
-	run("dkms", "remove", "-m", dkmsModule, "-v", dkmsVersion, "--all")
+	// Remove every registered version (not just dkmsVersion) so stale
+	// sources from an older release, including ones registered under a
+	// different version string, don't leak into the new build.
+	for _, ver := range dkmsRegisteredVersions() {
+		run("dkms", "remove", "-m", dkmsModule, "-v", ver, "--all")
+		os.RemoveAll(fmt.Sprintf("/usr/src/%s-%s", dkmsModule, ver))
+	}
 	os.RemoveAll(srcDir)
 	os.MkdirAll(srcDir, 0755)
 
@@ -894,13 +925,19 @@ func uninstall() {
 	os.Remove(filepath.Join(realHome, ".config/autostart/predator-sense-hotkey.desktop"))
 	runAsUser("systemctl", "--user", "daemon-reload")
 
-	// Unregister DKMS module so kernel upgrades stop rebuilding it
+	// Unregister every registered DKMS version (not just the current one)
+	// so a leftover from an older release doesn't keep rebuilding on kernel
+	// upgrades after uninstall.
 	if commandExists("dkms") {
-		run("dkms", "remove", "-m", dkmsModule, "-v", dkmsVersion, "--all")
-		os.RemoveAll(fmt.Sprintf("/usr/src/%s-%s", dkmsModule, dkmsVersion))
+		for _, ver := range dkmsRegisteredVersions() {
+			run("dkms", "remove", "-m", dkmsModule, "-v", ver, "--all")
+			os.RemoveAll(fmt.Sprintf("/usr/src/%s-%s", dkmsModule, ver))
+		}
 	}
 	os.Remove("/etc/modules-load.d/facer.conf")
 	os.Remove("/etc/modprobe.d/predator-sense.conf")
+	os.Remove("/etc/udev/rules.d/99-predator-ec.rules")
+	run("udevadm", "control", "--reload-rules")
 
 	os.RemoveAll(installDir)
 	os.Remove(desktopFile)
