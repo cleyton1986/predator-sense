@@ -95,7 +95,7 @@ Inspirado e baseado no projeto [acer-predator-turbo-and-rgb-keyboard-linux-modul
 | **Temperaturas** | Gauges em tempo real para CPU, GPU, sistema, NVMe, WiFi e RAM |
 | **Consumo** | Visão em 4 abas: CPU / GPU / Memória / Armazenamento, com top processos, detalhes ao clicar e animação de fogo CSS no gauge de temperatura |
 | **Rede** | Gráficos de download/upload em tempo real, com tracking de pico e detecção automática de interface |
-| **Controle RGB do Teclado** | Cores estáticas por zona (4 zonas) e efeitos dinâmicos (Respiração, Neon, Onda, Deslizar, Zoom) |
+| **Controle RGB do Teclado** | Cores estáticas por zona (4 zonas) e efeitos dinâmicos (Respiração, Neon, Onda, Deslizar, Zoom). Em hardware sem o módulo kernel (só controlador I2C-HID), cor estática, brilho, desligar luz e os efeitos Respiração/Neon também funcionam nativamente via HID — veja [Compatibilidade](#compatibilidade) |
 | **Perfis de Desempenho** | Silencioso / Balanceado / Performance / Turbo (CPU governor + Intel EPP + limite de potência da GPU) |
 | **Controle de Ventoinha** | RPM ao vivo com animação girando, toggle do CoolBoost, modos Auto/Max, e controle PWM por ventoinha + curva automática por temperatura (experimental, onde suportado) |
 | **Bateria** | Estatísticas de carga, ciclos, saúde, fabricante e limite de carga em 80% para preservar a longevidade |
@@ -163,6 +163,16 @@ Legenda: ✅ testado e funcionando · 🟡 implementado, não testado (precisa d
 | **Fan PWM %** 🧪 | Controle de velocidade por ventoinha (`pwm1`/`pwm2` 0–100%) portado do `acer-wmi` mainline via WMI — **somente kernel ≥ 6.14** | Subconjunto de modelos com `ACER_CAP_PWM` (AN515-58, PHN16-72/73, …) |
 
 > **🧪 O controle PWM é experimental.** É portado do driver `acer-wmi` oficial do kernel Linux e usa métodos WMI seguros (sem escrita bruta no EC), mas **não foi verificado em hardware real** pelo mantenedor (que tem um PH315-54, sem PWM). Se você tem um modelo suportado, relatos de teste são muito bem-vindos. **Use por sua conta e risco** — veja o aviso no topo.
+
+### RGB sem o módulo kernel (só hardware I2C-HID)
+
+Alguns modelos (confirmado: PHN16S-71, PHN16-73) roteiam o controlador RGB do teclado por um chip I2C-HID separado (ENEK5130) em vez da interface WMI do `facer.ko` — o app fala direto com ele via `/dev/hidrawN`, então funciona mesmo sem o módulo kernel carregado:
+
+| Recurso | Status |
+|---|---|
+| Cor estática por zona, brilho, desligar luz | ✅ confirmado funcionando (PHN16S-71) |
+| Efeitos dinâmicos — Respiração, Neon 🧪 | Nativo, um único write HID, hardware faz o loop do padrão sozinho — **aguardando confirmação** em hardware real |
+| Efeitos dinâmicos — Onda, Deslizar, Zoom | Só prévia visual na tela (sem escrita em hardware) — os códigos desses efeitos variam de significado entre gerações de hardware, então ainda não foram ativados |
 
 ---
 
@@ -278,6 +288,8 @@ sudo chmod +x /opt/predator-sense/predator-sense
 3. **Modo Estático:** ajuste os sliders R/G/B para cada uma das 4 secções do teclado
 4. **Modo Dinâmico:** selecione um efeito (Respiração, Neon, Onda, Deslizar, Zoom) e ajuste a velocidade
 5. Clique em **Aplicar**
+
+> Em hardware só I2C-HID sem o módulo kernel (veja [Compatibilidade](#compatibilidade)), Respiração e Neon animam de verdade; Onda/Deslizar/Zoom mostram só prévia visual, claramente rotulada como tal — o teclado físico ainda não muda pra esses.
 
 ### Perfis de Desempenho
 
