@@ -45,13 +45,14 @@ pub fn build() -> gtk::Box {
     keyboard_da.set_halign(gtk::Align::Fill);
 
     // Module-free HID-only hardware (e.g. PHN16S-71 without facer.ko, see
-    // issue #12) has no real dynamic-effect device to write to - only static
-    // per-zone color via ENEK5130. Rather than block the Dynamic tab
-    // entirely, show an on-screen-only animated simulation of the effect
-    // (no hardware writes at all) so users can still see what each mode
-    // looks like. Decided once at build time since hardware doesn't change
-    // while the app runs.
-    let preview_only = hid_rgb::is_available() && !rgb::is_module_loaded();
+    // issue #12) has no facer.ko dynamic-effect device, but some effects
+    // (Breath, Neon) are confirmed reachable natively through the same
+    // ENEK5130 feature report as static color - one write, the EC loops the
+    // pattern on its own (issue #12 follow-up). Others (Wave/Shifting/Zoom)
+    // were found to mean different things on different hardware generations
+    // and stay preview-only until confirmed per model. Decided once at build
+    // time since hardware doesn't change while the app runs.
+    let hid_only = hid_rgb::is_available() && !rgb::is_module_loaded();
 
     let state = Rc::new(RefCell::new(RgbState {
         mode: RgbMode::Breath,
@@ -192,9 +193,10 @@ pub fn build() -> gtk::Box {
         });
         let note = preview_note.clone();
         let da = keyboard_da.clone();
+        let s = state.clone();
         dynamic_btn.connect_toggled(move |b| {
             if b.is_active() {
-                note.set_visible(preview_only);
+                note.set_visible(hid_only && !mode_is_hid_native(s.borrow().mode));
                 da.queue_draw();
             }
         });
@@ -279,6 +281,8 @@ pub fn build() -> gtk::Box {
         if i == 0 { btn.set_active(true); btn.add_css_class("mode-active"); }
         let s = state.clone();
         let er = effects_row.clone();
+        let note = preview_note.clone();
+        let da = keyboard_da.clone();
         btn.connect_toggled(move |b| {
             if b.is_active() {
                 s.borrow_mut().mode = match i {
@@ -293,6 +297,8 @@ pub fn build() -> gtk::Box {
                     c = w.next_sibling();
                 }
                 b.add_css_class("mode-active");
+                note.set_visible(hid_only && !mode_is_hid_native(s.borrow().mode));
+                da.queue_draw();
             }
         });
         effects_row.append(&btn);
@@ -405,10 +411,25 @@ pub fn build() -> gtk::Box {
                 }
 
                 hid_result
-            } else if preview_only {
-                // Module-free HID hardware has no real dynamic-effect device
-                // to write to (see issue #12) - the animation is on-screen
-                // only, nothing to send here.
+            } else if hid_only && mode_is_hid_native(st.mode) {
+                // Confirmed native effect on the ENEK5130 controller (issue
+                // #12 follow-up): one feature report write, the EC then loops
+                // the pattern on its own - same "send it once" model as the
+                // WMI dynamic path below, just reached over HID instead.
+                let hid_mode = match st.mode {
+                    RgbMode::Breath => hid_rgb::MODE_BREATH,
+                    RgbMode::Neon => hid_rgb::MODE_NEON,
+                    _ => unreachable!("mode_is_hid_native guards this"),
+                };
+                hid_rgb::set_effect(
+                    hid_mode, st.brightness, st.speed, st.direction as u8,
+                    st.dyn_color.0, st.dyn_color.1, st.dyn_color.2,
+                )
+            } else if hid_only {
+                // Module-free HID hardware has no confirmed native effect for
+                // this mode yet (Wave/Shifting/Zoom meant different things on
+                // different hardware generations, see issue #12) - the
+                // animation is on-screen only, nothing to send here.
                 Ok(())
             } else {
                 rgb::apply_dynamic_effect(&RgbConfig {
@@ -417,7 +438,7 @@ pub fn build() -> gtk::Box {
                     red: st.dyn_color.0, green: st.dyn_color.1, blue: st.dyn_color.2,
                 })
             };
-            let preview_applied = !st.is_static && preview_only;
+            let preview_applied = !st.is_static && hid_only && !mode_is_hid_native(st.mode);
             match result {
                 Ok(()) if preview_applied => {
                     st.status.set_text(crate::i18n::t("rgb_preview_applied"));
@@ -493,9 +514,19 @@ pub fn build() -> gtk::Box {
     page
 }
 
+/// Whether `mode` is confirmed reachable as a native single-write effect on
+/// the ENEK5130 HID controller (issue #12 follow-up). Wave/Shifting/Zoom are
+/// deliberately excluded - their effect codes were found to mean different
+/// things on different hardware generations (PHN16S-71 vs ANV16S-41), so they
+/// stay preview-only until confirmed per model.
+fn mode_is_hid_native(mode: RgbMode) -> bool {
+    matches!(mode, RgbMode::Breath | RgbMode::Neon)
+}
+
 /// On-screen animation of the selected dynamic effect, shown on the
-/// keyboard visual whenever Dynamic mode is active (real hardware or the
-/// module-free HID preview from issue #12, same math either way). Follows
+/// keyboard visual whenever Dynamic mode is active (real hardware, the
+/// module-free HID preview from issue #12, or as a live mirror of a mode
+/// that's actually running natively via HID - same math either way). Follows
 /// `RgbMode::needs_color()`: Neon and Wave are hardware-autonomous rainbow
 /// patterns that ignore the color picker, the rest use the picked color.
 fn preview_zone_colors(mode: RgbMode, phase: f64, direction: Direction, color: (u8, u8, u8)) -> [(u8, u8, u8); 4] {
