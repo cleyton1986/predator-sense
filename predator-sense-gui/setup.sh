@@ -344,37 +344,7 @@ install_kernel_module() {
 }
 
 install_tray() {
-    cat > "$INSTALL_DIR/tray_helper.py" << 'PYEOF'
-#!/usr/bin/env python3
-import fcntl, os, signal, subprocess, sys
-LOCK = "/tmp/predator-sense-tray.lock"
-lock_fd = open(LOCK, 'w')
-try: fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except: sys.exit(0)
-lock_fd.write(str(os.getpid())); lock_fd.flush()
-import gi; gi.require_version('Gtk','3.0'); gi.require_version('AyatanaAppIndicator3','0.1')
-from gi.repository import Gtk, AyatanaAppIndicator3
-def find_icon():
-    d = os.path.dirname(os.path.abspath(__file__))
-    p = os.path.join(d, "resources", "predator-icon.svg")
-    if os.path.exists(p): return os.path.dirname(p), os.path.splitext(os.path.basename(p))[0]
-    return None, "preferences-system"
-class Tray:
-    def __init__(self):
-        d, n = find_icon()
-        self.ind = AyatanaAppIndicator3.Indicator.new("predator-sense-tray", n, AyatanaAppIndicator3.IndicatorCategory.HARDWARE)
-        if d: self.ind.set_icon_theme_path(d)
-        self.ind.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
-        m = Gtk.Menu()
-        o = Gtk.MenuItem(label="Abrir Predator Sense"); o.connect("activate", lambda _: subprocess.Popen(["gdbus","call","--session","--dest","com.predator.sense","--object-path","/com/predator/sense","--method","org.gtk.Application.Activate","[]"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)); m.append(o)
-        m.append(Gtk.SeparatorMenuItem())
-        q = Gtk.MenuItem(label="Sair"); q.connect("activate", lambda _: (os.kill(os.getppid(), signal.SIGTERM), Gtk.main_quit())); m.append(q)
-        m.show_all(); self.ind.set_menu(m)
-signal.signal(signal.SIGTERM, lambda s,f: Gtk.main_quit())
-Tray(); Gtk.main()
-try: fcntl.flock(lock_fd, fcntl.LOCK_UN); lock_fd.close(); os.unlink(LOCK)
-except: pass
-PYEOF
+    cp "$SCRIPT_DIR/resources/tray_helper.py" "$INSTALL_DIR/tray_helper.py"
     chmod +x "$INSTALL_DIR/tray_helper.py"
 }
 
