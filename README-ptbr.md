@@ -31,6 +31,9 @@
 > **Nota**
 > Todas as marcas registradas, nomes de produtos e logotipos mencionados (Acer, Predator, PredatorSense, Helios, Nitro, AeroBlade, CoolBoost) são propriedade de seus respectivos donos (Acer Inc.). Este projeto não é afiliado, endossado ou patrocinado pela Acer Inc. de nenhuma forma.
 
+> **Imagens dos produtos**
+> As fotos de notebooks em `predator-sense-gui/resources/models/` retratam produtos oficiais Acer Predator/Nitro e são usadas exclusivamente para permitir que o aplicativo identifique visualmente o modelo detectado na máquina do próprio usuário (comparando com o `product_name` informado pela DMI/BIOS do sistema). Essas imagens **não estão licenciadas sob a licença GPLv3 deste projeto** — os direitos de autor sobre as fotografias dos produtos pertencem à Acer Inc. e/ou seus criadores originais. Elas estão incluídas aqui de boa-fé, sem finalidade comercial, com propósito puramente informativo (uso nominativo/de identificação de produto), sem qualquer reivindicação de propriedade por parte deste projeto. Se você é o titular dos direitos e deseja a remoção de alguma imagem, abra uma issue que ela será removida prontamente.
+
 Esta aplicação foi criada para **uso pessoal**, para tirar o máximo proveito de um notebook Acer gaming no Linux — já que a Acer não oferece suporte oficial do PredatorSense para Linux. É compartilhada livremente para quem quiser o mesmo.
 
 ---
@@ -456,5 +459,7 @@ Qualquer contribuição é voluntária e muito apreciada! Ajuda a manter o proje
 Este projeto é licenciado sob a **GNU General Public License v3.0** — veja o arquivo [LICENSE](LICENSE) para detalhes.
 
 Este é software livre: você pode redistribuí-lo e/ou modificá-lo sob os termos da GNU GPL conforme publicada pela Free Software Foundation.
+
+**Exceção — imagens dos produtos:** a licença GPLv3 acima cobre apenas o código-fonte deste projeto. As fotos de notebooks Acer Predator/Nitro em `predator-sense-gui/resources/models/` são imagens de produto de terceiros (veja [Aviso Legal](#aviso-legal) acima) e **não** estão cobertas pela concessão da GPLv3; todos os direitos sobre essas imagens permanecem com a Acer Inc. e/ou os fotógrafos originais.
 
 **Este software é fornecido "como está", sem garantia de qualquer tipo.** Os autores não se responsabilizam por quaisquer danos que possam ocorrer pelo uso deste software. Ao instalar e usar este software, você reconhece que o faz por sua conta e risco.
