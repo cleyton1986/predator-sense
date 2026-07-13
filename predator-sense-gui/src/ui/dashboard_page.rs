@@ -23,7 +23,10 @@ pub fn build() -> gtk::ScrolledWindow {
     hero.set_halign(gtk::Align::Fill);
     hero.add_css_class("dashboard-hero");
 
-    if let Some(path) = find_resource("Predator PH315-54.png").or_else(|| find_resource("laptop-thumb.png")) {
+    if let Some(path) = find_model_photo(&info.product_name)
+        .or_else(|| find_resource("Predator PH315-54.png"))
+        .or_else(|| find_resource("laptop-thumb.png"))
+    {
         let pic = gtk::Picture::for_filename(path);
         pic.set_size_request(320, 200);
         pic.set_can_shrink(true);
@@ -247,6 +250,47 @@ fn create_spec_card(icon: &str, title: &str, value: &str) -> gtk::Box {
 
     card.append(&text);
     card
+}
+
+/// Model-specific photos live in `resources/models/<CODE>.png`, background
+/// already stripped to transparent to match the dashboard's hero style. The
+/// file name is the model code as it appears in the DMI `product_name`
+/// (e.g. "Predator PHN16-73" -> `models/PHN16-73.png`) - matched as a
+/// case-insensitive substring so "Predator PHN16-73" and "PHN16-73" both hit
+/// the same file regardless of the "Predator "/"Nitro " prefix some DMI
+/// strings include.
+fn find_model_photo(product_name: &str) -> Option<String> {
+    let dir = find_resource_dir("models")?;
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let product_lower = product_name.to_lowercase();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        let Some(code) = name.rsplit_once('.').map(|(base, _)| base) else { continue };
+        if product_lower.contains(&code.to_lowercase()) {
+            return Some(entry.path().to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+fn find_resource_dir(name: &str) -> Option<std::path::PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        let dir = exe.parent()?;
+        let p = dir.join("../../resources").join(name);
+        if p.is_dir() {
+            return Some(p);
+        }
+        let p = dir.join("resources").join(name);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    let dev = std::path::PathBuf::from(format!("/opt/predator-sense/resources/{}", name));
+    if dev.is_dir() {
+        return Some(dev);
+    }
+    None
 }
 
 fn find_resource(name: &str) -> Option<String> {
