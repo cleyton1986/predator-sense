@@ -194,7 +194,7 @@ pub fn build() -> gtk::Box {
 
         let page_c = page.clone();
         glib::timeout_add_seconds_local(2, move || {
-            if !crate::app_state::is_window_visible() || !page_c.is_visible() {
+            if !crate::app_state::is_window_visible() || !page_c.is_mapped() {
                 return glib::ControlFlow::Continue;
             }
             update_net_stats(
@@ -211,7 +211,7 @@ pub fn build() -> gtk::Box {
         let ul_da = ul_anim_da.clone();
         let page_c = page.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
-            if !crate::app_state::is_window_visible() || !page_c.is_visible() {
+            if !crate::app_state::is_window_visible() || !page_c.is_mapped() {
                 return glib::ControlFlow::Continue;
             }
             {
