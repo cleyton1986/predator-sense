@@ -330,62 +330,87 @@ fn is_canned_refusal(text: &str) -> bool {
     KNOWN_CANNED_REFUSALS.iter().any(|p| lower.contains(p))
 }
 
-/// Some models append a stray `{"name": null, "parameters": {}}`-style stub
-/// after real generated text when they considered (and rejected) a tool call
-/// - observed by hand against a real local llama3.1:8b. Not a canned refusal
-/// (the text before it is genuine, language-appropriate generation), just a
-/// trailing artifact of the tool-calling fine-tuning leaking into content.
-/// Strips one trailing `{...}` blob only when it looks like that stub (empty
-/// or null "name", empty "parameters"), never a legitimate closing brace in
-/// prose.
-fn strip_trailing_tool_stub(text: &str) -> &str {
-    let trimmed = text.trim_end();
-    if !trimmed.ends_with('}') {
-        return trimmed;
-    }
-    // Walk backwards tracking brace depth to find the '{' that balances the
-    // trailing '}', not just the nearest one (which could be a nested brace
-    // like the empty "parameters": {} inside the stub itself).
-    let bytes = trimmed.as_bytes();
+/// Some models embed a `{"name": ..., "parameters": {...}}`-style JSON blob
+/// directly in the generated text instead of using Ollama's structured
+/// `tool_calls` field - observed by hand against a real local llama3.1:8b, in
+/// varying positions (start, middle, or end of the text) and two shapes: an
+/// empty stub (`{"name": null, "parameters": {}}` or `{"name": "<nil>", ...}`)
+/// when it considered and rejected a tool call, and a REAL one with an actual
+/// tool name and arguments when it wanted to call a tool but leaked the call
+/// as plain text instead of the proper channel. Either way this is a
+/// fine-tuning artifact leaking into `content`, not genuine prose - scans the
+/// whole string for the first balanced `{...}` object with that shape and
+/// parses it, so the caller can both strip it from the visible comment and
+/// recover a real leaked tool call as an actual action instead of silently
+/// dropping it.
+fn extract_embedded_tool_json(text: &str) -> (String, Option<serde_json::Value>) {
+    let bytes = text.as_bytes();
     let mut depth = 0i32;
-    let mut start = None;
-    for (i, &b) in bytes.iter().enumerate().rev() {
+    let mut obj_start = None;
+
+    for (i, &b) in bytes.iter().enumerate() {
         match b {
-            b'}' => depth += 1,
             b'{' => {
+                if depth == 0 {
+                    obj_start = Some(i);
+                }
+                depth += 1;
+            }
+            b'}' => {
                 depth -= 1;
                 if depth == 0 {
-                    start = Some(i);
-                    break;
+                    if let Some(start) = obj_start {
+                        let candidate = &text[start..=i];
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(candidate) {
+                            // Only treat it as a leaked tool-call blob (and
+                            // strip it) when it has exactly the shape
+                            // observed in practice - both "name" and
+                            // "parameters" keys present at the top level. A
+                            // legitimate object in prose (e.g. a JSON example
+                            // the user asked about) won't have this shape.
+                            if parsed.get("name").is_some() && parsed.get("parameters").is_some() {
+                                let cleaned = format!("{}{}", &text[..start], &text[i + 1..]);
+                                return (cleaned.trim().to_string(), Some(parsed));
+                            }
+                        }
+                        obj_start = None;
+                    }
                 }
             }
             _ => {}
         }
     }
-    let Some(start) = start else { return trimmed };
-    let stub = &trimmed[start..];
-    let looks_like_stub = stub.contains("\"name\"")
-        && stub.contains("\"parameters\"")
-        && (stub.contains("null") || stub.contains("\"\""))
-        && stub.len() < 80;
-    if looks_like_stub {
-        trimmed[..start].trim_end()
-    } else {
-        trimmed
-    }
+    (text.trim().to_string(), None)
 }
 
 fn parse_reply(v: &serde_json::Value) -> Result<AiReply, AiError> {
-    let comment = v
-        .pointer("/message/content")
-        .and_then(|c| c.as_str())
-        .map(strip_trailing_tool_stub)
+    let raw_content = v.pointer("/message/content").and_then(|c| c.as_str()).unwrap_or("");
+    let (cleaned_content, leaked_tool) = extract_embedded_tool_json(raw_content);
+
+    let comment = Some(cleaned_content)
         .filter(|s| !s.trim().is_empty())
-        .filter(|s| !is_canned_refusal(s))
-        .map(|s| s.to_string());
+        .filter(|s| !is_canned_refusal(s));
 
     let action = match v.pointer("/message/tool_calls/0") {
-        None => None,
+        None => {
+            // No structured tool call from Ollama's own field - fall back to
+            // a leaked one found in the text, but only if it names a real
+            // tool with real (non-null) arguments; the empty/null stub shape
+            // is just noise to strip, not an action to recover.
+            match leaked_tool {
+                Some(blob) => {
+                    let name = blob.get("name").and_then(|n| n.as_str());
+                    match name {
+                        Some(name) => {
+                            let params = blob.get("parameters").cloned().unwrap_or(serde_json::Value::Null);
+                            build_tool_call(name, &params).ok()
+                        }
+                        None => None,
+                    }
+                }
+                None => None,
+            }
+        }
         Some(tc) => {
             let name = tc
                 .pointer("/function/name")
@@ -691,6 +716,70 @@ mod tests {
         });
         let reply = parse_reply(&json).unwrap();
         assert_eq!(reply.comment.as_deref(), Some("Não há problemas detectados."));
+        assert_eq!(reply.action, None);
+    }
+
+    #[test]
+    fn parse_reply_recovers_leaked_real_tool_call() {
+        // Verified against a real local llama3.1:8b: instead of using
+        // Ollama's structured tool_calls field, it sometimes writes a real,
+        // fully-formed tool call as trailing plain text in `content`. Without
+        // recovering this, the action is silently lost - the user sees the
+        // raw JSON in the chat and nothing happens on the hardware.
+        let json = serde_json::json!({
+            "message": {
+                "content": "O processador está superaquecendo.\n\n{\"name\": \"set_fan_mode\", \"parameters\": {\"mode\": \"max\"}}"
+            }
+        });
+        let reply = parse_reply(&json).unwrap();
+        assert_eq!(reply.comment.as_deref(), Some("O processador está superaquecendo."));
+        assert_eq!(reply.action, Some(ToolCall::SetFanMode(AiFanMode::Max)));
+    }
+
+    #[test]
+    fn parse_reply_recovers_leaked_tool_call_at_start() {
+        // Verified against a real local llama3.1:8b: the leaked blob doesn't
+        // always land at the end - it can be the very first thing in
+        // `content`, with the real generated text following it.
+        let json = serde_json::json!({
+            "message": {
+                "content": "{\"name\": \"set_coolboost\", \"parameters\": {\"enabled\": true}}\n\nAtivando CoolBoost para reduzir a temperatura."
+            }
+        });
+        let reply = parse_reply(&json).unwrap();
+        assert_eq!(reply.comment.as_deref(), Some("Ativando CoolBoost para reduzir a temperatura."));
+        assert_eq!(reply.action, Some(ToolCall::SetCoolBoost(true)));
+    }
+
+    #[test]
+    fn parse_reply_recovers_leaked_tool_call_in_middle() {
+        // Verified against a real local llama3.1:8b: text can also continue
+        // after the leaked blob, e.g. rambling about future behavior.
+        let json = serde_json::json!({
+            "message": {
+                "content": "O sistema está sobrecalorizado.\n\n{\"name\": \"set_fan_mode\", \"parameters\": {\"mode\": \"max\"}}\n\nMonitorando a temperatura."
+            }
+        });
+        let reply = parse_reply(&json).unwrap();
+        assert_eq!(
+            reply.comment.as_deref(),
+            Some("O sistema está sobrecalorizado.\n\n\n\nMonitorando a temperatura.")
+        );
+        assert_eq!(reply.action, Some(ToolCall::SetFanMode(AiFanMode::Max)));
+    }
+
+    #[test]
+    fn parse_reply_strips_stub_at_start() {
+        // Verified against a real local llama3.1:8b: the empty/null stub can
+        // also use "<nil>" instead of JSON null for the tool name.
+        let json = serde_json::json!({
+            "message": {
+                "content": "{\"name\": \"<nil>\", \"parameters\": {}} \n\nO sistema está funcionando normalmente."
+            }
+        });
+        let reply = parse_reply(&json).unwrap();
+        assert_eq!(reply.comment.as_deref(), Some("O sistema está funcionando normalmente."));
+        assert_eq!(reply.action, None);
     }
 
     #[test]
