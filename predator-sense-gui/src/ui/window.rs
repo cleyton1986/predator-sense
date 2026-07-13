@@ -464,17 +464,21 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     let info_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
     info_box.set_halign(gtk::Align::Center);
 
+    let model_name = std::fs::read_to_string("/sys/class/dmi/id/product_name")
+        .unwrap_or_else(|_| "Predator".into());
+
     // Laptop thumbnail
-    let laptop_path = find_resource("laptop-thumb.png");
+    let laptop_path = find_model_photo(model_name.trim())
+        .or_else(|| find_resource("models/notebook-404.png"))
+        .or_else(|| find_resource("laptop-thumb.png"));
     if let Some(path) = laptop_path {
         let pic = gtk::Picture::for_filename(path);
         pic.set_size_request(100, 66);
+        pic.set_can_shrink(true);
         pic.set_halign(gtk::Align::Center);
+        pic.set_valign(gtk::Align::Center);
         info_box.append(&pic);
     }
-
-    let model_name = std::fs::read_to_string("/sys/class/dmi/id/product_name")
-        .unwrap_or_else(|_| "Predator".into());
     let model = gtk::Label::new(Some(model_name.trim()));
     model.add_css_class("info-text");
     model.set_halign(gtk::Align::Center);
@@ -553,18 +557,35 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     main_overlay
 }
 
-/// Find a resource file relative to the executable
+fn find_model_photo(product_name: &str) -> Option<String> {
+    let dir = find_resource_path("models")?;
+    let entries = std::fs::read_dir(&dir).ok()?;
+    let product_lower = product_name.to_lowercase();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        let Some(code) = name.rsplit_once('.').map(|(base, _)| base) else { continue };
+        if product_lower.contains(&code.to_lowercase()) {
+            return Some(entry.path().to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
 fn find_resource(name: &str) -> Option<String> {
+    find_resource_path(name).map(|p| p.to_string_lossy().to_string())
+}
+
+fn find_resource_path(name: &str) -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         let dir = exe.parent()?;
-        // Development: target/release/ -> ../../resources/
         let p = dir.join("../../resources").join(name);
-        if p.exists() { return Some(p.to_string_lossy().to_string()); }
+        if p.exists() { return Some(p); }
         let p = dir.join(name);
-        if p.exists() { return Some(p.to_string_lossy().to_string()); }
+        if p.exists() { return Some(p); }
     }
-    let dev = format!("/opt/predator-sense/resources/{}", name);
-    if std::path::Path::new(&dev).exists() { return Some(dev); }
+    let dev = std::path::PathBuf::from(format!("/opt/predator-sense/resources/{}", name));
+    if dev.exists() { return Some(dev); }
     None
 }
 
