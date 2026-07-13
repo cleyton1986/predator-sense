@@ -412,7 +412,13 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 EOF
-    chown -R "$REAL_USER:$REAL_USER" "$svc_dir/predator-sense-hotkey.service"
+    # mkdir -p above runs as root: on a fresh ~/.config/systemd tree the
+    # directories end up root-owned, and systemd --user (which runs as the
+    # user) can't create the enable symlink in default.target.wants/ — enable
+    # fails forever, even when run manually later. Chown the whole tree, not
+    # just the unit file; this also repairs installs left broken by older
+    # versions.
+    chown -R "$REAL_USER:$REAL_USER" "$REAL_HOME/.config/systemd"
 
     # Remove legacy XDG autostart entry from older installs.
     rm -f "$REAL_HOME/.config/autostart/predator-sense-hotkey.desktop"
@@ -421,7 +427,18 @@ EOF
     # duplicate listeners surviving across reinstalls).
     pkill -f "/opt/predator-sense/hotkey-daemon.py" 2>/dev/null || true
 
-    sudo -u "$REAL_USER" bash -c 'systemctl --user daemon-reload && systemctl --user enable --now predator-sense-hotkey.service' 2>/dev/null || true
+    # systemctl --user talks to the user's session bus, but under `sudo -u`
+    # neither XDG_RUNTIME_DIR nor DBUS_SESSION_BUS_ADDRESS is set, so this
+    # call always failed silently. Inject the same env the Go installer
+    # already builds in runAsUser(), and surface the failure.
+    local real_uid
+    real_uid=$(id -u "$REAL_USER")
+    if ! sudo -u "$REAL_USER" env \
+        XDG_RUNTIME_DIR="/run/user/$real_uid" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$real_uid/bus" \
+        bash -c 'systemctl --user daemon-reload && systemctl --user enable --now predator-sense-hotkey.service' 2>/dev/null; then
+        echo -e "${RED}Hotkey service not enabled${NC} — log in as $REAL_USER and run: systemctl --user enable --now predator-sense-hotkey.service"
+    fi
 
     # System-level (root) boot service: re-applies persisted battery-limit
     # settings on every boot (issue #11). Needs root, so it's separate from
@@ -535,7 +552,15 @@ do_uninstall() {
     pkill -f "tray_helper" 2>/dev/null || true
     sleep 1
 
-    sudo -u "$REAL_USER" bash -c '
+    # Same session-bus env needed here as in install_hotkey() — without it
+    # stop/disable never reached the user's systemd and the unit stayed
+    # enabled (dangling symlink) after uninstall.
+    local real_uid
+    real_uid=$(id -u "$REAL_USER")
+    sudo -u "$REAL_USER" env \
+        XDG_RUNTIME_DIR="/run/user/$real_uid" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$real_uid/bus" \
+        bash -c '
     systemctl --user stop predator-sense-hotkey.service 2>/dev/null
     systemctl --user disable predator-sense-hotkey.service 2>/dev/null
     rm -f ~/.config/systemd/user/predator-sense-hotkey.service

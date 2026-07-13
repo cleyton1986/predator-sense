@@ -558,7 +558,12 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 SERVICE
-chown -R "$REAL_USER:$REAL_USER" "$SVC_DIR/predator-sense-hotkey.service"
+# mkdir -p above runs as root: on a fresh ~/.config/systemd tree the
+# directories end up root-owned, and systemd --user (which runs as the user)
+# can't create the enable symlink in default.target.wants/ — enable fails
+# forever, even when run manually later. Chown the whole tree, not just the
+# unit file; this also repairs installs left broken by older versions.
+chown -R "$REAL_USER:$REAL_USER" "$REAL_HOME/.config/systemd"
 
 # Remove legacy XDG autostart entry from older installs.
 rm -f "$REAL_HOME/.config/autostart/predator-sense-hotkey.desktop"
@@ -567,8 +572,20 @@ rm -f "$REAL_HOME/.config/autostart/predator-sense-hotkey.desktop"
 # listeners surviving across reinstalls).
 pkill -f "/opt/predator-sense/hotkey-daemon.py" 2>/dev/null || true
 
-sudo -u "$REAL_USER" bash -c 'systemctl --user daemon-reload && systemctl --user enable --now predator-sense-hotkey.service' 2>/dev/null || true
-msg ok "Hotkey + autostart configured"
+# systemctl --user talks to the user's session bus, but under `sudo -u`
+# neither XDG_RUNTIME_DIR nor DBUS_SESSION_BUS_ADDRESS is set, so this call
+# always failed — and `2>/dev/null || true` hid it while the installer still
+# printed success. Inject the same env the Go installer already builds in
+# runAsUser(), and surface the failure instead of swallowing it.
+REAL_UID=$(id -u "$REAL_USER")
+if sudo -u "$REAL_USER" env \
+    XDG_RUNTIME_DIR="/run/user/$REAL_UID" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$REAL_UID/bus" \
+    bash -c 'systemctl --user daemon-reload && systemctl --user enable --now predator-sense-hotkey.service' 2>/dev/null; then
+    msg ok "Hotkey + autostart configured"
+else
+    msg fail "Hotkey service not enabled — log in as $REAL_USER and run: systemctl --user enable --now predator-sense-hotkey.service"
+fi
 
 # System-level (root) boot service: re-applies persisted battery-limit
 # settings on every boot (issue #11). Needs root, so it's separate from the
