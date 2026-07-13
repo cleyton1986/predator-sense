@@ -1,4 +1,5 @@
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -42,6 +43,27 @@ static PREV_NET: Mutex<Option<(u64, u64, Instant)>> = Mutex::new(None);
 // sensors in parallel don't fork it dozens of times per second.
 static GPU_CACHE: Mutex<Option<(Instant, GpuInfo)>> = Mutex::new(None);
 const GPU_TTL: Duration = Duration::from_millis(1800);
+static GPU_REFRESHING: AtomicBool = AtomicBool::new(false);
+
+/// True when the NVIDIA dGPU is runtime-suspended (D3cold). Querying it via
+/// nvidia-smi would power the whole GPU back up (~850 ms measured on a
+/// PHN16-73) just to read the temperature of a chip that is turned off — so
+/// monitoring paths skip the query instead of waking it.
+pub(crate) fn nvidia_suspended() -> bool {
+    let Ok(entries) = fs::read_dir("/sys/bus/pci/devices") else { return false };
+    for e in entries.flatten() {
+        let p = e.path();
+        let is_nvidia = fs::read_to_string(p.join("vendor"))
+            .is_ok_and(|v| v.trim() == "0x10de");
+        let is_gpu = fs::read_to_string(p.join("class"))
+            .is_ok_and(|c| c.trim().starts_with("0x03"));
+        if is_nvidia && is_gpu {
+            return fs::read_to_string(p.join("power/runtime_status"))
+                .is_ok_and(|s| s.trim() == "suspended");
+        }
+    }
+    false
+}
 
 pub fn read_all_sensors() -> SensorData {
     let gpu_info = read_nvidia_gpu_info();
@@ -167,6 +189,28 @@ fn read_nvidia_gpu_info() -> GpuInfo {
             }
         }
     }
+    // Stale or empty: refresh OFF the main thread. nvidia-smi takes ~40 ms
+    // with the GPU awake and ~850 ms when it has to power it up from D3cold;
+    // every caller of this function is a GTK timeout on the main loop, so
+    // running it inline froze the UI for that long on every cache expiry.
+    // Return the stale value (or defaults on the very first call) right away
+    // and let the next tick pick up the refreshed one.
+    if !GPU_REFRESHING.swap(true, Ordering::AcqRel) {
+        std::thread::spawn(|| {
+            let info = if nvidia_suspended() { GpuInfo::default() } else { fetch_nvidia_gpu_info() };
+            *GPU_CACHE.lock().unwrap() = Some((Instant::now(), info));
+            GPU_REFRESHING.store(false, Ordering::Release);
+        });
+    }
+    GPU_CACHE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|(_, info)| info.clone())
+        .unwrap_or_default()
+}
+
+fn fetch_nvidia_gpu_info() -> GpuInfo {
     let o = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=name,temperature.gpu,fan.speed,clocks.gr,clocks.mem,utilization.gpu,power.draw",
                "--format=csv,noheader,nounits"]).output();
@@ -190,7 +234,6 @@ fn read_nvidia_gpu_info() -> GpuInfo {
         }
         _ => GpuInfo::default(),
     };
-    *GPU_CACHE.lock().unwrap() = Some((Instant::now(), info.clone()));
     info
 }
 

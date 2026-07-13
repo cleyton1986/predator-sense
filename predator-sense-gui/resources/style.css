@@ -650,17 +650,15 @@ scrollbar slider:hover {
 .stat-value { font-size: 20px; font-weight: 700; color: @text_main; }
 .stat-unit { font-size: 11px; color: @text_muted; margin-bottom: 4px; }
 
-/* === Pulsing green status dot === */
-@keyframes pulse-green {
-    0% { color: #3fb950; }
-    50% { color: #1a6b28; }
-    100% { color: #3fb950; }
-}
-
+/* === Pulsing green status dot ===
+   Pulsed by a 5 fps opacity timer in window.rs, NOT a CSS animation: an
+   `animation: ... infinite` on an always-mapped widget pins the GTK frame
+   clock at panel refresh rate, and every frame re-rasterizes the window's
+   cairo render nodes in software — measured at ~84% of a core with the app
+   idle on a 165 Hz panel (issue #13). */
 .status-dot-pulse {
     color: #3fb950;
     font-size: 10px;
-    animation: pulse-green 2s ease-in-out infinite;
 }
 
 /* === Dashboard === */

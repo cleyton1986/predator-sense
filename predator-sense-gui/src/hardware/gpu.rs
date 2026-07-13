@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -52,15 +53,37 @@ impl GpuMetrics {
 static CACHE: Mutex<Option<(Instant, GpuMetrics)>> = Mutex::new(None);
 const TTL: Duration = Duration::from_millis(1800);
 
+static REFRESHING: AtomicBool = AtomicBool::new(false);
+
 pub fn read_gpu_metrics() -> GpuMetrics {
     if let Some((t, m)) = CACHE.lock().unwrap().as_ref() {
         if t.elapsed() < TTL {
             return m.clone();
         }
     }
-    let m = fetch_gpu_metrics();
-    *CACHE.lock().unwrap() = Some((Instant::now(), m.clone()));
-    m
+    // Stale or empty: refresh OFF the main thread — same reasoning as
+    // sensors::read_nvidia_gpu_info(). nvidia-smi blocks for ~40 ms with the
+    // GPU awake and ~850 ms waking it from D3cold, and every caller here is
+    // a GTK timeout on the main loop. While the dGPU is runtime-suspended,
+    // skip the query entirely instead of powering it up just to read idle
+    // metrics.
+    if !REFRESHING.swap(true, Ordering::AcqRel) {
+        std::thread::spawn(|| {
+            let m = if crate::hardware::sensors::nvidia_suspended() {
+                GpuMetrics::default()
+            } else {
+                fetch_gpu_metrics()
+            };
+            *CACHE.lock().unwrap() = Some((Instant::now(), m));
+            REFRESHING.store(false, Ordering::Release);
+        });
+    }
+    CACHE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|(_, m)| m.clone())
+        .unwrap_or_default()
 }
 
 fn fetch_gpu_metrics() -> GpuMetrics {

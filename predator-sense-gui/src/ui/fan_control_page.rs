@@ -373,7 +373,7 @@ pub fn build() -> gtk::Box {
 
     let page_anim = page.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
-        if !crate::app_state::is_window_visible() || !page_anim.is_visible() {
+        if !crate::app_state::is_window_visible() || !page_anim.is_mapped() {
             return glib::ControlFlow::Continue;
         }
         let cpu_r = *cr1.borrow();
@@ -397,7 +397,7 @@ pub fn build() -> gtk::Box {
     let gt2 = gpu_temp.clone();
     let page_sense = page.clone();
     glib::timeout_add_seconds_local(2, move || {
-        if !crate::app_state::is_window_visible() || !page_sense.is_visible() {
+        if !crate::app_state::is_window_visible() || !page_sense.is_mapped() {
             return glib::ControlFlow::Continue;
         }
         let data = sensors::read_all_sensors();

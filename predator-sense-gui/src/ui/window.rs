@@ -241,26 +241,32 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
     let root_overlay = gtk::Overlay::new();
     root_overlay.set_child(Some(&main_content));
 
-    let neon_bars = gtk::DrawingArea::new();
-    neon_bars.set_hexpand(true);
-    neon_bars.set_vexpand(true);
-    neon_bars.set_can_target(false);
-
-    // Pulse animation: phase cycles 0.0 -> 1.0 continuously
+    // Two slim edge-hugging DrawingAreas instead of one full-window overlay:
+    // the pulse timer below re-rasterizes whatever surface it invalidates,
+    // and at full-window size that meant a window-sized cairo software pass
+    // 5x/second forever — one of the issue #13 idle-CPU culprits. 32 px
+    // covers the 4 px core bar plus the widest glow layer (10 px outward,
+    // clipped by the window edge exactly like before, and 14 px inward), so
+    // the result is pixel-identical to the old full-window draw.
     let pulse_phase: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
-
-    {
+    let mut neon_bars = Vec::new();
+    for left in [true, false] {
+        let bar = gtk::DrawingArea::new();
+        bar.set_content_width(32);
+        bar.set_vexpand(true);
+        bar.set_halign(if left { gtk::Align::Start } else { gtk::Align::End });
+        bar.set_can_target(false);
         let phase = pulse_phase.clone();
-        neon_bars.set_draw_func(move |_a, cr, w, h| {
-            let p = *phase.borrow();
-            draw_neon_edges(cr, w as f64, h as f64, p);
+        bar.set_draw_func(move |_a, cr, w, h| {
+            draw_neon_bar(cr, w as f64, h as f64, *phase.borrow(), left);
         });
+        root_overlay.add_overlay(&bar);
+        neon_bars.push(bar);
     }
 
     // Animate at ~5fps. The neon edge is a slow background pulse — full 60fps
     // here was visually identical but burned ~30% CPU drawing layered Cairo
     // strokes on every redraw cycle of the entire window.
-    let neon_c = neon_bars.clone();
     let phase_c = pulse_phase.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
         if !crate::app_state::is_window_visible() {
@@ -270,11 +276,11 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         *p += 0.12;
         if *p > 1.0 { *p -= 1.0; }
         drop(p);
-        neon_c.queue_draw();
+        for bar in &neon_bars {
+            bar.queue_draw();
+        }
         glib::ControlFlow::Continue
     });
-
-    root_overlay.add_overlay(&neon_bars);
 
     window.set_child(Some(&root_overlay));
 }
@@ -376,6 +382,8 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     let active_idx: Rc<RefCell<usize>> = Rc::new(RefCell::new(0));
     let nav_widgets: Rc<RefCell<Vec<(gtk::DrawingArea, gtk::Label)>>> =
         Rc::new(RefCell::new(Vec::new()));
+    // Captured by the shared sidebar pulse timer created after the loop.
+    let beta_badge: Rc<RefCell<Option<gtk::Label>>> = Rc::new(RefCell::new(None));
 
     for (i, (label, page_name)) in nav_items.iter().enumerate() {
         let item_overlay = gtk::Overlay::new();
@@ -416,21 +424,10 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
             badge.set_margin_top(4);
             item_overlay.add_overlay(&badge);
 
-            let badge_c = badge.clone();
-            let phase: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
-            glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
-                if !crate::app_state::is_window_visible() {
-                    return glib::ControlFlow::Continue;
-                }
-                let mut p = phase.borrow_mut();
-                *p += 0.04;
-                if *p > std::f64::consts::TAU {
-                    *p -= std::f64::consts::TAU;
-                }
-                let opacity = 0.55 + 0.45 * ((p.sin() + 1.0) / 2.0);
-                badge_c.set_opacity(opacity);
-                glib::ControlFlow::Continue
-            });
+            // Pulsed by the shared 5 fps sidebar timer below (was a dedicated
+            // 16 fps timer — see that timer's comment for why the rate
+            // matters).
+            *beta_badge.borrow_mut() = Some(badge.clone());
         }
 
         // Click
@@ -489,12 +486,48 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     ver.set_halign(gtk::Align::Center);
     info_box.append(&ver);
 
-    // Status dot (pulsing via CSS animation - green)
+    // Status dot (pulsing green)
     let status_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     status_row.set_halign(gtk::Align::Center);
     status_row.set_margin_top(4);
     let dot = gtk::Label::new(Some("●"));
     dot.add_css_class(if rgb::is_module_loaded() { "status-dot-pulse" } else { "status-dot-off" });
+
+    // One shared 5 fps timer pulses both sidebar accents (status dot + BETA
+    // badge) via opacity. This replaces a CSS `animation: infinite` on the
+    // dot and a dedicated 16 fps set_opacity() timer on the badge: an
+    // infinite CSS animation on an always-mapped widget pins the GTK frame
+    // clock at panel refresh rate, re-rasterizing the window's cairo nodes
+    // in software nonstop — measured at ~84% of a core with the app idle on
+    // a 165 Hz panel (issue #13). A discrete 5 fps sine is visually
+    // equivalent for pulses this slow and lets the frame clock go fully
+    // idle between ticks.
+    {
+        let dot_pulses = rgb::is_module_loaded();
+        let dot_c = dot.clone();
+        let badge_c = beta_badge.clone();
+        let phase: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
+        glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+            if !crate::app_state::is_window_visible() {
+                return glib::ControlFlow::Continue;
+            }
+            let mut p = phase.borrow_mut();
+            *p += 0.1;
+            if *p > 1.0 {
+                *p -= 1.0;
+            }
+            let wave = ((*p * 2.0 * PI).sin() + 1.0) / 2.0;
+            drop(p);
+            if dot_pulses {
+                // Same 2 s bright↔dim cycle the CSS keyframes had.
+                dot_c.set_opacity(0.45 + 0.55 * wave);
+            }
+            if let Some(badge) = badge_c.borrow().as_ref() {
+                badge.set_opacity(0.55 + 0.45 * wave);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
     let st = gtk::Label::new(Some(crate::i18n::t(if rgb::is_module_loaded() { "module_active" } else { "module_inactive" })));
     st.add_css_class("info-text-dim");
     status_row.append(&dot);
@@ -591,7 +624,10 @@ fn find_resource_path(name: &str) -> Option<std::path::PathBuf> {
 
 /// Draw pulsing cyan neon glow bars on left and right edges
 /// phase: 0.0 to 1.0, controls the pulse intensity
-fn draw_neon_edges(cr: &gtk4::cairo::Context, w: f64, h: f64, phase: f64) {
+/// Draw one neon edge bar (left or right) inside its own slim DrawingArea.
+/// Geometry matches the old full-window draw_neon_edges() exactly, just
+/// expressed in the slim area's local coordinates.
+fn draw_neon_bar(cr: &gtk4::cairo::Context, w: f64, h: f64, phase: f64, left: bool) {
     // Smooth sine pulse: oscillates between 0.4 and 1.0
     let pulse = 0.4 + 0.6 * ((phase * 2.0 * PI).sin() * 0.5 + 0.5);
 
@@ -600,44 +636,28 @@ fn draw_neon_edges(cr: &gtk4::cairo::Context, w: f64, h: f64, phase: f64) {
     let bottom = h * 0.90;
     let bar_h = bottom - top;
     let radius = 5.0;
+    let x0 = if left { 0.0 } else { w - bar_width };
 
-    // --- Left neon bar ---
     // Glow layers (pulsing)
     for i in 0..5 {
         let spread = (i as f64 + 1.0) * 4.0;
         let alpha = (0.15 / (i as f64 + 1.0)) * pulse;
         cr.set_source_rgba(0.0, 0.8, 0.9, alpha);
-        rounded_rect(cr, -spread / 2.0, top - spread / 2.0,
+        rounded_rect(cr, x0 - spread / 2.0, top - spread / 2.0,
                      bar_width + spread, bar_h + spread, radius + spread / 2.0);
         let _ = cr.fill();
     }
     // Core bar
     cr.set_source_rgba(0.0, 0.8, 0.9, 0.5 + 0.4 * pulse);
-    rounded_rect(cr, 0.0, top, bar_width, bar_h, radius);
-    let _ = cr.fill();
-
-    // --- Right neon bar ---
-    let rx = w - bar_width;
-    for i in 0..5 {
-        let spread = (i as f64 + 1.0) * 4.0;
-        let alpha = (0.15 / (i as f64 + 1.0)) * pulse;
-        cr.set_source_rgba(0.0, 0.8, 0.9, alpha);
-        rounded_rect(cr, rx - spread / 2.0, top - spread / 2.0,
-                     bar_width + spread, bar_h + spread, radius + spread / 2.0);
-        let _ = cr.fill();
-    }
-    cr.set_source_rgba(0.0, 0.8, 0.9, 0.5 + 0.4 * pulse);
-    rounded_rect(cr, rx, top, bar_width, bar_h, radius);
+    rounded_rect(cr, x0, top, bar_width, bar_h, radius);
     let _ = cr.fill();
 
     // Subtle edge border (also pulses slightly)
+    let ex = if left { 1.0 } else { w - 1.0 };
     cr.set_source_rgba(0.0, 0.8, 0.9, 0.15 + 0.2 * pulse);
     cr.set_line_width(2.0);
-    cr.move_to(1.0, 0.0);
-    cr.line_to(1.0, h);
-    let _ = cr.stroke();
-    cr.move_to(w - 1.0, 0.0);
-    cr.line_to(w - 1.0, h);
+    cr.move_to(ex, 0.0);
+    cr.line_to(ex, h);
     let _ = cr.stroke();
 }
 
