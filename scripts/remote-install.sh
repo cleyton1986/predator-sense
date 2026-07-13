@@ -169,7 +169,18 @@ GUI_DIR="$TMP_DIR/predator-sense-gui"
 mkdir -p "$INSTALL_DIR/resources" "$INSTALL_DIR/kernel"
 cp "$GUI_DIR/target/release/predator-sense" "$INSTALL_DIR/"
 cp -r "$GUI_DIR/resources/"* "$INSTALL_DIR/resources/" 2>/dev/null || true
-cp "$GUI_DIR/kernel/facer.c" "$GUI_DIR/kernel/Makefile" "$GUI_DIR/kernel/dkms.conf" "$INSTALL_DIR/kernel/" 2>/dev/null || true
+# Copy every kernel source file via glob (not a hardcoded list) so a new
+# file added to kernel/ can never be silently left out again - a hardcoded
+# list here previously omitted acer-wmi-battery.c and acpi_ec.c even though
+# dkms.conf/Makefile reference them, breaking a rebuild from this copy
+# after a kernel update (same class of bug as issue #4).
+for f in "$GUI_DIR/kernel"/*; do
+    base="$(basename "$f")"
+    case "$base" in
+        *.o|*.ko|*.mod|*.mod.c|*.mod.o|.*|modules.order|Module.symvers) continue ;;
+    esac
+    cp "$f" "$INSTALL_DIR/kernel/" 2>/dev/null || true
+done
 chmod +x "$INSTALL_DIR/predator-sense"
 
 # Icon
@@ -199,6 +210,7 @@ cat > /usr/share/polkit-1/actions/com.predator.sense.policy << 'POLKIT'
 <policyconfig>
   <action id="com.predator.sense.helper">
     <description>Predator Sense Hardware Control</description>
+    <message>Predator Sense needs permissions to control the hardware.</message>
     <defaults><allow_any>auth_admin_keep</allow_any><allow_inactive>auth_admin_keep</allow_inactive><allow_active>auth_admin_keep</allow_active></defaults>
     <annotate key="org.freedesktop.policykit.exec.path">/opt/predator-sense/predator-sense-helper</annotate>
     <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
@@ -224,6 +236,14 @@ chmod 644 /etc/polkit-1/rules.d/49-predator-sense.rules
 
 cat > "$INSTALL_DIR/predator-sense-helper" << 'HELPER'
 #!/bin/bash
+# Locate the facer/acer hwmon dir that exposes pwm* (kernel >= 6.14)
+acer_hwmon() {
+  for d in /sys/class/hwmon/hwmon*; do
+    n=$(cat "$d/name" 2>/dev/null)
+    if [ "$n" = "acer" ] && [ -e "$d/pwm1" ]; then echo "$d"; return 0; fi
+  done
+  return 1
+}
 case "$1" in
   set-governor) for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "$2" > "$c" 2>/dev/null; done ;;
   set-epp) for c in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do echo "$2" > "$c" 2>/dev/null; done ;;
@@ -245,6 +265,17 @@ case "$1" in
   boot-anim-read) python3 -c "f=open('/dev/ec','rb');f.seek(0x1A);print(ord(f.read(1)));f.close()" 2>/dev/null ;;
   usb-charge) python3 -c "f=open('/dev/ec','rb+');v=1 if '$2'=='1' else 0;f.seek(0x1B);f.write(bytes([v]));f.close()" 2>/dev/null ;;
   usb-charge-read) python3 -c "f=open('/dev/ec','rb');f.seek(0x1B);print(ord(f.read(1)));f.close()" 2>/dev/null ;;
+  # PWM fan control via hwmon (kernel >= 6.14, models with ACER_CAP_PWM).
+  # pwm value 0-255; pwm_enable: 0=max/turbo 1=manual/custom 2=auto.
+  pwm-available) d=$(acer_hwmon) && echo 1 || echo 0 ;;
+  pwm-cpu) d=$(acer_hwmon) && echo "$2" > "$d/pwm1" 2>/dev/null ;;
+  pwm-gpu) d=$(acer_hwmon) && echo "$2" > "$d/pwm2" 2>/dev/null ;;
+  pwm-cpu-read) d=$(acer_hwmon) && cat "$d/pwm1" 2>/dev/null ;;
+  pwm-gpu-read) d=$(acer_hwmon) && cat "$d/pwm2" 2>/dev/null ;;
+  pwm-cpu-enable) d=$(acer_hwmon) && echo "$2" > "$d/pwm1_enable" 2>/dev/null ;;
+  pwm-gpu-enable) d=$(acer_hwmon) && echo "$2" > "$d/pwm2_enable" 2>/dev/null ;;
+  pwm-cpu-enable-read) d=$(acer_hwmon) && cat "$d/pwm1_enable" 2>/dev/null ;;
+  pwm-gpu-enable-read) d=$(acer_hwmon) && cat "$d/pwm2_enable" 2>/dev/null ;;
   # Re-applies the battery-limit settings the GUI persisted to config.json
   # (issue #11) - both mechanisms reset on a full power cycle and need
   # root, so this runs from a system-level (not user) boot service instead
@@ -362,7 +393,7 @@ if dkms add -m "$DKMS_MODULE" -v "$DKMS_VERSION" > "$MAKE_LOG" 2>&1 \
     && env $MAKE_EXTRA dkms build -m "$DKMS_MODULE" -v "$DKMS_VERSION" >> "$MAKE_LOG" 2>&1 \
     && env $MAKE_EXTRA dkms install -m "$DKMS_MODULE" -v "$DKMS_VERSION" --force >> "$MAKE_LOG" 2>&1; then
     MODULE_OK=1
-    printf "wmi\nsparse-keymap\nvideo\nplatform_profile\nfacer\nacer-wmi-battery\n" > /etc/modules-load.d/facer.conf
+    printf "wmi\nsparse-keymap\nvideo\nplatform_profile\nfacer\nacer-wmi-battery\nacpi_ec\n" > /etc/modules-load.d/facer.conf
     echo "blacklist acer_wmi" > /etc/modprobe.d/predator-sense.conf
     depmod -a 2>/dev/null
     # Load now
@@ -371,6 +402,7 @@ if dkms add -m "$DKMS_MODULE" -v "$DKMS_VERSION" > "$MAKE_LOG" 2>&1 \
     modprobe wmi sparse-keymap video platform_profile 2>/dev/null || true
     modprobe facer 2>/dev/null && msg ok "facer loaded" || msg fail "facer load failed"
     modprobe acer-wmi-battery 2>/dev/null && msg ok "acer-wmi-battery loaded" || msg skip "acer-wmi-battery not available"
+    modprobe acpi_ec 2>/dev/null && msg ok "acpi_ec loaded" || msg skip "acpi_ec not available"
 else
     msg fail "Kernel module compilation failed"
     echo ""
