@@ -24,7 +24,7 @@ pub fn build() -> gtk::ScrolledWindow {
     hero.add_css_class("dashboard-hero");
 
     if let Some(path) = find_model_photo(&info.product_name)
-        .or_else(|| find_resource("Predator PH315-54.png"))
+        .or_else(|| find_resource("models/notebook-404.png"))
         .or_else(|| find_resource("laptop-thumb.png"))
     {
         let pic = gtk::Picture::for_filename(path);
