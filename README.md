@@ -35,6 +35,9 @@
 > **Note**
 > All trademarks, product names, and logos mentioned (Acer, Predator, PredatorSense, Helios, Nitro, AeroBlade, CoolBoost) are the property of their respective owners (Acer Inc.). This project is not affiliated with, endorsed by, or sponsored by Acer Inc. in any way.
 
+> **Product images**
+> The laptop photos under `predator-sense-gui/resources/models/` depict official Acer Predator/Nitro products and are used solely to let the app visually identify the model detected on the user's own machine (matched against the `product_name` reported by the system's DMI/BIOS). These images are **not licensed under this project's GPLv3 license** — copyright in the underlying product photography belongs to Acer Inc. and/or its original creators. They are included here on a good-faith, non-commercial, purely informational basis (nominative/product-identification use), with no claim of ownership by this project. If you are the rights holder and would like an image removed, please open an issue and it will be taken down promptly.
+
 This application was created for **personal use**, to get the most out of an Acer gaming laptop on Linux — since Acer does not provide official Linux support for PredatorSense. It is shared freely for anyone who wants the same.
 
 ---
@@ -509,5 +512,7 @@ Any contribution is voluntary and greatly appreciated! It helps keep the project
 This project is licensed under the **GNU General Public License v3.0** — see the [LICENSE](LICENSE) file for details.
 
 This is free software: you can redistribute it and/or modify it under the terms of the GNU GPL as published by the Free Software Foundation.
+
+**Exception — product images:** the GPLv3 license above covers this project's source code only. The Acer Predator/Nitro laptop photos under `predator-sense-gui/resources/models/` are third-party product images (see [Disclaimer](#disclaimer) above) and are **not** covered by the GPLv3 grant; all rights in those images remain with Acer Inc. and/or the original photographers.
 
 **This software is provided "as is", without warranty of any kind.** The authors are not responsible for any damage that may occur from using this software. By installing and using this software, you acknowledge that you do so at your own risk.
