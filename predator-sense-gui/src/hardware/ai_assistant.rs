@@ -152,9 +152,20 @@ fn tools_schema() -> serde_json::Value {
 }
 
 const SYSTEM_PROMPT: &str = "You manage a laptop's hardware settings through a fixed set of tools. \
+    You must ONLY discuss this laptop's hardware/software state, this app's settings, and the \
+    available tools. If the user asks about anything else - general knowledge, unrelated topics, \
+    personal questions, or anything not about this laptop or this app - politely refuse and say you \
+    can only help with this laptop's hardware and this app, then stop; do not answer the unrelated \
+    part and do not call a tool. \
     You will be given a snapshot of the current hardware state and, optionally, a question from the \
-    user. If a change is clearly warranted, call exactly one appropriate tool. If nothing needs to \
-    change, or you are only answering a question, just reply with text and do not call any tool. \
+    user. If the user's message is a status question (e.g. 'is everything ok?', 'how is my system \
+    doing?', 'what is my CPU temperature?'), you MUST answer with text summarizing the relevant \
+    snapshot values - do NOT call a tool just because one is available; a tool exists to change \
+    something, not to answer a question. Only call a tool when the user explicitly asks for a change \
+    (e.g. 'set the fan to max', 'turn the keyboard blue') OR when the snapshot data itself clearly \
+    demands a corrective action per the thermal-safety rule below - never as a reply to a plain \
+    status question with no real need for change. If nothing needs to change and there is no \
+    question to answer, just reply with text and do not call any tool. \
     Thermal safety takes priority over everything else: if cpu_temp_c or gpu_temp_c is high (above \
     roughly 80C) or climbing, that is the one thing clearly warranting action - call set_fan_mode \
     with mode=max or set_coolboost with enabled=true, NOT a thermal profile change. Changing the \
@@ -319,10 +330,56 @@ fn is_canned_refusal(text: &str) -> bool {
     KNOWN_CANNED_REFUSALS.iter().any(|p| lower.contains(p))
 }
 
+/// Some models append a stray `{"name": null, "parameters": {}}`-style stub
+/// after real generated text when they considered (and rejected) a tool call
+/// - observed by hand against a real local llama3.1:8b. Not a canned refusal
+/// (the text before it is genuine, language-appropriate generation), just a
+/// trailing artifact of the tool-calling fine-tuning leaking into content.
+/// Strips one trailing `{...}` blob only when it looks like that stub (empty
+/// or null "name", empty "parameters"), never a legitimate closing brace in
+/// prose.
+fn strip_trailing_tool_stub(text: &str) -> &str {
+    let trimmed = text.trim_end();
+    if !trimmed.ends_with('}') {
+        return trimmed;
+    }
+    // Walk backwards tracking brace depth to find the '{' that balances the
+    // trailing '}', not just the nearest one (which could be a nested brace
+    // like the empty "parameters": {} inside the stub itself).
+    let bytes = trimmed.as_bytes();
+    let mut depth = 0i32;
+    let mut start = None;
+    for (i, &b) in bytes.iter().enumerate().rev() {
+        match b {
+            b'}' => depth += 1,
+            b'{' => {
+                depth -= 1;
+                if depth == 0 {
+                    start = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(start) = start else { return trimmed };
+    let stub = &trimmed[start..];
+    let looks_like_stub = stub.contains("\"name\"")
+        && stub.contains("\"parameters\"")
+        && (stub.contains("null") || stub.contains("\"\""))
+        && stub.len() < 80;
+    if looks_like_stub {
+        trimmed[..start].trim_end()
+    } else {
+        trimmed
+    }
+}
+
 fn parse_reply(v: &serde_json::Value) -> Result<AiReply, AiError> {
     let comment = v
         .pointer("/message/content")
         .and_then(|c| c.as_str())
+        .map(strip_trailing_tool_stub)
         .filter(|s| !s.trim().is_empty())
         .filter(|s| !is_canned_refusal(s))
         .map(|s| s.to_string());
@@ -622,6 +679,27 @@ mod tests {
         });
         let reply = parse_reply(&json).unwrap();
         assert_eq!(reply.action, Some(ToolCall::SetCoolBoost(true)));
+    }
+
+    #[test]
+    fn parse_reply_strips_trailing_tool_stub() {
+        // Verified against a real local llama3.1:8b: it can append this
+        // exact stub after genuine, language-appropriate text when it
+        // considered and rejected a tool call.
+        let json = serde_json::json!({
+            "message": { "content": "Não há problemas detectados.\n\n{\"name\": null, \"parameters\": {}}" }
+        });
+        let reply = parse_reply(&json).unwrap();
+        assert_eq!(reply.comment.as_deref(), Some("Não há problemas detectados."));
+    }
+
+    #[test]
+    fn parse_reply_keeps_prose_ending_in_brace() {
+        let json = serde_json::json!({
+            "message": { "content": "The set is {1, 2, 3}." }
+        });
+        let reply = parse_reply(&json).unwrap();
+        assert_eq!(reply.comment.as_deref(), Some("The set is {1, 2, 3}."));
     }
 
     #[test]
