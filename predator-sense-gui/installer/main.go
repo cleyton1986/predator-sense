@@ -802,7 +802,13 @@ RestartSec=5
 WantedBy=default.target`
 	svcPath := filepath.Join(svcDir, "predator-sense-hotkey.service")
 	os.WriteFile(svcPath, []byte(service), 0644)
-	chownToUser(svcPath)
+	// MkdirAll above runs as root: on a fresh ~/.config/systemd tree the
+	// directories end up root-owned, and systemd --user (which runs as the
+	// user) can't create the enable symlink in default.target.wants/ —
+	// enable fails forever, even when run manually later. Chown the whole
+	// tree, not just the unit file; this also repairs installs left broken
+	// by older versions.
+	run("chown", "-R", realUser+":"+realUser, filepath.Join(realHome, ".config/systemd"))
 
 	// Remove legacy XDG autostart entry — older installs wrote both this and the
 	// systemd unit, which spawned two listeners that each dispatched Activate on
@@ -1311,6 +1317,3 @@ func copyDir(src, dst string) error {
 	return nil
 }
 
-func chownToUser(path string) {
-	run("chown", realUser+":"+realUser, path)
-}
