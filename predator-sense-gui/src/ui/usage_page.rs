@@ -139,7 +139,7 @@ pub fn build() -> gtk::Box {
         let sampler_c = sampler.clone();
         let page_c = page.clone();
         glib::timeout_add_seconds_local(2, move || {
-            if !crate::app_state::is_window_visible() || !page_c.is_visible() {
+            if !crate::app_state::is_window_visible() || !page_c.is_mapped() {
                 return glib::ControlFlow::Continue;
             }
             let mut s = sampler_c.borrow_mut();
@@ -162,7 +162,7 @@ pub fn build() -> gtk::Box {
         let state_c = state.clone();
         let page_c = page.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
-            if !crate::app_state::is_window_visible() || !page_c.is_visible() {
+            if !crate::app_state::is_window_visible() || !page_c.is_mapped() {
                 return glib::ControlFlow::Continue;
             }
             let mut st = state_c.borrow_mut();
@@ -328,7 +328,7 @@ fn build_cpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     let lc_anim = list_container.clone();
     let page_anim = page.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
-        if !crate::app_state::is_window_visible() || !page_anim.is_visible() {
+        if !crate::app_state::is_window_visible() || !page_anim.is_mapped() {
             return glib::ControlFlow::Continue;
         }
         gauge_da_c.queue_draw();
@@ -345,7 +345,7 @@ fn build_cpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
 
     let page_list = page.clone();
     glib::timeout_add_seconds_local(2, move || {
-        if !crate::app_state::is_window_visible() || !page_list.is_visible() {
+        if !crate::app_state::is_window_visible() || !page_list.is_mapped() {
             return glib::ControlFlow::Continue;
         }
         rebuild_cpu_process_list(&lc, &state_list);
@@ -513,7 +513,7 @@ fn build_gpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     let power_da_c = power_da.clone();
     let page_c = page.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
-        if !crate::app_state::is_window_visible() || !page_c.is_visible() {
+        if !crate::app_state::is_window_visible() || !page_c.is_mapped() {
             return glib::ControlFlow::Continue;
         }
         let st = st_u.borrow();
@@ -612,7 +612,7 @@ fn build_mem_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     let list_anim = list.clone();
     let page_anim = page.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
-        if !crate::app_state::is_window_visible() || !page_anim.is_visible() {
+        if !crate::app_state::is_window_visible() || !page_anim.is_mapped() {
             return glib::ControlFlow::Continue;
         }
         let st = st_u.borrow();
@@ -644,7 +644,7 @@ fn build_mem_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     let lc = list.clone();
     let page_list = page.clone();
     glib::timeout_add_seconds_local(2, move || {
-        if !crate::app_state::is_window_visible() || !page_list.is_visible() {
+        if !crate::app_state::is_window_visible() || !page_list.is_mapped() {
             return glib::ControlFlow::Continue;
         }
         rebuild_mem_process_list(&lc, &st_list);
@@ -723,7 +723,7 @@ fn build_storage_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     let flow_c = flow.clone();
     let outer_list = outer.clone();
     glib::timeout_add_seconds_local(3, move || {
-        if !crate::app_state::is_window_visible() || !outer_list.is_visible() {
+        if !crate::app_state::is_window_visible() || !outer_list.is_mapped() {
             return glib::ControlFlow::Continue;
         }
         rebuild_storage_cards(&flow_c, &st_list);
@@ -739,7 +739,7 @@ fn build_storage_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     let flow_c2 = flow.clone();
     let outer_anim = outer.clone();
     glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
-        if !crate::app_state::is_window_visible() || !outer_anim.is_visible() {
+        if !crate::app_state::is_window_visible() || !outer_anim.is_mapped() {
             return glib::ControlFlow::Continue;
         }
         // Percorre filhos e força redraw no DrawingArea
