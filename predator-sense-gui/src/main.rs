@@ -29,6 +29,17 @@ pub fn apply_font_scale(scale: f64) {
 }
 
 fn main() {
+    // GTK 4.16+ picks the Vulkan renderer by default. Creating the Vulkan
+    // instance enumerates every GPU in the system, which opens /dev/nvidia*
+    // and keeps a hybrid laptop's discrete GPU powered — blocked from
+    // runtime-suspending into D3cold — for the app's whole lifetime, plus
+    // visibly janky frame pacing on NVIDIA PRIME setups. The GL renderer
+    // only touches the GPU that actually drives the display. An explicit
+    // user override still wins.
+    if std::env::var_os("GSK_RENDERER").is_none() {
+        std::env::set_var("GSK_RENDERER", "ngl");
+    }
+
     let app = adw::Application::builder()
         .application_id(APP_ID)
         .build();

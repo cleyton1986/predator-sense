@@ -216,7 +216,7 @@ pub fn build() -> gtk::Box {
     let w = all_widgets;
     let page_c = page.clone();
     glib::timeout_add_seconds_local(2, move || {
-        if !crate::app_state::is_window_visible() || !page_c.is_visible() {
+        if !crate::app_state::is_window_visible() || !page_c.is_mapped() {
             return glib::ControlFlow::Continue;
         }
         update(&s, &w);
