@@ -52,6 +52,7 @@ msg() {
         ok)         echo -e "       ${GREEN}✓${NC} $*" ;;
         fail)       echo -e "       ${RED}✗${NC} $*" ;;
         skip)       echo -e "       ${DIM}● $*${NC}" ;;
+        warn)       echo -e "       ${YELLOW}⚠${NC} $*" ;;
         done_msg)
             echo -e "\n  ${GREEN}${BOLD}══════════════════════════════════════════════${NC}"
             if [[ $LANG_CODE == "pt" ]]; then
@@ -393,16 +394,31 @@ if dkms add -m "$DKMS_MODULE" -v "$DKMS_VERSION" > "$MAKE_LOG" 2>&1 \
     && env $MAKE_EXTRA dkms build -m "$DKMS_MODULE" -v "$DKMS_VERSION" >> "$MAKE_LOG" 2>&1 \
     && env $MAKE_EXTRA dkms install -m "$DKMS_MODULE" -v "$DKMS_VERSION" --force >> "$MAKE_LOG" 2>&1; then
     MODULE_OK=1
-    printf "wmi\nsparse-keymap\nvideo\nplatform_profile\nfacer\nacer-wmi-battery\nacpi_ec\n" > /etc/modules-load.d/facer.conf
-    echo "blacklist acer_wmi" > /etc/modprobe.d/predator-sense.conf
-    depmod -a 2>/dev/null
-    # Load now
-    rmmod acer_wmi 2>/dev/null || true
-    rmmod facer 2>/dev/null || true
-    modprobe wmi sparse-keymap video platform_profile 2>/dev/null || true
-    modprobe facer 2>/dev/null && msg ok "facer loaded" || msg fail "facer load failed"
-    modprobe acer-wmi-battery 2>/dev/null && msg ok "acer-wmi-battery loaded" || msg skip "acer-wmi-battery not available"
-    modprobe acpi_ec 2>/dev/null && msg ok "acpi_ec loaded" || msg skip "acpi_ec not available"
+
+    # Linuwu-Sense (and DAMX, which builds on it) already replaces acer_wmi and
+    # claims the same WMI GUIDs facer needs. If it's installed, the blacklist +
+    # facer swap below would fight it and break a setup that already works, so
+    # don't touch the platform driver — RGB is driven over HID regardless.
+    if lsmod | awk '{print $1}' | grep -qx linuwu_sense \
+        || dkms status linuwu_sense 2>/dev/null | grep -q .; then
+        # Drop a facer.conf left by an earlier predator-sense run, otherwise
+        # systemd-modules-load would still pull facer up next to linuwu_sense
+        # on the next boot and reintroduce the conflict.
+        rm -f /etc/modules-load.d/facer.conf
+        msg warn "Linuwu-Sense detected — not blacklisting acer_wmi or swapping in facer"
+        msg skip "RGB still works over HID; leaving your platform driver alone"
+    else
+        printf "wmi\nsparse-keymap\nvideo\nplatform_profile\nfacer\nacer-wmi-battery\nacpi_ec\n" > /etc/modules-load.d/facer.conf
+        echo "blacklist acer_wmi" > /etc/modprobe.d/predator-sense.conf
+        depmod -a 2>/dev/null
+        # Load now
+        rmmod acer_wmi 2>/dev/null || true
+        rmmod facer 2>/dev/null || true
+        modprobe wmi sparse-keymap video platform_profile 2>/dev/null || true
+        modprobe facer 2>/dev/null && msg ok "facer loaded" || msg fail "facer load failed"
+        modprobe acer-wmi-battery 2>/dev/null && msg ok "acer-wmi-battery loaded" || msg skip "acer-wmi-battery not available"
+        modprobe acpi_ec 2>/dev/null && msg ok "acpi_ec loaded" || msg skip "acpi_ec not available"
+    fi
 else
     msg fail "Kernel module compilation failed"
     echo ""
