@@ -42,10 +42,12 @@ is_module_loaded() {
 }
 
 # linuwu_sense (and DAMX, which builds on it) already replaces acer_wmi and
-# claims the same WMI GUIDs facer needs. The two can't coexist.
+# claims the same WMI GUIDs facer needs. The two can't coexist. DKMS registers
+# the package as linuwu-sense while the module it builds is linuwu_sense, so the
+# two names have to be matched separately.
 is_linuwu_sense_present() {
     lsmod | awk '{print $1}' | grep -qx linuwu_sense && return 0
-    dkms status linuwu_sense 2>/dev/null | grep -q .
+    dkms status 2>/dev/null | grep -q '^linuwu[-_]sense[/,]'
 }
 
 is_hotkey_active() {
