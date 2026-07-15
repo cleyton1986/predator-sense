@@ -785,6 +785,41 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     page.append(&feat_title);
     page.append(&dashboard_page::build_features_flow());
 
+    // === Language (issue #17: no way to override the LANG/LANGUAGE-based
+    // auto-detect from the UI, so a Portuguese locale always got PT-BR text
+    // regardless of what the user actually reads) ===
+    let lang_title = gtk::Label::new(Some(t("language")));
+    lang_title.add_css_class("settings-section-title");
+    lang_title.set_halign(gtk::Align::Start);
+    lang_title.set_margin_top(16);
+    page.append(&lang_title);
+
+    let lang_choices: [(&str, &str); 2] = [("pt", "language_pt"), ("en", "language_en")];
+    let lang_labels: Vec<&str> = lang_choices.iter().map(|(_, k)| t(k)).collect();
+    let current_lang_code = cfg.language.clone().unwrap_or_else(|| {
+        if crate::i18n::is_pt() { "pt".to_string() } else { "en".to_string() }
+    });
+    let lang_selected = lang_choices
+        .iter()
+        .position(|(code, _)| *code == current_lang_code)
+        .unwrap_or(0) as u32;
+
+    let lang_row = create_setting_row(t("language"), t("language_desc"));
+    let lang_dd = gtk::DropDown::from_strings(&lang_labels);
+    lang_dd.set_selected(lang_selected);
+    lang_dd.set_valign(gtk::Align::Center);
+    lang_dd.connect_selected_notify(move |dd| {
+        let sel = dd.selected() as usize;
+        if sel >= lang_choices.len() {
+            return; // GTK_INVALID_LIST_POSITION or other transient state, not a real user pick
+        }
+        let mut c = config::load_app_config();
+        c.language = Some(lang_choices[sel].0.to_string());
+        let _ = config::save_app_config(&c);
+    });
+    lang_row.append(&lang_dd);
+    page.append(&lang_row);
+
     let beh_title = gtk::Label::new(Some(t("behavior")));
     beh_title.add_css_class("settings-section-title");
     beh_title.set_halign(gtk::Align::Start);

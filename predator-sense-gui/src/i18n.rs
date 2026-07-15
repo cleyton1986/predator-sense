@@ -22,6 +22,18 @@ pub fn lang() -> Lang {
     *LANG.get_or_init(detect_lang)
 }
 
+/// Seed the language from a saved user preference ("pt"/"en"). Must be called
+/// before the first `t()`/`lang()` call (i.e. before any UI is built) to have
+/// an effect - falls back to `detect_lang()` for `None` or an unset OnceLock.
+pub fn init(saved_override: Option<&str>) {
+    let lang = match saved_override {
+        Some("pt") => Lang::Pt,
+        Some("en") => Lang::En,
+        _ => detect_lang(),
+    };
+    let _ = LANG.set(lang);
+}
+
 pub fn is_pt() -> bool { lang() == Lang::Pt }
 
 /// Get translated string by key
@@ -265,6 +277,10 @@ fn t_pt<'a>(key: &'a str) -> &'a str {
         "mon_core_clock" => "Relógio de Núcleo",
         "mon_temp_load" => "Temperatura (°C)",
         "settings_title" => "Configurações",
+        "language" => "Idioma",
+        "language_desc" => "Idioma da interface. Requer reiniciar o aplicativo para aplicar.",
+        "language_pt" => "Português",
+        "language_en" => "Inglês",
         "behavior" => "Comportamento",
         "minimize_close" => "Minimizar ao fechar",
         "minimize_desc" => "A aplicação continua em segundo plano na bandeja do sistema.",
@@ -535,6 +551,10 @@ fn t_en<'a>(key: &'a str) -> &'a str {
         "mon_core_clock" => "Core Clock",
         "mon_temp_load" => "Temperature (°C)",
         "settings_title" => "Settings",
+        "language" => "Language",
+        "language_desc" => "Interface language. Restart the app for it to take effect.",
+        "language_pt" => "Portuguese",
+        "language_en" => "English",
         "behavior" => "Behavior",
         "minimize_close" => "Minimize on close",
         "minimize_desc" => "The application continues running in the system tray.",
