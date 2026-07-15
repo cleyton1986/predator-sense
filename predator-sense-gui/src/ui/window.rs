@@ -808,14 +808,42 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     let lang_dd = gtk::DropDown::from_strings(&lang_labels);
     lang_dd.set_selected(lang_selected);
     lang_dd.set_valign(gtk::Align::Center);
+    let current_lang_code_c = current_lang_code.clone();
     lang_dd.connect_selected_notify(move |dd| {
         let sel = dd.selected() as usize;
         if sel >= lang_choices.len() {
             return; // GTK_INVALID_LIST_POSITION or other transient state, not a real user pick
         }
+        let new_lang = lang_choices[sel].0.to_string();
+        if new_lang == current_lang_code_c {
+            return; // re-selecting the language already active, nothing to do
+        }
         let mut c = config::load_app_config();
-        c.language = Some(lang_choices[sel].0.to_string());
+        c.language = Some(new_lang);
         let _ = config::save_app_config(&c);
+
+        // i18n::LANG is a OnceLock seeded once at startup, and every page is
+        // built exactly once - there's no live re-render path to flip the
+        // language in place. Relaunch immediately instead of leaving the user
+        // staring at a dropdown that visibly did nothing: closing the window
+        // alone doesn't restart the process when "minimize on close" is on
+        // (confirmed this is what happened when this shipped - closing to
+        // tray kept the old process, and old process kept the old language,
+        // with no obvious way for the user to tell the two apart).
+        //
+        // The app is a single-instance GApplication (default flags, no
+        // NON_UNIQUE) registered on the session D-Bus - spawning the
+        // replacement before this process actually exits would just have it
+        // hand off to the dying primary instance and quit immediately,
+        // leaving no window at all. `sleep 0.5` in the child gives the D-Bus
+        // name time to free up before it tries to register.
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("sleep 0.5; exec {:?}", exe))
+                .spawn();
+        }
+        std::process::exit(0);
     });
     lang_row.append(&lang_dd);
     page.append(&lang_row);
