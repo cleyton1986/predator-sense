@@ -481,7 +481,7 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     model.set_halign(gtk::Align::Center);
     info_box.append(&model);
 
-    let ver = gtk::Label::new(Some("v0.2.37-preview • Linux"));
+    let ver = gtk::Label::new(Some(&format!("v{} • Linux", env!("CARGO_PKG_VERSION"))));
     ver.add_css_class("info-text-dim");
     ver.set_halign(gtk::Align::Center);
     info_box.append(&ver);
@@ -1187,7 +1187,7 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     about.set_halign(gtk::Align::Start);
     about.set_margin_top(24);
     page.append(&about);
-    let about_t = gtk::Label::new(Some(t("about_text")));
+    let about_t = gtk::Label::new(Some(&crate::i18n::tf("about_text", &[env!("CARGO_PKG_VERSION")])));
     about_t.add_css_class("about-text");
     about_t.set_halign(gtk::Align::Start);
     page.append(&about_t);
