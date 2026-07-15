@@ -23,34 +23,34 @@ var translations = map[string][2]string{
 	// [0] = English, [1] = Portuguese
 
 	// Menu
-	"menu_title":       {"Main Menu", "Menu Principal"},
-	"full_install":     {"Full Installation", "Instalação completa"},
-	"uninstall":        {"Uninstall", "Desinstalar"},
-	"reinstall":        {"Reinstall (clean)", "Reinstalar (limpo)"},
-	"reload_module":    {"Reload kernel module", "Recarregar módulo kernel"},
-	"view_status":      {"View system status", "Ver status do sistema"},
-	"open_app":         {"Open Predator Sense", "Abrir Predator Sense"},
-	"exit":             {"Exit", "Sair"},
-	"choice":           {"Choice", "Escolha"},
+	"menu_title":    {"Main Menu", "Menu Principal"},
+	"full_install":  {"Full Installation", "Instalação completa"},
+	"uninstall":     {"Uninstall", "Desinstalar"},
+	"reinstall":     {"Reinstall (clean)", "Reinstalar (limpo)"},
+	"reload_module": {"Reload kernel module", "Recarregar módulo kernel"},
+	"view_status":   {"View system status", "Ver status do sistema"},
+	"open_app":      {"Open Predator Sense", "Abrir Predator Sense"},
+	"exit":          {"Exit", "Sair"},
+	"choice":        {"Choice", "Escolha"},
 
 	// Status
-	"status_installed":   {"Installed", "Instalado"},
-	"status_not_installed": {"Not installed", "Não instalado"},
-	"status_module_active": {"Module active", "Módulo ativo"},
+	"status_installed":       {"Installed", "Instalado"},
+	"status_not_installed":   {"Not installed", "Não instalado"},
+	"status_module_active":   {"Module active", "Módulo ativo"},
 	"status_module_inactive": {"Module inactive", "Módulo inativo"},
-	"status_hotkey_active": {"PS Key active", "Tecla PS ativa"},
+	"status_hotkey_active":   {"PS Key active", "Tecla PS ativa"},
 	"status_hotkey_inactive": {"PS Key inactive", "Tecla PS inativa"},
 
 	// Status page
-	"system":            {"System", "Sistema"},
-	"components":        {"Components", "Componentes"},
-	"devices":           {"Devices", "Dispositivos"},
-	"application":       {"Application", "Aplicação"},
-	"facer_module":      {"facer module", "Módulo facer"},
-	"predator_key":      {"PredatorSense key", "Tecla PredatorSense"},
-	"menu_shortcut":     {"Menu shortcut", "Atalho no menu"},
-	"kernel_headers":    {"Kernel headers", "Kernel headers"},
-	"press_enter":       {"Press ENTER to continue...", "Pressione ENTER para continuar..."},
+	"system":         {"System", "Sistema"},
+	"components":     {"Components", "Componentes"},
+	"devices":        {"Devices", "Dispositivos"},
+	"application":    {"Application", "Aplicação"},
+	"facer_module":   {"facer module", "Módulo facer"},
+	"predator_key":   {"PredatorSense key", "Tecla PredatorSense"},
+	"menu_shortcut":  {"Menu shortcut", "Atalho no menu"},
+	"kernel_headers": {"Kernel headers", "Kernel headers"},
+	"press_enter":    {"Press ENTER to continue...", "Pressione ENTER para continuar..."},
 
 	// Install steps
 	"step_deps":         {"Installing system dependencies", "Instalando dependências do sistema"},
@@ -64,6 +64,7 @@ var translations = map[string][2]string{
 	"step_desktop":      {"Creating menu shortcut", "Criando atalho no menu"},
 	"step_hotkey":       {"Configuring PredatorSense key", "Configurando tecla PredatorSense"},
 	"step_module":       {"Compiling/loading kernel module", "Compilando/carregando módulo kernel"},
+	"linuwu_sense_skip": {"Linuwu-Sense detected — not blacklisting acer_wmi or swapping in facer (RGB still works over HID)", "Linuwu-Sense detectado — não vou colocar acer_wmi na blacklist nem trocar por facer (RGB continua funcionando via HID)"},
 
 	// Install flow
 	"full_install_title": {"Full Installation", "Instalação Completa"},
@@ -76,15 +77,15 @@ var translations = map[string][2]string{
 	"done_errors":        {"Completed with errors.", "Concluído com erros."},
 
 	// Uninstall
-	"removing":           {"Removing Predator Sense...", "Removendo Predator Sense..."},
-	"confirm_uninstall":  {"Remove Predator Sense completely? (y/N): ", "Deseja realmente desinstalar? (s/N): "},
-	"confirm_reinstall":  {"Reinstall from scratch? (y/N): ", "Reinstalar do zero? (s/N): "},
-	"confirm_yes":        {"y", "s"},
-	"removed_app":        {"Application removed", "Aplicação removida"},
-	"removed_menu":       {"Menu shortcut removed", "Atalho do menu removido"},
-	"removed_hotkey":     {"PredatorSense key deactivated", "Tecla PredatorSense desativada"},
-	"removed_service":    {"systemd service removed", "Serviço systemd removido"},
-	"note_module":        {"Note: facer kernel module was not removed (sudo rmmod facer)", "Nota: módulo kernel facer não removido (sudo rmmod facer)"},
+	"removing":          {"Removing Predator Sense...", "Removendo Predator Sense..."},
+	"confirm_uninstall": {"Remove Predator Sense completely? (y/N): ", "Deseja realmente desinstalar? (s/N): "},
+	"confirm_reinstall": {"Reinstall from scratch? (y/N): ", "Reinstalar do zero? (s/N): "},
+	"confirm_yes":       {"y", "s"},
+	"removed_app":       {"Application removed", "Aplicação removida"},
+	"removed_menu":      {"Menu shortcut removed", "Atalho do menu removido"},
+	"removed_hotkey":    {"PredatorSense key deactivated", "Tecla PredatorSense desativada"},
+	"removed_service":   {"systemd service removed", "Serviço systemd removido"},
+	"note_module":       {"Note: facer kernel module was not removed (sudo rmmod facer)", "Nota: módulo kernel facer não removido (sudo rmmod facer)"},
 
 	// Module
 	"module_reload_title": {"Reload Kernel Module", "Recarregar Módulo Kernel"},
@@ -95,10 +96,10 @@ var translations = map[string][2]string{
 	"module_reload_fail":  {"Failed to load module.\nCheck: dmesg | tail", "Falha ao carregar o módulo.\nVerifique: dmesg | tail"},
 
 	// Header
-	"for_linux":          {"For Linux", "Para Linux"},
+	"for_linux": {"For Linux", "Para Linux"},
 
 	// Errors
-	"run_as_root":        {"Run as root: sudo ./predator-sense-installer", "Execute como root: sudo ./predator-sense-installer"},
+	"run_as_root": {"Run as root: sudo ./predator-sense-installer", "Execute como root: sudo ./predator-sense-installer"},
 }
 
 func t(key string) string {

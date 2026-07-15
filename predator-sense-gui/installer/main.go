@@ -82,8 +82,8 @@ func detectPaths() {
 	//   └── ...
 
 	candidates := []string{
-		dir,                          // if binary is in project root
-		filepath.Join(dir, ".."),     // if binary is in installer/
+		dir,                            // if binary is in project root
+		filepath.Join(dir, ".."),       // if binary is in installer/
 		filepath.Join(dir, "..", ".."), // extra level up
 	}
 
@@ -332,10 +332,22 @@ func renderBar(pct int, width int) string {
 
 // ─── Status checks ───
 
-func isInstalled() bool   { return fileExists(installDir + "/predator-sense") }
+func isInstalled() bool    { return fileExists(installDir + "/predator-sense") }
 func isModuleLoaded() bool { return runSilent("lsmod") && grepOutput("lsmod", "^facer ") }
-func hasRust() bool        { return runAsUser("bash", "-c", `source "$HOME/.cargo/env" 2>/dev/null && which cargo`) == nil }
-func hasGTK4Dev() bool     { return runSilent("pkg-config", "--exists", "gtk4") }
+
+// linuwuSensePresent reports whether the linuwu_sense kernel module (which
+// DAMX relies on for fan/thermal control) is already loaded or DKMS-installed.
+// It binds the same WMI GUIDs as facer, so the two cannot coexist.
+func linuwuSensePresent() bool {
+	if grepOutput("lsmod", "^linuwu_sense ") {
+		return true
+	}
+	return runOutput("dkms", "status", "linuwu_sense") != ""
+}
+func hasRust() bool {
+	return runAsUser("bash", "-c", `source "$HOME/.cargo/env" 2>/dev/null && which cargo`) == nil
+}
+func hasGTK4Dev() bool { return runSilent("pkg-config", "--exists", "gtk4") }
 
 func isHotkeyActive() bool {
 	// Check if the service file exists AND if the daemon process is running
@@ -964,6 +976,20 @@ func installModule() error {
 		return fmt.Errorf("dkms install falhou: %v", err)
 	}
 
+	// Linuwu-Sense (and DAMX, which builds on it) already replaces acer_wmi and
+	// claims the same WMI GUIDs facer needs. If it's installed, blacklisting
+	// acer_wmi and force-loading facer below would fight it and break a setup
+	// that already works, so leave the platform driver alone — RGB is driven
+	// over HID regardless.
+	if linuwuSensePresent() {
+		// Drop a facer.conf left by an earlier predator-sense run, otherwise
+		// systemd-modules-load would still pull facer up next to linuwu_sense
+		// on the next boot and reintroduce the conflict.
+		os.Remove("/etc/modules-load.d/facer.conf")
+		fmt.Printf("    %s⚠ %s%s\n", yellow, t("linuwu_sense_skip"), reset)
+		return nil
+	}
+
 	// Persistent autoload at boot + blacklist stock acer_wmi.
 	// Loads facer's dependencies explicitly (wmi, sparse-keymap, video,
 	// platform_profile) so the stack comes up even if dependency autoloading
@@ -1316,4 +1342,3 @@ func copyDir(src, dst string) error {
 	}
 	return nil
 }
-
