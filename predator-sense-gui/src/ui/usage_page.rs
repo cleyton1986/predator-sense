@@ -1014,13 +1014,13 @@ fn build_process_row(
         det.set_margin_bottom(8);
 
         if !p.cmdline.is_empty() {
-            det.append(&detail_kv("Comando", &p.cmdline));
+            det.append(&detail_kv(crate::i18n::t("proc_command"), &p.cmdline));
         }
         det.append(&detail_kv("PID", &p.pid.to_string()));
-        det.append(&detail_kv("Usuário", &p.user));
-        det.append(&detail_kv("Estado", &format!("{} ({})", p.state, state_name(&p.state))));
+        det.append(&detail_kv(crate::i18n::t("proc_user"), &p.user));
+        det.append(&detail_kv(crate::i18n::t("proc_state"), &format!("{} ({})", p.state, state_name(&p.state))));
         det.append(&detail_kv("CPU", &format!("{:.2}%", p.cpu_pct)));
-        det.append(&detail_kv("Memória (RSS)", &format_kb(p.mem_kb)));
+        det.append(&detail_kv(crate::i18n::t("proc_memory_rss"), &format_kb(p.mem_kb)));
         row_outer.append(&det);
     }
 
@@ -1034,13 +1034,13 @@ fn build_process_row(
 
 fn state_name(s: &str) -> &'static str {
     match s {
-        "R" => "executando",
-        "S" => "dormindo",
-        "D" => "aguardando I/O",
-        "Z" => "zombie",
-        "T" => "parado",
-        "t" => "trace stop",
-        "X" => "morto",
+        "R" => crate::i18n::t("proc_state_running"),
+        "S" => crate::i18n::t("proc_state_sleeping"),
+        "D" => crate::i18n::t("proc_state_io_wait"),
+        "Z" => crate::i18n::t("proc_state_zombie"),
+        "T" => crate::i18n::t("proc_state_stopped"),
+        "t" => crate::i18n::t("proc_state_trace_stop"),
+        "X" => crate::i18n::t("proc_state_dead"),
         _ => "—",
     }
 }
@@ -1862,7 +1862,10 @@ fn draw_power_gauge(
     if let Some(g) = gpu {
         cr.set_source_rgba(0.8, 0.8, 0.8, 0.85);
         cr.set_font_size(11.0);
-        let sub = format!("Limite {:.0} W · Máx {:.0} W", g.power_limit_w, g.power_max_w);
+        let sub = crate::i18n::tf(
+            "gpu_power_sub",
+            &[&format!("{:.0}", g.power_limit_w), &format!("{:.0}", g.power_max_w)],
+        );
         if let Ok(ext) = cr.text_extents(&sub) {
             cr.move_to(w / 2.0 - ext.width() / 2.0, bar_y + bar_h + 16.0);
             let _ = cr.show_text(&sub);

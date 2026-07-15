@@ -484,7 +484,7 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     model.set_halign(gtk::Align::Center);
     info_box.append(&model);
 
-    let ver = gtk::Label::new(Some("v0.2.28 • Linux"));
+    let ver = gtk::Label::new(Some(&format!("v{} • Linux", env!("CARGO_PKG_VERSION"))));
     ver.add_css_class("info-text-dim");
     ver.set_halign(gtk::Align::Center);
     info_box.append(&ver);
@@ -764,6 +764,66 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     feat_title.set_margin_top(8);
     page.append(&feat_title);
     page.append(&dashboard_page::build_features_flow());
+
+    // === Language (issue #17: no way to override the LANG/LANGUAGE-based
+    // auto-detect from the UI, so a Portuguese locale always got PT-BR text
+    // regardless of what the user actually reads) ===
+    let lang_title = gtk::Label::new(Some(t("language")));
+    lang_title.add_css_class("settings-section-title");
+    lang_title.set_halign(gtk::Align::Start);
+    lang_title.set_margin_top(16);
+    page.append(&lang_title);
+
+    let lang_choices: [(&str, &str); 2] = [("pt", "language_pt"), ("en", "language_en")];
+    let lang_labels: Vec<&str> = lang_choices.iter().map(|(_, k)| t(k)).collect();
+    let current_lang_code = cfg.language.clone().unwrap_or_else(|| {
+        if crate::i18n::is_pt() { "pt".to_string() } else { "en".to_string() }
+    });
+    let lang_selected = lang_choices
+        .iter()
+        .position(|(code, _)| *code == current_lang_code)
+        .unwrap_or(0) as u32;
+
+    let lang_row = create_setting_row(t("language"), t("language_desc"));
+    let lang_dd = gtk::DropDown::from_strings(&lang_labels);
+    lang_dd.set_selected(lang_selected);
+    lang_dd.set_valign(gtk::Align::Center);
+    let current_lang_code_c = current_lang_code.clone();
+    lang_dd.connect_selected_notify(move |dd| {
+        let sel = dd.selected() as usize;
+        if sel >= lang_choices.len() {
+            return; // GTK_INVALID_LIST_POSITION or other transient state, not a real user pick
+        }
+        let new_lang = lang_choices[sel].0.to_string();
+        if new_lang == current_lang_code_c {
+            return; // re-selecting the language already active, nothing to do
+        }
+        let mut c = config::load_app_config();
+        c.language = Some(new_lang);
+        let _ = config::save_app_config(&c);
+
+        // i18n::LANG is a OnceLock seeded once at startup, and every page is
+        // built exactly once - there's no live re-render path to flip the
+        // language in place. Relaunch immediately instead of leaving the user
+        // staring at a dropdown that visibly did nothing: closing the window
+        // alone doesn't restart the process when "minimize on close" is on.
+        //
+        // The app is a single-instance GApplication (default flags, no
+        // NON_UNIQUE) registered on the session D-Bus - spawning the
+        // replacement before this process actually exits would just have it
+        // hand off to the dying primary instance and quit immediately,
+        // leaving no window at all. `sleep 0.5` in the child gives the D-Bus
+        // name time to free up before it tries to register.
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("sleep 0.5; exec {:?}", exe))
+                .spawn();
+        }
+        std::process::exit(0);
+    });
+    lang_row.append(&lang_dd);
+    page.append(&lang_row);
 
     let beh_title = gtk::Label::new(Some(t("behavior")));
     beh_title.add_css_class("settings-section-title");
@@ -1127,7 +1187,7 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     about.set_halign(gtk::Align::Start);
     about.set_margin_top(24);
     page.append(&about);
-    let about_t = gtk::Label::new(Some(t("about_text")));
+    let about_t = gtk::Label::new(Some(&crate::i18n::tf("about_text", &[env!("CARGO_PKG_VERSION")])));
     about_t.add_css_class("about-text");
     about_t.set_halign(gtk::Align::Start);
     page.append(&about_t);

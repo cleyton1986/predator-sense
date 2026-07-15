@@ -166,7 +166,7 @@ fn read_gpu_name() -> String {
             return rest.trim().to_string();
         }
     }
-    "Desconhecida".into()
+    crate::i18n::t("unknown").to_string()
 }
 
 fn read_gpu_vram() -> u32 {
@@ -238,7 +238,7 @@ fn read_storage() -> Vec<StorageDevice> {
             continue;
         }
         let model = read_trim(&base.join("device/model").to_string_lossy())
-            .unwrap_or_else(|| "Desconhecido".into());
+            .unwrap_or_else(|| crate::i18n::t("unknown").to_string());
         let kind = if name.starts_with("nvme") {
             "NVMe SSD".into()
         } else {

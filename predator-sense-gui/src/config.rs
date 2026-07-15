@@ -59,6 +59,10 @@ pub struct AppConfig {
     /// for a verdict. Only runs while ai_assistant_enabled is true.
     #[serde(default = "default_ai_check_interval_min")]
     pub ai_check_interval_min: u32,
+    /// Manual UI language override ("pt" or "en"). None = auto-detect from
+    /// LANG/LANGUAGE env vars, same as before this setting existed (issue #17).
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -107,6 +111,7 @@ impl Default for AppConfig {
             ai_ollama_url: default_ai_ollama_url(),
             ai_model: default_ai_model(),
             ai_check_interval_min: default_ai_check_interval_min(),
+            language: None,
         }
     }
 }

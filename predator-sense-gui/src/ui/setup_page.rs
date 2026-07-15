@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::hardware::setup;
+use crate::i18n::{t, tf};
 
 /// Build the setup/installer page shown when kernel module is not ready
 pub fn build(on_complete: Rc<dyn Fn()>) -> gtk::Box {
@@ -17,22 +18,16 @@ pub fn build(on_complete: Rc<dyn Fn()>) -> gtk::Box {
     page.set_size_request(600, -1);
 
     // Icon/Title
-    let title = gtk::Label::new(Some("Configuração Inicial"));
+    let title = gtk::Label::new(Some(t("setup_title")));
     title.add_css_class("setup-title");
     page.append(&title);
 
     let status = setup::check_status();
     let status_text = match &status {
-        setup::ModuleStatus::Ready => "Tudo pronto! O módulo facer está carregado.",
-        setup::ModuleStatus::NeedsFacerInstall => {
-            "O módulo kernel facer precisa ser compilado e instalado\npara habilitar RGB, Turbo e controle de ventoinhas."
-        }
-        setup::ModuleStatus::NeedsFacerLoad => {
-            "O módulo facer está compilado mas não carregado.\nClique para ativar."
-        }
-        setup::ModuleStatus::MissingDependencies(_) => {
-            "Dependências de compilação não encontradas.\nA instalação automática irá resolver."
-        }
+        setup::ModuleStatus::Ready => t("setup_status_ready"),
+        setup::ModuleStatus::NeedsFacerInstall => t("setup_status_needs_install"),
+        setup::ModuleStatus::NeedsFacerLoad => t("setup_status_needs_load"),
+        setup::ModuleStatus::MissingDependencies(_) => t("setup_status_missing_deps"),
     };
 
     let desc = gtk::Label::new(Some(status_text));
@@ -42,8 +37,8 @@ pub fn build(on_complete: Rc<dyn Fn()>) -> gtk::Box {
 
     // Repo location
     let repo_text = match setup::find_repo_dir() {
-        Some(p) => format!("Repositório: {}", p.display()),
-        None => "Repositório do módulo não encontrado!".to_string(),
+        Some(p) => tf("setup_repo_label", &[&p.display().to_string()]),
+        None => t("setup_repo_not_found").to_string(),
     };
     let repo_label = gtk::Label::new(Some(&repo_text));
     repo_label.add_css_class("setup-info");
@@ -54,9 +49,9 @@ pub fn build(on_complete: Rc<dyn Fn()>) -> gtk::Box {
     progress_box.set_margin_top(16);
 
     let step_labels: Vec<gtk::Box> = vec![
-        create_step("1", "Verificar dependências (gcc, make, headers)"),
-        create_step("2", "Compilar módulo kernel facer"),
-        create_step("3", "Carregar módulo (substituir acer_wmi)"),
+        create_step("1", t("setup_step1")),
+        create_step("2", t("setup_step2")),
+        create_step("3", t("setup_step3")),
     ];
     for step in &step_labels {
         progress_box.append(step);
@@ -89,11 +84,11 @@ pub fn build(on_complete: Rc<dyn Fn()>) -> gtk::Box {
     button_box.set_margin_top(16);
 
     if status != setup::ModuleStatus::Ready {
-        let install_btn = gtk::Button::with_label("Instalar Agora");
+        let install_btn = gtk::Button::with_label(t("install_now"));
         install_btn.add_css_class("accent-button");
         install_btn.add_css_class("setup-install-btn");
 
-        let service_btn = gtk::Button::with_label("Instalar como Serviço (persistente)");
+        let service_btn = gtk::Button::with_label(t("install_service"));
         service_btn.add_css_class("secondary-button");
 
         let steps_clone = step_labels.clone();
@@ -105,7 +100,7 @@ pub fn build(on_complete: Rc<dyn Fn()>) -> gtk::Box {
 
         install_btn.connect_clicked(move |btn| {
             btn.set_sensitive(false);
-            btn.set_label("Instalando...");
+            btn.set_label(t("installing"));
             log_scroll_c.set_visible(true);
 
             let steps = steps_clone.clone();
@@ -128,7 +123,7 @@ pub fn build(on_complete: Rc<dyn Fn()>) -> gtk::Box {
 
         service_btn.connect_clicked(move |btn| {
             btn.set_sensitive(false);
-            btn.set_label("Instalando serviço...");
+            btn.set_label(t("setup_installing_service"));
             log_scroll_c2.set_visible(true);
 
             let log_tv = log_text_c2.clone();
@@ -145,7 +140,7 @@ pub fn build(on_complete: Rc<dyn Fn()>) -> gtk::Box {
                     let load = setup::load_module();
                     append_log(&log_tv, &load.details);
                     if load.success {
-                        set_status_msg(&slabel, "Serviço instalado e módulo carregado!", false);
+                        set_status_msg(&slabel, t("setup_service_module_loaded"), false);
                         glib::timeout_add_seconds_local_once(2, move || {
                             on_done();
                         });
@@ -153,7 +148,7 @@ pub fn build(on_complete: Rc<dyn Fn()>) -> gtk::Box {
                 } else {
                     set_status_msg(&slabel, &result.message, true);
                     button.set_sensitive(true);
-                    button.set_label("Tentar Novamente");
+                    button.set_label(t("try_again"));
                 }
             });
         });
@@ -161,7 +156,7 @@ pub fn build(on_complete: Rc<dyn Fn()>) -> gtk::Box {
         button_box.append(&install_btn);
         button_box.append(&service_btn);
     } else {
-        let continue_btn = gtk::Button::with_label("Continuar");
+        let continue_btn = gtk::Button::with_label(t("setup_continue"));
         continue_btn.add_css_class("accent-button");
         let on_complete_c = on_complete.clone();
         continue_btn.connect_clicked(move |_| {
@@ -171,7 +166,7 @@ pub fn build(on_complete: Rc<dyn Fn()>) -> gtk::Box {
     }
 
     // Skip button
-    let skip_btn = gtk::Button::with_label("Pular (usar sem módulo)");
+    let skip_btn = gtk::Button::with_label(t("skip"));
     skip_btn.add_css_class("flat-button");
     let on_complete_skip = on_complete.clone();
     skip_btn.connect_clicked(move |_| {
@@ -199,14 +194,14 @@ fn run_installation(
         deps
     };
     if !missing.is_empty() {
-        append_log(&log_tv, &format!("Instalando: {}\n", missing.join(", ")));
+        append_log(&log_tv, &tf("setup_installing_deps", &[&missing.join(", ")]));
         let result = setup::install_dependencies(&missing);
         append_log(&log_tv, &result.details);
         if !result.success {
             mark_step(&steps[0], "failed");
             set_status_msg(&status_label, &result.message, true);
             button.set_sensitive(true);
-            button.set_label("Tentar Novamente");
+            button.set_label(t("try_again"));
             return;
         }
     }
@@ -214,29 +209,29 @@ fn run_installation(
 
     // Step 2: Compile
     mark_step(&steps[1], "running");
-    append_log(&log_tv, "Compilando módulo facer...\n");
+    append_log(&log_tv, t("setup_compiling_module"));
     let compile = setup::compile_module();
     append_log(&log_tv, &compile.details);
     if !compile.success {
         mark_step(&steps[1], "failed");
         set_status_msg(&status_label, &compile.message, true);
         button.set_sensitive(true);
-        button.set_label("Tentar Novamente");
+        button.set_label(t("try_again"));
         return;
     }
     mark_step(&steps[1], "done");
 
     // Step 3: Load
     mark_step(&steps[2], "running");
-    append_log(&log_tv, "Carregando módulo...\n");
+    append_log(&log_tv, t("setup_loading_module"));
     let load = setup::load_module();
     append_log(&log_tv, &load.details);
     if load.success {
         mark_step(&steps[2], "done");
-        set_status_msg(&status_label, "Instalação concluída com sucesso!", false);
+        set_status_msg(&status_label, t("setup_install_complete"), false);
         service_btn.set_visible(true);
         service_btn.set_sensitive(true);
-        service_btn.set_label("Instalar como Serviço (boot automático)");
+        service_btn.set_label(t("setup_install_service_boot"));
 
         // Auto-navigate to main app after 2 seconds
         glib::timeout_add_seconds_local_once(2, move || {
@@ -246,7 +241,7 @@ fn run_installation(
         mark_step(&steps[2], "failed");
         set_status_msg(&status_label, &load.message, true);
         button.set_sensitive(true);
-        button.set_label("Tentar Novamente");
+        button.set_label(t("try_again"));
     }
 }
 

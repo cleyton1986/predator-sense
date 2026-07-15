@@ -55,6 +55,7 @@ fn main() {
 
     app.connect_activate(|app| {
         config::ensure_dirs();
+        i18n::init(config::load_app_config().language.as_deref());
 
         // Single instance: if window exists, present it
         if let Some(window) = app.active_window() {

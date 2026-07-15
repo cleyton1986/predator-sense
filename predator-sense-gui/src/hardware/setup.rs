@@ -1,3 +1,4 @@
+use crate::i18n::{t, tf};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -125,16 +126,16 @@ pub fn install_dependencies(missing: &[String]) -> SetupResult {
             SetupResult {
                 success: out.status.success(),
                 message: if out.status.success() {
-                    format!("Dependências instaladas: {}", packages)
+                    tf("setup_deps_installed", &[&packages])
                 } else {
-                    "Falha ao instalar dependências".into()
+                    t("setup_deps_failed").to_string()
                 },
                 details: format!("{}\n{}", stdout, stderr),
             }
         }
         Err(e) => SetupResult {
             success: false,
-            message: format!("Erro ao executar apt-get: {}", e),
+            message: tf("setup_err_apt_exec", &[&e.to_string()]),
             details: String::new(),
         },
     }
@@ -147,8 +148,8 @@ pub fn compile_module() -> SetupResult {
         None => {
             return SetupResult {
                 success: false,
-                message: "Diretório do repositório não encontrado".into(),
-                details: "O código fonte do facer.c não foi encontrado.".into(),
+                message: t("setup_err_repo_not_found").to_string(),
+                details: t("setup_err_facer_src_not_found").to_string(),
             }
         }
     };
@@ -175,16 +176,16 @@ pub fn compile_module() -> SetupResult {
             SetupResult {
                 success: out.status.success() && ko_exists,
                 message: if out.status.success() && ko_exists {
-                    "Módulo facer compilado com sucesso!".into()
+                    t("setup_compile_success").to_string()
                 } else {
-                    "Falha na compilação do módulo".into()
+                    t("setup_compile_failed").to_string()
                 },
                 details: format!("{}\n{}", stdout, stderr),
             }
         }
         Err(e) => SetupResult {
             success: false,
-            message: format!("Erro ao compilar: {}", e),
+            message: tf("setup_err_compile_exec", &[&e.to_string()]),
             details: String::new(),
         },
     }
@@ -197,7 +198,7 @@ pub fn load_module() -> SetupResult {
         None => {
             return SetupResult {
                 success: false,
-                message: "Diretório do repositório não encontrado".into(),
+                message: t("setup_err_repo_not_found").to_string(),
                 details: String::new(),
             }
         }
@@ -207,7 +208,7 @@ pub fn load_module() -> SetupResult {
     if !ko_path.exists() {
         return SetupResult {
             success: false,
-            message: "facer.ko não encontrado. Compile primeiro.".into(),
+            message: t("setup_err_ko_not_found").to_string(),
             details: String::new(),
         };
     }
@@ -264,18 +265,18 @@ pub fn load_module() -> SetupResult {
             SetupResult {
                 success: out.status.success() && devices_ok,
                 message: if devices_ok {
-                    "Módulo facer carregado! Dispositivos RGB disponíveis.".into()
+                    t("setup_module_loaded_ok").to_string()
                 } else if out.status.success() {
-                    "Módulo inserido mas dispositivos não apareceram. Verifique dmesg.".into()
+                    t("setup_module_inserted_no_devices").to_string()
                 } else {
-                    format!("Falha ao carregar módulo: {}", stderr.trim())
+                    tf("setup_module_load_failed", &[stderr.trim()])
                 },
                 details: log,
             }
         }
         Err(e) => SetupResult {
             success: false,
-            message: format!("Erro ao carregar módulo: {}", e),
+            message: tf("setup_err_load_exec", &[&e.to_string()]),
             details: log,
         },
     }
@@ -288,7 +289,7 @@ pub fn install_service() -> SetupResult {
         None => {
             return SetupResult {
                 success: false,
-                message: "Diretório do repositório não encontrado".into(),
+                message: t("setup_err_repo_not_found").to_string(),
                 details: String::new(),
             }
         }
@@ -298,7 +299,7 @@ pub fn install_service() -> SetupResult {
     if !script.exists() {
         return SetupResult {
             success: false,
-            message: "Script install_service.sh não encontrado".into(),
+            message: t("setup_script_not_found").to_string(),
             details: String::new(),
         };
     }
@@ -315,16 +316,16 @@ pub fn install_service() -> SetupResult {
             SetupResult {
                 success: out.status.success(),
                 message: if out.status.success() {
-                    "Serviço instalado! O módulo será carregado automaticamente no boot.".into()
+                    t("setup_service_installed").to_string()
                 } else {
-                    "Falha ao instalar serviço".into()
+                    t("setup_service_install_failed").to_string()
                 },
                 details: format!("{}\n{}", stdout, stderr),
             }
         }
         Err(e) => SetupResult {
             success: false,
-            message: format!("Erro: {}", e),
+            message: tf("setup_err_generic", &[&e.to_string()]),
             details: String::new(),
         },
     }

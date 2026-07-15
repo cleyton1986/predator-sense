@@ -1,3 +1,4 @@
+use crate::i18n::{t, tf};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -111,18 +112,15 @@ pub fn is_static_device_available() -> bool {
 /// All values are range-checked before writing.
 pub fn apply_dynamic_effect(config: &RgbConfig) -> Result<(), String> {
     if !is_module_loaded() {
-        return Err(format!(
-            "Dispositivo {} não encontrado. O módulo kernel está carregado?",
-            DEVICE_DYNAMIC
-        ));
+        return Err(tf("rgb_err_device_not_found", &[DEVICE_DYNAMIC]));
     }
 
     // Validate ranges
     if config.speed > 9 {
-        return Err("Velocidade deve ser entre 0 e 9".into());
+        return Err(t("rgb_err_speed_range").to_string());
     }
     if config.brightness > 100 {
-        return Err("Brilho deve ser entre 0 e 100".into());
+        return Err(t("rgb_err_brightness_range").to_string());
     }
 
     // Build the 16-byte payload matching the kernel module's expected format
@@ -147,14 +145,11 @@ pub fn apply_dynamic_effect(config: &RgbConfig) -> Result<(), String> {
 /// SAFETY: Validates zone number (1-4) and writes a 4-byte payload.
 pub fn apply_static_zone(config: &StaticZoneConfig) -> Result<(), String> {
     if !is_static_device_available() {
-        return Err(format!(
-            "Dispositivo {} não encontrado. O módulo kernel está carregado?",
-            DEVICE_STATIC
-        ));
+        return Err(tf("rgb_err_device_not_found", &[DEVICE_STATIC]));
     }
 
     if config.zone < 1 || config.zone > 4 {
-        return Err("Zona deve ser entre 1 e 4".into());
+        return Err(t("rgb_err_zone_range").to_string());
     }
 
     // Build the 4-byte payload: zone bitmap, R, G, B
@@ -186,10 +181,10 @@ fn write_to_device(device_path: &str, data: &[u8]) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .write(true)
         .open(device_path)
-        .map_err(|e| format!("Erro ao abrir {}: {}. Execute como root (sudo).", device_path, e))?;
+        .map_err(|e| tf("rgb_err_open_device", &[device_path, &e.to_string()]))?;
 
     file.write_all(data)
-        .map_err(|e| format!("Erro ao escrever em {}: {}", device_path, e))?;
+        .map_err(|e| tf("rgb_err_write_device", &[device_path, &e.to_string()]))?;
 
     Ok(())
 }
@@ -197,16 +192,16 @@ fn write_to_device(device_path: &str, data: &[u8]) -> Result<(), String> {
 /// Check if user has write permission to the devices
 pub fn check_permissions() -> Result<(), String> {
     if !is_module_loaded() {
-        return Err("Módulo kernel não carregado. Execute: sudo ./install.sh".into());
+        return Err(t("rgb_err_module_not_loaded").to_string());
     }
 
     // Try to check write permissions
     let metadata = fs::metadata(DEVICE_DYNAMIC)
-        .map_err(|e| format!("Não foi possível acessar {}: {}", DEVICE_DYNAMIC, e))?;
+        .map_err(|e| tf("rgb_err_access_device", &[DEVICE_DYNAMIC, &e.to_string()]))?;
 
     let permissions = metadata.permissions();
     if permissions.readonly() {
-        return Err("Sem permissão de escrita. Execute a aplicação como root (sudo).".into());
+        return Err(t("rgb_err_no_write_perm").to_string());
     }
 
     Ok(())
