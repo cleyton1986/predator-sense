@@ -1,5 +1,6 @@
 /// Simple internationalization module.
-/// Detects system locale and returns strings in the correct language.
+/// Language is explicit (saved user preference in Settings), defaulting to
+/// English on first run - no OS locale auto-detection.
 
 use std::sync::OnceLock;
 
@@ -8,28 +9,18 @@ static LANG: OnceLock<Lang> = OnceLock::new();
 #[derive(Clone, Copy, PartialEq)]
 pub enum Lang { Pt, En }
 
-fn detect_lang() -> Lang {
-    let lang = std::env::var("LANG").unwrap_or_default();
-    let language = std::env::var("LANGUAGE").unwrap_or_default();
-    if lang.starts_with("pt") || language.starts_with("pt") {
-        Lang::Pt
-    } else {
-        Lang::En
-    }
-}
-
 pub fn lang() -> Lang {
-    *LANG.get_or_init(detect_lang)
+    *LANG.get_or_init(|| Lang::En)
 }
 
 /// Seed the language from a saved user preference ("pt"/"en"). Must be called
 /// before the first `t()`/`lang()` call (i.e. before any UI is built) to have
-/// an effect - falls back to `detect_lang()` for `None` or an unset OnceLock.
+/// an effect - defaults to English for `None`, an unrecognized value, or an
+/// already-set OnceLock (first-run / no config.json entry yet).
 pub fn init(saved_override: Option<&str>) {
     let lang = match saved_override {
         Some("pt") => Lang::Pt,
-        Some("en") => Lang::En,
-        _ => detect_lang(),
+        _ => Lang::En,
     };
     let _ = LANG.set(lang);
 }
