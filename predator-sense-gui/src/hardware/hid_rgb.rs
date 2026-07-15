@@ -1,3 +1,4 @@
+use crate::i18n::t;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::io::AsRawFd;
@@ -74,7 +75,7 @@ pub const MODE_NEON: u8 = 0x05;
 /// the same call/packet format verified working on real PHN16-73 hardware.
 pub fn set_zone_color(zone_mask: u8, red: u8, green: u8, blue: u8, brightness_pct: u8) -> Result<(), String> {
     let path = find_enek5130_hidraw()
-        .ok_or_else(|| "Dispositivo ENEK5130 (I2C-HID) não encontrado".to_string())?;
+        .ok_or_else(|| t("hid_rgb_err_device_not_found").to_string())?;
 
     let file: File = OpenOptions::new()
         .read(true)
@@ -120,7 +121,7 @@ pub fn set_zone_color(zone_mask: u8, red: u8, green: u8, blue: u8, brightness_pc
 /// this hardware and are intentionally not exposed.
 pub fn set_effect(mode: u8, brightness_pct: u8, speed: u8, direction: u8, red: u8, green: u8, blue: u8) -> Result<(), String> {
     let path = find_enek5130_hidraw()
-        .ok_or_else(|| "Dispositivo ENEK5130 (I2C-HID) não encontrado".to_string())?;
+        .ok_or_else(|| t("hid_rgb_err_device_not_found").to_string())?;
 
     let file: File = OpenOptions::new()
         .read(true)

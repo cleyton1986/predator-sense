@@ -6,6 +6,7 @@ use std::f64::consts::PI;
 use std::rc::Rc;
 
 use crate::hardware::sensors;
+use crate::i18n::tf;
 
 const HISTORY_SIZE: usize = 60; // 60 data points = 2 minutes at 2s interval
 
@@ -58,9 +59,9 @@ pub fn build() -> gtk::Box {
     cpu_temp_display.set_halign(gtk::Align::End);
     let cpu_temp_value = gtk::Label::new(Some("--°"));
     cpu_temp_value.add_css_class("monitor-temp-big");
-    let cpu_temp_min = gtk::Label::new(Some("Mín: --°"));
+    let cpu_temp_min = gtk::Label::new(Some(&tf("min_short", &["--"])));
     cpu_temp_min.add_css_class("monitor-minmax");
-    let cpu_temp_max = gtk::Label::new(Some("Máx: --°"));
+    let cpu_temp_max = gtk::Label::new(Some(&tf("max_short", &["--"])));
     cpu_temp_max.add_css_class("monitor-minmax");
     cpu_temp_display.append(&cpu_temp_min);
     cpu_temp_display.append(&cpu_temp_max);
@@ -113,9 +114,9 @@ pub fn build() -> gtk::Box {
     gpu_temp_display.set_halign(gtk::Align::End);
     let gpu_temp_value = gtk::Label::new(Some("--°"));
     gpu_temp_value.add_css_class("monitor-temp-big");
-    let gpu_temp_min = gtk::Label::new(Some("Mín: --°"));
+    let gpu_temp_min = gtk::Label::new(Some(&tf("min_short", &["--"])));
     gpu_temp_min.add_css_class("monitor-minmax");
-    let gpu_temp_max = gtk::Label::new(Some("Máx: --°"));
+    let gpu_temp_max = gtk::Label::new(Some(&tf("max_short", &["--"])));
     gpu_temp_max.add_css_class("monitor-minmax");
     gpu_temp_display.append(&gpu_temp_min);
     gpu_temp_display.append(&gpu_temp_max);
@@ -266,8 +267,8 @@ fn do_update(
     if !st.cpu_temp_history.is_empty() {
         let min = st.cpu_temp_history.iter().cloned().fold(f64::MAX, f64::min);
         let max = st.cpu_temp_history.iter().cloned().fold(f64::MIN, f64::max);
-        cpu_tmin.set_text(&format!("Mín: {}°", min as i32));
-        cpu_tmax.set_text(&format!("Máx: {}°", max as i32));
+        cpu_tmin.set_text(&tf("min_short", &[&(min as i32).to_string()]));
+        cpu_tmax.set_text(&tf("max_short", &[&(max as i32).to_string()]));
     }
 
     // GPU temp display
@@ -277,8 +278,8 @@ fn do_update(
     if !st.gpu_temp_history.is_empty() {
         let min = st.gpu_temp_history.iter().cloned().fold(f64::MAX, f64::min);
         let max = st.gpu_temp_history.iter().cloned().fold(f64::MIN, f64::max);
-        gpu_tmin.set_text(&format!("Mín: {}°", min as i32));
-        gpu_tmax.set_text(&format!("Máx: {}°", max as i32));
+        gpu_tmin.set_text(&tf("min_short", &[&(min as i32).to_string()]));
+        gpu_tmax.set_text(&tf("max_short", &[&(max as i32).to_string()]));
     }
     drop(st);
 

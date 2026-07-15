@@ -72,12 +72,14 @@ pub fn build() -> gtk::ScrolledWindow {
     grid.set_margin_top(6);
 
     let cpu_detail = if info.cpu_cores > 0 {
-        format!(
-            "{}\n{} núcleos / {} threads · {:.2} GHz",
-            info.cpu_model,
-            info.cpu_cores,
-            info.cpu_threads,
-            info.cpu_max_freq_mhz as f64 / 1000.0
+        crate::i18n::tf(
+            "cpu_full_spec",
+            &[
+                &info.cpu_model,
+                &info.cpu_cores.to_string(),
+                &info.cpu_threads.to_string(),
+                &format!("{:.2}", info.cpu_max_freq_mhz as f64 / 1000.0),
+            ],
         )
     } else {
         info.cpu_model.clone()
@@ -122,7 +124,7 @@ pub fn build() -> gtk::ScrolledWindow {
     };
 
     let net_detail = if info.net_interface.is_empty() {
-        "Sem conexão ativa".into()
+        crate::i18n::t("no_active_interface").to_string()
     } else {
         format!("{} · {}\n{}", info.net_type, info.net_interface, info.net_mac)
     };
@@ -207,15 +209,15 @@ fn make_feature_chip(name: &str, supported: bool) -> gtk::Box {
 fn build_short_summary(info: &SystemInfo) -> String {
     let mut parts: Vec<String> = Vec::new();
     if info.cpu_cores > 0 {
-        parts.push(format!(
-            "{} núcleos / {} threads",
-            info.cpu_cores, info.cpu_threads
+        parts.push(crate::i18n::tf(
+            "cores_threads_short",
+            &[&info.cpu_cores.to_string(), &info.cpu_threads.to_string()],
         ));
     }
     if info.ram_total_gb > 0.0 {
         parts.push(format!("{:.0} GB RAM", info.ram_total_gb));
     }
-    if !info.gpu_name.is_empty() && info.gpu_name != "Desconhecida" {
+    if !info.gpu_name.is_empty() && info.gpu_name != crate::i18n::t("unknown") {
         parts.push(info.gpu_name.clone());
     }
     parts.join(" · ")
