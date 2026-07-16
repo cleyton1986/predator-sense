@@ -399,8 +399,10 @@ if dkms add -m "$DKMS_MODULE" -v "$DKMS_VERSION" > "$MAKE_LOG" 2>&1 \
     # claims the same WMI GUIDs facer needs. If it's installed, the blacklist +
     # facer swap below would fight it and break a setup that already works, so
     # don't touch the platform driver — RGB is driven over HID regardless.
+    # DKMS registers the package as linuwu-sense while the module it builds is
+    # linuwu_sense, so the two names have to be matched separately.
     if lsmod | awk '{print $1}' | grep -qx linuwu_sense \
-        || dkms status linuwu_sense 2>/dev/null | grep -q .; then
+        || dkms status 2>/dev/null | grep -q '^linuwu[-_]sense[/,]'; then
         # Drop a facer.conf left by an earlier predator-sense run, otherwise
         # systemd-modules-load would still pull facer up next to linuwu_sense
         # on the next boot and reintroduce the conflict.

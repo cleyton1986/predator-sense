@@ -337,12 +337,14 @@ func isModuleLoaded() bool { return runSilent("lsmod") && grepOutput("lsmod", "^
 
 // linuwuSensePresent reports whether the linuwu_sense kernel module (which
 // DAMX relies on for fan/thermal control) is already loaded or DKMS-installed.
-// It binds the same WMI GUIDs as facer, so the two cannot coexist.
+// It binds the same WMI GUIDs as facer, so the two cannot coexist. DKMS
+// registers the package as linuwu-sense while the module it builds is
+// linuwu_sense, so the two names have to be matched separately.
 func linuwuSensePresent() bool {
 	if grepOutput("lsmod", "^linuwu_sense ") {
 		return true
 	}
-	return runOutput("dkms", "status", "linuwu_sense") != ""
+	return grepOutput("dkms status", `^linuwu[-_]sense[/,]`)
 }
 func hasRust() bool {
 	return runAsUser("bash", "-c", `source "$HOME/.cargo/env" 2>/dev/null && which cargo`) == nil
