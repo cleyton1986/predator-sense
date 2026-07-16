@@ -99,6 +99,7 @@ Inspirado e baseado no projeto [acer-predator-turbo-and-rgb-keyboard-linux-modul
 | **Consumo** | Visão em 4 abas: CPU / GPU / Memória / Armazenamento, com top processos, detalhes ao clicar e animação de fogo CSS no gauge de temperatura |
 | **Rede** | Gráficos de download/upload em tempo real, com tracking de pico e detecção automática de interface |
 | **Controle RGB do Teclado** | Cores estáticas por zona (4 zonas) e efeitos dinâmicos (Respiração, Neon, Onda, Deslizar, Zoom). Em hardware sem o módulo kernel (só controlador I2C-HID), cor estática, brilho, desligar luz e os efeitos Respiração/Neon também funcionam nativamente via HID — veja [Compatibilidade](#compatibilidade) |
+| **Logo RGB da Tampa** | Controle independente de energia, cor estática, brilho, Respiração e Neon para o emblema atrás da tela, com prévia vetorial ao vivo. Só aparece após detecção de capacidades HID em tempo de execução |
 | **Perfis de Desempenho** | Silencioso / Balanceado / Performance / Turbo (CPU governor + Intel EPP + limite de potência da GPU) |
 | **Controle de Ventoinha** | RPM ao vivo com animação girando, toggle do CoolBoost, modos Auto/Max, e controle PWM por ventoinha + curva automática por temperatura (experimental, onde suportado) |
 | **Bateria** | Estatísticas de carga, ciclos, saúde, fabricante e limite de carga em 80% para preservar a longevidade |
@@ -176,6 +177,9 @@ Alguns modelos (confirmado: PHN16S-71, PHN16-73) roteiam o controlador RGB do te
 | Cor estática por zona, brilho, desligar luz | ✅ confirmado funcionando (PHN16S-71) |
 | Efeitos dinâmicos — Respiração, Neon 🧪 | Nativo, um único write HID, hardware faz o loop do padrão sozinho — **aguardando confirmação** em hardware real |
 | Efeitos dinâmicos — Onda, Deslizar, Zoom | Só prévia visual na tela (sem escrita em hardware) — os códigos desses efeitos variam de significado entre gerações de hardware, então ainda não foram ativados |
+| Logo RGB da tampa — desligar, cor estática, brilho, Respiração, Neon | ✅ confirmado funcionando (PHN16-73) |
+
+O suporte ao logo da tampa não é ativado por uma allow-list de modelos. O controlador precisa anunciar o alvo `0x83` no relatório A1 e retornar capacidades A3 correspondentes e não vazias antes que a interface apareça; o app repete essa verificação imediatamente antes de cada escrita. O daemon de hotkey restaura somente uma configuração que o app aplicou com sucesso após login e retorno do modo de suspensão, e ignora totalmente o logo quando não há configuração salva ou o alvo está ausente.
 
 ### Já usa Linuwu-Sense ou DAMX?
 
@@ -300,6 +304,17 @@ sudo chmod +x /opt/predator-sense/predator-sense
 5. Clique em **Aplicar**
 
 > Em hardware só I2C-HID sem o módulo kernel (veja [Compatibilidade](#compatibilidade)), Respiração e Neon animam de verdade; Onda/Deslizar/Zoom mostram só prévia visual, claramente rotulada como tal — o teclado físico ainda não muda pra esses.
+
+### Logo RGB da Tampa
+
+1. Vá em **Iluminação** e selecione **Logo da tampa** (o seletor só aparece quando o alvo HID compatível é detectado)
+2. Use **Iluminação** para ligar ou desligar o emblema
+3. Escolha **Estático**, **Respiração** ou **Neon** e ajuste os controles disponíveis de cor, brilho e velocidade acompanhando a prévia ao vivo
+4. Clique em **Aplicar no logo**
+
+O último estado aplicado com sucesso é restaurado quando o serviço de hotkey do usuário inicia e após suspensão/hibernação. As cores dos efeitos animados são controladas pelo firmware; por isso a prévia representa o comportamento deles e o seletor de cor fica reservado ao modo estático.
+
+> O firmware controla a animação exibida antes de o Linux iniciar o serviço do usuário. Um estado “desligado” salvo é restaurado após o login, mas o app não consegue suprimir a animação anterior do BIOS/boot.
 
 ### Perfis de Desempenho
 

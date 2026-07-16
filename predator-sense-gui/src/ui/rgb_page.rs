@@ -1,8 +1,11 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
+use libadwaita as adw;
+use libadwaita::prelude::BreakpointBinExt;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::config::CoverLogoSettings;
 use crate::hardware::hid_rgb;
 use crate::hardware::rgb::{self, Direction, RgbConfig, RgbMode, StaticZoneConfig};
 
@@ -19,12 +22,118 @@ struct RgbState {
     anim_phase: f64,
 }
 
-pub fn build() -> gtk::Box {
+struct CoverLogoState {
+    enabled: bool,
+    config: RgbConfig,
+    preview_provider: gtk::CssProvider,
+    preview_image: gtk::Image,
+    status: gtk::Label,
+    anim_phase: f64,
+}
+
+pub fn build() -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_propagate_natural_width(false);
+
+    let shell = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    shell.set_margin_top(10);
+    shell.set_margin_bottom(10);
+    shell.set_margin_start(16);
+    shell.set_margin_end(16);
+
+    let keyboard = build_keyboard_panel();
+    match hid_rgb::cover_logo_capabilities() {
+        Ok(Some(caps)) => {
+            let switcher = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            switcher.set_halign(gtk::Align::Center);
+            switcher.add_css_class("lighting-device-switcher");
+
+            let keyboard_btn = gtk::ToggleButton::with_label(crate::i18n::t("lighting_keyboard"));
+            keyboard_btn.add_css_class("mode-button");
+            keyboard_btn.add_css_class("mode-active");
+            keyboard_btn.set_active(true);
+
+            let logo_btn = gtk::ToggleButton::with_label(crate::i18n::t("cover_logo"));
+            logo_btn.add_css_class("mode-button");
+
+            switcher.append(&keyboard_btn);
+            switcher.append(&logo_btn);
+            shell.append(&switcher);
+
+            let stack = gtk::Stack::new();
+            stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+            stack.set_transition_duration(180);
+            // Let the visible panel determine the requested size. Keeping the
+            // default homogeneous sizing made the wider cover-logo controls
+            // impose their natural width on the entire window.
+            stack.set_hhomogeneous(false);
+            stack.set_vhomogeneous(false);
+            stack.add_named(&keyboard, Some("keyboard"));
+            stack.add_named(&build_cover_logo_panel(caps), Some("cover-logo"));
+            stack.set_visible_child_name("keyboard");
+
+            {
+                let stack = stack.clone();
+                let logo_btn = logo_btn.clone();
+                keyboard_btn.connect_toggled(move |button| {
+                    if !button.is_active() {
+                        if !logo_btn.is_active() {
+                            button.set_active(true);
+                        }
+                        return;
+                    }
+                    logo_btn.set_active(false);
+                    logo_btn.remove_css_class("mode-active");
+                    button.add_css_class("mode-active");
+                    stack.set_visible_child_name("keyboard");
+                });
+            }
+            {
+                let stack = stack.clone();
+                let keyboard_btn = keyboard_btn.clone();
+                logo_btn.connect_toggled(move |button| {
+                    if !button.is_active() {
+                        if !keyboard_btn.is_active() {
+                            button.set_active(true);
+                        }
+                        return;
+                    }
+                    keyboard_btn.set_active(false);
+                    keyboard_btn.remove_css_class("mode-active");
+                    button.add_css_class("mode-active");
+                    stack.set_visible_child_name("cover-logo");
+                });
+            }
+            shell.append(&stack);
+        }
+        Ok(None) => shell.append(&keyboard),
+        Err(error) => {
+            crate::hardware::applog::error(&format!(
+                "Could not detect ENEK5130 cover-logo capabilities: {}",
+                error
+            ));
+            shell.append(&keyboard);
+            if hid_rgb::is_available() {
+                let warning = gtk::Label::new(Some(crate::i18n::t("cover_logo_detection_failed")));
+                warning.add_css_class("warning-text");
+                warning.set_tooltip_text(Some(&error));
+                warning.set_wrap(true);
+                shell.append(&warning);
+            }
+        }
+    }
+
+    scroll.set_child(Some(&shell));
+    scroll
+}
+
+fn build_keyboard_panel() -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    page.set_margin_top(14);
+    page.set_margin_top(6);
     page.set_margin_bottom(10);
-    page.set_margin_start(20);
-    page.set_margin_end(20);
+    page.set_margin_start(4);
+    page.set_margin_end(4);
 
     // Title
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -284,22 +393,29 @@ pub fn build() -> gtk::Box {
         let note = preview_note.clone();
         let da = keyboard_da.clone();
         btn.connect_toggled(move |b| {
-            if b.is_active() {
-                s.borrow_mut().mode = match i {
-                    0 => RgbMode::Breath, 1 => RgbMode::Neon, 2 => RgbMode::Wave,
-                    3 => RgbMode::Shifting, _ => RgbMode::Zoom,
-                };
-                let mut c = er.first_child();
-                while let Some(w) = c {
-                    if let Some(tb) = w.downcast_ref::<gtk::ToggleButton>() {
-                        if !std::ptr::eq(tb, b) { tb.set_active(false); tb.remove_css_class("mode-active"); }
-                    }
-                    c = w.next_sibling();
-                }
-                b.add_css_class("mode-active");
-                note.set_visible(hid_only && !mode_is_hid_native(s.borrow().mode));
-                da.queue_draw();
+            if !toggle_activation_is_selected(b, &er) {
+                return;
             }
+            s.borrow_mut().mode = match i {
+                0 => RgbMode::Breath,
+                1 => RgbMode::Neon,
+                2 => RgbMode::Wave,
+                3 => RgbMode::Shifting,
+                _ => RgbMode::Zoom,
+            };
+            let mut c = er.first_child();
+            while let Some(w) = c {
+                if let Some(tb) = w.downcast_ref::<gtk::ToggleButton>() {
+                    if tb != b {
+                        tb.set_active(false);
+                        tb.remove_css_class("mode-active");
+                    }
+                }
+                c = w.next_sibling();
+            }
+            b.add_css_class("mode-active");
+            note.set_visible(hid_only && !mode_is_hid_native(s.borrow().mode));
+            da.queue_draw();
         });
         effects_row.append(&btn);
     }
@@ -394,11 +510,11 @@ pub fn build() -> gtk::Box {
                     wmi_result
                 };
 
-                // Persist so hotkey-daemon.py can reapply it after a full
-                // power cycle (issue #11) - the keyboard controller has no
-                // memory of its own and resets to the default pulsing effect.
-                // Only the HID path is replayable at boot (hotkey-daemon.py
-                // speaks raw HID, not WMI), so only persist when it applied.
+                // Persist so hotkey-daemon.py can reapply it after login or
+                // resume (issue #11) - the keyboard controller has no memory
+                // of its own and resets to the default pulsing effect. Only
+                // the HID path is replayable (the daemon speaks raw HID, not
+                // WMI), so only persist when it applied.
                 if hid_rgb::is_available() && hid_result.is_ok() {
                     let mut cfg = crate::config::load_app_config();
                     cfg.rgb_static_zones = Some(
@@ -422,7 +538,7 @@ pub fn build() -> gtk::Box {
                     _ => unreachable!("mode_is_hid_native guards this"),
                 };
                 hid_rgb::set_effect(
-                    hid_mode, st.brightness, st.speed, st.direction as u8,
+                    hid_mode, st.brightness, st.speed,
                     st.dyn_color.0, st.dyn_color.1, st.dyn_color.2,
                 )
             } else if hid_only {
@@ -512,6 +628,535 @@ pub fn build() -> gtk::Box {
     }
 
     page
+}
+
+fn build_cover_logo_panel(caps: hid_rgb::TargetCapabilities) -> gtk::Box {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    page.set_margin_top(6);
+    page.set_margin_bottom(10);
+    page.set_margin_start(4);
+    page.set_margin_end(4);
+
+    let saved = crate::config::load_app_config()
+        .cover_logo
+        .unwrap_or_default();
+    let mut initial_config = saved.config;
+    if !matches!(
+        initial_config.mode,
+        RgbMode::Static | RgbMode::Breath | RgbMode::Neon
+    ) || !caps.supports_rgb_mode(initial_config.mode)
+    {
+        initial_config.mode = RgbMode::Static;
+    }
+    initial_config.brightness = initial_config.brightness.min(100);
+    initial_config.speed = initial_config.speed.min(9);
+
+    let preview_provider = gtk::CssProvider::new();
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &preview_provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+        );
+    }
+    let preview_image = gtk::Image::from_icon_name("predator-cover-logo-symbolic");
+    preview_image.set_widget_name("cover-logo-emblem");
+    preview_image.set_pixel_size(150);
+    preview_image.set_tooltip_text(Some(crate::i18n::t("cover_logo_preview_tooltip")));
+
+    let status = gtk::Label::new(Some(crate::i18n::t("cover_logo_ready")));
+    status.add_css_class("status-label");
+    status.set_wrap(true);
+
+    let state = Rc::new(RefCell::new(CoverLogoState {
+        enabled: saved.enabled,
+        config: initial_config.clone(),
+        preview_provider,
+        preview_image: preview_image.clone(),
+        status: status.clone(),
+        anim_phase: 0.0,
+    }));
+
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+    header.add_css_class("cover-logo-header");
+
+    let header_copy = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    header_copy.set_hexpand(true);
+    let title = gtk::Label::new(Some(crate::i18n::t("cover_logo")));
+    title.add_css_class("cover-logo-title");
+    title.set_halign(gtk::Align::Start);
+    let subtitle = gtk::Label::new(Some(crate::i18n::t("cover_logo_subtitle")));
+    subtitle.add_css_class("cover-logo-subtitle");
+    subtitle.set_halign(gtk::Align::Start);
+    subtitle.set_wrap(true);
+    header_copy.append(&title);
+    header_copy.append(&subtitle);
+
+    let detected = gtk::Label::new(Some(crate::i18n::t("cover_logo_detected")));
+    detected.add_css_class("cover-logo-detected");
+    detected.set_valign(gtk::Align::Center);
+    detected.set_tooltip_text(Some(&format!(
+        "ENEK5130 · target 0x{:02x} · {} zones · A3 {:02x?}",
+        caps.target,
+        caps.zone_count,
+        &caps.raw[..caps.raw_len]
+    )));
+
+    let power_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    power_box.set_valign(gtk::Align::Center);
+    let power_label = gtk::Label::new(Some(crate::i18n::t("cover_logo_power")));
+    power_label.add_css_class("cover-logo-section-title");
+    let power_switch = gtk::Switch::new();
+    power_switch.set_active(saved.enabled);
+    power_switch.set_valign(gtk::Align::Center);
+    power_box.append(&power_label);
+    power_box.append(&power_switch);
+
+    let header_actions = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    header_actions.set_halign(gtk::Align::End);
+    header_actions.append(&detected);
+    header_actions.append(&power_box);
+
+    header.append(&header_copy);
+    header.append(&header_actions);
+    page.append(&header);
+
+    // Side by side is the primary workflow: controls remain visible while the
+    // preview changes. An Adwaita breakpoint below switches to one column only
+    // when two usable cards genuinely no longer fit.
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 14);
+    content.set_homogeneous(true);
+    content.add_css_class("cover-logo-content");
+
+    let preview_card = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    preview_card.add_css_class("cover-logo-preview-card");
+    preview_card.set_hexpand(true);
+    let preview_title = gtk::Label::new(Some(crate::i18n::t("cover_logo_live_preview")));
+    preview_title.add_css_class("cover-logo-section-title");
+    preview_title.set_halign(gtk::Align::Start);
+    preview_card.append(&preview_title);
+
+    let lid = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    lid.add_css_class("cover-logo-lid");
+    lid.set_halign(gtk::Align::Fill);
+    lid.set_valign(gtk::Align::Center);
+    lid.set_vexpand(true);
+    preview_image.set_halign(gtk::Align::Center);
+    preview_image.set_valign(gtk::Align::Center);
+    lid.append(&preview_image);
+    let preview_caption = gtk::Label::new(Some(crate::i18n::t("cover_logo_lid_caption")));
+    preview_caption.add_css_class("cover-logo-preview-caption");
+    preview_caption.set_halign(gtk::Align::Center);
+    lid.append(&preview_caption);
+    preview_card.append(&lid);
+
+    let preview_note = gtk::Label::new(Some(crate::i18n::t("cover_logo_preview_note")));
+    preview_note.add_css_class("cover-logo-hint");
+    preview_note.set_wrap(true);
+    preview_note.set_xalign(0.0);
+    preview_card.append(&preview_note);
+    content.append(&preview_card);
+
+    let controls_card = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    controls_card.add_css_class("cover-logo-controls-card");
+    controls_card.set_hexpand(true);
+
+    let config_controls = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    config_controls.set_sensitive(saved.enabled);
+
+    let effect_title = gtk::Label::new(Some(crate::i18n::t("cover_logo_effect")));
+    effect_title.add_css_class("cover-logo-section-title");
+    effect_title.set_halign(gtk::Align::Start);
+    config_controls.append(&effect_title);
+
+    let effect_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let effect_hint = gtk::Label::new(Some(if initial_config.mode == RgbMode::Static {
+        crate::i18n::t("cover_logo_static_hint")
+    } else {
+        crate::i18n::t("cover_logo_dynamic_hint")
+    }));
+    effect_hint.add_css_class("cover-logo-hint");
+    effect_hint.set_halign(gtk::Align::Start);
+    effect_hint.set_wrap(true);
+
+    let color_controls = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    let speed_controls = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    color_controls.set_sensitive(initial_config.mode == RgbMode::Static);
+    speed_controls.set_sensitive(initial_config.mode != RgbMode::Static);
+
+    for (mode, label) in [
+        (RgbMode::Static, crate::i18n::t("static_mode")),
+        (RgbMode::Breath, crate::i18n::t("breath")),
+        (RgbMode::Neon, crate::i18n::t("neon")),
+    ]
+    .into_iter()
+    .filter(|(mode, _)| caps.supports_rgb_mode(*mode))
+    {
+        let button = gtk::ToggleButton::with_label(label);
+        button.add_css_class("mode-button");
+        if mode == initial_config.mode {
+            button.set_active(true);
+            button.add_css_class("mode-active");
+        }
+        let state = state.clone();
+        let effect_row_for_cb = effect_row.clone();
+        let color_controls = color_controls.clone();
+        let speed_controls = speed_controls.clone();
+        let effect_hint = effect_hint.clone();
+        button.connect_toggled(move |active_button| {
+            if !toggle_activation_is_selected(active_button, &effect_row_for_cb) {
+                return;
+            }
+            let mut child = effect_row_for_cb.first_child();
+            while let Some(widget) = child {
+                if let Some(other) = widget.downcast_ref::<gtk::ToggleButton>() {
+                    if other != active_button {
+                        other.set_active(false);
+                        other.remove_css_class("mode-active");
+                    }
+                }
+                child = widget.next_sibling();
+            }
+            active_button.add_css_class("mode-active");
+            let mut state = state.borrow_mut();
+            state.config.mode = mode;
+            color_controls.set_sensitive(mode == RgbMode::Static);
+            speed_controls.set_sensitive(mode != RgbMode::Static);
+            effect_hint.set_text(if mode == RgbMode::Static {
+                crate::i18n::t("cover_logo_static_hint")
+            } else {
+                crate::i18n::t("cover_logo_dynamic_hint")
+            });
+            mark_cover_logo_pending(&state);
+            update_cover_logo_preview(&state);
+        });
+        effect_row.append(&button);
+    }
+    config_controls.append(&effect_row);
+    config_controls.append(&effect_hint);
+
+    let brightness_head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let brightness_title = gtk::Label::new(Some(crate::i18n::t("cover_logo_brightness")));
+    brightness_title.add_css_class("cover-logo-section-title");
+    brightness_title.set_hexpand(true);
+    brightness_title.set_halign(gtk::Align::Start);
+    let brightness_value = gtk::Label::new(Some(&format!("{}%", initial_config.brightness)));
+    brightness_value.add_css_class("cover-logo-value");
+    brightness_head.append(&brightness_title);
+    brightness_head.append(&brightness_value);
+    config_controls.append(&brightness_head);
+
+    let brightness_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
+    brightness_scale.set_value(initial_config.brightness as f64);
+    brightness_scale.set_draw_value(false);
+    brightness_scale.add_css_class("accent-scale");
+    {
+        let state = state.clone();
+        let value_label = brightness_value.clone();
+        brightness_scale.connect_value_changed(move |scale| {
+            let value = scale.value() as u8;
+            let mut state = state.borrow_mut();
+            state.config.brightness = value;
+            value_label.set_text(&format!("{}%", value));
+            mark_cover_logo_pending(&state);
+            update_cover_logo_preview(&state);
+        });
+    }
+    config_controls.append(&brightness_scale);
+
+    let speed_head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let speed_title = gtk::Label::new(Some(crate::i18n::t("cover_logo_speed")));
+    speed_title.add_css_class("cover-logo-section-title");
+    speed_title.set_hexpand(true);
+    speed_title.set_halign(gtk::Align::Start);
+    let speed_value = gtk::Label::new(Some(&initial_config.speed.to_string()));
+    speed_value.add_css_class("cover-logo-value");
+    speed_head.append(&speed_title);
+    speed_head.append(&speed_value);
+    speed_controls.append(&speed_head);
+    let speed_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 9.0, 1.0);
+    speed_scale.set_value(initial_config.speed as f64);
+    speed_scale.set_draw_value(false);
+    speed_scale.add_css_class("accent-scale");
+    {
+        let state = state.clone();
+        let value_label = speed_value.clone();
+        speed_scale.connect_value_changed(move |scale| {
+            let value = scale.value() as u8;
+            let mut state = state.borrow_mut();
+            state.config.speed = value;
+            value_label.set_text(&value.to_string());
+            mark_cover_logo_pending(&state);
+        });
+    }
+    speed_controls.append(&speed_scale);
+    config_controls.append(&speed_controls);
+
+    let color_head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let color_title = gtk::Label::new(Some(crate::i18n::t("cover_logo_color")));
+    color_title.add_css_class("cover-logo-section-title");
+    color_title.set_hexpand(true);
+    color_title.set_halign(gtk::Align::Start);
+    let color_swatch = gtk::DrawingArea::new();
+    color_swatch.set_size_request(38, 30);
+    color_swatch.add_css_class("cover-logo-color-preview");
+    {
+        let state = state.clone();
+        color_swatch.set_draw_func(move |_area, cr, width, height| {
+            let config = &state.borrow().config;
+            cr.set_source_rgb(
+                config.red as f64 / 255.0,
+                config.green as f64 / 255.0,
+                config.blue as f64 / 255.0,
+            );
+            cr.rectangle(0.0, 0.0, width as f64, height as f64);
+            let _ = cr.fill();
+        });
+    }
+    color_head.append(&color_title);
+    color_head.append(&color_swatch);
+    color_controls.append(&color_head);
+
+    let mut color_scales = Vec::new();
+    for (channel, label, value) in [
+        (0usize, "R", initial_config.red),
+        (1usize, "G", initial_config.green),
+        (2usize, "B", initial_config.blue),
+    ] {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 7);
+        let channel_label = gtk::Label::new(Some(label));
+        channel_label.add_css_class("rgb-channel-label");
+        channel_label.set_size_request(18, -1);
+        let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 255.0, 1.0);
+        scale.set_value(value as f64);
+        scale.set_draw_value(false);
+        scale.set_hexpand(true);
+        scale.add_css_class("color-scale");
+        let value_label = gtk::Label::new(Some(&value.to_string()));
+        value_label.add_css_class("cover-logo-value");
+        {
+            let state = state.clone();
+            let value_label = value_label.clone();
+            let swatch = color_swatch.clone();
+            scale.connect_value_changed(move |scale| {
+                let value = scale.value() as u8;
+                let mut state = state.borrow_mut();
+                match channel {
+                    0 => state.config.red = value,
+                    1 => state.config.green = value,
+                    _ => state.config.blue = value,
+                }
+                value_label.set_text(&value.to_string());
+                mark_cover_logo_pending(&state);
+                update_cover_logo_preview(&state);
+                drop(state);
+                swatch.queue_draw();
+            });
+        }
+        row.append(&channel_label);
+        row.append(&scale);
+        row.append(&value_label);
+        color_scales.push(scale);
+        color_controls.append(&row);
+    }
+
+    let presets = gtk::FlowBox::new();
+    presets.set_selection_mode(gtk::SelectionMode::None);
+    presets.set_max_children_per_line(5);
+    presets.set_min_children_per_line(1);
+    presets.set_homogeneous(true);
+    presets.set_column_spacing(5);
+    presets.set_row_spacing(5);
+    presets.add_css_class("cover-logo-presets");
+    for (label, color) in [
+        (crate::i18n::t("color_cyan"), (0u8, 220u8, 255u8)),
+        (crate::i18n::t("color_blue"), (35, 90, 255)),
+        (crate::i18n::t("color_magenta"), (225, 35, 255)),
+        (crate::i18n::t("color_red"), (255, 45, 55)),
+        (crate::i18n::t("color_white"), (255, 255, 255)),
+    ] {
+        let button = gtk::Button::with_label(label);
+        button.add_css_class("secondary-button");
+        button.add_css_class("cover-logo-preset");
+        button.set_hexpand(true);
+        let scales = color_scales.clone();
+        button.connect_clicked(move |_| {
+            scales[0].set_value(color.0 as f64);
+            scales[1].set_value(color.1 as f64);
+            scales[2].set_value(color.2 as f64);
+        });
+        presets.insert(&button, -1);
+    }
+    color_controls.append(&presets);
+    config_controls.append(&color_controls);
+    controls_card.append(&config_controls);
+
+    {
+        let state = state.clone();
+        let config_controls = config_controls.clone();
+        power_switch.connect_active_notify(move |switch| {
+            let active = switch.is_active();
+            let mut state = state.borrow_mut();
+            state.enabled = active;
+            config_controls.set_sensitive(active);
+            mark_cover_logo_pending(&state);
+            update_cover_logo_preview(&state);
+        });
+    }
+
+    let apply_button = gtk::Button::with_label(crate::i18n::t("cover_logo_apply"));
+    apply_button.add_css_class("accent-button");
+    apply_button.set_halign(gtk::Align::End);
+    {
+        let state = state.clone();
+        let status = state.borrow().status.clone();
+        apply_button.connect_clicked(move |_| {
+            let settings = {
+                let state = state.borrow();
+                CoverLogoSettings {
+                    enabled: state.enabled,
+                    config: state.config.clone(),
+                }
+            };
+            let result =
+                hid_rgb::set_cover_logo(settings.enabled, &settings.config).and_then(|_| {
+                    let mut app_config = crate::config::load_app_config();
+                    app_config.cover_logo = Some(settings.clone());
+                    crate::config::save_app_config(&app_config)
+                });
+            match result {
+                Ok(()) => {
+                    status.set_text(if settings.enabled {
+                        crate::i18n::t("cover_logo_applied")
+                    } else {
+                        crate::i18n::t("cover_logo_off_applied")
+                    });
+                    status.remove_css_class("status-error");
+                    status.add_css_class("status-success");
+                }
+                Err(error) => {
+                    status.set_text(&error);
+                    status.remove_css_class("status-success");
+                    status.add_css_class("status-error");
+                }
+            }
+        });
+    }
+    let apply_footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    status.set_hexpand(true);
+    status.set_halign(gtk::Align::Start);
+    status.set_valign(gtk::Align::Center);
+    status.set_xalign(0.0);
+    apply_footer.append(&status);
+    apply_footer.append(&apply_button);
+    controls_card.append(&apply_footer);
+    content.append(&controls_card);
+
+    let responsive_content = adw::BreakpointBin::new();
+    responsive_content.set_child(Some(&content));
+    let narrow_layout = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+        adw::BreakpointConditionLengthType::MaxWidth,
+        900.0,
+        adw::LengthUnit::Px,
+    ));
+    {
+        let content = content.clone();
+        let header = header.clone();
+        narrow_layout.connect_apply(move |_| {
+            content.set_orientation(gtk::Orientation::Vertical);
+            content.set_homogeneous(false);
+            header.set_orientation(gtk::Orientation::Vertical);
+        });
+    }
+    {
+        let content = content.clone();
+        let header = header.clone();
+        narrow_layout.connect_unapply(move |_| {
+            content.set_orientation(gtk::Orientation::Horizontal);
+            content.set_homogeneous(true);
+            header.set_orientation(gtk::Orientation::Horizontal);
+        });
+    }
+    responsive_content.add_breakpoint(narrow_layout);
+    page.append(&responsive_content);
+
+    update_cover_logo_preview(&state.borrow());
+    {
+        let state = state.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            if state.borrow().preview_image.root().is_none() {
+                return glib::ControlFlow::Break;
+            }
+            let mut state = state.borrow_mut();
+            if state.enabled
+                && state.config.mode != RgbMode::Static
+                && state.preview_image.is_mapped()
+            {
+                state.anim_phase += 0.025 + state.config.speed as f64 * 0.012;
+                update_cover_logo_preview(&state);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    page
+}
+
+fn update_cover_logo_preview(state: &CoverLogoState) {
+    let brightness = state.config.brightness as f64 / 100.0;
+    let (red, green, blue, pulse) = if !state.enabled {
+        (45u8, 50u8, 54u8, 0.14)
+    } else {
+        match state.config.mode {
+            RgbMode::Static => (state.config.red, state.config.green, state.config.blue, 1.0),
+            RgbMode::Breath => {
+                let level = 0.18 + 0.82 * (0.5 + 0.5 * state.anim_phase.sin());
+                let color = hsv_to_rgb((state.anim_phase * 0.025).rem_euclid(1.0), 0.85, 1.0);
+                (color.0, color.1, color.2, level)
+            }
+            RgbMode::Neon => {
+                let color = hsv_to_rgb((state.anim_phase * 0.12).rem_euclid(1.0), 1.0, 1.0);
+                (color.0, color.1, color.2, 0.9)
+            }
+            _ => (state.config.red, state.config.green, state.config.blue, 1.0),
+        }
+    };
+    let opacity = if state.enabled {
+        (brightness * pulse).clamp(0.04, 1.0)
+    } else {
+        pulse
+    };
+    let glow_alpha = if state.enabled { opacity * 0.72 } else { 0.0 };
+    state.preview_provider.load_from_data(&format!(
+        "#cover-logo-emblem {{ color: rgb({}, {}, {}); -gtk-icon-shadow: 0 0 16px rgba({}, {}, {}, {:.3}); }}",
+        red, green, blue, red, green, blue, glow_alpha
+    ));
+    state.preview_image.set_opacity(opacity.max(0.04));
+}
+
+fn mark_cover_logo_pending(state: &CoverLogoState) {
+    state.status.set_text(crate::i18n::t("cover_logo_ready"));
+    state.status.remove_css_class("status-success");
+    state.status.remove_css_class("status-error");
+}
+
+/// Give a row of toggle buttons radio-button semantics without duplicating
+/// GTK signal bookkeeping across the keyboard and cover-logo selectors.
+fn toggle_activation_is_selected(button: &gtk::ToggleButton, row: &gtk::Box) -> bool {
+    if button.is_active() {
+        return true;
+    }
+    let mut child = row.first_child();
+    while let Some(widget) = child {
+        if let Some(other) = widget.downcast_ref::<gtk::ToggleButton>() {
+            if other != button && other.is_active() {
+                return false;
+            }
+        }
+        child = widget.next_sibling();
+    }
+    button.set_active(true);
+    false
 }
 
 /// Whether `mode` is confirmed reachable as a native single-write effect on
