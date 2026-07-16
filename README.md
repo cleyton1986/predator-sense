@@ -177,6 +177,12 @@ Some models (confirmed: PHN16S-71, PHN16-73) route the keyboard's RGB controller
 | Dynamic effects — Breathing, Neon 🧪 | Native, single HID write, hardware loops the pattern on its own — **awaiting confirmation** on real hardware |
 | Dynamic effects — Wave, Shifting, Zoom | On-screen preview only (no hardware writes) — the effect codes for these were found to mean different things across hardware generations, so they're not wired up yet |
 
+### Already running Linuwu-Sense or DAMX?
+
+[Linuwu-Sense](https://github.com/0x7375646F/Linuwu-Sense) (and [DAMX](https://github.com/PXDiv/Div-Acer-Manager-Max), which is built on it) is a separate, unrelated project that also drives Acer Predator/Nitro hardware on Linux. It's not a dependency of this project and none of its code is used here — but its kernel module binds the **same WMI GUIDs** `facer` needs, and the kernel won't let two drivers claim the same device at once.
+
+If the installer detects `linuwu_sense` already loaded or DKMS-installed, it automatically **leaves your existing setup alone** — it won't blacklist `acer_wmi` or force-load `facer`, so it won't fight (or break) a Linuwu-Sense/DAMX install that already works. Keyboard RGB still works through this app over the HID path (see above) regardless of which platform driver is active; fan/thermal control in that case stays with whichever tool you already had managing it.
+
 ---
 
 ## Installation
@@ -191,9 +197,9 @@ sudo rm -f /tmp/ps-install.sh && curl -fsSL https://raw.githubusercontent.com/cl
 
 That's it! Everything is downloaded, compiled, and configured automatically.
 
-### Interactive Installer (Offline)
+### Interactive Installer (prebuilt binary, no Rust toolchain needed)
 
-Download the `predator-sense-installer` binary from the [Releases](../../releases) page:
+Download the `predator-sense-installer` binary from the [Releases](../../releases) page. It's a small static binary, not a bundle — it still needs internet access to fetch the app's source (for the kernel module) and the matching prebuilt release binary, but it skips installing Rust and compiling the GTK4 app on your machine entirely:
 
 ```bash
 chmod +x predator-sense-installer
@@ -204,12 +210,13 @@ Select **option 1** (Full Installation). The installer will automatically:
 
 1. Detect your distribution (Debian/Ubuntu/Mint, Fedora, Arch)
 2. Install system dependencies (GTK4, libadwaita, build tools, kernel headers)
-3. Install Rust (if not present)
-4. Compile the application
-5. Compile and load the `facer` kernel module
-6. Create desktop menu entry with icon
-7. Map the PredatorSense hardware key (auto-start on login)
-8. Set up system tray support
+3. Download the matching release's source + prebuilt binary
+4. Compile and load the `facer` kernel module (this part always compiles locally — kernel modules can't be shipped prebuilt across different kernel versions)
+5. Create desktop menu entry with icon
+6. Map the PredatorSense hardware key (auto-start on login)
+7. Set up system tray support
+
+Unlike the one-line install above, this path doesn't touch Rust/cargo at all, and doubles as a standalone management tool afterwards — keep the binary around to check status, reload the kernel module, or uninstall later without re-downloading anything (see [Installer Options](#installer-options)).
 
 After installation, open the app by:
 - Pressing the **PredatorSense key** (next to NumLock)
