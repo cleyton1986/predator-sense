@@ -13,38 +13,9 @@ use crate::hardware::ai_actionlog;
 use crate::hardware::ai_snapshot;
 use crate::hardware::gpu;
 use crate::i18n::{t, tf};
-use crate::ui::gpu_page;
+use crate::ui::{background, gpu_page};
 
-/// GTK widgets aren't `Send`, so they can never be moved into a
-/// `std::thread::spawn` closure or an `idle_add` (Send-only) callback. This
-/// runs `work` on a worker thread and delivers its `Send`-safe result back
-/// to `on_done`, which is registered on the calling (GTK main) thread from
-/// the start via a polling `glib::timeout_add_local` - so `on_done` is free
-/// to capture widgets. Used for every network call this page makes.
-fn spawn_and_deliver<T, F, D>(work: F, on_done: D)
-where
-    T: Send + 'static,
-    F: FnOnce() -> T + Send + 'static,
-    D: FnOnce(T) + 'static,
-{
-    let (tx, rx) = mpsc::channel::<T>();
-    std::thread::spawn(move || {
-        let _ = tx.send(work());
-    });
-    let on_done = RefCell::new(Some(on_done));
-    glib::timeout_add_local(Duration::from_millis(120), move || match rx.try_recv() {
-        Ok(v) => {
-            if let Some(f) = on_done.borrow_mut().take() {
-                f(v);
-            }
-            glib::ControlFlow::Break
-        }
-        Err(mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-        Err(mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
-    });
-}
-
-/// Same idea as `spawn_and_deliver` but for a worker task that reports
+/// Same idea as `background::run` but for a worker task that reports
 /// incremental progress (model pull) before its final result - `on_update`
 /// runs once per progress item, `on_done` once at the end.
 fn spawn_streaming<T, F, U, D>(work: F, mut on_update: U, on_done: D)
@@ -277,7 +248,7 @@ fn trigger_verdict(
     let output_c = output.cloned();
     let parent_c = parent.clone();
 
-    spawn_and_deliver(
+    background::run(
         move || ai_snapshot::ask_verdict(&base_url, &model, question.as_deref()),
         move |result| match result {
             Ok(reply) => handle_reply(reply, output_c.as_ref(), &parent_c, &model_for_reply, source),
@@ -744,7 +715,7 @@ fn build_model_manager_section() -> gtk::Box {
             let status_label_c = status_label.clone();
             let base_url_for_err = base_url.clone();
             let do_refresh_cell = do_refresh_cell.clone();
-            spawn_and_deliver(
+            background::run(
                 move || ai_assistant::list_installed_models(&base_url),
                 move |result| {
                     let do_refresh_for_rows = do_refresh_cell
@@ -799,7 +770,7 @@ fn build_model_manager_section() -> gtk::Box {
             let base_url_for_err = base_url.clone();
             status_label.set_text(t("ai_testing_connection"));
             let status_label_c = status_label.clone();
-            spawn_and_deliver(
+            background::run(
                 move || ai_assistant::list_installed_models(&base_url),
                 move |result| {
                     let text = match result {

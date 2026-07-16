@@ -1,10 +1,11 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::f64::consts::PI;
 use std::rc::Rc;
 
 use crate::hardware::{fan, sensors};
+use crate::ui::background;
 
 pub fn build() -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -17,19 +18,18 @@ pub fn build() -> gtk::Box {
 
     // Header — CoolBoost only where EC access (/dev/ec) is available.
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    if caps.ec {
+    let cb_switch = if caps.ec {
         let cb_label = gtk::Label::new(Some("CoolBoost™"));
         cb_label.add_css_class("info-card-value");
         let cb_switch = gtk::Switch::new();
-        cb_switch.set_active(fan::get_coolboost());
         cb_switch.set_valign(gtk::Align::Center);
-        cb_switch.connect_state_set(move |_, active| {
-            let _ = fan::set_coolboost(active);
-            glib::Propagation::Proceed
-        });
+        cb_switch.set_sensitive(false);
         top.append(&cb_label);
         top.append(&cb_switch);
-    }
+        Some(cb_switch)
+    } else {
+        None
+    };
     let aero = gtk::Label::new(Some("AeroBlade™ 3D Fan"));
     aero.add_css_class("fan-rpm");
     aero.set_halign(gtk::Align::End);
@@ -61,15 +61,9 @@ pub fn build() -> gtk::Box {
         mode_names.push((crate::i18n::t("custom"), "custom"));
     }
 
-    // Real current mode, not a hardcoded guess - `set_fan_mode`'s Auto/Max
-    // write EC bytes the physical Predator key ALSO writes directly
-    // (through facer.ko, bypassing this app entirely), so at app startup
-    // the real state can already be Max from a keypress before the app was
-    // even open. `fan::get_fan_mode()` reads those same bytes back.
-    let initial_mode_id = match fan::get_fan_mode() {
-        Some(fan::FanMode::Max) => "max",
-        _ => "auto", // Auto, unreadable, or (impossible here) Custom
-    };
+    // Use a harmless visual default while the real EC state is fetched off
+    // the GTK thread below. Controls stay disabled until that read completes.
+    let initial_mode_id = "auto";
     let active_mode: Rc<RefCell<String>> = Rc::new(RefCell::new(initial_mode_id.to_string()));
 
     // Custom speed sliders (hidden initially)
@@ -116,9 +110,9 @@ pub fn build() -> gtk::Box {
         gpu_scale.connect_value_changed(move |s| l.set_text(&format!("GPU: {}%", s.value() as i32)));
     }
 
-    // Detect PWM (hwmon) support once. When available, the custom sliders drive
-    // real per-fan PWM via WMI; otherwise the firmware-only modes are used.
-    let pwm_ok = fan::pwm_available();
+    // Capability detection already queried PWM once; do not fork the helper a
+    // second time while building the same page.
+    let pwm_ok = caps.fan_pwm;
 
     // Apply custom speeds
     {
@@ -153,6 +147,7 @@ pub fn build() -> gtk::Box {
 
     for (name, mode_id) in &mode_names {
         let btn = gtk::Button::with_label(name);
+        btn.set_sensitive(!caps.ec);
         if *mode_id == initial_mode_id {
             btn.add_css_class("accent-button");
         } else {
@@ -185,7 +180,7 @@ pub fn build() -> gtk::Box {
             *active.borrow_mut() = mode.clone();
 
             // When leaving custom PWM, restore automatic fan control.
-            if mode.as_str() == "auto" && fan::pwm_available() {
+            if mode.as_str() == "auto" && pwm_ok {
                 let _ = fan::set_pwm_auto();
             }
 
@@ -220,6 +215,50 @@ pub fn build() -> gtk::Box {
         modes_box.append(&btn);
     }
 
+    let mode_ids: Rc<Vec<String>> = Rc::new(
+        mode_names
+            .iter()
+            .map(|(_, id)| id.to_string())
+            .collect(),
+    );
+
+    // EC helper reads cost roughly 150 ms each on the tested machine. Fetch
+    // the initial state in a worker so opening this page never stalls GTK.
+    if caps.ec {
+        let buttons = nav_widgets.clone();
+        let active = active_mode.clone();
+        let ids = mode_ids.clone();
+        let coolboost = cb_switch.expect("EC capability created the switch");
+        background::run(
+            || (fan::get_coolboost(), fan::get_fan_mode()),
+            move |(coolboost_enabled, mode)| {
+                coolboost.set_active(coolboost_enabled);
+                coolboost.connect_state_set(move |_, enabled| {
+                    let _ = fan::set_coolboost(enabled);
+                    glib::Propagation::Proceed
+                });
+                coolboost.set_sensitive(true);
+
+                let real_id = if mode == Some(fan::FanMode::Max) {
+                    "max"
+                } else {
+                    "auto"
+                };
+                *active.borrow_mut() = real_id.to_string();
+                for (button, id) in buttons.borrow().iter().zip(ids.iter()) {
+                    button.set_sensitive(true);
+                    button.remove_css_class("accent-button");
+                    button.remove_css_class("secondary-button");
+                    button.add_css_class(if id == real_id {
+                        "accent-button"
+                    } else {
+                        "secondary-button"
+                    });
+                }
+            },
+        );
+    }
+
     // Same page-built-once problem as the thermal-profile page (fan_page.rs)
     // had - poll and reconcile instead of only reacting to this page's own
     // button clicks. Catches the AI assistant's fan-mode changes AND the
@@ -230,37 +269,52 @@ pub fn build() -> gtk::Box {
         let nw = nav_widgets.clone();
         let active = active_mode.clone();
         let sl = status_label.clone();
-        let mode_ids: Vec<String> = mode_names.iter().map(|(_, id)| id.to_string()).collect();
+        let mode_ids = mode_ids.clone();
+        let refreshing = Rc::new(Cell::new(false));
+        let page_c = page.clone();
         glib::timeout_add_seconds_local(3, move || {
-            if *active.borrow() == "custom" {
+            if !crate::app_state::is_window_visible()
+                || !page_c.is_mapped()
+                || *active.borrow() == "custom"
+                || refreshing.get()
+            {
                 return glib::ControlFlow::Continue;
             }
-            let real_id = match fan::get_fan_mode() {
-                Some(fan::FanMode::Max) => "max",
-                Some(fan::FanMode::Auto) => "auto",
-                _ => return glib::ControlFlow::Continue, // unreadable this tick, try again later
-            };
-            if *active.borrow() == real_id {
-                return glib::ControlFlow::Continue;
-            }
-            *active.borrow_mut() = real_id.to_string();
-            let msg = match real_id {
-                "auto" => crate::i18n::t("automatic"),
-                "max" => crate::i18n::t("max"),
-                _ => "",
-            };
-            sl.set_text(&format!("{} ✓", msg));
-            sl.remove_css_class("status-error");
-            sl.add_css_class("status-success");
-            for (b, id) in nw.borrow().iter().zip(mode_ids.iter()) {
-                if id == real_id {
-                    b.remove_css_class("secondary-button");
-                    b.add_css_class("accent-button");
-                } else {
-                    b.remove_css_class("accent-button");
-                    b.add_css_class("secondary-button");
+            refreshing.set(true);
+            let refreshing_done = refreshing.clone();
+            let nw_done = nw.clone();
+            let active_done = active.clone();
+            let sl_done = sl.clone();
+            let mode_ids_done = mode_ids.clone();
+            background::run(fan::get_fan_mode, move |mode| {
+                refreshing_done.set(false);
+                let real_id = match mode {
+                    Some(fan::FanMode::Max) => "max",
+                    Some(fan::FanMode::Auto) => "auto",
+                    _ => return,
+                };
+                if *active_done.borrow() == real_id {
+                    return;
                 }
-            }
+                *active_done.borrow_mut() = real_id.to_string();
+                let msg = match real_id {
+                    "auto" => crate::i18n::t("automatic"),
+                    "max" => crate::i18n::t("max"),
+                    _ => "",
+                };
+                sl_done.set_text(&format!("{} ✓", msg));
+                sl_done.remove_css_class("status-error");
+                sl_done.add_css_class("status-success");
+                for (button, id) in nw_done.borrow().iter().zip(mode_ids_done.iter()) {
+                    button.remove_css_class("accent-button");
+                    button.remove_css_class("secondary-button");
+                    button.add_css_class(if id == real_id {
+                        "accent-button"
+                    } else {
+                        "secondary-button"
+                    });
+                }
+            });
             glib::ControlFlow::Continue
         });
     }

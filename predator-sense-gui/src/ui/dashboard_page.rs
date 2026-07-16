@@ -85,15 +85,17 @@ pub fn build() -> gtk::ScrolledWindow {
         info.cpu_model.clone()
     };
 
-    let gpu_detail = if info.gpu_vram_mb > 0 {
-        format!(
-            "{}\n{:.0} GB VRAM · Driver {}",
-            info.gpu_name,
-            info.gpu_vram_mb as f64 / 1024.0,
-            if info.gpu_driver.is_empty() { "—".into() } else { info.gpu_driver.clone() }
-        )
-    } else {
+    let mut gpu_metadata = Vec::new();
+    if info.gpu_vram_mb > 0 {
+        gpu_metadata.push(format!("{:.0} GB VRAM", info.gpu_vram_mb as f64 / 1024.0));
+    }
+    if !info.gpu_driver.is_empty() {
+        gpu_metadata.push(format!("Driver {}", info.gpu_driver));
+    }
+    let gpu_detail = if gpu_metadata.is_empty() {
         info.gpu_name.clone()
+    } else {
+        format!("{}\n{}", info.gpu_name, gpu_metadata.join(" · "))
     };
 
     let ram_detail = if info.ram_total_gb > 0.0 {

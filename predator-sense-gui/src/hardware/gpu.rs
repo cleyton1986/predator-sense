@@ -62,17 +62,17 @@ pub fn read_gpu_metrics() -> GpuMetrics {
         }
     }
     // Stale or empty: refresh OFF the main thread — same reasoning as
-    // sensors::read_nvidia_gpu_info(). nvidia-smi blocks for ~40 ms with the
-    // GPU awake and ~850 ms waking it from D3cold, and every caller here is
-    // a GTK timeout on the main loop. While the dGPU is runtime-suspended,
-    // skip the query entirely instead of powering it up just to read idle
-    // metrics.
+    // sensors::read_nvidia_gpu_info(). nvidia-smi blocks briefly with the GPU
+    // awake but can take multiple seconds waking it from D3cold, and every
+    // caller here is a GTK timeout on the main loop. Unless every dGPU is
+    // safely active, skip the query instead of powering one up just to read
+    // idle metrics.
     if !REFRESHING.swap(true, Ordering::AcqRel) {
         std::thread::spawn(|| {
-            let m = if crate::hardware::sensors::nvidia_suspended() {
-                GpuMetrics::default()
-            } else {
+            let m = if crate::hardware::nvidia::live_query_is_safe() {
                 fetch_gpu_metrics()
+            } else {
+                GpuMetrics::default()
             };
             *CACHE.lock().unwrap() = Some((Instant::now(), m));
             REFRESHING.store(false, Ordering::Release);

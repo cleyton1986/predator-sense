@@ -2,6 +2,7 @@ use gtk4::prelude::*;
 use gtk4::{self as gtk, gio, glib};
 use libadwaita as adw;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::f64::consts::PI;
 use std::rc::Rc;
 
@@ -9,8 +10,8 @@ use crate::config;
 use crate::hardware::{rgb, sensors, setup};
 use crate::tray::TrayManager;
 use crate::ui::{
-    ai_page, battery_page, dashboard_page, fan_control_page, fan_page, gpu_page, monitor_page,
-    network_page, rgb_page, setup_page, temperatures_page, usage_page,
+    ai_page, background, battery_page, dashboard_page, fan_control_page, fan_page, gpu_page,
+    monitor_page, network_page, rgb_page, setup_page, temperatures_page, usage_page,
 };
 
 thread_local! {
@@ -19,6 +20,7 @@ thread_local! {
 }
 
 pub fn build(app: &adw::Application) {
+    crate::startup_mark("window build start");
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("Predator Sense")
@@ -27,6 +29,7 @@ pub fn build(app: &adw::Application) {
         .resizable(true)
         .decorated(true)
         .build();
+    window.connect_map(|_| crate::startup_mark("window mapped"));
     window.add_css_class("main-window");
 
     // === TOP BAR (custom header) ===
@@ -83,11 +86,13 @@ pub fn build(app: &adw::Application) {
 
     // Check module status
     let module_status = setup::check_status();
+    crate::startup_mark("module status checked");
     if module_status != setup::ModuleStatus::Ready {
         build_with_setup(app, &window, &header);
     } else {
         build_main_ui(app, &window);
     }
+    crate::startup_mark("window content built");
 
     // Handle ALL close events (native X button, our custom button, Alt+F4, etc.)
     let app_clone = app.clone();
@@ -103,6 +108,7 @@ pub fn build(app: &adw::Application) {
     });
 
     window.present();
+    crate::startup_mark("window present called");
 }
 
 /// Esconde a janela e garante que o tray helper está rodando.
@@ -285,6 +291,23 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
     window.set_child(Some(&root_overlay));
 }
 
+type PageBuilder = Box<dyn FnOnce() -> gtk::Widget>;
+type PendingPages = Rc<RefCell<HashMap<String, PageBuilder>>>;
+
+fn ensure_page_built(stack: &gtk::Stack, pending: &PendingPages, name: &str) {
+    if stack.child_by_name(name).is_some() {
+        return;
+    }
+    // Remove first so the RefCell borrow is released before the builder runs;
+    // page constructors can register callbacks that immediately touch GTK.
+    let builder = pending.borrow_mut().remove(name);
+    if let Some(builder) = builder {
+        let page = builder();
+        stack.add_named(&page, Some(name));
+        crate::startup_mark(&format!("lazy page: {name}"));
+    }
+}
+
 /// Build main area matching nova-ui.html: main-area with padding, sidebar + content-panel
 fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -> gtk::Overlay {
     // Main area overlay (for the diagonal stripe background)
@@ -336,32 +359,53 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     stack.set_hexpand(true);
     stack.set_vexpand(true);
 
-    let initial_sensors = sensors::read_all_sensors();
     let dashboard = dashboard_page::build();
-    let temperatures = temperatures_page::build(&initial_sensors);
-    let network = network_page::build();
-    let usage = usage_page::build();
-    let rgb = rgb_page::build();
-    let fan = fan_page::build();
-    let fan_ctrl = fan_control_page::build();
-    let battery = battery_page::build();
-    let gpu = gpu_page::build();
-    let monitor = monitor_page::build();
-    let ai = ai_page::build(window);
-    let settings = build_settings_page(app);
-
+    crate::startup_mark("dashboard page");
     stack.add_named(&dashboard, Some("home"));
-    stack.add_named(&temperatures, Some("temperatures"));
-    stack.add_named(&network, Some("network"));
-    stack.add_named(&usage, Some("usage"));
-    stack.add_named(&rgb, Some("lighting"));
-    stack.add_named(&fan, Some("fan"));
-    stack.add_named(&fan_ctrl, Some("fan_ctrl"));
-    stack.add_named(&battery, Some("battery"));
-    stack.add_named(&gpu, Some("gpu"));
-    stack.add_named(&monitor, Some("monitor"));
-    stack.add_named(&ai, Some("ai"));
-    stack.add_named(&settings, Some("settings"));
+
+    // GTK widgets must be created on the main thread, but invisible pages do
+    // not need to exist before the first frame. Build each page once, on its
+    // first navigation, so its widgets, timers and hardware reads cannot hold
+    // up application startup.
+    let pending: PendingPages = Rc::new(RefCell::new(HashMap::new()));
+    {
+        let mut pages = pending.borrow_mut();
+        pages.insert(
+            "temperatures".into(),
+            Box::new(|| {
+                let readings = sensors::read_all_sensors();
+                temperatures_page::build(&readings).upcast()
+            }),
+        );
+        pages.insert("network".into(), Box::new(|| network_page::build().upcast()));
+        pages.insert("usage".into(), Box::new(|| usage_page::build().upcast()));
+        pages.insert("lighting".into(), Box::new(|| rgb_page::build().upcast()));
+        pages.insert("fan".into(), Box::new(|| fan_page::build().upcast()));
+        pages.insert("fan_ctrl".into(), Box::new(|| fan_control_page::build().upcast()));
+        pages.insert("battery".into(), Box::new(|| battery_page::build().upcast()));
+        pages.insert("gpu".into(), Box::new(|| gpu_page::build().upcast()));
+        pages.insert("monitor".into(), Box::new(|| monitor_page::build().upcast()));
+        let window_weak = window.downgrade();
+        pages.insert(
+            "ai".into(),
+            Box::new(move || {
+                let window = window_weak
+                    .upgrade()
+                    .expect("lazy AI page is built only while its window exists");
+                ai_page::build(&window).upcast()
+            }),
+        );
+        let app_weak = app.downgrade();
+        pages.insert(
+            "settings".into(),
+            Box::new(move || {
+                let app = app_weak
+                    .upgrade()
+                    .expect("lazy settings page is built only while its app exists");
+                build_settings_page(&app).upcast()
+            }),
+        );
+    }
 
     // Menu items
     let nav_items = vec![
@@ -433,11 +477,13 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
         // Click
         let gesture = gtk::GestureClick::new();
         let stack_c = stack.clone();
+        let pending_c = pending.clone();
         let page = page_name.to_string();
         let active_c = active_idx.clone();
         let widgets_c = nav_widgets.clone();
         gesture.connect_released(move |_, _, _, _| {
             *active_c.borrow_mut() = idx;
+            ensure_page_built(&stack_c, &pending_c, &page);
             stack_c.set_visible_child_name(&page);
             for (j, (bg_da, lbl_w)) in widgets_c.borrow().iter().enumerate() {
                 bg_da.queue_draw();
@@ -1124,38 +1170,61 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
         // LCD Overdrive
         let lcd_row = create_setting_row(t("lcd_overdrive"), t("lcd_overdrive_desc"));
         let lcd_switch = gtk::Switch::new();
-        lcd_switch.set_active(crate::hardware::extras::get_lcd_overdrive());
         lcd_switch.set_valign(gtk::Align::Center);
-        lcd_switch.connect_state_set(|_, active| {
-            let _ = crate::hardware::extras::set_lcd_overdrive(active);
-            glib::Propagation::Proceed
-        });
+        lcd_switch.set_sensitive(false);
         lcd_row.append(&lcd_switch);
         page.append(&lcd_row);
 
         // Boot animation
         let boot_row = create_setting_row(t("boot_anim"), t("boot_anim_desc"));
         let boot_switch = gtk::Switch::new();
-        boot_switch.set_active(crate::hardware::extras::get_boot_animation());
         boot_switch.set_valign(gtk::Align::Center);
-        boot_switch.connect_state_set(|_, active| {
-            let _ = crate::hardware::extras::set_boot_animation(active);
-            glib::Propagation::Proceed
-        });
+        boot_switch.set_sensitive(false);
         boot_row.append(&boot_switch);
         page.append(&boot_row);
 
         // USB charging
         let usb_row = create_setting_row(t("usb_charge"), t("usb_charge_desc"));
         let usb_switch = gtk::Switch::new();
-        usb_switch.set_active(crate::hardware::extras::get_usb_charging());
         usb_switch.set_valign(gtk::Align::Center);
-        usb_switch.connect_state_set(|_, active| {
-            let _ = crate::hardware::extras::set_usb_charging(active);
-            glib::Propagation::Proceed
-        });
+        usb_switch.set_sensitive(false);
         usb_row.append(&usb_switch);
         page.append(&usb_row);
+
+        // These reads each launch the EC helper and can take ~150 ms. Keep
+        // the switches disabled until all three states arrive off-thread,
+        // then attach write handlers only after setting their initial values.
+        background::run(
+            || {
+                (
+                    crate::hardware::extras::get_lcd_overdrive(),
+                    crate::hardware::extras::get_boot_animation(),
+                    crate::hardware::extras::get_usb_charging(),
+                )
+            },
+            move |(lcd_enabled, boot_enabled, usb_enabled)| {
+                lcd_switch.set_active(lcd_enabled);
+                lcd_switch.connect_state_set(|_, active| {
+                    let _ = crate::hardware::extras::set_lcd_overdrive(active);
+                    glib::Propagation::Proceed
+                });
+                lcd_switch.set_sensitive(true);
+
+                boot_switch.set_active(boot_enabled);
+                boot_switch.connect_state_set(|_, active| {
+                    let _ = crate::hardware::extras::set_boot_animation(active);
+                    glib::Propagation::Proceed
+                });
+                boot_switch.set_sensitive(true);
+
+                usb_switch.set_active(usb_enabled);
+                usb_switch.connect_state_set(|_, active| {
+                    let _ = crate::hardware::extras::set_usb_charging(active);
+                    glib::Propagation::Proceed
+                });
+                usb_switch.set_sensitive(true);
+            },
+        );
     }
 
     if !hw_any {
