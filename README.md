@@ -307,8 +307,14 @@ sudo chmod +x /opt/predator-sense/predator-sense
 |---------|-------------|-----------|-----------|----------|
 | **Quiet** | powersave | power | 40W | Silent work |
 | **Balanced** | powersave | balance_performance | 80W | General use |
-| **Performance** | performance | performance | 100W | Gaming |
-| **Turbo** | performance | performance | 110W | Maximum performance |
+| **Performance** | performance | performance¹ | 100W | Gaming |
+| **Turbo** | performance | performance¹ | 110W | Maximum performance |
+
+¹ With active Intel P-State + HWP, the kernel requires raw EPP `0` while the
+`performance` governor is selected. Predator Sense detects that backend from
+sysfs capabilities and uses `0` instead of assuming that the model-specific
+`performance` name maps to zero. Other drivers retain their normal named EPP,
+and systems without EPP skip that optional control.
 
 ### GPU Dashboard
 
