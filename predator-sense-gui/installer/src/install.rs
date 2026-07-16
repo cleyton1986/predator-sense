@@ -47,6 +47,8 @@ const FILE_SEPARATOR_WIDTH: usize = 48;
 const PROGRESS_WIDTH: usize = 40;
 const MAX_PROJECT_ANCESTORS: usize = 8;
 const BOOT_UNIT_ENABLE_ARGUMENTS: [&str; 2] = ["enable", path::BOOT_UNIT_NAME];
+const RUST_TOOL_DESTINATIONS: [&str; 4] = [path::INSTALLER, path::HELPER, path::HOTKEY, path::TRAY];
+const RUST_TOOL_PROCESSES_TO_STOP: [&str; 3] = [path::HELPER, path::HOTKEY, path::TRAY];
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -573,17 +575,26 @@ fn detect_gui_dir() -> Option<PathBuf> {
                 .map(Path::to_path_buf),
         );
     }
-    detect_gui_dir_from_candidates(candidates, Path::new(path::INSTALL_DIR))
+    detect_gui_dir_from_candidates(candidates)
 }
 
 fn detect_gui_dir_from_candidates(
     candidates: impl IntoIterator<Item = PathBuf>,
-    installed_dir: &Path,
 ) -> Option<PathBuf> {
-    candidates.into_iter().find(|candidate| {
-        has_kernel_source(candidate)
-            && (candidate.join(GUI_MANIFEST).is_file() || candidate == installed_dir)
-    })
+    candidates
+        .into_iter()
+        .find(|candidate| is_complete_gui_source(candidate))
+}
+
+fn is_complete_gui_source(candidate: &Path) -> bool {
+    candidate.join(GUI_MANIFEST).is_file() && has_kernel_source(candidate)
+}
+
+fn find_kernel_source_root(gui_dir: Option<&Path>, installed_dir: &Path) -> Option<PathBuf> {
+    gui_dir
+        .filter(|candidate| has_kernel_source(candidate))
+        .or_else(|| has_kernel_source(installed_dir).then_some(installed_dir))
+        .map(Path::to_path_buf)
 }
 
 fn gui_binary_path(gui: &Path) -> PathBuf {
@@ -842,9 +853,10 @@ impl Installer {
     }
 
     fn install_rust_tools(&self) -> AppResult {
+        self.stop_rust_tools_for_upgrade()?;
         let executable = std::env::current_exe()
             .map_err(|error| format!("não foi possível localizar o instalador: {error}"))?;
-        for destination in [path::INSTALLER, path::HELPER, path::HOTKEY, path::TRAY] {
+        for destination in RUST_TOOL_DESTINATIONS {
             let destination = Path::new(destination);
             if executable != destination {
                 copy_file(&executable, destination)?;
@@ -854,10 +866,46 @@ impl Installer {
         Ok(())
     }
 
+    fn stop_rust_tools_for_upgrade(&self) -> AppResult {
+        let had_running_tool = RUST_TOOL_PROCESSES_TO_STOP.into_iter().any(process_running);
+        let _ = self.run_as_user_quiet(
+            command::SYSTEMCTL,
+            ["--user", "stop", path::HOTKEY_UNIT],
+            None,
+        );
+        for process in RUST_TOOL_PROCESSES_TO_STOP {
+            terminate_process(process);
+        }
+        for process in [LEGACY_HOTKEY_PROCESS, LEGACY_TRAY_PROCESS] {
+            terminate_legacy_process(process);
+        }
+        if had_running_tool {
+            thread::sleep(Duration::from_secs(timing::PROCESS_SHUTDOWN_GRACE_SECS));
+        }
+
+        let running = RUST_TOOL_PROCESSES_TO_STOP
+            .into_iter()
+            .filter(|process| process_running(process))
+            .collect::<Vec<_>>();
+        if running.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "não foi possível parar os serviços antes da atualização: {}",
+                running.join(", ")
+            ))
+        }
+    }
+
     fn gui_dir(&self) -> AppResult<&Path> {
         self.gui_dir
             .as_deref()
             .ok_or_else(|| "diretório predator-sense-gui não encontrado".into())
+    }
+
+    fn kernel_source_root(&self) -> AppResult<PathBuf> {
+        find_kernel_source_root(self.gui_dir.as_deref(), Path::new(path::INSTALL_DIR))
+            .ok_or_else(|| "código fonte do módulo não encontrado".into())
     }
 
     fn prebuilt_application(&self) -> Option<PathBuf> {
@@ -1140,8 +1188,7 @@ where
 
 impl Installer {
     fn install_kernel_module(&self) -> AppResult {
-        let gui = self.gui_dir()?;
-        let source = gui.join(KERNEL_DIR);
+        let source = self.kernel_source_root()?.join(KERNEL_DIR);
         if !source.join(format!("{MODULE_NAME}.c")).is_file() {
             return Err("código fonte do módulo não encontrado".into());
         }
@@ -1633,11 +1680,12 @@ mod tests {
     }
 
     #[test]
-    fn detects_source_and_installed_kernel_trees() {
+    fn separates_complete_gui_sources_from_installed_kernel_sources() {
         let temporary = tempdir().unwrap();
         let source = temporary.path().join("source");
         let installed = temporary.path().join("installed");
         let unrelated = temporary.path().join("unrelated");
+        let missing = temporary.path().join("missing");
 
         for directory in [&source, &installed, &unrelated] {
             let kernel = directory.join(KERNEL_DIR);
@@ -1647,17 +1695,20 @@ mod tests {
         fs::write(source.join(GUI_MANIFEST), "").unwrap();
 
         assert_eq!(
-            detect_gui_dir_from_candidates([source.clone()], &installed),
-            Some(source)
+            detect_gui_dir_from_candidates([source.clone()]),
+            Some(source.clone())
         );
+        assert_eq!(detect_gui_dir_from_candidates([installed.clone()]), None);
+        assert_eq!(detect_gui_dir_from_candidates([unrelated.clone()]), None);
         assert_eq!(
-            detect_gui_dir_from_candidates([installed.clone()], &installed),
+            find_kernel_source_root(None, &installed),
             Some(installed.clone())
         );
         assert_eq!(
-            detect_gui_dir_from_candidates([unrelated], &installed),
-            None
+            find_kernel_source_root(Some(&source), &installed),
+            Some(source)
         );
+        assert_eq!(find_kernel_source_root(None, &missing), None);
     }
 
     #[test]
