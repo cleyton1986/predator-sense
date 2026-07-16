@@ -1,11 +1,12 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::f64::consts::PI;
 use std::rc::Rc;
 
-use crate::hardware::gpu::{read_gpu_metrics, GpuMetrics};
+use crate::hardware::gpu::{self, read_gpu_metrics, GpuLiveState};
+use crate::ui::background;
 
 const HISTORY: usize = 60;
 
@@ -62,6 +63,11 @@ pub fn build() -> gtk::Box {
     header.append(&gpu_name);
     header.append(&gpu_driver);
     page.append(&header);
+
+    let live_status = gtk::Label::new(Some(crate::i18n::t("gpu_loading_live")));
+    live_status.add_css_class("info-note");
+    live_status.set_halign(gtk::Align::Start);
+    page.append(&live_status);
 
     // === Top row: 4 gauges (Temp, Utilização, VRAM, Consumo) ===
     let gauges_row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
@@ -132,51 +138,52 @@ pub fn build() -> gtk::Box {
     page.append(&stats_row);
 
     // === GPU power limit (TGP) slider ===
+    let m0 = read_gpu_metrics();
+    let min_w = if m0.power_min_w > 0.0 { m0.power_min_w } else { 20.0 };
+    let max_w = if m0.power_max_w > min_w { m0.power_max_w } else { min_w + 50.0 };
+    let cur_w = if m0.power_limit_w > 0.0 { m0.power_limit_w } else { max_w };
+    let power_controls_ready = Rc::new(Cell::new(m0.live));
+
+    let pl_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    pl_box.add_css_class("usage-panel");
+    pl_box.set_margin_top(10);
+    let pl_head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let pl_title = gtk::Label::new(Some(crate::i18n::t("gpu_power_limit")));
+    pl_title.add_css_class("section-title");
+    pl_title.set_hexpand(true);
+    pl_title.set_halign(gtk::Align::Start);
+    let initial_power_value = if m0.live { format!("{cur_w:.0} W") } else { "--".to_string() };
+    let pl_value = gtk::Label::new(Some(&initial_power_value));
+    pl_value.add_css_class("usage-big-number");
+    pl_head.append(&pl_title);
+    pl_head.append(&pl_value);
+    pl_box.append(&pl_head);
+
+    let pl_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, min_w, max_w, 5.0);
+    pl_scale.set_value(cur_w);
+    pl_scale.set_sensitive(m0.live);
+    pl_scale.set_hexpand(true);
+    pl_scale.add_css_class("accent-scale");
     {
-        let m0 = read_gpu_metrics();
-        let min_w = if m0.power_min_w > 0.0 { m0.power_min_w } else { 20.0 };
-        let max_w = if m0.power_max_w > min_w { m0.power_max_w } else { min_w + 50.0 };
-        let cur_w = if m0.power_limit_w > 0.0 { m0.power_limit_w } else { max_w };
-
-        let pl_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        pl_box.add_css_class("usage-panel");
-        pl_box.set_margin_top(10);
-        let pl_head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let pl_title = gtk::Label::new(Some(crate::i18n::t("gpu_power_limit")));
-        pl_title.add_css_class("section-title");
-        pl_title.set_hexpand(true);
-        pl_title.set_halign(gtk::Align::Start);
-        let pl_value = gtk::Label::new(Some(&format!("{:.0} W", cur_w)));
-        pl_value.add_css_class("usage-big-number");
-        pl_head.append(&pl_title);
-        pl_head.append(&pl_value);
-        pl_box.append(&pl_head);
-
-        let pl_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, min_w, max_w, 5.0);
-        pl_scale.set_value(cur_w);
-        pl_scale.set_hexpand(true);
-        pl_scale.add_css_class("accent-scale");
-        {
-            let v = pl_value.clone();
-            pl_scale.connect_value_changed(move |s| v.set_text(&format!("{:.0} W", s.value())));
-        }
-        // Apply when the user releases the slider.
-        let gesture = gtk::GestureClick::new();
-        {
-            let s = pl_scale.clone();
-            let v = pl_value.clone();
-            gesture.connect_released(move |_, _, _, _| {
-                let w = s.value().round() as u32;
-                match crate::hardware::gpu::set_power_limit(w) {
-                    Ok(()) => v.set_text(&format!("{} W ✓", w)),
-                    Err(e) => v.set_text(&format!("⚠ {}", e)),
-                }
-            });
-        }
-        pl_scale.add_controller(gesture);
-        pl_box.append(&pl_scale);
-        page.append(&pl_box);
+        let v = pl_value.clone();
+        pl_scale.connect_value_changed(move |s| v.set_text(&format!("{:.0} W", s.value())));
     }
+    // Apply when the user releases the slider.
+    let gesture = gtk::GestureClick::new();
+    {
+        let s = pl_scale.clone();
+        let v = pl_value.clone();
+        gesture.connect_released(move |_, _, _, _| {
+            let w = s.value().round() as u32;
+            match crate::hardware::gpu::set_power_limit(w) {
+                Ok(()) => v.set_text(&format!("{} W ✓", w)),
+                Err(e) => v.set_text(&format!("⚠ {}", e)),
+            }
+        });
+    }
+    pl_scale.add_controller(gesture);
+    pl_box.append(&pl_scale);
+    page.append(&pl_box);
 
     // === Graph draw functions ===
     {
@@ -194,7 +201,7 @@ pub fn build() -> gtk::Box {
 
     // === Periodic update ===
     let all_widgets = AllWidgets {
-        gpu_name, gpu_driver,
+        gpu_name, gpu_driver, live_status,
         temp_da: temp_gauge.1, util_da: util_gauge.1,
         vram_da: vram_gauge.1, power_da: power_gauge.1,
         temp_label: temp_gauge.2, util_label: util_gauge.2,
@@ -202,6 +209,7 @@ pub fn build() -> gtk::Box {
         core_val: core_clk.1, mem_val: mem_clk.1,
         pstate_val: pstate_w.1, pcie_val: pcie_w.1, vbios_val: vbios_w.1,
         temp_graph_da: temp_graph, util_graph_da: util_graph,
+        power_scale: pl_scale, power_value: pl_value, power_controls_ready,
     };
 
     // Initial update
@@ -209,6 +217,27 @@ pub fn build() -> gtk::Box {
         let s = state.clone();
         let w = all_widgets.clone();
         glib::idle_add_local_once(move || update(&s, &w));
+    }
+
+    // Entering the explicit GPU monitor opts into waking a suspended dGPU,
+    // but the query remains on a worker and all controls keep their real
+    // static identity while live metrics are loading.
+    {
+        let s = state.clone();
+        let w = all_widgets.clone();
+        page.connect_map(move |_| {
+            w.live_status.set_text(crate::i18n::t("gpu_loading_live"));
+            let s = s.clone();
+            let w = w.clone();
+            background::run(gpu::load_live_metrics_blocking, move |metrics| {
+                update(&s, &w);
+                crate::startup_mark(if metrics.live {
+                    "GPU page live data loaded"
+                } else {
+                    "GPU page live data unavailable"
+                });
+            });
+        });
     }
 
     // Periodic (pausado quando window oculto OU página inativa)
@@ -228,7 +257,7 @@ pub fn build() -> gtk::Box {
 
 #[derive(Clone)]
 struct AllWidgets {
-    gpu_name: gtk::Label, gpu_driver: gtk::Label,
+    gpu_name: gtk::Label, gpu_driver: gtk::Label, live_status: gtk::Label,
     temp_da: gtk::DrawingArea, util_da: gtk::DrawingArea,
     vram_da: gtk::DrawingArea, power_da: gtk::DrawingArea,
     temp_label: gtk::Label, util_label: gtk::Label,
@@ -236,13 +265,66 @@ struct AllWidgets {
     core_val: gtk::Label, mem_val: gtk::Label,
     pstate_val: gtk::Label, pcie_val: gtk::Label, vbios_val: gtk::Label,
     temp_graph_da: gtk::DrawingArea, util_graph_da: gtk::DrawingArea,
+    power_scale: gtk::Scale, power_value: gtk::Label,
+    power_controls_ready: Rc<Cell<bool>>,
 }
 
 fn update(state: &Rc<RefCell<GpuState>>, w: &AllWidgets) {
     let m = read_gpu_metrics();
 
-    w.gpu_name.set_text(&m.name);
-    w.gpu_driver.set_text(&format!("Driver: {} | VBIOS: {}", m.driver, m.vbios));
+    w.gpu_name.set_text(if m.name.is_empty() { "NVIDIA GPU" } else { &m.name });
+    let mut identity = Vec::new();
+    if !m.driver.is_empty() {
+        identity.push(format!("Driver: {}", m.driver));
+    }
+    if !m.vbios.is_empty() {
+        identity.push(format!("VBIOS: {}", m.vbios));
+    }
+    w.gpu_driver.set_text(&identity.join(" | "));
+
+    if !m.live {
+        let status = match gpu::live_data_state() {
+            GpuLiveState::Loading => crate::i18n::t("gpu_loading_live"),
+            GpuLiveState::Unavailable => crate::i18n::t("gpu_live_unavailable"),
+            GpuLiveState::Static => crate::i18n::t("gpu_suspended_static"),
+            GpuLiveState::Live => crate::i18n::t("gpu_live_ready"),
+        };
+        w.live_status.set_text(status);
+        w.temp_label.set_text("--");
+        w.util_label.set_text("--");
+        let vram_text = if m.vram_total_mb > 0 {
+            format!("--/{} MB", m.vram_total_mb)
+        } else {
+            "--".to_string()
+        };
+        w.vram_label.set_text(&vram_text);
+        w.power_label.set_text("--");
+        w.core_val.set_text("--");
+        w.mem_val.set_text("--");
+        w.pstate_val.set_text("--");
+        w.pcie_val.set_text("--");
+        w.vbios_val
+            .set_text(if m.vbios.is_empty() { "--" } else { &m.vbios });
+        set_gauge_draw(&w.temp_da, 0.0);
+        set_gauge_draw(&w.util_da, 0.0);
+        set_gauge_draw(&w.vram_da, 0.0);
+        set_gauge_draw(&w.power_da, 0.0);
+        w.temp_graph_da.queue_draw();
+        w.util_graph_da.queue_draw();
+        return;
+    }
+
+    w.live_status.set_text(crate::i18n::t("gpu_live_ready"));
+
+    if !w.power_controls_ready.replace(true) {
+        let min_w = if m.power_min_w > 0.0 { m.power_min_w } else { 20.0 };
+        let max_w = if m.power_max_w > min_w { m.power_max_w } else { min_w + 50.0 };
+        let current_w = if m.power_limit_w > 0.0 { m.power_limit_w } else { max_w };
+        w.power_scale.set_range(min_w, max_w);
+        w.power_scale.set_value(current_w);
+        w.power_scale.set_sensitive(true);
+        w.power_value.set_text(&format!("{current_w:.0} W"));
+    }
 
     // Update gauges
     w.temp_label.set_text(&format!("{}°C", m.temp as i32));

@@ -1,7 +1,10 @@
 use gtk4::prelude::*;
-use gtk4::{self as gtk};
+use gtk4::{self as gtk, glib};
+use std::cell::Cell;
+use std::time::Duration;
 
 use crate::hardware::sysinfo::{self, SystemInfo};
+use crate::ui::background;
 
 /// Dashboard principal: hero com foto do notebook + especificações técnicas.
 pub fn build() -> gtk::ScrolledWindow {
@@ -85,18 +88,13 @@ pub fn build() -> gtk::ScrolledWindow {
         info.cpu_model.clone()
     };
 
-    let mut gpu_metadata = Vec::new();
-    if info.gpu_vram_mb > 0 {
-        gpu_metadata.push(format!("{:.0} GB VRAM", info.gpu_vram_mb as f64 / 1024.0));
-    }
-    if !info.gpu_driver.is_empty() {
-        gpu_metadata.push(format!("Driver {}", info.gpu_driver));
-    }
-    let gpu_detail = if gpu_metadata.is_empty() {
-        info.gpu_name.clone()
-    } else {
-        format!("{}\n{}", info.gpu_name, gpu_metadata.join(" · "))
-    };
+    let nvidia_available = crate::hardware::nvidia::is_available();
+    let gpu_detail = format_gpu_detail(
+        &info.gpu_name,
+        info.gpu_vram_mb,
+        &info.gpu_driver,
+        nvidia_available.then(|| crate::i18n::t("gpu_loading_live")),
+    );
 
     let ram_detail = if info.ram_total_gb > 0.0 {
         if info.ram_type.is_empty() {
@@ -149,8 +147,12 @@ pub fn build() -> gtk::ScrolledWindow {
         ("BIOS", "⚙", bios_detail),
     ];
 
+    let mut gpu_value_label = None;
     for (i, (title, icon, value)) in cards.iter().enumerate() {
-        let card = create_spec_card(icon, title, value);
+        let (card, value_label) = create_spec_card(icon, title, value);
+        if *title == "GPU" {
+            gpu_value_label = Some(value_label);
+        }
         let col = (i % 2) as i32;
         let row = (i / 2) as i32;
         grid.attach(&card, col, row, 1, 1);
@@ -158,8 +160,64 @@ pub fn build() -> gtk::ScrolledWindow {
 
     page.append(&grid);
 
+    // Preserve full NVIDIA information without delaying the first frame.
+    // Static model/driver/VBIOS data is already visible above. Once the
+    // Dashboard maps, hydrate the shared GPU cache on a worker and replace the
+    // loading line with VRAM and live-driver data.
+    if nvidia_available {
+        if let Some(gpu_value_label) = gpu_value_label {
+            let started = Cell::new(false);
+            scroll.connect_map(move |_| {
+                if started.replace(true) {
+                    return;
+                }
+                let gpu_value_label = gpu_value_label.clone();
+                // Give the compositor a chance to paint the mapped window
+                // before the driver starts runtime-resuming the dGPU.
+                glib::timeout_add_local_once(Duration::from_millis(200), move || {
+                    background::run(
+                        crate::hardware::gpu::load_live_metrics_blocking,
+                        move |metrics| {
+                            let status = (!metrics.live)
+                                .then(|| crate::i18n::t("gpu_live_unavailable"));
+                            gpu_value_label.set_text(&format_gpu_detail(
+                                &metrics.name,
+                                metrics.vram_total_mb,
+                                &metrics.driver,
+                                status,
+                            ));
+                            crate::startup_mark(if metrics.live {
+                                "NVIDIA live data loaded"
+                            } else {
+                                "NVIDIA live data unavailable"
+                            });
+                        },
+                    );
+                });
+            });
+        }
+    }
+
     scroll.set_child(Some(&page));
     scroll
+}
+
+fn format_gpu_detail(name: &str, vram_mb: u32, driver: &str, status: Option<&str>) -> String {
+    let mut metadata = Vec::new();
+    if vram_mb > 0 {
+        metadata.push(format!("{:.0} GB VRAM", vram_mb as f64 / 1024.0));
+    }
+    if !driver.is_empty() {
+        metadata.push(format!("Driver {driver}"));
+    }
+    if let Some(status) = status {
+        metadata.push(status.to_string());
+    }
+    if metadata.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}\n{}", metadata.join(" · "))
+    }
 }
 
 /// Reusable "supported features" FlowBox (used in Settings). Auto-detected for
@@ -225,7 +283,7 @@ fn build_short_summary(info: &SystemInfo) -> String {
     parts.join(" · ")
 }
 
-fn create_spec_card(icon: &str, title: &str, value: &str) -> gtk::Box {
+fn create_spec_card(icon: &str, title: &str, value: &str) -> (gtk::Box, gtk::Label) {
     let card = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     card.add_css_class("spec-card");
     // Fill the grid row so both cards on a row keep the same height (no misalign).
@@ -253,7 +311,7 @@ fn create_spec_card(icon: &str, title: &str, value: &str) -> gtk::Box {
     text.append(&v);
 
     card.append(&text);
-    card
+    (card, v)
 }
 
 /// Model-specific photos live in `resources/models/<CODE>.png`, background
@@ -314,4 +372,36 @@ fn find_resource(name: &str) -> Option<String> {
         return Some(dev);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_gpu_detail;
+
+    #[test]
+    fn keeps_static_nvidia_identity_visible_while_loading() {
+        let detail = format_gpu_detail(
+            "NVIDIA GeForce RTX 5070 Laptop GPU",
+            0,
+            "610.43.03",
+            Some("Loading live NVIDIA data..."),
+        );
+
+        assert!(detail.contains("NVIDIA GeForce RTX 5070 Laptop GPU"));
+        assert!(detail.contains("Driver 610.43.03"));
+        assert!(detail.contains("Loading live NVIDIA data..."));
+    }
+
+    #[test]
+    fn adds_vram_when_live_hydration_finishes() {
+        let detail = format_gpu_detail(
+            "NVIDIA GeForce RTX 5070 Laptop GPU",
+            8192,
+            "610.43.03",
+            None,
+        );
+
+        assert!(detail.contains("8 GB VRAM"));
+        assert!(detail.contains("Driver 610.43.03"));
+    }
 }

@@ -1,7 +1,6 @@
 use std::fs;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::hardware::hwmon;
 
@@ -38,12 +37,6 @@ pub struct GpuInfo {
 
 // Store previous network bytes for delta calculation
 static PREV_NET: Mutex<Option<(u64, u64, Instant)>> = Mutex::new(None);
-
-// nvidia-smi is a fork+exec — cache its output for 2s so multiple pages reading
-// sensors in parallel don't fork it dozens of times per second.
-static GPU_CACHE: Mutex<Option<(Instant, GpuInfo)>> = Mutex::new(None);
-const GPU_TTL: Duration = Duration::from_millis(1800);
-static GPU_REFRESHING: AtomicBool = AtomicBool::new(false);
 
 pub fn read_all_sensors() -> SensorData {
     let gpu_info = read_nvidia_gpu_info();
@@ -160,65 +153,18 @@ fn read_cpu_frequency() -> Option<u32> {
 }
 
 fn read_nvidia_gpu_info() -> GpuInfo {
-    // Serve from cache if recent.
-    {
-        let guard = GPU_CACHE.lock().unwrap();
-        if let Some((t, info)) = guard.as_ref() {
-            if t.elapsed() < GPU_TTL {
-                return info.clone();
-            }
-        }
+    // Reuse the comprehensive GPU cache instead of maintaining a second
+    // nvidia-smi command, TTL and suspended-device policy in parallel.
+    let metrics = crate::hardware::gpu::read_gpu_metrics();
+    GpuInfo {
+        name: metrics.name,
+        temp: metrics.live.then_some(metrics.temp),
+        fan_speed_pct: metrics.live.then_some(metrics.fan_speed_pct),
+        clock_mhz: metrics.live.then_some(metrics.clock_core_mhz),
+        mem_clock_mhz: metrics.live.then_some(metrics.clock_mem_mhz),
+        utilization_pct: metrics.live.then_some(metrics.util_gpu_pct),
+        power_watts: metrics.live.then_some(metrics.power_draw_w),
     }
-    // Stale or empty: refresh OFF the main thread. nvidia-smi is quick with
-    // the GPU awake but can take multiple seconds to power it up from D3cold;
-    // every caller of this function is a GTK timeout on the main loop, so
-    // running it inline froze the UI for that long on every cache expiry.
-    // Return the stale value (or defaults on the very first call) right away
-    // and let the next tick pick up the refreshed one.
-    if !GPU_REFRESHING.swap(true, Ordering::AcqRel) {
-        std::thread::spawn(|| {
-            let info = if crate::hardware::nvidia::live_query_is_safe() {
-                fetch_nvidia_gpu_info()
-            } else {
-                GpuInfo::default()
-            };
-            *GPU_CACHE.lock().unwrap() = Some((Instant::now(), info));
-            GPU_REFRESHING.store(false, Ordering::Release);
-        });
-    }
-    GPU_CACHE
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|(_, info)| info.clone())
-        .unwrap_or_default()
-}
-
-fn fetch_nvidia_gpu_info() -> GpuInfo {
-    let o = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=name,temperature.gpu,fan.speed,clocks.gr,clocks.mem,utilization.gpu,power.draw",
-               "--format=csv,noheader,nounits"]).output();
-    let info = match o {
-        Ok(o) if o.status.success() => {
-            let t = String::from_utf8_lossy(&o.stdout);
-            let p: Vec<&str> = t.trim().split(", ").collect();
-            if p.len() < 7 {
-                GpuInfo::default()
-            } else {
-                GpuInfo {
-                    name: p[0].trim().into(),
-                    temp: p[1].trim().parse().ok(),
-                    fan_speed_pct: p[2].trim().replace("[N/A]", "").parse().ok(),
-                    clock_mhz: p[3].trim().replace(" MHz", "").parse().ok(),
-                    mem_clock_mhz: p[4].trim().replace(" MHz", "").parse().ok(),
-                    utilization_pct: p[5].trim().replace(" %", "").parse().ok(),
-                    power_watts: p[6].trim().replace(" W", "").parse().ok(),
-                }
-            }
-        }
-        _ => GpuInfo::default(),
-    };
-    info
 }
 
 fn read_cpu_temperature() -> Option<f64> {
