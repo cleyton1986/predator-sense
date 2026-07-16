@@ -184,7 +184,9 @@ rollback_cpu_profile() {
     old_epp=${OLD_EPPS[$i]}
 
     if [ "$old_governor" = performance ] && [ "$intel_hwp" -eq 1 ]; then
-      [ "$old_epp" = skip ] || rollback_attr epp 0 "$policy/energy_performance_preference" || rollback_failed=1
+      # Selecting this policy is itself the kernel ABI for restoring forced
+      # EPP 0.  Do not require numeric EPP writes, which some HWP/EPB-backed
+      # systems do not expose even though named preferences are available.
       rollback_attr scaling-governor "$old_governor" "$policy/scaling_governor" || rollback_failed=1
     else
       rollback_attr scaling-governor "$old_governor" "$policy/scaling_governor" || rollback_failed=1
@@ -254,11 +256,15 @@ apply_cpu_profile() {
   preflight_cpu_profile || return 1
   snapshot_cpu_profile || return 1
 
-  local policy
+  local policy kernel_forces_epp_zero=0
+  if [ "$TARGET_GOVERNOR" = performance ] && [ "$TARGET_EPP" = 0 ] && intel_pstate_hwp_active; then
+    kernel_forces_epp_zero=1
+  fi
   if [ "$TARGET_GOVERNOR" = performance ]; then
-    # Raw EPP 0 is valid before and after switching to the intel_pstate HWP
-    # performance governor; non-zero EPP values are rejected afterwards.
-    if [ "$TARGET_EPP" != skip ]; then
+    # Active intel_pstate HWP guarantees EPP 0 when this governor is selected.
+    # Rely on that policy instead of requiring the optional numeric EPP ABI.
+    # Other drivers still receive their requested EPP before the governor.
+    if [ "$TARGET_EPP" != skip ] && [ "$kernel_forces_epp_zero" -eq 0 ]; then
       for policy in "${CPU_POLICIES[@]}"; do
         apply_or_rollback epp "$TARGET_EPP" "$policy/energy_performance_preference" || return 1
       done
