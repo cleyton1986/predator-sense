@@ -163,8 +163,7 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
                 hardware::GPU_POWER_MIN_WATTS,
                 hardware::GPU_POWER_MAX_WATTS,
             )?;
-            command(external::NVIDIA_SMI, &["-pm", "1"])?;
-            command(external::NVIDIA_SMI, &["-pl", &watts.to_string()])
+            set_gpu_power_limit(watts, command)
         }
         HelperAction::SetNoTurbo => {
             let value = parse_bool(&args[1])?;
@@ -461,6 +460,15 @@ fn command(name: &str, args: &[&str]) -> AppResult {
     }
 }
 
+fn set_gpu_power_limit(
+    watts: u16,
+    mut execute: impl FnMut(&str, &[&str]) -> AppResult,
+) -> AppResult {
+    let _ = execute(external::NVIDIA_SMI, &["-pm", "1"]);
+    let watts = watts.to_string();
+    execute(external::NVIDIA_SMI, &["-pl", watts.as_str()])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,5 +571,40 @@ mod tests {
         assert_eq!(action.argument_count(), 1);
         assert!(action.usage().starts_with(action.as_str()));
         assert!(HelperAction::parse("made-up-action").is_none());
+    }
+
+    #[test]
+    fn applies_gpu_power_limit_when_persistence_mode_is_unsupported() {
+        let mut invocations = Vec::new();
+        let result = set_gpu_power_limit(80, |name, args| {
+            invocations.push((name.to_string(), args.join(" ")));
+            if args == ["-pm", "1"] {
+                Err("persistence mode unsupported".into())
+            } else {
+                Ok(())
+            }
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(
+            invocations,
+            [
+                (external::NVIDIA_SMI.into(), "-pm 1".into()),
+                (external::NVIDIA_SMI.into(), "-pl 80".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_gpu_power_limit_failure() {
+        let result = set_gpu_power_limit(80, |_name, args| {
+            if args == ["-pl", "80"] {
+                Err("power limit rejected".into())
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(result.unwrap_err(), "power limit rejected");
     }
 }
