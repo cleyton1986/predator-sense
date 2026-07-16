@@ -7,7 +7,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 const PCI_DEVICES: &str = "/sys/bus/pci/devices";
 const NVIDIA_VENDOR: &str = "0x10de";
@@ -18,7 +17,6 @@ pub struct NvidiaInfo {
     pub name: String,
     pub driver: String,
     pub vbios: String,
-    pub vram_mb: u32,
 }
 
 fn read_trim(path: impl AsRef<Path>) -> Option<String> {
@@ -104,7 +102,8 @@ fn model_from_udev_cache(bus_id: &str) -> Option<String> {
     })
 }
 
-fn static_info() -> NvidiaInfo {
+/// Static NVIDIA identity available without runtime-resuming the dGPU.
+pub fn hardware_info() -> NvidiaInfo {
     let Some(device) = display_devices().into_iter().next() else {
         return NvidiaInfo::default();
     };
@@ -123,58 +122,9 @@ fn static_info() -> NvidiaInfo {
     info
 }
 
-fn parse_live_query(contents: &str) -> Option<NvidiaInfo> {
-    let fields: Vec<&str> = contents.lines().next()?.split(',').map(str::trim).collect();
-    if fields.len() < 3 || fields[0].is_empty() {
-        return None;
-    }
-    Some(NvidiaInfo {
-        name: fields[0].to_string(),
-        vram_mb: fields[1].parse().unwrap_or(0),
-        driver: fields[2].to_string(),
-        vbios: String::new(),
-    })
-}
-
-fn live_info() -> Option<NvidiaInfo> {
-    let output = Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=name,memory.total,driver_version",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_live_query(&String::from_utf8_lossy(&output.stdout))
-}
-
-/// Information suitable for the startup dashboard.
-///
-/// When the dGPU is suspended this uses only cached kernel/udev metadata. If
-/// it is already active, one combined `nvidia-smi` query adds the VRAM total
-/// without the three sequential subprocesses previously used by the page.
-pub fn dashboard_info() -> NvidiaInfo {
-    let mut info = static_info();
-    if !is_available() || !live_query_is_safe() {
-        return info;
-    }
-    if let Some(live) = live_info() {
-        if !live.name.is_empty() {
-            info.name = live.name;
-        }
-        if !live.driver.is_empty() {
-            info.driver = live.driver;
-        }
-        info.vram_mb = live.vram_mb;
-    }
-    info
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{parse_live_query, parse_proc_information, runtime_status_is_safe, NvidiaInfo};
+    use super::{parse_proc_information, runtime_status_is_safe, NvidiaInfo};
 
     #[test]
     fn parses_static_proc_information() {
@@ -189,19 +139,6 @@ mod tests {
                 ..NvidiaInfo::default()
             }
         );
-    }
-
-    #[test]
-    fn parses_single_combined_live_query() {
-        let parsed = parse_live_query("NVIDIA GeForce RTX 5070, 8192, 610.43.03\n").unwrap();
-        assert_eq!(parsed.name, "NVIDIA GeForce RTX 5070");
-        assert_eq!(parsed.vram_mb, 8192);
-        assert_eq!(parsed.driver, "610.43.03");
-    }
-
-    #[test]
-    fn rejects_truncated_live_query() {
-        assert!(parse_live_query("NVIDIA GPU, 8192\n").is_none());
     }
 
     #[test]
