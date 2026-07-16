@@ -522,12 +522,21 @@ fn build_gpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
             drv_c.set_text(&format!("Driver {} · VBIOS {}", g.driver, g.vbios));
             core_c.set_text(&format!("{} MHz", g.clock_core_mhz));
             mem_c.set_text(&format!("{} MHz", g.clock_mem_mhz));
-            fan_c.set_text(&format!("{}%", g.fan_speed_pct));
+            fan_c.set_text(
+                &g.fan_speed_pct
+                    .map(|v| format!("{v}%"))
+                    .unwrap_or_else(|| "--".into()),
+            );
             ps_c.set_text(&g.pstate);
             pcie_c.set_text(&format!("Gen{} x{}", g.pcie_gen, g.pcie_width));
         } else {
-            name_c.set_text(&crate::i18n::t("gpu_not_detected").to_string());
+            name_c.set_text(crate::i18n::t("gpu_live_unavailable"));
             drv_c.set_text("");
+            core_c.set_text("--");
+            mem_c.set_text("--");
+            fan_c.set_text("--");
+            ps_c.set_text("--");
+            pcie_c.set_text("--");
         }
         util_da_c.queue_draw();
         temp_da_c.queue_draw();

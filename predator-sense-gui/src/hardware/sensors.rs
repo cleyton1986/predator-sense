@@ -159,7 +159,11 @@ fn read_nvidia_gpu_info() -> GpuInfo {
     GpuInfo {
         name: metrics.name,
         temp: metrics.live.then_some(metrics.temp),
-        fan_speed_pct: metrics.live.then_some(metrics.fan_speed_pct),
+        fan_speed_pct: if metrics.live {
+            metrics.fan_speed_pct
+        } else {
+            None
+        },
         clock_mhz: metrics.live.then_some(metrics.clock_core_mhz),
         mem_clock_mhz: metrics.live.then_some(metrics.clock_mem_mhz),
         utilization_pct: metrics.live.then_some(metrics.util_gpu_pct),

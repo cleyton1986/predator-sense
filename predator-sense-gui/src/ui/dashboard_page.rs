@@ -1,10 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
-use std::cell::Cell;
-use std::time::Duration;
 
 use crate::hardware::sysinfo::{self, SystemInfo};
-use crate::ui::background;
 
 /// Dashboard principal: hero com foto do notebook + especificações técnicas.
 pub fn build() -> gtk::ScrolledWindow {
@@ -89,11 +86,18 @@ pub fn build() -> gtk::ScrolledWindow {
     };
 
     let nvidia_available = crate::hardware::nvidia::is_available();
+    let initial_gpu_status = nvidia_available.then(|| {
+        if crate::hardware::nvidia::live_query_is_safe() {
+            crate::i18n::t("gpu_loading_live")
+        } else {
+            crate::i18n::t("gpu_suspended_static")
+        }
+    });
     let gpu_detail = format_gpu_detail(
         &info.gpu_name,
         info.gpu_vram_mb,
         &info.gpu_driver,
-        nvidia_available.then(|| crate::i18n::t("gpu_loading_live")),
+        initial_gpu_status,
     );
 
     let ram_detail = if info.ram_total_gb > 0.0 {
@@ -160,46 +164,57 @@ pub fn build() -> gtk::ScrolledWindow {
 
     page.append(&grid);
 
-    // Preserve full NVIDIA information without delaying the first frame.
-    // Static model/driver/VBIOS data is already visible above. Once the
-    // Dashboard maps, hydrate the shared GPU cache on a worker and replace the
-    // loading line with VRAM and live-driver data.
+    // Passive Dashboard refreshes never runtime-resume a suspended dGPU.
+    // They can consume an already-live sample (including one loaded after the
+    // user explicitly opens the GPU page), or query an already-active device
+    // on the shared background path without blocking GTK.
     if nvidia_available {
         if let Some(gpu_value_label) = gpu_value_label {
-            let started = Cell::new(false);
-            scroll.connect_map(move |_| {
-                if started.replace(true) {
-                    return;
+            let map_label = gpu_value_label.clone();
+            scroll.connect_map(move |_| refresh_gpu_detail(&map_label));
+
+            let scroll = scroll.clone();
+            glib::timeout_add_seconds_local(2, move || {
+                if scroll.is_mapped() {
+                    refresh_gpu_detail(&gpu_value_label);
                 }
-                let gpu_value_label = gpu_value_label.clone();
-                // Give the compositor a chance to paint the mapped window
-                // before the driver starts runtime-resuming the dGPU.
-                glib::timeout_add_local_once(Duration::from_millis(200), move || {
-                    background::run(
-                        crate::hardware::gpu::load_live_metrics_blocking,
-                        move |metrics| {
-                            let status = (!metrics.live)
-                                .then(|| crate::i18n::t("gpu_live_unavailable"));
-                            gpu_value_label.set_text(&format_gpu_detail(
-                                &metrics.name,
-                                metrics.vram_total_mb,
-                                &metrics.driver,
-                                status,
-                            ));
-                            crate::startup_mark(if metrics.live {
-                                "NVIDIA live data loaded"
-                            } else {
-                                "NVIDIA live data unavailable"
-                            });
-                        },
-                    );
-                });
+                glib::ControlFlow::Continue
             });
         }
     }
 
     scroll.set_child(Some(&page));
     scroll
+}
+
+fn refresh_gpu_detail(label: &gtk::Label) {
+    let metrics = crate::hardware::gpu::read_gpu_metrics();
+    let status = if metrics.live {
+        None
+    } else {
+        Some(match crate::hardware::gpu::live_data_state() {
+            crate::hardware::gpu::GpuLiveState::Loading => crate::i18n::t("gpu_loading_live"),
+            crate::hardware::gpu::GpuLiveState::Unavailable => {
+                crate::i18n::t("gpu_live_unavailable")
+            }
+            crate::hardware::gpu::GpuLiveState::Static => {
+                if crate::hardware::nvidia::live_query_is_safe() {
+                    crate::i18n::t("gpu_loading_live")
+                } else {
+                    crate::i18n::t("gpu_suspended_static")
+                }
+            }
+            crate::hardware::gpu::GpuLiveState::Live => {
+                crate::i18n::t("gpu_live_unavailable")
+            }
+        })
+    };
+    label.set_text(&format_gpu_detail(
+        &metrics.name,
+        metrics.vram_total_mb,
+        &metrics.driver,
+        status,
+    ));
 }
 
 fn format_gpu_detail(name: &str, vram_mb: u32, driver: &str, status: Option<&str>) -> String {
