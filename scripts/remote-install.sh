@@ -303,7 +303,7 @@ msg ok "Files installed"
 # the module automatically on future kernel upgrades - a bare insmod copy
 # in /lib/modules/$(uname -r)/extra/ goes stale the moment the kernel
 # updates and never gets rebuilt, silently breaking facer on next boot.
-# Same DKMS flow already used by setup.sh and the Go installer.
+# Same DKMS flow already used by the Go installer.
 msg kernel
 KERNEL_DIR="$TMP_DIR/predator-sense-gui/kernel"
 MAKE_LOG="$TMP_DIR/make.log"

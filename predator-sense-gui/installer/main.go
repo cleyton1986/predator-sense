@@ -17,7 +17,7 @@ const (
 	desktopFile = "/usr/share/applications/predator-sense.desktop"
 	iconPath    = "/usr/share/icons/hicolor/128x128/apps/predator-sense.png"
 	polkitRule  = "/usr/share/polkit-1/actions/com.predator.sense.policy"
-	appVersion  = "0.2.31"
+	appVersion  = "0.2.32"
 )
 
 // ─── Colors ───
@@ -422,6 +422,13 @@ func installKernelHeaders() error {
 
 func installRust() error {
 	if hasRust() {
+		return nil
+	}
+	// prepareReleaseAssets (the step right before this one) already downloaded
+	// a prebuilt binary when guiDir wasn't found locally - buildApp() will skip
+	// compiling entirely in that case, so installing the whole Rust toolchain
+	// here would be pure waste (time, bandwidth, disk) for a step that never runs.
+	if guiDir != "" && fileExists(filepath.Join(guiDir, "target/release/predator-sense")) {
 		return nil
 	}
 	return runAsUser("bash", "-c", `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y`)
