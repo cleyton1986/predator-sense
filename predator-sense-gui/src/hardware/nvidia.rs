@@ -5,12 +5,12 @@
 //! driver and VBIOS are already available through sysfs/procfs while the GPU
 //! is suspended, so startup paths should use those sources instead.
 
+use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
-const PCI_DEVICES: &str = "/sys/bus/pci/devices";
 const NVIDIA_VENDOR: &str = "0x10de";
-const DISPLAY_CLASS_PREFIX: &str = "0x03";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NvidiaInfo {
@@ -26,36 +26,42 @@ fn read_trim(path: impl AsRef<Path>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn display_devices() -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(PCI_DEVICES) else {
-        return Vec::new();
-    };
-    let mut devices: Vec<PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            read_trim(path.join("vendor")).as_deref() == Some(NVIDIA_VENDOR)
-                && read_trim(path.join("class"))
-                    .is_some_and(|class| class.starts_with(DISPLAY_CLASS_PREFIX))
-        })
-        .collect();
-    devices.sort();
-    devices
+fn display_devices() -> Vec<crate::hardware::display::DisplayDevice> {
+    crate::hardware::display::devices()
+        .into_iter()
+        .filter(|device| device.vendor_id == NVIDIA_VENDOR)
+        .collect()
 }
 
-/// A usable NVIDIA display device and driver are present.
+/// An NVIDIA display device, proprietary driver and `nvidia-smi` are usable.
 ///
 /// `/proc/driver/nvidia/gpus` remains readable while the device is in D3cold,
-/// unlike invoking `nvidia-smi` merely to answer the same yes/no question.
+/// and the executable is located through PATH without running it. This keeps
+/// capability detection non-waking while ensuring the monitor can fetch data.
 pub fn is_available() -> bool {
+    driver_is_loaded() && executable_in_path("nvidia-smi")
+}
+
+fn driver_is_loaded() -> bool {
     display_devices().iter().any(|device| {
-        let Some(bus_id) = device.file_name().and_then(|name| name.to_str()) else {
-            return false;
-        };
         Path::new("/proc/driver/nvidia/gpus")
-            .join(bus_id)
+            .join(&device.bus_id)
             .join("information")
             .is_file()
+    })
+}
+
+fn executable_in_path(name: &str) -> bool {
+    let path = env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into());
+    executable_in_paths(name, &path)
+}
+
+fn executable_in_paths(name: &str, path: &std::ffi::OsStr) -> bool {
+    env::split_paths(path).any(|directory| {
+        let candidate = directory.join(name);
+        candidate
+            .metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
     })
 }
 
@@ -71,8 +77,8 @@ fn runtime_status_is_safe(status: Option<&str>) -> bool {
 pub fn live_query_is_safe() -> bool {
     let devices = display_devices();
     !devices.is_empty()
-        && devices.iter().all(|path| {
-            let status = read_trim(path.join("power/runtime_status"));
+        && devices.iter().all(|device| {
+            let status = device.runtime_status();
             runtime_status_is_safe(status.as_deref())
         })
 }
@@ -92,31 +98,18 @@ fn parse_proc_information(contents: &str) -> NvidiaInfo {
     info
 }
 
-fn model_from_udev_cache(bus_id: &str) -> Option<String> {
-    let contents = fs::read_to_string(format!("/run/udev/data/+pci:{bus_id}")).ok()?;
-    contents.lines().find_map(|line| {
-        line.strip_prefix("E:ID_MODEL_FROM_DATABASE=")
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(|value| format!("NVIDIA {value}"))
-    })
-}
-
 /// Static NVIDIA identity available without runtime-resuming the dGPU.
 pub fn hardware_info() -> NvidiaInfo {
     let Some(device) = display_devices().into_iter().next() else {
         return NvidiaInfo::default();
     };
-    let Some(bus_id) = device.file_name().and_then(|name| name.to_str()) else {
-        return NvidiaInfo::default();
-    };
 
-    let proc_path = format!("/proc/driver/nvidia/gpus/{bus_id}/information");
+    let proc_path = format!("/proc/driver/nvidia/gpus/{}/information", device.bus_id);
     let mut info = fs::read_to_string(proc_path)
         .map(|contents| parse_proc_information(&contents))
         .unwrap_or_default();
     if info.name.is_empty() {
-        info.name = model_from_udev_cache(bus_id).unwrap_or_else(|| "NVIDIA GPU".to_string());
+        info.name = device.name();
     }
     info.driver = read_trim("/sys/module/nvidia/version").unwrap_or_default();
     info
@@ -124,7 +117,7 @@ pub fn hardware_info() -> NvidiaInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_proc_information, runtime_status_is_safe, NvidiaInfo};
+    use super::{executable_in_paths, parse_proc_information, runtime_status_is_safe, NvidiaInfo};
 
     #[test]
     fn parses_static_proc_information() {
@@ -150,5 +143,14 @@ mod tests {
         assert!(!runtime_status_is_safe(Some("suspended")));
         assert!(!runtime_status_is_safe(Some("resuming")));
         assert!(!runtime_status_is_safe(Some("error")));
+    }
+
+    #[test]
+    fn finds_an_executable_without_running_it() {
+        let executable = std::env::current_exe().unwrap();
+        let name = executable.file_name().unwrap().to_str().unwrap();
+        let path = executable.parent().unwrap().as_os_str();
+        assert!(executable_in_paths(name, path));
+        assert!(!executable_in_paths("definitely-not-installed", path));
     }
 }

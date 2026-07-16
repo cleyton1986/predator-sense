@@ -23,7 +23,7 @@ pub struct Capabilities {
     pub rgb: bool,
     /// Raw EC access (/dev/ec) — needed for CoolBoost / LCD overdrive / etc.
     pub ec: bool,
-    /// NVIDIA GPU and proprietary driver detected without waking the dGPU.
+    /// NVIDIA GPU monitoring available without waking the dGPU during detection.
     pub nvidia_gpu: bool,
     /// Battery charge-limit control.
     pub battery_limit: bool,

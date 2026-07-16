@@ -32,6 +32,12 @@ pub struct StorageDevice {
 
 pub fn read_system_info() -> SystemInfo {
     let gpu = crate::hardware::nvidia::hardware_info();
+    let gpu_name = if gpu.name.is_empty() {
+        crate::hardware::display::primary_name()
+            .unwrap_or_else(|| crate::i18n::t("unknown").to_string())
+    } else {
+        gpu.name
+    };
     SystemInfo {
         product_name: read_trim("/sys/class/dmi/id/product_name").unwrap_or_else(|| "Unknown".into()),
         vendor: read_trim("/sys/class/dmi/id/sys_vendor").unwrap_or_else(|| "Unknown".into()),
@@ -42,11 +48,7 @@ pub fn read_system_info() -> SystemInfo {
         cpu_cores: read_cpu_cores(),
         cpu_threads: read_cpu_threads(),
         cpu_max_freq_mhz: read_cpu_max_freq(),
-        gpu_name: if gpu.name.is_empty() {
-            crate::i18n::t("unknown").to_string()
-        } else {
-            gpu.name
-        },
+        gpu_name,
         // VRAM requires a live driver query. The Dashboard hydrates it in a
         // worker after the first frame instead of delaying startup here.
         gpu_vram_mb: 0,
