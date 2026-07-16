@@ -208,20 +208,30 @@ fn detect_cpu_capabilities_at(sysfs_root: &Path) -> CpuCapabilities {
 
 fn plan_for(profile: PowerProfile, capabilities: &CpuCapabilities) -> CpuProfilePlan {
     let settings = settings_for(profile);
+    let governor = if capabilities.intel_pstate_hwp_active && profile == PowerProfile::Performance {
+        // With HWP, intel_pstate's "powersave" policy is a dynamic scaling
+        // algorithm (not the generic minimum-frequency governor) and is the
+        // policy under which a model-specific, non-zero EPP remains writable.
+        // This gives Performance a real dynamic 50%-to-max CPU tier while
+        // Turbo retains the kernel-defined maximum-only policy below.
+        "powersave"
+    } else {
+        settings.governor
+    };
     let epp = if !capabilities.epp_supported {
         None
-    } else if capabilities.intel_pstate_hwp_active && settings.governor == "performance" {
-        // Active intel_pstate HWP performance mode forces raw EPP 0 and
-        // rejects every non-zero value.  On CPUs with model-specific EPP
-        // tables (including Meteor/Arrow Lake), the named "performance"
-        // preference may be non-zero, so the numeric ABI is required here.
+    } else if capabilities.intel_pstate_hwp_active && governor == "performance" {
+        // Active intel_pstate HWP performance mode forces EPP 0 and rejects
+        // every non-zero value.  Keep 0 in the plan as the expected semantic
+        // state; the helper selects the governor and lets the kernel enforce
+        // it, which also supports HWP systems without numeric EPP writes.
         Some("0")
     } else {
         Some(settings.epp)
     };
 
     CpuProfilePlan {
-        governor: settings.governor,
+        governor,
         epp,
         no_turbo: capabilities.no_turbo_supported.then_some(settings.no_turbo),
         min_perf_pct: capabilities
@@ -540,17 +550,22 @@ mod tests {
     }
 
     #[test]
-    fn active_intel_pstate_hwp_uses_raw_zero_with_performance_governor() {
+    fn active_intel_pstate_hwp_has_distinct_performance_and_turbo_plans() {
         let fixture = SysfsFixture::new("intel_pstate", "active", 2, 2);
         fixture.add_intel_limits(false, 17);
         let capabilities = detect_cpu_capabilities_at(&fixture.root);
 
         assert!(capabilities.intel_pstate_hwp_active);
-        assert_eq!(
-            plan_for(PowerProfile::Performance, &capabilities).epp,
-            Some("0")
-        );
-        assert_eq!(plan_for(PowerProfile::Turbo, &capabilities).epp, Some("0"));
+        let performance = plan_for(PowerProfile::Performance, &capabilities);
+        assert_eq!(performance.governor, "powersave");
+        assert_eq!(performance.epp, Some("performance"));
+        assert_eq!(performance.min_perf_pct, Some(50));
+
+        let turbo = plan_for(PowerProfile::Turbo, &capabilities);
+        assert_eq!(turbo.governor, "performance");
+        assert_eq!(turbo.epp, Some("0"));
+        assert_eq!(turbo.min_perf_pct, Some(100));
+
         assert_eq!(
             plan_for(PowerProfile::Balanced, &capabilities).epp,
             Some("balance_performance")
@@ -577,10 +592,9 @@ mod tests {
         let capabilities = detect_cpu_capabilities_at(&fixture.root);
 
         assert!(!capabilities.intel_pstate_hwp_active);
-        assert_eq!(
-            plan_for(PowerProfile::Performance, &capabilities).epp,
-            Some("performance")
-        );
+        let performance = plan_for(PowerProfile::Performance, &capabilities);
+        assert_eq!(performance.governor, "performance");
+        assert_eq!(performance.epp, Some("performance"));
     }
 
     #[test]
@@ -604,17 +618,21 @@ mod tests {
     }
 
     #[test]
-    fn kernel_normalized_default_epp_still_detects_performance_and_turbo() {
+    fn hwp_hardware_state_distinguishes_performance_from_turbo() {
         let fixture = SysfsFixture::new("intel_pstate", "active", 2, 2);
         fixture.add_intel_limits(false, 50);
-        fixture.set_policy_value("scaling_governor", "performance", 2);
-        fixture.set_policy_value("energy_performance_preference", "default", 2);
+        fixture.set_policy_value("scaling_governor", "powersave", 2);
+        fixture.set_policy_value("energy_performance_preference", "performance", 2);
 
         assert_eq!(
             detect_from_hardware_at(&fixture.root),
             Some(PowerProfile::Performance)
         );
 
+        fixture.set_policy_value("scaling_governor", "performance", 2);
+        // Model-specific EPP tables may render the forced raw zero as
+        // "default" instead of the named "performance" preference.
+        fixture.set_policy_value("energy_performance_preference", "default", 2);
         fixture.write("devices/system/cpu/intel_pstate/min_perf_pct", "100");
         assert_eq!(
             detect_from_hardware_at(&fixture.root),
@@ -626,11 +644,11 @@ mod tests {
     fn mixed_policy_state_is_not_reported_as_an_active_profile() {
         let fixture = SysfsFixture::new("intel_pstate", "active", 2, 2);
         fixture.add_intel_limits(false, 50);
-        fixture.set_policy_value("scaling_governor", "performance", 2);
-        fixture.set_policy_value("energy_performance_preference", "default", 2);
+        fixture.set_policy_value("scaling_governor", "powersave", 2);
+        fixture.set_policy_value("energy_performance_preference", "performance", 2);
         fixture.write(
             "devices/system/cpu/cpufreq/policy1/scaling_governor",
-            "powersave",
+            "performance",
         );
 
         assert_eq!(detect_from_hardware_at(&fixture.root), None);

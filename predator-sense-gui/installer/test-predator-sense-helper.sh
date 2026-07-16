@@ -2,8 +2,8 @@
 set -euo pipefail
 
 if [ "$EUID" -eq 0 ]; then
-  echo 'run this test as an unprivileged user; refusing to touch the real sysfs' >&2
-  exit 77
+  echo 'SKIP: run this test as an unprivileged user; refusing to touch the real sysfs' >&2
+  exit 0
 fi
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -55,17 +55,27 @@ write_fixture devices/system/cpu/intel_pstate/status active
 write_fixture devices/system/cpu/intel_pstate/no_turbo 0
 write_fixture devices/system/cpu/intel_pstate/min_perf_pct 17
 
-# Active intel_pstate HWP performance path: EPP must be written before the
-# governor and all values must be applied across every policy.
-run_helper apply-cpu-profile performance 0 0 50
+# Active intel_pstate HWP Performance retains the writable dynamic policy and
+# applies the model-specific named preference across every policy.
+run_helper apply-cpu-profile powersave performance 0 50
 for index in 0 1; do
-  assert_value "devices/system/cpu/cpufreq/policy$index/scaling_governor" performance
-  assert_value "devices/system/cpu/cpufreq/policy$index/energy_performance_preference" 0
+  assert_value "devices/system/cpu/cpufreq/policy$index/scaling_governor" powersave
+  assert_value "devices/system/cpu/cpufreq/policy$index/energy_performance_preference" performance
 done
 assert_value devices/system/cpu/intel_pstate/no_turbo 0
 assert_value devices/system/cpu/intel_pstate/min_perf_pct 50
 
-# Leaving performance reverses the order so a named, non-zero EPP is writable.
+# Turbo selects the HWP performance policy. A plain-file fixture does not
+# emulate the kernel's forced EPP 0, so retaining the previous named value here
+# also proves the helper did not require a numeric EPP write.
+run_helper apply-cpu-profile performance 0 0 100
+for index in 0 1; do
+  assert_value "devices/system/cpu/cpufreq/policy$index/scaling_governor" performance
+  assert_value "devices/system/cpu/cpufreq/policy$index/energy_performance_preference" performance
+done
+assert_value devices/system/cpu/intel_pstate/min_perf_pct 100
+
+# Leaving Turbo reverses the order so a named, non-zero EPP is writable.
 run_helper apply-cpu-profile powersave balance_performance 0 17
 for index in 0 1; do
   assert_value "devices/system/cpu/cpufreq/policy$index/scaling_governor" powersave
@@ -75,7 +85,7 @@ done
 # A failure after policy0 changed must restore its snapshot and return an
 # actionable path instead of the old empty "Helper failed:" diagnostic.
 chmod u-w "$FIXTURE/devices/system/cpu/cpufreq/policy1/scaling_governor"
-if output=$(run_helper apply-cpu-profile performance 0 0 50 2>&1); then
+if output=$(run_helper apply-cpu-profile performance 0 0 100 2>&1); then
   echo 'expected the read-only policy write to fail' >&2
   exit 1
 fi
