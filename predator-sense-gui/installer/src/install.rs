@@ -47,7 +47,8 @@ const FILE_SEPARATOR_WIDTH: usize = 48;
 const PROGRESS_WIDTH: usize = 40;
 const MAX_PROJECT_ANCESTORS: usize = 8;
 const BOOT_UNIT_ENABLE_ARGUMENTS: [&str; 2] = ["enable", path::BOOT_UNIT_NAME];
-const RUST_TOOL_DESTINATIONS: [&str; 4] = [path::INSTALLER, path::HELPER, path::HOTKEY, path::TRAY];
+const RUST_TOOL_CANONICAL_PATH: &str = path::INSTALLER;
+const RUST_TOOL_ALIAS_PATHS: [&str; 3] = [path::HELPER, path::HOTKEY, path::TRAY];
 const RUST_TOOL_PROCESSES_TO_STOP: [&str; 3] = [path::HELPER, path::HOTKEY, path::TRAY];
 
 const RESET: &str = "\x1b[0m";
@@ -68,6 +69,12 @@ enum ModuleLoadPolicy {
 struct KernelModuleLoad {
     name: &'static str,
     policy: ModuleLoadPolicy,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MulticallInstallOutcome {
+    hard_linked_aliases: usize,
+    copied_aliases: usize,
 }
 
 impl KernelModuleLoad {
@@ -856,12 +863,14 @@ impl Installer {
         self.stop_rust_tools_for_upgrade()?;
         let executable = std::env::current_exe()
             .map_err(|error| format!("não foi possível localizar o instalador: {error}"))?;
-        for destination in RUST_TOOL_DESTINATIONS {
-            let destination = Path::new(destination);
-            if executable != destination {
-                copy_file(&executable, destination)?;
-            }
-            set_mode(destination, mode::EXECUTABLE)?;
+        let aliases = RUST_TOOL_ALIAS_PATHS.map(Path::new);
+        let outcome =
+            install_multicall_binary(&executable, Path::new(RUST_TOOL_CANONICAL_PATH), &aliases)?;
+        if outcome.copied_aliases != 0 {
+            eprintln!(
+                "    {YELLOW}aviso: hardlinks indisponíveis; {} ferramenta(s) usam cópias independentes{RESET}",
+                outcome.copied_aliases
+            );
         }
         Ok(())
     }
@@ -957,6 +966,98 @@ fn has_kernel_headers() -> bool {
 fn set_mode(path: &Path, bits: u32) -> AppResult {
     fs::set_permissions(path, fs::Permissions::from_mode(bits))
         .map_err(|error| format!("falha ao definir permissões em {}: {error}", path.display()))
+}
+
+fn install_multicall_binary(
+    source: &Path,
+    canonical: &Path,
+    aliases: &[&Path],
+) -> AppResult<MulticallInstallOutcome> {
+    // Hardlinks keep argv[0] and polkit's exact helper path stable while all multicall entrypoints
+    // share one inode. Every name is staged and renamed so an interrupted copy cannot truncate the
+    // currently installed executable.
+    install_multicall_binary_with_linker(source, canonical, aliases, |source, destination| {
+        fs::hard_link(source, destination)
+    })
+}
+
+fn install_multicall_binary_with_linker(
+    source: &Path,
+    canonical: &Path,
+    aliases: &[&Path],
+    mut hard_link: impl FnMut(&Path, &Path) -> io::Result<()>,
+) -> AppResult<MulticallInstallOutcome> {
+    replace_file_atomically(source, canonical)?;
+
+    let mut outcome = MulticallInstallOutcome::default();
+    for alias in aliases {
+        if replace_alias_atomically(canonical, alias, &mut hard_link)? {
+            outcome.hard_linked_aliases += 1;
+        } else {
+            outcome.copied_aliases += 1;
+        }
+    }
+    Ok(outcome)
+}
+
+fn replace_file_atomically(source: &Path, destination: &Path) -> AppResult {
+    let staging = staging_path(destination)?;
+    fs::remove_file(&staging).ok();
+    let result = (|| {
+        copy_file(source, &staging)?;
+        set_mode(&staging, mode::EXECUTABLE)?;
+        rename_file(&staging, destination)
+    })();
+    if result.is_err() {
+        fs::remove_file(staging).ok();
+    }
+    result
+}
+
+fn replace_alias_atomically(
+    canonical: &Path,
+    alias: &Path,
+    hard_link: &mut impl FnMut(&Path, &Path) -> io::Result<()>,
+) -> AppResult<bool> {
+    let staging = staging_path(alias)?;
+    fs::remove_file(&staging).ok();
+    let result = (|| {
+        let hard_linked = match hard_link(canonical, &staging) {
+            Ok(()) => true,
+            Err(_) => {
+                copy_file(canonical, &staging)?;
+                set_mode(&staging, mode::EXECUTABLE)?;
+                false
+            }
+        };
+        rename_file(&staging, alias)?;
+        Ok(hard_linked)
+    })();
+    if result.is_err() {
+        fs::remove_file(staging).ok();
+    }
+    result
+}
+
+fn staging_path(destination: &Path) -> AppResult<PathBuf> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| format!("caminho de instalação inválido: {}", destination.display()))?;
+    let name = destination
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| format!("nome de arquivo inválido: {}", destination.display()))?;
+    Ok(parent.join(format!(".{name}.{}.tmp", std::process::id())))
+}
+
+fn rename_file(source: &Path, destination: &Path) -> AppResult {
+    fs::rename(source, destination).map_err(|error| {
+        format!(
+            "falha ao ativar {} como {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })
 }
 
 fn is_kernel_build_artifact(path: &Path) -> bool {
@@ -1631,6 +1732,7 @@ fn product_model() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
     use tempfile::tempdir;
 
     #[test]
@@ -1756,5 +1858,76 @@ mod tests {
             + "\n";
 
         assert_eq!(modules_load_config(), expected);
+    }
+
+    #[test]
+    fn installs_and_updates_multicall_tools_as_one_inode() {
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("downloaded-installer");
+        let canonical = temporary.path().join(binary::INSTALLER);
+        let helper = temporary.path().join(binary::HELPER);
+        let hotkey = temporary.path().join(binary::HOTKEY);
+        let tray = temporary.path().join(binary::TRAY);
+        let aliases = [helper.as_path(), hotkey.as_path(), tray.as_path()];
+        fs::write(&source, "version one").unwrap();
+
+        let first = install_multicall_binary(&source, &canonical, &aliases).unwrap();
+        assert_eq!(first.hard_linked_aliases, aliases.len());
+        assert_eq!(first.copied_aliases, 0);
+        let first_metadata = fs::metadata(&canonical).unwrap();
+        let first_inode = first_metadata.ino();
+        assert_eq!(first_metadata.nlink(), (aliases.len() + 1) as u64);
+        assert_ne!(first_metadata.mode() & 0o111, 0);
+        for alias in aliases {
+            let metadata = fs::metadata(alias).unwrap();
+            assert_eq!(metadata.ino(), first_inode);
+            assert_eq!(metadata.dev(), first_metadata.dev());
+        }
+
+        fs::write(&source, "version two").unwrap();
+        let second = install_multicall_binary(&source, &canonical, &aliases).unwrap();
+        assert_eq!(second.hard_linked_aliases, aliases.len());
+        let second_metadata = fs::metadata(&canonical).unwrap();
+        assert_ne!(second_metadata.ino(), first_inode);
+        assert_eq!(second_metadata.nlink(), (aliases.len() + 1) as u64);
+        assert_eq!(fs::read_to_string(&canonical).unwrap(), "version two");
+        for alias in aliases {
+            let metadata = fs::metadata(alias).unwrap();
+            assert_eq!(metadata.ino(), second_metadata.ino());
+            assert_eq!(metadata.dev(), second_metadata.dev());
+        }
+    }
+
+    #[test]
+    fn falls_back_to_independent_alias_copies_when_hardlinks_fail() {
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("downloaded-installer");
+        let canonical = temporary.path().join(binary::INSTALLER);
+        let helper = temporary.path().join(binary::HELPER);
+        let hotkey = temporary.path().join(binary::HOTKEY);
+        let tray = temporary.path().join(binary::TRAY);
+        let aliases = [helper.as_path(), hotkey.as_path(), tray.as_path()];
+        fs::write(&source, "multicall binary").unwrap();
+
+        let outcome = install_multicall_binary_with_linker(
+            &source,
+            &canonical,
+            &aliases,
+            |_source, _destination| {
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "hardlinks disabled",
+                ))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.hard_linked_aliases, 0);
+        assert_eq!(outcome.copied_aliases, aliases.len());
+        let canonical_inode = fs::metadata(&canonical).unwrap().ino();
+        for alias in aliases {
+            assert_ne!(fs::metadata(alias).unwrap().ino(), canonical_inode);
+            assert_eq!(fs::read_to_string(alias).unwrap(), "multicall binary");
+        }
     }
 }
