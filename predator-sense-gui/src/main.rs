@@ -8,11 +8,11 @@ mod ui;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gdk, glib};
 use libadwaita as adw;
+use predator_sense_protocol::application;
 use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-const APP_ID: &str = "com.predator.sense";
 const CSS_THEME: &str = include_str!("../resources/style.css");
 
 static STARTUP_STARTED: OnceLock<Instant> = OnceLock::new();
@@ -28,7 +28,7 @@ pub(crate) fn startup_mark(stage: &str) {
 }
 
 thread_local! {
-    static CSS_PROVIDER: RefCell<Option<gtk::CssProvider>> = RefCell::new(None);
+    static CSS_PROVIDER: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
 }
 
 /// Re-applies the base stylesheet scaled by `scale` (see `ui::font_scale`).
@@ -45,6 +45,13 @@ pub fn apply_font_scale(scale: f64) {
 fn main() {
     STARTUP_STARTED.get_or_init(Instant::now);
     startup_mark("main entered");
+    if std::env::args().any(|argument| {
+        argument == predator_sense_protocol::internal::DELAYED_APPLICATION_START_ARGUMENT
+    }) {
+        std::thread::sleep(std::time::Duration::from_millis(
+            predator_sense_protocol::internal::APPLICATION_RESTART_DELAY_MS,
+        ));
+    }
     // GTK 4.16+ picks the Vulkan renderer by default. Creating the Vulkan
     // instance enumerates every GPU in the system, which opens /dev/nvidia*
     // and keeps a hybrid laptop's discrete GPU powered — blocked from
@@ -57,7 +64,7 @@ fn main() {
     }
 
     let app = adw::Application::builder()
-        .application_id(APP_ID)
+        .application_id(application::DBUS_ID)
         .build();
 
     app.connect_startup(|_| {
@@ -112,6 +119,7 @@ fn main() {
         startup_mark("window build returned");
     });
 
+    // Internal lifecycle arguments are consumed above and never exposed to GTK/GApplication.
     app.run_with_args::<String>(&[]);
 }
 

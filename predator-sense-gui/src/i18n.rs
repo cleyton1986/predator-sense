@@ -1,6 +1,6 @@
-/// Simple internationalization module.
-/// Language is explicit (saved user preference in Settings), defaulting to
-/// English on first run - no OS locale auto-detection.
+//! Simple internationalization module.
+//! Language is explicit (saved user preference in Settings), defaulting to
+//! English on first run - no OS locale auto-detection.
 
 use std::sync::OnceLock;
 
@@ -32,7 +32,7 @@ pub fn t(key: &str) -> &str {
     if is_pt() { t_pt(key) } else { t_en(key) }
 }
 
-fn t_pt<'a>(key: &'a str) -> &'a str {
+fn t_pt(key: &str) -> &str {
     match key {
         "temperature" => "Temperatura (°C)",
         "lighting_profile" => "Perfil de iluminação",
@@ -369,7 +369,7 @@ fn t_pt<'a>(key: &'a str) -> &'a str {
         "setup_module_inserted_no_devices" => "Módulo inserido mas dispositivos não apareceram. Verifique dmesg.",
         "setup_module_load_failed" => "Falha ao carregar módulo: {0}",
         "setup_err_load_exec" => "Erro ao carregar módulo: {0}",
-        "setup_script_not_found" => "Script install_service.sh não encontrado",
+        "setup_script_not_found" => "Instalador Rust não encontrado",
         "setup_service_installed" => "Serviço instalado! O módulo será carregado automaticamente no boot.",
         "setup_service_install_failed" => "Falha ao instalar serviço",
         "setup_err_generic" => "Erro: {0}",
@@ -396,7 +396,7 @@ fn t_pt<'a>(key: &'a str) -> &'a str {
         "rgb_err_zone_range" => "Zona deve ser entre 1 e 4",
         "rgb_err_open_device" => "Erro ao abrir {0}: {1}. Execute como root (sudo).",
         "rgb_err_write_device" => "Erro ao escrever em {0}: {1}",
-        "rgb_err_module_not_loaded" => "Módulo kernel não carregado. Execute: sudo ./install.sh",
+        "rgb_err_module_not_loaded" => "Módulo kernel não carregado. Use o instalador Rust.",
         "rgb_err_access_device" => "Não foi possível acessar {0}: {1}",
         "rgb_err_no_write_perm" => "Sem permissão de escrita. Execute a aplicação como root (sudo).",
         "hid_rgb_err_device_not_found" => "Dispositivo ENEK5130 (I2C-HID) não encontrado",
@@ -410,7 +410,7 @@ fn t_pt<'a>(key: &'a str) -> &'a str {
     }
 }
 
-fn t_en<'a>(key: &'a str) -> &'a str {
+fn t_en(key: &str) -> &str {
     match key {
         "temperature" => "Temperature (°C)",
         "lighting_profile" => "Lighting Profile",
@@ -747,7 +747,7 @@ fn t_en<'a>(key: &'a str) -> &'a str {
         "setup_module_inserted_no_devices" => "Module inserted but devices did not appear. Check dmesg.",
         "setup_module_load_failed" => "Failed to load module: {0}",
         "setup_err_load_exec" => "Error loading module: {0}",
-        "setup_script_not_found" => "install_service.sh script not found",
+        "setup_script_not_found" => "Rust installer not found",
         "setup_service_installed" => "Service installed! The module will load automatically on boot.",
         "setup_service_install_failed" => "Failed to install service",
         "setup_err_generic" => "Error: {0}",
@@ -774,7 +774,7 @@ fn t_en<'a>(key: &'a str) -> &'a str {
         "rgb_err_zone_range" => "Zone must be between 1 and 4",
         "rgb_err_open_device" => "Error opening {0}: {1}. Run as root (sudo).",
         "rgb_err_write_device" => "Error writing to {0}: {1}",
-        "rgb_err_module_not_loaded" => "Kernel module not loaded. Run: sudo ./install.sh",
+        "rgb_err_module_not_loaded" => "Kernel module not loaded. Use the Rust installer.",
         "rgb_err_access_device" => "Could not access {0}: {1}",
         "rgb_err_no_write_perm" => "No write permission. Run the application as root (sudo).",
         "hid_rgb_err_device_not_found" => "ENEK5130 (I2C-HID) device not found",
