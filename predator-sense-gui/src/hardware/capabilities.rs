@@ -22,6 +22,8 @@ pub struct Capabilities {
     pub platform_profile: bool,
     /// RGB keyboard backlight (/dev/acer-gkbbl-*).
     pub rgb: bool,
+    /// Independently addressable RGB logo on the display lid (ENE target 0x83).
+    pub cover_logo: bool,
     /// Raw EC access (/dev/ec) — needed for CoolBoost / LCD overdrive / etc.
     pub ec: bool,
     /// NVIDIA GPU present and queryable via nvidia-smi.
@@ -38,7 +40,9 @@ impl Capabilities {
             fan_pwm: crate::hardware::fan::pwm_available(),
             platform_profile: Path::new("/sys/firmware/acpi/platform_profile").exists(),
             rgb: Path::new("/dev/acer-gkbbl-0").exists()
-                || Path::new("/dev/acer-gkbbl-static-0").exists(),
+                || Path::new("/dev/acer-gkbbl-static-0").exists()
+                || crate::hardware::hid_rgb::is_available(),
+            cover_logo: crate::hardware::hid_rgb::has_cover_logo(),
             ec: Path::new("/dev/ec").exists(),
             nvidia_gpu: nvidia_present(),
             battery_limit: battery_limit_present(),
