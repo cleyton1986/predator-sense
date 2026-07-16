@@ -119,6 +119,20 @@ struct CpuState {
     min_perf_pct: Option<u32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuPolicyKind {
+    IntelHwpDynamic,
+    IntelHwpMaximum,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuPolicyInfo {
+    pub governor: String,
+    pub epp: Option<String>,
+    pub kind: CpuPolicyKind,
+}
+
 fn settings_for(p: PowerProfile) -> ProfileSettings {
     match p {
         PowerProfile::Quiet => ProfileSettings {
@@ -280,6 +294,30 @@ fn read_cpu_state_at(sysfs_root: &Path, capabilities: &CpuCapabilities) -> Optio
         no_turbo,
         min_perf_pct,
     })
+}
+
+fn cpu_policy_info_at(sysfs_root: &Path) -> Option<CpuPolicyInfo> {
+    let capabilities = detect_cpu_capabilities_at(sysfs_root);
+    let state = read_cpu_state_at(sysfs_root, &capabilities)?;
+    let kind = if capabilities.intel_pstate_hwp_active {
+        match state.governor.as_str() {
+            "powersave" => CpuPolicyKind::IntelHwpDynamic,
+            "performance" => CpuPolicyKind::IntelHwpMaximum,
+            _ => CpuPolicyKind::Other,
+        }
+    } else {
+        CpuPolicyKind::Other
+    };
+
+    Some(CpuPolicyInfo {
+        governor: state.governor,
+        epp: state.epp,
+        kind,
+    })
+}
+
+pub fn current_cpu_policy_info() -> Option<CpuPolicyInfo> {
+    cpu_policy_info_at(Path::new(SYSFS_ROOT))
 }
 
 fn state_matches_plan(
@@ -652,5 +690,33 @@ mod tests {
         );
 
         assert_eq!(detect_from_hardware_at(&fixture.root), None);
+    }
+
+    #[test]
+    fn cpu_policy_info_explains_intel_hwp_policy_semantics() {
+        let fixture = SysfsFixture::new("intel_pstate", "active", 2, 2);
+        fixture.add_intel_limits(false, 50);
+
+        let dynamic = cpu_policy_info_at(&fixture.root).unwrap();
+        assert_eq!(dynamic.kind, CpuPolicyKind::IntelHwpDynamic);
+        assert_eq!(dynamic.governor, "powersave");
+        assert_eq!(dynamic.epp.as_deref(), Some("balance_performance"));
+
+        fixture.set_policy_value("scaling_governor", "performance", 2);
+        fixture.set_policy_value("energy_performance_preference", "default", 2);
+        let maximum = cpu_policy_info_at(&fixture.root).unwrap();
+        assert_eq!(maximum.kind, CpuPolicyKind::IntelHwpMaximum);
+        assert_eq!(maximum.governor, "performance");
+        assert_eq!(maximum.epp.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn cpu_policy_info_keeps_generic_governor_semantics() {
+        let fixture = SysfsFixture::new("acpi-cpufreq", "off", 2, 0);
+        let info = cpu_policy_info_at(&fixture.root).unwrap();
+
+        assert_eq!(info.kind, CpuPolicyKind::Other);
+        assert_eq!(info.governor, "powersave");
+        assert_eq!(info.epp, None);
     }
 }

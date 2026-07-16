@@ -10,6 +10,43 @@ const PROFILES_ORDER: [PowerProfile; 4] = [
     PowerProfile::Performance, PowerProfile::Turbo,
 ];
 
+fn cpu_policy_info_text() -> String {
+    let Some(info) = profile::current_cpu_policy_info() else {
+        return format!(
+            "{}: {}",
+            crate::i18n::t("cpu_governor"),
+            crate::i18n::t("unknown")
+        );
+    };
+    let epp = info
+        .epp
+        .as_deref()
+        .unwrap_or_else(|| crate::i18n::t("unknown"));
+
+    match info.kind {
+        profile::CpuPolicyKind::IntelHwpDynamic => format!(
+            "{}: {} ({})  |  EPP: {}",
+            crate::i18n::t("intel_hwp_policy"),
+            crate::i18n::t("hwp_dynamic"),
+            info.governor,
+            epp
+        ),
+        profile::CpuPolicyKind::IntelHwpMaximum => format!(
+            "{}: {} ({})  |  EPP: 0 ({})",
+            crate::i18n::t("intel_hwp_policy"),
+            crate::i18n::t("hwp_maximum"),
+            info.governor,
+            crate::i18n::t("kernel_forced")
+        ),
+        profile::CpuPolicyKind::Other => format!(
+            "{}: {}  |  EPP: {}",
+            crate::i18n::t("cpu_governor"),
+            info.governor,
+            epp
+        ),
+    }
+}
+
 /// Updates every card's active/inactive styling and button to match
 /// `current` - shared by the click handler (immediate feedback after a
 /// manual pick) and the periodic refresh below (for changes that happen
@@ -179,18 +216,7 @@ pub fn build() -> gtk::Box {
     info_box.set_margin_top(16);
     info_box.set_halign(gtk::Align::Center);
 
-    let governor = std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
-        .unwrap_or_else(|_| "N/D".into());
-    let epp = std::fs::read_to_string(
-        "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference",
-    )
-    .unwrap_or_else(|_| "N/D".into());
-
-    let info_text = format!(
-        "CPU Governor: {}  |  EPP: {}",
-        governor.trim(),
-        epp.trim()
-    );
+    let info_text = cpu_policy_info_text();
     let info_label = gtk::Label::new(Some(&info_text));
     info_label.add_css_class("info-text-dim");
     info_box.append(&info_label);
@@ -209,21 +235,8 @@ pub fn build() -> gtk::Box {
         if now != last_known.get() {
             last_known.set(now);
             apply_active_visuals(&profiles_box, now);
-
-            let governor = std::fs::read_to_string(
-                "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor",
-            )
-            .unwrap_or_else(|_| "N/D".into());
-            let epp = std::fs::read_to_string(
-                "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference",
-            )
-            .unwrap_or_else(|_| "N/D".into());
-            info_label.set_text(&format!(
-                "CPU Governor: {}  |  EPP: {}",
-                governor.trim(),
-                epp.trim()
-            ));
         }
+        info_label.set_text(&cpu_policy_info_text());
         glib::ControlFlow::Continue
     });
 
