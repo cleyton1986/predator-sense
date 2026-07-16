@@ -24,7 +24,8 @@ pub struct GpuMetrics {
     pub power_limit_w: f64,
     pub power_max_w: f64,
     pub power_min_w: f64,
-    pub fan_speed_pct: u32,
+    /// `None` when the driver reports `[N/A]`, which is common on laptops.
+    pub fan_speed_pct: Option<u32>,
     pub pstate: String,
     pub pcie_gen: String,
     pub pcie_width: String,
@@ -44,9 +45,6 @@ impl GpuMetrics {
         } else {
             (self.power_draw_w / self.power_max_w * 100.0).clamp(0.0, 100.0)
         }
-    }
-    pub fn is_present(&self) -> bool {
-        !self.name.is_empty()
     }
 }
 
@@ -106,8 +104,7 @@ pub fn read_gpu_metrics() -> GpuMetrics {
 /// Hydrate the shared cache with full NVIDIA data.
 ///
 /// This may runtime-resume a suspended dGPU and therefore must only be called
-/// from a worker. The Dashboard invokes it after GTK maps the first frame:
-/// startup remains fast while NVIDIA data arrives asynchronously.
+/// from a worker after an explicit user action, such as opening the GPU page.
 pub fn load_live_metrics_blocking() -> GpuMetrics {
     refresh_gpu_metrics_blocking(true)
 }
@@ -202,16 +199,7 @@ fn parse_gpu_metrics(contents: &str) -> Option<GpuMetrics> {
     if p.len() < 21 {
         return None;
     }
-    let parse_u32 = |s: &str| {
-        s.trim()
-            .replace(" MiB", "")
-            .replace(" MHz", "")
-            .replace(" W", "")
-            .replace(" %", "")
-            .replace("[N/A]", "0")
-            .parse::<u32>()
-            .unwrap_or(0)
-    };
+    let parse_u32 = |s: &str| parse_optional_u32(s).unwrap_or(0);
     let parse_f64 = |s: &str| {
         s.trim()
             .replace(" W", "")
@@ -239,12 +227,23 @@ fn parse_gpu_metrics(contents: &str) -> Option<GpuMetrics> {
         power_draw_w: parse_f64(p[13]),
         power_limit_w: parse_f64(p[14]),
         power_max_w: parse_f64(p[15]),
-        fan_speed_pct: parse_u32(p[16]),
+        fan_speed_pct: parse_optional_u32(p[16]),
         pstate: p[17].into(),
         pcie_gen: p[18].into(),
         pcie_width: p[19].into(),
         power_min_w: parse_f64(p[20]),
     })
+}
+
+fn parse_optional_u32(value: &str) -> Option<u32> {
+    value
+        .trim()
+        .replace(" MiB", "")
+        .replace(" MHz", "")
+        .replace(" W", "")
+        .replace(" %", "")
+        .parse()
+        .ok()
 }
 
 /// Set GPU power limit (TGP) in watts via the helper (nvidia-smi -pl, root).
@@ -321,7 +320,21 @@ mod tests {
         assert_eq!(metrics.vram_total_mb, 8192);
         assert_eq!(metrics.temp, 46.0);
         assert_eq!(metrics.power_limit_w, 80.0);
+        assert_eq!(metrics.fan_speed_pct, Some(25));
         assert_eq!(metrics.pstate, "P8");
+    }
+
+    #[test]
+    fn preserves_an_unavailable_fan_reading() {
+        let metrics = parse_gpu_metrics(
+            "NVIDIA GPU, 610.43.03, 98.06.2a.80.e1, 8192, 512, 7680, 46, \
+             2100, 9001, 3000, 10001, 12, 4, 32.5, 80.0, 115.0, [N/A], \
+             P8, 4, 16, 20.0\n",
+        )
+        .unwrap();
+
+        assert!(metrics.live);
+        assert_eq!(metrics.fan_speed_pct, None);
     }
 
     #[test]
@@ -330,14 +343,14 @@ mod tests {
     }
 
     #[test]
-    fn static_identity_still_counts_as_a_present_gpu() {
+    fn static_identity_is_not_live_usage_data() {
         let metrics = GpuMetrics {
             name: "NVIDIA GeForce RTX 5070 Laptop GPU".into(),
             driver: "610.43.03".into(),
             ..GpuMetrics::default()
         };
 
-        assert!(metrics.is_present());
+        assert!(!metrics.name.is_empty());
         assert!(!metrics.live);
     }
 }

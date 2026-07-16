@@ -97,7 +97,9 @@ impl UsageSampler {
         // Temperaturas
         let cpu_temp = read_cpu_temperature();
         let gpu_metrics = super::gpu::read_gpu_metrics();
-        let gpu = if gpu_metrics.is_present() {
+        // Static identity is useful elsewhere, but this sample feeds gauges;
+        // only expose it when the dynamic fields are a real live reading.
+        let gpu = if gpu_metrics.live {
             Some(gpu_metrics)
         } else {
             None
