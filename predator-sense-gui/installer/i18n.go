@@ -64,6 +64,7 @@ var translations = map[string][2]string{
 	"step_desktop":      {"Creating menu shortcut", "Criando atalho no menu"},
 	"step_hotkey":       {"Configuring PredatorSense key", "Configurando tecla PredatorSense"},
 	"step_module":       {"Compiling/loading kernel module", "Compilando/carregando módulo kernel"},
+	"linuwu_sense_skip": {"Linuwu-Sense detected — not blacklisting acer_wmi or swapping in facer (RGB still works over HID)", "Linuwu-Sense detectado — não vou colocar acer_wmi na blacklist nem trocar por facer (RGB continua funcionando via HID)"},
 
 	// Install flow
 	"full_install_title": {"Full Installation", "Instalação Completa"},

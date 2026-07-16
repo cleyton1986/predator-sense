@@ -40,6 +40,15 @@ is_module_loaded() {
     lsmod | grep -q "^facer " 2>/dev/null
 }
 
+# linuwu_sense (and DAMX, which builds on it) already replaces acer_wmi and
+# claims the same WMI GUIDs facer needs. The two can't coexist. DKMS registers
+# the package as linuwu-sense while the module it builds is linuwu_sense, so the
+# two names have to be matched separately.
+is_linuwu_sense_present() {
+    lsmod | awk '{print $1}' | grep -qx linuwu_sense && return 0
+    dkms status 2>/dev/null | grep -q '^linuwu[-_]sense[/,]'
+}
+
 is_hotkey_active() {
     sudo -u "$REAL_USER" systemctl --user is-active predator-sense-hotkey.service &>/dev/null
 }
@@ -424,15 +433,23 @@ install_kernel_module() {
     if dkms add -m "$dkms_module" -v "$dkms_version" 2>&1 \
         && env $make_extra dkms build -m "$dkms_module" -v "$dkms_version" 2>&1 \
         && env $make_extra dkms install -m "$dkms_module" -v "$dkms_version" --force 2>&1; then
-        printf "wmi\nsparse-keymap\nvideo\nplatform_profile\nfacer\nacer-wmi-battery\nacpi_ec\n" > /etc/modules-load.d/facer.conf
-        echo "blacklist acer_wmi" > /etc/modprobe.d/predator-sense.conf
-        depmod -a 2>/dev/null || true
-        rmmod acer_wmi 2>/dev/null || true
-        rmmod facer 2>/dev/null || true
-        modprobe wmi sparse-keymap video platform_profile 2>/dev/null || true
-        modprobe facer 2>&1
-        modprobe acer-wmi-battery 2>/dev/null || true
-        modprobe acpi_ec 2>/dev/null || true
+        if is_linuwu_sense_present; then
+            # Don't fight an already-working Linuwu-Sense/DAMX setup for the
+            # same WMI device. Also drop a facer.conf left by an earlier
+            # predator-sense run so it can't reload facer next boot.
+            rm -f /etc/modules-load.d/facer.conf
+            echo -e "  ${YELLOW}⚠${NC} Linuwu-Sense detectado — não vou colocar acer_wmi na blacklist nem trocar por facer (RGB continua funcionando via HID)"
+        else
+            printf "wmi\nsparse-keymap\nvideo\nplatform_profile\nfacer\nacer-wmi-battery\nacpi_ec\n" > /etc/modules-load.d/facer.conf
+            echo "blacklist acer_wmi" > /etc/modprobe.d/predator-sense.conf
+            depmod -a 2>/dev/null || true
+            rmmod acer_wmi 2>/dev/null || true
+            rmmod facer 2>/dev/null || true
+            modprobe wmi sparse-keymap video platform_profile 2>/dev/null || true
+            modprobe facer 2>&1
+            modprobe acer-wmi-battery 2>/dev/null || true
+            modprobe acpi_ec 2>/dev/null || true
+        fi
     else
         echo "Falha ao compilar/instalar o módulo via DKMS"
         return 1
