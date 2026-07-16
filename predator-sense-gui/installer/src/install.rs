@@ -33,6 +33,9 @@ const LEGACY_HOTKEY_ENTRY: &str = "predator-sense-hotkey.desktop";
 const LEGACY_HOTKEY_PROCESS: &str = "hotkey-daemon";
 const LEGACY_TRAY_PROCESS: &str = "tray_helper";
 const MODULE_NAME: &str = "facer";
+const ACER_WMI_MODULE_NAME: &str = "acer_wmi";
+const ACER_WMI_BATTERY_MODULE_NAME: &str = "acer-wmi-battery";
+const ACPI_EC_MODULE_NAME: &str = "acpi_ec";
 const DKMS_VERSION: &str = "0.2";
 const LINUWU_MODULE_NAME: &str = "linuwu_sense";
 const LINUWU_DKMS_NAMES: [&str; 2] = ["linuwu-sense", "linuwu_sense"];
@@ -43,6 +46,7 @@ const RUSTUP_TEMP_NAME: &str = "predator-sense-rustup-init";
 const FILE_SEPARATOR_WIDTH: usize = 48;
 const PROGRESS_WIDTH: usize = 40;
 const MAX_PROJECT_ANCESTORS: usize = 8;
+const BOOT_UNIT_ENABLE_ARGUMENTS: [&str; 2] = ["enable", path::BOOT_UNIT_NAME];
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -51,6 +55,44 @@ const CYAN: &str = "\x1b[36m";
 const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
 const YELLOW: &str = "\x1b[33m";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModuleLoadPolicy {
+    Required,
+    Optional,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KernelModuleLoad {
+    name: &'static str,
+    policy: ModuleLoadPolicy,
+}
+
+impl KernelModuleLoad {
+    const fn required(name: &'static str) -> Self {
+        Self {
+            name,
+            policy: ModuleLoadPolicy::Required,
+        }
+    }
+
+    const fn optional(name: &'static str) -> Self {
+        Self {
+            name,
+            policy: ModuleLoadPolicy::Optional,
+        }
+    }
+}
+
+const KERNEL_MODULE_LOAD_PLAN: [KernelModuleLoad; 7] = [
+    KernelModuleLoad::required("wmi"),
+    KernelModuleLoad::required("sparse-keymap"),
+    KernelModuleLoad::required("video"),
+    KernelModuleLoad::required("platform_profile"),
+    KernelModuleLoad::required(MODULE_NAME),
+    KernelModuleLoad::optional(ACER_WMI_BATTERY_MODULE_NAME),
+    KernelModuleLoad::optional(ACPI_EC_MODULE_NAME),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InstallerCommand {
@@ -531,9 +573,17 @@ fn detect_gui_dir() -> Option<PathBuf> {
                 .map(Path::to_path_buf),
         );
     }
-    candidates
-        .into_iter()
-        .find(|candidate| candidate.join(GUI_MANIFEST).is_file() && has_kernel_source(candidate))
+    detect_gui_dir_from_candidates(candidates, Path::new(path::INSTALL_DIR))
+}
+
+fn detect_gui_dir_from_candidates(
+    candidates: impl IntoIterator<Item = PathBuf>,
+    installed_dir: &Path,
+) -> Option<PathBuf> {
+    candidates.into_iter().find(|candidate| {
+        has_kernel_source(candidate)
+            && (candidate.join(GUI_MANIFEST).is_file() || candidate == installed_dir)
+    })
 }
 
 fn gui_binary_path(gui: &Path) -> PathBuf {
@@ -1033,17 +1083,31 @@ impl Installer {
         );
         write_text(Path::new(path::BOOT_UNIT), &boot_unit, mode::REGULAR_FILE)?;
         run(command::SYSTEMCTL, ["daemon-reload"])?;
-        run(
-            command::SYSTEMCTL,
-            [
-                "enable",
-                "--now",
-                Path::new(path::BOOT_UNIT)
-                    .file_name()
-                    .and_then(OsStr::to_str)
-                    .unwrap_or(path::BOOT_UNIT_NAME),
-            ],
-        )
+        run(command::SYSTEMCTL, BOOT_UNIT_ENABLE_ARGUMENTS)
+    }
+}
+
+fn modules_load_config() -> String {
+    let mut config = String::new();
+    for module in KERNEL_MODULE_LOAD_PLAN {
+        config.push_str(module.name);
+        config.push('\n');
+    }
+    config
+}
+
+fn apply_module_load_policy(module: KernelModuleLoad, result: AppResult) -> AppResult {
+    match module.policy {
+        ModuleLoadPolicy::Required => result,
+        ModuleLoadPolicy::Optional => {
+            if let Err(error) = result {
+                eprintln!(
+                    "    {YELLOW}aviso: módulo opcional {} não foi carregado: {error}{RESET}",
+                    module.name
+                );
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1145,12 +1209,11 @@ impl Installer {
             return Ok(());
         }
 
-        const MODULES_AT_BOOT: &str =
-            "wmi\nsparse-keymap\nvideo\nplatform_profile\nfacer\nacer-wmi-battery\nacpi_ec\n";
         const MODPROBE_CONFIG: &str = "blacklist acer_wmi\n";
+        let modules_at_boot = modules_load_config();
         write_text(
             Path::new(path::MODULES_LOAD),
-            MODULES_AT_BOOT,
+            &modules_at_boot,
             mode::REGULAR_FILE,
         )?;
         write_text(
@@ -1159,19 +1222,11 @@ impl Installer {
             mode::REGULAR_FILE,
         )?;
 
-        for module in ["acer_wmi", MODULE_NAME] {
+        for module in [ACER_WMI_MODULE_NAME, MODULE_NAME] {
             let _ = run_quiet(command::RMMOD, [module]);
         }
-        for module in [
-            "wmi",
-            "sparse-keymap",
-            "video",
-            "platform_profile",
-            MODULE_NAME,
-            "acer-wmi-battery",
-            "acpi_ec",
-        ] {
-            run(command::MODPROBE, [module])?;
+        for module in KERNEL_MODULE_LOAD_PLAN {
+            apply_module_load_policy(module, run(command::MODPROBE, [module.name]))?;
         }
         Ok(())
     }
@@ -1529,6 +1584,7 @@ fn product_model() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn parses_cli_without_silently_falling_back_to_menu() {
@@ -1574,5 +1630,80 @@ mod tests {
         if matches!(std::env::consts::ARCH, "x86_64" | "aarch64" | "arm") {
             assert!(rustup_target().is_some());
         }
+    }
+
+    #[test]
+    fn detects_source_and_installed_kernel_trees() {
+        let temporary = tempdir().unwrap();
+        let source = temporary.path().join("source");
+        let installed = temporary.path().join("installed");
+        let unrelated = temporary.path().join("unrelated");
+
+        for directory in [&source, &installed, &unrelated] {
+            let kernel = directory.join(KERNEL_DIR);
+            fs::create_dir_all(&kernel).unwrap();
+            fs::write(kernel.join(format!("{MODULE_NAME}.c")), "").unwrap();
+        }
+        fs::write(source.join(GUI_MANIFEST), "").unwrap();
+
+        assert_eq!(
+            detect_gui_dir_from_candidates([source.clone()], &installed),
+            Some(source)
+        );
+        assert_eq!(
+            detect_gui_dir_from_candidates([installed.clone()], &installed),
+            Some(installed.clone())
+        );
+        assert_eq!(
+            detect_gui_dir_from_candidates([unrelated], &installed),
+            None
+        );
+    }
+
+    #[test]
+    fn applies_kernel_module_load_policy() {
+        let optional_modules = KERNEL_MODULE_LOAD_PLAN
+            .iter()
+            .filter(|module| module.policy == ModuleLoadPolicy::Optional)
+            .map(|module| module.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            optional_modules,
+            [ACER_WMI_BATTERY_MODULE_NAME, ACPI_EC_MODULE_NAME]
+        );
+        assert_eq!(
+            KERNEL_MODULE_LOAD_PLAN
+                .iter()
+                .find(|module| module.name == MODULE_NAME)
+                .map(|module| module.policy),
+            Some(ModuleLoadPolicy::Required)
+        );
+
+        let required = KernelModuleLoad::required(MODULE_NAME);
+        let optional = KernelModuleLoad::optional(ACPI_EC_MODULE_NAME);
+        assert_eq!(
+            apply_module_load_policy(required, Err("required failure".into())).unwrap_err(),
+            "required failure"
+        );
+        assert!(apply_module_load_policy(optional, Err("device unavailable".into())).is_ok());
+    }
+
+    #[test]
+    fn enables_boot_reapply_without_starting_it_during_install() {
+        assert_eq!(BOOT_UNIT_ENABLE_ARGUMENTS, ["enable", path::BOOT_UNIT_NAME]);
+        assert!(!BOOT_UNIT_ENABLE_ARGUMENTS.contains(&"--now"));
+    }
+
+    #[test]
+    fn renders_every_planned_module_in_boot_order() {
+        let expected = KERNEL_MODULE_LOAD_PLAN
+            .iter()
+            .map(|module| module.name)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+
+        assert_eq!(modules_load_config(), expected);
     }
 }
