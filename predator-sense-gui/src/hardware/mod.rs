@@ -1,6 +1,7 @@
 pub mod alerts;
 pub mod applog;
 pub mod capabilities;
+pub mod display;
 pub mod hwmon;
 pub mod power_profile;
 pub mod rgb;
