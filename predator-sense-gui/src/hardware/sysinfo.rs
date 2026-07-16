@@ -225,3 +225,23 @@ fn active_net_interface() -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::parse_lspci_gpu;
+
+    #[test]
+    fn parses_gpu_from_lspci_without_a_command_pipeline() {
+        let devices = "00:14.0 USB controller: Intel Corporation Device 1234\n\
+                       01:00.0 VGA compatible controller: NVIDIA Corporation AD107M\n";
+        assert_eq!(
+            parse_lspci_gpu(devices).as_deref(),
+            Some("NVIDIA Corporation AD107M")
+        );
+        assert_eq!(
+            parse_lspci_gpu("0000:03:00.0 3D controller: Advanced Micro Devices, Inc. GPU")
+                .as_deref(),
+            Some("Advanced Micro Devices, Inc. GPU")
+        );
+    }
+}

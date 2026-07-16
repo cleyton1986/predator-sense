@@ -1,0 +1,23 @@
+[package]
+name = "predator-sense-installer"
+version = "0.2.43-preview"
+edition = "2021"
+rust-version = "1.80"
+description = "Rust installer and system services for Predator Sense"
+license = "GPL-3.0"
+
+[dependencies]
+ksni = { version = "0.3.6", default-features = false, features = ["async-io", "blocking"] }
+libc = "0.2"
+predator-sense-protocol = { path = "../protocol" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = true

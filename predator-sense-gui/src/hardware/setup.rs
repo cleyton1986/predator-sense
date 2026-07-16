@@ -1,4 +1,5 @@
 use crate::i18n::{t, tf};
+use predator_sense_protocol::{installer as installer_cli, path as userspace_path};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -249,7 +250,7 @@ pub fn load_module() -> SetupResult {
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             log.push_str(&format!("insmod facer.ko: {}\n{}",
                 if out.status.success() { "OK" } else { "falhou" },
-                &stderr
+                stderr
             ));
 
             // Wait a moment for devices to appear
@@ -284,30 +285,39 @@ pub fn load_module() -> SetupResult {
 
 /// Install as systemd service for persistence across reboots
 pub fn install_service() -> SetupResult {
-    let repo_dir = match find_repo_dir() {
-        Some(d) => d,
-        None => {
-            return SetupResult {
-                success: false,
-                message: t("setup_err_repo_not_found").to_string(),
-                details: String::new(),
-            }
-        }
-    };
-
-    let script = repo_dir.join("install_service.sh");
-    if !script.exists() {
+    let installer = PathBuf::from(userspace_path::INSTALLER)
+        .is_file()
+        .then(|| PathBuf::from(userspace_path::INSTALLER))
+        .or_else(|| {
+            let repo = find_repo_dir()?;
+            ["release", "debug"]
+                .into_iter()
+                .map(|profile| {
+                    repo.join("installer/target")
+                        .join(profile)
+                        .join(predator_sense_protocol::binary::INSTALLER)
+                })
+                .find(|candidate| candidate.is_file())
+        });
+    let Some(installer) = installer else {
         return SetupResult {
             success: false,
             message: t("setup_script_not_found").to_string(),
             details: String::new(),
         };
-    }
+    };
 
-    let output = Command::new("bash")
-        .arg(&script)
-        .current_dir(&repo_dir)
-        .output();
+    // SAFETY: geteuid has no preconditions.
+    let output = if unsafe { libc::geteuid() } == 0 {
+        Command::new(&installer)
+            .arg(installer_cli::RELOAD_MODULE_ARGUMENT)
+            .output()
+    } else {
+        Command::new("pkexec")
+            .arg(&installer)
+            .arg(installer_cli::RELOAD_MODULE_ARGUMENT)
+            .output()
+    };
 
     match output {
         Ok(out) => {

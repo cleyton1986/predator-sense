@@ -16,7 +16,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Linguagem-Rust-orange?logo=rust" alt="Rust">
   <img src="https://img.shields.io/badge/GTK-4-blue?logo=gtk" alt="GTK4">
-  <img src="https://img.shields.io/badge/Instalador-Go-00ADD8?logo=go" alt="Go">
+  <img src="https://img.shields.io/badge/Userspace-100%25_Rust-orange?logo=rust" alt="Userspace 100% Rust">
   <img src="https://img.shields.io/badge/Licença-GPL--3.0-green" alt="License">
   <img src="https://img.shields.io/badge/Plataforma-Linux-yellow?logo=linux" alt="Linux">
 </p>
@@ -196,21 +196,23 @@ Se o instalador detectar `linuwu_sense` já carregado ou registrado via DKMS, el
 
 ## Instalação
 
-### Instalação com Um Comando (Mais Rápida)
+### Instalador Pré-compilado (Mais Rápido)
 
-Abra um terminal e execute:
+Baixe diretamente o instalador da release e execute:
 
-```bash
-sudo rm -f /tmp/ps-install.sh && curl -fsSL https://raw.githubusercontent.com/cleyton1986/predator-sense/main/scripts/remote-install.sh -o /tmp/ps-install.sh && sudo bash /tmp/ps-install.sh
+```console
+curl --fail --location https://github.com/cleyton1986/predator-sense/releases/latest/download/predator-sense-installer --output predator-sense-installer
+chmod +x predator-sense-installer
+sudo ./predator-sense-installer --install
 ```
 
-Pronto! Tudo é baixado, compilado e configurado automaticamente.
+O instalador, o helper privilegiado, o listener da tecla e o serviço da bandeja são fornecidos pelo mesmo binário multicall em Rust. O instalador baixa e configura tudo sem depender de um script de shell para o bootstrap.
 
 ### Instalador Interativo (binário pré-compilado, sem precisar de Rust)
 
-Baixe o binário `predator-sense-installer` da página de [Releases](../../releases). É um binário estático pequeno, não um pacote fechado — ainda precisa de internet pra baixar o código fonte do app (por causa do módulo kernel) e o binário pré-compilado da release correspondente, mas não instala Rust nem compila o app GTK4 na sua máquina:
+Baixe o binário `predator-sense-installer` da página de [Releases](../../releases). É um binário Rust independente, não um pacote fechado — ainda precisa de internet pra baixar o código fonte do app (por causa do módulo kernel) e o binário pré-compilado da release correspondente, mas não instala Rust nem compila o app GTK4 na sua máquina:
 
-```bash
+```console
 chmod +x predator-sense-installer
 sudo ./predator-sense-installer
 ```
@@ -225,7 +227,7 @@ Selecione a **opção 1** (Instalação completa). O instalador irá automaticam
 6. Mapear a tecla PredatorSense (inicia automaticamente no login)
 7. Configurar suporte à bandeja do sistema
 
-Diferente da instalação de um comando acima, esse caminho não mexe em Rust/cargo nenhuma vez, e também serve como ferramenta de gerenciamento depois de instalado — guarde o binário pra checar status, recarregar o módulo do kernel, ou desinstalar depois sem precisar baixar nada de novo (ver [Opções do Instalador](#opções-do-instalador)).
+O caminho pré-compilado não precisa de Rust/cargo na máquina de destino. O instalador também é copiado para `/opt/predator-sense/` como ferramenta de gerenciamento para consultar status, recarregar o módulo do kernel, atualizar e desinstalar (ver [Opções do Instalador](#opções-do-instalador)).
 
 Após a instalação, abra a aplicação por:
 - Pressionando a **tecla PredatorSense** (ao lado do NumLock)
@@ -239,59 +241,48 @@ Após a instalação, abra a aplicação por:
 <details>
 <summary><b>Debian / Ubuntu / Linux Mint</b></summary>
 
-```bash
+```console
 sudo apt install libgtk-4-dev libadwaita-1-dev pkg-config build-essential \
-    gcc make linux-headers-$(uname -r) libayatana-appindicator3-dev
+    gcc make dkms curl tar linux-headers-$(uname -r)
 ```
 </details>
 
 <details>
 <summary><b>Fedora</b></summary>
 
-```bash
+```console
 sudo dnf install gtk4-devel libadwaita-devel pkg-config gcc make \
-    kernel-devel-$(uname -r)
+    dkms curl tar kernel-devel-$(uname -r)
 ```
 </details>
 
 <details>
 <summary><b>Arch Linux</b></summary>
 
-```bash
-sudo pacman -S gtk4 libadwaita pkgconf gcc make linux-headers
+```console
+sudo pacman -S gtk4 libadwaita pkgconf gcc make dkms curl tar linux-headers
 ```
 </details>
 
 **Rust** (se não instalado):
-```bash
+```console
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
 ```
 
 #### Compilar e Instalar
 
-```bash
+```console
 # Clonar o repositório
 git clone https://github.com/cleyton1986/predator-sense.git
 cd predator-sense/predator-sense-gui
 
-# Compilar a aplicação
+# Compilar a GUI e o instalador/serviços Rust
 cargo build --release
+cargo build --release --manifest-path installer/Cargo.toml
 
-# Compilar o módulo do kernel
-cd kernel && make && cd ..
-
-# Carregar o módulo do kernel
-sudo rmmod acer_wmi 2>/dev/null
-sudo modprobe wmi sparse-keymap video
-sudo insmod kernel/facer.ko
-
-# Instalar
-sudo mkdir -p /opt/predator-sense/resources
-sudo cp target/release/predator-sense /opt/predator-sense/
-sudo cp resources/* /opt/predator-sense/resources/
-sudo install -m 0755 installer/predator-sense-helper /opt/predator-sense/
-sudo chmod +x /opt/predator-sense/predator-sense
+# Instalar o build local e registrar os fontes C existentes no DKMS
+sudo installer/target/release/predator-sense-installer --install
 
 # Executar
 /opt/predator-sense/predator-sense
@@ -356,7 +347,7 @@ Monitoramento NVIDIA em tempo real:
 
 Um assistente de IA local e opt-in, via [Ollama](https://ollama.com) rodando inteiramente na sua máquina — nada é enviado pra lugar nenhum.
 
-1. Instale o Ollama separadamente: `curl -fsSL https://ollama.com/install.sh | sh`
+1. Instale o Ollama separadamente seguindo as [instruções oficiais para Linux](https://ollama.com/download/linux)
 2. Vá em **IA** no menu lateral e baixe um modelo pelo gerenciador de modelos integrado (`smollm2:1.7b` ou maior — modelos menores não suportam tool-calling de forma confiável)
 3. Ative o assistente em **Configurações** e escolha **Aplicar automaticamente** (aplica sugestões na hora) ou **Sempre confirmar** (padrão — toda mudança sugerida espera sua aprovação)
 
@@ -366,12 +357,13 @@ O assistente lê o estado do hardware em tempo real (temperatura, ventoinha, per
 
 ## Opções do Instalador
 
-O instalador Go oferece um menu interativo:
+O instalador Rust oferece um menu interativo:
 
-```bash
+```console
 sudo ./predator-sense-installer              # Menu interativo
 sudo ./predator-sense-installer --install    # Instalação direta
 sudo ./predator-sense-installer --uninstall  # Remover tudo
+sudo ./predator-sense-installer --reload-module # Recompilar/recarregar o módulo
 sudo ./predator-sense-installer --status     # Ver status dos componentes
 ```
 
@@ -379,12 +371,12 @@ sudo ./predator-sense-installer --status     # Ver status dos componentes
 
 ## Desinstalar
 
-```bash
+```console
 sudo ./predator-sense-installer  # Selecione a opção 2
 ```
 
 Ou manualmente:
-```bash
+```console
 pkill -f "/opt/predator-sense/predator-sense"
 sudo rm -rf /opt/predator-sense
 sudo rm -f /usr/share/applications/predator-sense.desktop
@@ -402,7 +394,7 @@ sudo rmmod facer  # Opcional: descarregar o módulo do kernel
 <summary><b>RGB do teclado não muda / preso em um efeito</b></summary>
 
 O estado do módulo do kernel pode estar travado. Recarregue-o:
-```bash
+```console
 sudo rmmod facer
 sudo insmod /caminho/para/kernel/facer.ko
 # Ou use o instalador: sudo ./predator-sense-installer → Opção 4
@@ -412,7 +404,7 @@ sudo insmod /caminho/para/kernel/facer.ko
 <details>
 <summary><b>Módulo não carrega</b></summary>
 
-```bash
+```console
 # Verifique se o dispositivo WMI existe
 ls /sys/bus/wmi/devices/7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56/
 
@@ -427,9 +419,10 @@ sudo apt install linux-headers-$(uname -r)
 <details>
 <summary><b>Tecla PredatorSense não funciona</b></summary>
 
-```bash
-# Verifique se o daemon está rodando
-pgrep -f hotkey-daemon.py
+```console
+# Verifique o serviço Rust da tecla
+systemctl --user status predator-sense-hotkey.service
+pgrep -af predator-sense-hotkey
 
 # Certifique-se que o usuário está no grupo 'input' (logout necessário após adicionar)
 groups | grep input
@@ -440,7 +433,7 @@ sudo usermod -aG input $USER
 <details>
 <summary><b>Página GPU não mostra dados</b></summary>
 
-```bash
+```console
 # Verifique se o nvidia-smi funciona
 nvidia-smi
 # Se não, instale os drivers proprietários da NVIDIA
@@ -452,7 +445,7 @@ nvidia-smi
 
 Se seu modelo exato ainda não está na lista de compatibilidade, tente forçar todos os recursos opcionais da família `predator_v4` e veja o que funciona no seu hardware:
 
-```bash
+```console
 sudo modprobe facer enable_all=1
 # persistente entre reboots:
 echo "options facer enable_all=1" | sudo tee /etc/modprobe.d/facer-options.conf
@@ -473,16 +466,27 @@ predator-sense-gui/
 │   ├── acpi_ec.c                # Acesso raw ao EC via /dev/ec (de MusiKid/acpi_ec)
 │   ├── Makefile
 │   └── dkms.conf                # Config DKMS para recompilação automática
-├── installer/                   # Instalador interativo Go (binário estático)
-│   ├── main.go                  # Instalador + registro DKMS
-│   └── i18n.go
+├── installer/                   # Instalador e serviços multicall em Rust
+│   ├── Cargo.toml
+│   └── src/
+│       ├── main.rs              # Dispatch tipado pelo nome do executável instalado
+│       ├── constants.rs         # Caminhos, protocolos e constantes de hardware centrais
+│       ├── install.rs           # Instalador + registro DKMS
+│       ├── helper.rs            # Operações privilegiadas validadas
+│       ├── hotkey.rs            # Listener de eventos de input do Linux
+│       ├── tray.rs              # Serviço StatusNotifierItem
+│       └── i18n.rs              # Mensagens EN/PT tipadas
+├── protocol/                    # Contrato tipado compartilhado entre GUI/helper
+│   ├── Cargo.toml
+│   └── src/lib.rs               # Ações, caminhos, limites e nomes dos binários
 ├── src/                         # Aplicação Rust GTK4
 │   ├── main.rs
 │   ├── app_state.rs             # Flag global de visibilidade da janela (gate dos timers)
 │   ├── i18n.rs                  # Internacionalização EN/PT
 │   ├── config.rs                # Preferências do usuário (JSON)
-│   ├── tray.rs                  # Bandeja do sistema (AyatanaAppIndicator)
+│   ├── tray.rs                  # Ciclo de vida do serviço Rust da bandeja
 │   ├── hardware/
+│   │   ├── helper.rs            # Cliente tipado do helper privilegiado
 │   │   ├── rgb.rs               # RGB via /dev/acer-gkbbl-*
 │   │   ├── hwmon.rs             # Índice /sys/class/hwmon (cacheado em OnceLock)
 │   │   ├── sensors.rs           # Temps, fans, RAM, rede
@@ -514,8 +518,7 @@ predator-sense-gui/
 │       └── gauge_widget.rs      # Widget de gauge circular tracejado
 └── resources/
     ├── style.css                # Tema escuro gaming
-    ├── predator-icon.svg        # Ícone da bandeja
-    └── tray_helper.py           # Helper da bandeja (Python/GTK3)
+    └── predator-icon.svg        # Ícone da bandeja
 ```
 
 ---
@@ -525,7 +528,7 @@ predator-sense-gui/
 - **Módulo do kernel `facer`** baseado no projeto [acer-predator-turbo-and-rgb-keyboard-linux-module](https://github.com/JafarAkhondali/acer-predator-turbo-and-rgb-keyboard-linux-module) de [JafarAkhondali](https://github.com/JafarAkhondali) e [todos os contribuidores](https://github.com/JafarAkhondali/acer-predator-turbo-and-rgb-keyboard-linux-module/graphs/contributors)
 - **Módulo do kernel `acpi_ec`** de [Sayafdine Said (MusiKid)](https://github.com/MusiKid/acpi_ec) — expõe `/dev/ec` para leitura/escrita bruta no EC. Usado pelo helper para definir modos de ventoinha, CoolBoost, LCD overdrive, USB charging e animação de boot.
 - **Aplicação GUI** desenvolvida com [Rust](https://www.rust-lang.org/) + [GTK4](https://gtk.org/) + [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/)
-- **Instalador** desenvolvido com [Go](https://go.dev/)
+- **Instalador e serviços de background** desenvolvidos com [Rust](https://www.rust-lang.org/); a bandeja usa [ksni](https://crates.io/crates/ksni)
 
 ### Fazendo fork ou reaproveitando este projeto
 

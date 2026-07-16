@@ -4,11 +4,11 @@
 
 # === Rust build artifacts ===
 predator-sense-gui/target/
+predator-sense-gui/installer/target/
+predator-sense-gui/protocol/target/
+predator-sense-gui/protocol/Cargo.lock
 *.rlib
 outros/
-
-# === Go build artifacts ===
-predator-sense-gui/installer/predator-sense-installer
 
 # === Kernel module build artifacts ===
 *.o

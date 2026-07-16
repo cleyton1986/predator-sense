@@ -13,4 +13,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
 libc = "0.2"
+predator-sense-protocol = { path = "protocol" }
 ureq = { version = "2", default-features = false, features = ["json"] }

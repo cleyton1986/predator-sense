@@ -1,3 +1,4 @@
+use predator_sense_protocol::helper::{Action as HelperAction, Switch};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -477,7 +478,6 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
 
     Ok(())
 }
-
 fn run_helper(action: &str, args: &[&str]) -> Result<(), String> {
     let helper = "/opt/predator-sense/predator-sense-helper";
     let mut command = if unsafe { libc::geteuid() } == 0 {
