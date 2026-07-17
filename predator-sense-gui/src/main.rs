@@ -8,12 +8,15 @@ mod ui;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gdk, glib};
 use libadwaita as adw;
+use libadwaita::prelude::*;
 use predator_sense_protocol::application;
 use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::time::Instant;
 
 const CSS_THEME: &str = include_str!("../resources/style.css");
+const GSK_RENDERER_ENV: &str = "GSK_RENDERER";
+const GSK_GL_RENDERER: &str = "gl";
 
 static STARTUP_STARTED: OnceLock<Instant> = OnceLock::new();
 static STARTUP_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
@@ -59,16 +62,21 @@ fn main() {
     // visibly janky frame pacing on NVIDIA PRIME setups. The GL renderer
     // only touches the GPU that actually drives the display. An explicit
     // user override still wins.
-    if std::env::var_os("GSK_RENDERER").is_none() {
-        std::env::set_var("GSK_RENDERER", "ngl");
+    if std::env::var_os(GSK_RENDERER_ENV).is_none() {
+        std::env::set_var(GSK_RENDERER_ENV, GSK_GL_RENDERER);
     }
 
     let app = adw::Application::builder()
         .application_id(application::DBUS_ID)
         .build();
 
-    app.connect_startup(|_| {
+    app.connect_startup(|app| {
         startup_mark("startup signal");
+        // The application uses a deliberately dark, content-matched palette.
+        // Request it through libadwaita instead of GTK's deprecated dark-theme
+        // setting so standard Adwaita widgets use the same appearance.
+        app.style_manager()
+            .set_color_scheme(adw::ColorScheme::ForceDark);
         let provider = gtk::CssProvider::new();
         let scale = config::load_app_config().font_scale;
         provider.load_from_data(&ui::font_scale::scale_css(CSS_THEME, scale));
