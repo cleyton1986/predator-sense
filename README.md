@@ -80,6 +80,11 @@ This application was created for **personal use**, to get the most out of an Ace
 <p align="center"><b>Settings</b> — Minimize to tray, start on boot, auto-apply profile on start, language preferences, and per-model supported-features list.</p>
 <p align="center"><img src="assets/psense-12.png" width="800" alt="Settings"></p>
 
+<p align="center"><b>Cover logo lighting</b> — Independent RGB control for the logo on the back of the display, on models with a color-capable cover logo (Static/Breathing/Neon). Runtime-detected: the control only appears if the hardware responds to a capability probe, so it stays safely hidden on models without it.</p>
+<p align="center"><img src="assets/psense-13.png" width="800" alt="Cover logo lighting"></p>
+<p align="center"><img src="assets/psense-14.jpg" width="800" alt="Cover logo lit up green on a Predator PHN16-73"></p>
+<p align="center"><sub>Feature contributed by <a href="https://github.com/jlucaso1">@jlucaso1</a>, tested on their own Predator PHN16-73. This laptop's cover logo isn't color-capable, so the feature was verified using their hardware.</sub></p>
+
 ---
 
 ## About

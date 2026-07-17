@@ -80,6 +80,11 @@ Esta aplicação foi criada para **uso pessoal**, para tirar o máximo proveito 
 <p align="center"><b>Configurações</b> — Minimizar para a bandeja, iniciar com o sistema, aplicar perfil automaticamente no início, preferências de idioma, e lista de recursos suportados por modelo.</p>
 <p align="center"><img src="assets/psense-12.png" width="800" alt="Configurações"></p>
 
+<p align="center"><b>Iluminação do logo da tampa</b> — Controle RGB independente pro logo na parte de trás da tela, em modelos com logo colorido (Estático/Respiração/Neon). Detectado em tempo real: o controle só aparece se o hardware responder a um probe de capacidade, ficando escondido com segurança em modelos sem esse recurso.</p>
+<p align="center"><img src="assets/psense-13.png" width="800" alt="Iluminação do logo da tampa"></p>
+<p align="center"><img src="assets/psense-14.jpg" width="800" alt="Logo da tampa aceso em verde num Predator PHN16-73"></p>
+<p align="center"><sub>Recurso contribuído por <a href="https://github.com/jlucaso1">@jlucaso1</a>, testado no próprio Predator PHN16-73 dele. O logo da tampa deste notebook do autor deste projeto não tem cor, então o recurso foi validado usando o hardware dele.</sub></p>
+
 ---
 
 ## Sobre
