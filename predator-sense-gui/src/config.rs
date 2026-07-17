@@ -20,6 +20,24 @@ pub struct ZoneColor {
     pub blue: u8,
 }
 
+/// Last successfully applied state for the independently controlled RGB logo
+/// on the display lid. `RgbConfig` is shared with keyboard lighting so mode,
+/// brightness, speed and color keep one serialization contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoverLogoSettings {
+    pub enabled: bool,
+    pub config: RgbConfig,
+}
+
+impl Default for CoverLogoSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            config: RgbConfig::default(),
+        }
+    }
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -42,11 +60,15 @@ pub struct AppConfig {
     pub debug_logging: bool,
     /// Last-applied static RGB zone colors (issue #11: nothing persisted this
     /// before, so a full power cycle always reset the keyboard to its default
-    /// pulsing effect). Reapplied at boot by hotkey-daemon.py.
+    /// pulsing effect). Reapplied after login/resume by hotkey-daemon.py.
     #[serde(default)]
     pub rgb_static_zones: Option<Vec<ZoneColor>>,
     #[serde(default = "default_rgb_brightness")]
     pub rgb_brightness: u8,
+    /// None means the user has never applied a cover-logo setting, so automatic
+    /// restoration must leave the controller's firmware default untouched.
+    #[serde(default)]
+    pub cover_logo: Option<CoverLogoSettings>,
     /// Settings page "Limite de carga da bateria (80%)" (charge_control_end_threshold).
     #[serde(default)]
     pub battery_limiter: bool,
@@ -127,6 +149,7 @@ impl Default for AppConfig {
             debug_logging: false,
             rgb_static_zones: None,
             rgb_brightness: 100,
+            cover_logo: None,
             battery_limiter: false,
             battery_health_mode: false,
             ai_assistant_enabled: false,
@@ -147,6 +170,10 @@ pub fn set_autostart(enabled: bool) {
 
     let app_path = autostart_dir.join("predator-sense.desktop");
     let hotkey_path = autostart_dir.join("predator-sense-hotkey.desktop");
+    // The installer-managed systemd user service is the only hotkey listener.
+    // Always clean up the legacy XDG entry so toggling app autostart cannot
+    // reintroduce a second listener and duplicate lighting restores.
+    let _ = std::fs::remove_file(&hotkey_path);
 
     if enabled {
         let app_desktop = "[Desktop Entry]\n\
@@ -158,19 +185,8 @@ NoDisplay=true\n\
 X-GNOME-Autostart-enabled=true\n\
 Comment=Predator Sense for Linux\n";
         let _ = std::fs::write(&app_path, app_desktop);
-
-        let hotkey_desktop = "[Desktop Entry]\n\
-Type=Application\n\
-Name=Predator Sense Hotkey\n\
-Exec=/opt/predator-sense/hotkey-daemon.py\n\
-Hidden=false\n\
-NoDisplay=true\n\
-X-GNOME-Autostart-enabled=true\n\
-Comment=PredatorSense key listener\n";
-        let _ = std::fs::write(&hotkey_path, hotkey_desktop);
     } else {
         let _ = std::fs::remove_file(&app_path);
-        let _ = std::fs::remove_file(&hotkey_path);
     }
 }
 

@@ -99,6 +99,7 @@ Inspired by and based on the [acer-predator-turbo-and-rgb-keyboard-linux-module]
 | **Usage** | 4-tab view: CPU / GPU / Memory / Storage with top processes, click-to-expand details and CSS-style fire animation on the temperature gauges |
 | **Network** | Real-time download/upload graphs with peak tracking and auto interface detection |
 | **RGB Keyboard Control** | Static per-zone (4 zones) and dynamic effects (Breathing, Neon, Wave, Shifting, Zoom). On hardware without the kernel module (I2C-HID controller only), static color, brightness, backlight-off and the Breathing/Neon effects work natively over HID too — see [Compatibility](#compatibility) |
+| **RGB Cover Logo** | Independent power, solid-color, brightness, Breathing and Neon controls for the emblem on the back of the display, with a live vector preview. Exposed only after runtime HID capability detection |
 | **Performance Profiles** | Quiet / Balanced / Performance / Turbo modes (CPU governor + Intel EPP + GPU power limit) |
 | **Fan Control** | Live RPM with animated spinning fans, CoolBoost toggle, Auto/Max modes, plus experimental per-fan PWM control & auto temperature curve (where supported) |
 | **Battery** | Charge stats, cycles, health, manufacturer info and 80% charge limit for longevity |
@@ -176,6 +177,9 @@ Some models (confirmed: PHN16S-71, PHN16-73) route the keyboard's RGB controller
 | Static per-zone color, brightness, backlight-off | ✅ confirmed working (PHN16S-71) |
 | Dynamic effects — Breathing, Neon 🧪 | Native, single HID write, hardware loops the pattern on its own — **awaiting confirmation** on real hardware |
 | Dynamic effects — Wave, Shifting, Zoom | On-screen preview only (no hardware writes) — the effect codes for these were found to mean different things across hardware generations, so they're not wired up yet |
+| RGB cover logo — off, solid color, brightness, Breathing, Neon | ✅ confirmed working (PHN16-73) |
+
+Cover-logo support is not enabled from a model-name allow-list. The controller must advertise target `0x83` in its A1 target report and return matching, non-empty A3 capabilities before the UI is exposed; the app repeats that check immediately before every write. The hotkey daemon restores only a setting that the app previously applied successfully after login and resume, and skips the logo entirely when there is no saved setting or the target is absent.
 
 ### Already running Linuwu-Sense or DAMX?
 
@@ -301,6 +305,17 @@ sudo chmod +x /opt/predator-sense/predator-sense
 5. Click **Apply**
 
 > On I2C-HID-only hardware without the kernel module (see [Compatibility](#compatibility)), Breathing and Neon animate for real; Wave/Shifting/Zoom show an on-screen preview only, clearly labeled as such — the physical keyboard doesn't change for those yet.
+
+### RGB Cover Logo
+
+1. Go to **Lighting** and select **Cover logo** (the selector appears only when the compatible HID target is detected)
+2. Use **Lighting** to turn the emblem on or off
+3. Choose **Static**, **Breathing** or **Neon**, then adjust the available color, brightness and speed controls while checking the live preview
+4. Click **Apply to logo**
+
+The last successfully applied state is restored when the user hotkey service starts and after suspend/hibernate. Animated-effect colors are firmware-controlled, so the preview represents their behavior rather than offering a color picker for those modes.
+
+> The firmware owns the lighting animation shown before Linux starts the user service. A saved “off” state is restored after login, but this app cannot suppress the earlier BIOS/boot animation.
 
 ### Performance Profiles
 
