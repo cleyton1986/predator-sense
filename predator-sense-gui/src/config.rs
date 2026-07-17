@@ -142,7 +142,7 @@ impl Default for AppConfig {
             minimize_on_close: false,
             start_on_boot: false,
             temp_alerts: true,
-            auto_profile_ac: false,
+            auto_profile_ac: true,
             profile_ac: default_profile_ac(),
             profile_battery: default_profile_battery(),
             font_scale: 1.0,
