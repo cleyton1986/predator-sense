@@ -46,6 +46,14 @@ struct PersistedBatteryConfig {
     battery_health_mode: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BatteryReapplySetting {
+    enabled: bool,
+    label: &'static str,
+    value: &'static str,
+    relative_path: &'static str,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PwmAttribute {
     Cpu,
@@ -836,6 +844,14 @@ fn pwm_read(sysfs: &Path, attribute: PwmAttribute) -> AppResult {
 }
 
 fn reapply_battery(sysfs: &Path, home: &Path) -> AppResult {
+    reapply_battery_with(sysfs, home, &mut write_attr)
+}
+
+fn reapply_battery_with(
+    sysfs: &Path,
+    home: &Path,
+    write: &mut impl FnMut(&str, &str, &Path) -> AppResult,
+) -> AppResult {
     if !home.is_absolute() {
         return Err(fail("USER_HOME must be an absolute path"));
     }
@@ -845,21 +861,41 @@ fn reapply_battery(sysfs: &Path, home: &Path) -> AppResult {
     };
     let config: PersistedBatteryConfig = serde_json::from_slice(&data)
         .map_err(|error| fail(format!("invalid {}: {error}", config_path.display())))?;
-    if config.battery_limiter {
-        write_attr(
-            "battery-limit",
-            BATTERY_LIMIT_ENABLED,
-            &sysfs.join(BATTERY_THRESHOLD),
-        )?;
+
+    let settings = [
+        BatteryReapplySetting {
+            enabled: config.battery_limiter,
+            label: "battery-limit",
+            value: BATTERY_LIMIT_ENABLED,
+            relative_path: BATTERY_THRESHOLD,
+        },
+        BatteryReapplySetting {
+            enabled: config.battery_health_mode,
+            label: "battery-health",
+            value: bool_str(true),
+            relative_path: BATTERY_HEALTH,
+        },
+    ];
+    let mut errors = Vec::new();
+    for setting in settings.into_iter().filter(|setting| setting.enabled) {
+        let attribute = sysfs.join(setting.relative_path);
+        if !attribute.exists() {
+            eprintln!(
+                "predator-sense-helper: skipping unavailable {} attribute {}",
+                setting.label,
+                attribute.display()
+            );
+            continue;
+        }
+        if let Err(error) = write(setting.label, setting.value, &attribute) {
+            errors.push(error);
+        }
     }
-    if config.battery_health_mode {
-        write_attr(
-            "battery-health",
-            bool_str(true),
-            &sysfs.join(BATTERY_HEALTH),
-        )?;
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
     }
-    Ok(())
 }
 
 fn command(name: &str, args: &[&str]) -> AppResult {
@@ -1189,6 +1225,55 @@ mod tests {
         .unwrap();
 
         assert_eq!(read(fixture.path(), BATTERY_CALIBRATION), bool_str(true));
+    }
+
+    #[test]
+    fn boot_battery_restore_continues_when_an_optional_path_is_missing() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        let home = fixture.path().join("home/user");
+        write(
+            &home,
+            USER_CONFIG,
+            r#"{"battery_limiter":true,"battery_health_mode":true}"#,
+        );
+        write(&sysfs, BATTERY_HEALTH, bool_str(false));
+
+        reapply_battery(&sysfs, &home).unwrap();
+
+        assert!(!sysfs.join(BATTERY_THRESHOLD).exists());
+        assert_eq!(read(&sysfs, BATTERY_HEALTH), bool_str(true));
+    }
+
+    #[test]
+    fn boot_battery_restore_attempts_every_present_setting_before_failing() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        let home = fixture.path().join("home/user");
+        write(
+            &home,
+            USER_CONFIG,
+            r#"{"battery_limiter":true,"battery_health_mode":true}"#,
+        );
+        write(&sysfs, BATTERY_THRESHOLD, BATTERY_LIMIT_DISABLED);
+        write(&sysfs, BATTERY_HEALTH, bool_str(false));
+        let limiter = sysfs.join(BATTERY_THRESHOLD);
+        let health = sysfs.join(BATTERY_HEALTH);
+        let mut attempted = Vec::new();
+
+        let error = reapply_battery_with(&sysfs, &home, &mut |label, value, path| {
+            attempted.push(path.to_path_buf());
+            if path == limiter {
+                Err(fail("injected battery-limit write failure"))
+            } else {
+                write_attr(label, value, path)
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(attempted, [limiter, health]);
+        assert!(error.contains("injected battery-limit write failure"));
+        assert_eq!(read(&sysfs, BATTERY_HEALTH), bool_str(true));
     }
 
     #[test]

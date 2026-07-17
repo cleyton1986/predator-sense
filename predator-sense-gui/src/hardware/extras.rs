@@ -98,7 +98,7 @@ pub fn get_usb_charging() -> bool {
     ) {
         return v.trim() != "0";
     }
-    crate::hardware::helper::read_switch(HelperAction::UsbChargingRead).unwrap_or(false)
+    crate::hardware::helper::read_nonzero_byte(HelperAction::UsbChargingRead).unwrap_or(false)
 }
 
 pub fn set_usb_charging(enabled: bool) -> Result<(), String> {
