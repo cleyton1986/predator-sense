@@ -9,9 +9,23 @@ use gtk4::prelude::*;
 use gtk4::{self as gtk, gdk, glib};
 use libadwaita as adw;
 use std::cell::RefCell;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 const APP_ID: &str = "com.predator.sense";
 const CSS_THEME: &str = include_str!("../resources/style.css");
+
+static STARTUP_STARTED: OnceLock<Instant> = OnceLock::new();
+static STARTUP_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
+
+pub(crate) fn startup_mark(stage: &str) {
+    if *STARTUP_TRACE_ENABLED
+        .get_or_init(|| std::env::var_os("PREDATOR_SENSE_STARTUP_TRACE").is_some())
+    {
+        let started = STARTUP_STARTED.get_or_init(Instant::now);
+        eprintln!("[startup] {:>8.3} ms  {stage}", started.elapsed().as_secs_f64() * 1000.0);
+    }
+}
 
 thread_local! {
     static CSS_PROVIDER: RefCell<Option<gtk::CssProvider>> = RefCell::new(None);
@@ -29,6 +43,8 @@ pub fn apply_font_scale(scale: f64) {
 }
 
 fn main() {
+    STARTUP_STARTED.get_or_init(Instant::now);
+    startup_mark("main entered");
     // GTK 4.16+ picks the Vulkan renderer by default. Creating the Vulkan
     // instance enumerates every GPU in the system, which opens /dev/nvidia*
     // and keeps a hybrid laptop's discrete GPU powered — blocked from
@@ -45,6 +61,7 @@ fn main() {
         .build();
 
     app.connect_startup(|_| {
+        startup_mark("startup signal");
         let provider = gtk::CssProvider::new();
         let scale = config::load_app_config().font_scale;
         provider.load_from_data(&ui::font_scale::scale_css(CSS_THEME, scale));
@@ -62,9 +79,11 @@ fn main() {
                 theme.add_search_path(dir.to_str().unwrap_or(""));
             }
         }
+        startup_mark("startup complete");
     });
 
     app.connect_activate(|app| {
+        startup_mark("activate signal");
         config::ensure_dirs();
         i18n::init(config::load_app_config().language.as_deref());
 
@@ -85,10 +104,12 @@ fn main() {
                     child.queue_draw();
                 }
             });
+            startup_mark("existing window presented");
             return;
         }
 
         ui::window::build(app);
+        startup_mark("window build returned");
     });
 
     app.run_with_args::<String>(&[]);

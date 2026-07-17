@@ -1,6 +1,7 @@
 pub mod alerts;
 pub mod applog;
 pub mod capabilities;
+pub mod display;
 pub mod hwmon;
 pub mod power_profile;
 pub mod rgb;
@@ -14,6 +15,7 @@ pub mod sysinfo;
 pub mod procs;
 pub mod storage;
 pub mod gpu;
+pub mod nvidia;
 pub mod ai_assistant;
 pub mod ai_snapshot;
 pub mod ai_actionlog;
