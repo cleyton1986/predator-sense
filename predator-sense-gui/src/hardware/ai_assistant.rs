@@ -166,14 +166,23 @@ const SYSTEM_PROMPT: &str = "You manage a laptop's hardware settings through a f
     demands a corrective action per the thermal-safety rule below - never as a reply to a plain \
     status question with no real need for change. If nothing needs to change and there is no \
     question to answer, just reply with text and do not call any tool. \
-    Thermal safety takes priority over everything else: if cpu_temp_c or gpu_temp_c is high (above \
-    roughly 80C) or climbing, that is the one thing clearly warranting action - call set_fan_mode \
-    with mode=max or set_coolboost with enabled=true, NOT a thermal profile change. Changing the \
-    thermal profile (quiet/balanced/performance/turbo) does not directly control fan speed at all, \
-    it only affects CPU/GPU power targets, so it will not cool the machine down by itself. Do not \
-    suggest a thermal profile change two checks in a row unless the state has genuinely changed \
-    since the last one - alternating between profiles on every check with no real justification is \
-    wrong.";
+    Default bias is toward performance, not toward saving power: this app's job is to keep the \
+    machine running as fast as it can while staying thermally safe, never to quietly throttle it \
+    down for efficiency. Never call set_thermal_profile with quiet or balanced just because the \
+    machine is idle, cool, or 'everything looks fine' - a cool idle machine is not a reason to lower \
+    the profile, it is the expected result of the cooling already in place. Only move DOWN from \
+    performance/turbo when cpu_temp_c or gpu_temp_c is genuinely high (above roughly 90C) or clearly \
+    still climbing AFTER set_fan_mode(max) and set_coolboost(true) have already been tried and did \
+    not bring it under control - profile is the last resort, not the first one. When moving up is \
+    safe (temps are fine and the current profile is below performance), prefer set_thermal_profile \
+    with performance over leaving it at quiet/balanced. \
+    Thermal safety still comes first when temps are genuinely high: call set_fan_mode with mode=max \
+    or set_coolboost with enabled=true before ever touching the thermal profile - those cool the \
+    machine directly, a profile change alone does not. Setting performance or turbo already turns \
+    the fan to max as part of the profile itself, so do not call set_fan_mode separately right after \
+    picking one of those two. Do not suggest a thermal profile change two checks in a row unless the \
+    state has genuinely changed since the last one - alternating between profiles on every check with \
+    no real justification is wrong.";
 
 /// Any free-text reply (the `comment` field - tool calls themselves are
 /// structured, not language-dependent) must match the app's own UI

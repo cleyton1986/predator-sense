@@ -493,6 +493,22 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     let gpu_watts = s.gpu_watts.to_string();
     let _ = crate::hardware::helper::execute(HelperAction::SetGpuPower, &[gpu_watts.as_str()]);
 
+    // Fan mode used to only follow the physical Predator/Turbo key (see
+    // window.rs's turbo-key handler); picking a profile from the "Modo" page
+    // or via the AI assistant left whatever fan mode was previously set
+    // untouched, so e.g. selecting Quiet right after Max didn't quiet
+    // anything down. Every profile change now carries a matching fan mode,
+    // best-effort like the GPU wattage write above - some models have no EC
+    // fan control at all. Performance/Turbo push CPU+GPU power targets high
+    // enough that automatic fan curves alone won't keep up, so both force
+    // Max (matching what the physical Turbo key already does); only
+    // Quiet/Balanced leave the fan on Auto.
+    let fan_mode = match profile {
+        PowerProfile::Performance | PowerProfile::Turbo => crate::hardware::fan::FanMode::Max,
+        PowerProfile::Quiet | PowerProfile::Balanced => crate::hardware::fan::FanMode::Auto,
+    };
+    let _ = crate::hardware::fan::set_fan_mode(fan_mode);
+
     // Save the selected profile to state file
     let _ = fs::write(PROFILE_STATE_FILE, profile.to_id());
     if let Some(config_dir) = dirs::config_dir() {

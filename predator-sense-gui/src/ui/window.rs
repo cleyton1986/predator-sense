@@ -214,7 +214,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
     // polling already in fan_page.rs/fan_control_page.rs, no direct
     // knowledge of this timer needed there.
     {
-        use crate::hardware::{fan, profile};
+        use crate::hardware::profile;
         let last_state: Rc<std::cell::Cell<Option<bool>>> = Rc::new(std::cell::Cell::new(None));
         glib::timeout_add_seconds_local(2, move || {
             let Some(now) = profile::get_turbo_button_state() else {
@@ -230,13 +230,14 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 // startup - only react to an actual transition from here on.
                 return glib::ControlFlow::Continue;
             }
+            // set_profile() now applies the matching fan mode itself (Max
+            // for Turbo, Auto otherwise), so this only needs to pick the
+            // profile - no separate fan::set_fan_mode call to keep in sync.
             if now {
                 let _ = profile::set_profile(profile::PowerProfile::Turbo);
-                let _ = fan::set_fan_mode(fan::FanMode::Max);
                 crate::hardware::applog::info("Turbo key: pressed, forced profile=Turbo fan=Max");
             } else {
                 let _ = profile::set_profile(profile::PowerProfile::Balanced);
-                let _ = fan::set_fan_mode(fan::FanMode::Auto);
                 crate::hardware::applog::info("Turbo key: released, restored profile=Balanced fan=Auto");
             }
             glib::ControlFlow::Continue
