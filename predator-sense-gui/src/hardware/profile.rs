@@ -1,7 +1,9 @@
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const PROFILE_STATE_FILE: &str = "/opt/predator-sense/current_profile";
+const SYSFS_ROOT: &str = "/sys";
 
 /// Read-only sysfs attribute the kernel module exposes for the physical
 /// Predator/Turbo keyboard key - see the `turbo_state` patch in
@@ -25,7 +27,12 @@ pub fn get_turbo_button_state() -> Option<bool> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum PowerProfile { Quiet, Balanced, Performance, Turbo }
+pub enum PowerProfile {
+    Quiet,
+    Balanced,
+    Performance,
+    Turbo,
+}
 
 impl PowerProfile {
     pub fn label(&self) -> &str {
@@ -38,26 +45,44 @@ impl PowerProfile {
     }
 
     pub fn to_id(&self) -> &str {
-        match self { Self::Quiet => "quiet", Self::Balanced => "balanced", Self::Performance => "performance", Self::Turbo => "turbo" }
+        match self {
+            Self::Quiet => "quiet",
+            Self::Balanced => "balanced",
+            Self::Performance => "performance",
+            Self::Turbo => "turbo",
+        }
     }
 
     fn from_id(id: &str) -> Option<Self> {
         match id.trim() {
-            "quiet" => Some(Self::Quiet), "balanced" => Some(Self::Balanced),
-            "performance" => Some(Self::Performance), "turbo" => Some(Self::Turbo),
+            "quiet" => Some(Self::Quiet),
+            "balanced" => Some(Self::Balanced),
+            "performance" => Some(Self::Performance),
+            "turbo" => Some(Self::Turbo),
             _ => None,
         }
     }
 
     pub fn index(&self) -> i8 {
-        match self { Self::Quiet => 0, Self::Balanced => 1, Self::Performance => 2, Self::Turbo => 3 }
+        match self {
+            Self::Quiet => 0,
+            Self::Balanced => 1,
+            Self::Performance => 2,
+            Self::Turbo => 3,
+        }
     }
 
     pub fn from_index(i: i8) -> Self {
-        match i { 0 => Self::Quiet, 2 => Self::Performance, 3 => Self::Turbo, _ => Self::Balanced }
+        match i {
+            0 => Self::Quiet,
+            2 => Self::Performance,
+            3 => Self::Turbo,
+            _ => Self::Balanced,
+        }
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 struct ProfileSettings {
     governor: &'static str,
     epp: &'static str,
@@ -66,25 +91,266 @@ struct ProfileSettings {
     no_turbo: bool, // false = turbo ON, true = turbo OFF
 }
 
+#[derive(Debug, Clone)]
+struct CpuCapabilities {
+    policy_dirs: Vec<PathBuf>,
+    epp_supported: bool,
+    no_turbo_supported: bool,
+    min_perf_supported: bool,
+    /// Active intel_pstate exposes EPP only when Hardware-managed P-states
+    /// (HWP) are available.  Require every policy to report the same driver
+    /// so a model name or incomplete policy is never used as a proxy.
+    intel_pstate_hwp_active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CpuProfilePlan {
+    governor: &'static str,
+    epp: Option<&'static str>,
+    no_turbo: Option<bool>,
+    min_perf_pct: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CpuState {
+    governor: String,
+    epp: Option<String>,
+    no_turbo: Option<bool>,
+    min_perf_pct: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuPolicyKind {
+    IntelHwpDynamic,
+    IntelHwpMaximum,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuPolicyInfo {
+    pub governor: String,
+    pub epp: Option<String>,
+    pub kind: CpuPolicyKind,
+}
+
 fn settings_for(p: PowerProfile) -> ProfileSettings {
     match p {
         PowerProfile::Quiet => ProfileSettings {
-            governor: "powersave", epp: "power", gpu_watts: 40,
-            min_perf_pct: 10, no_turbo: true,
+            governor: "powersave",
+            epp: "power",
+            gpu_watts: 40,
+            min_perf_pct: 10,
+            no_turbo: true,
         },
         PowerProfile::Balanced => ProfileSettings {
-            governor: "powersave", epp: "balance_performance", gpu_watts: 80,
-            min_perf_pct: 17, no_turbo: false,
+            governor: "powersave",
+            epp: "balance_performance",
+            gpu_watts: 80,
+            min_perf_pct: 17,
+            no_turbo: false,
         },
         PowerProfile::Performance => ProfileSettings {
-            governor: "performance", epp: "performance", gpu_watts: 100,
-            min_perf_pct: 50, no_turbo: false,
+            governor: "performance",
+            epp: "performance",
+            gpu_watts: 100,
+            min_perf_pct: 50,
+            no_turbo: false,
         },
         PowerProfile::Turbo => ProfileSettings {
-            governor: "performance", epp: "performance", gpu_watts: 110,
-            min_perf_pct: 100, no_turbo: false,
+            governor: "performance",
+            epp: "performance",
+            gpu_watts: 110,
+            min_perf_pct: 100,
+            no_turbo: false,
         },
     }
+}
+
+fn read_trimmed(path: &Path) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
+}
+
+fn policy_dirs_at(sysfs_root: &Path) -> Vec<PathBuf> {
+    let base = sysfs_root.join("devices/system/cpu/cpufreq");
+    let mut policies = fs::read_dir(base)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                return false;
+            };
+            let Some(index) = name.strip_prefix("policy") else {
+                return false;
+            };
+            !index.is_empty() && index.chars().all(|c| c.is_ascii_digit()) && path.is_dir()
+        })
+        .collect::<Vec<_>>();
+    policies.sort();
+    policies
+}
+
+fn detect_cpu_capabilities_at(sysfs_root: &Path) -> CpuCapabilities {
+    let policy_dirs = policy_dirs_at(sysfs_root);
+    let epp_supported = !policy_dirs.is_empty()
+        && policy_dirs
+            .iter()
+            .all(|policy| policy.join("energy_performance_preference").exists());
+    let all_intel_pstate = !policy_dirs.is_empty()
+        && policy_dirs.iter().all(|policy| {
+            read_trimmed(&policy.join("scaling_driver")).as_deref() == Some("intel_pstate")
+        });
+    let intel_pstate_active =
+        read_trimmed(&sysfs_root.join("devices/system/cpu/intel_pstate/status")).as_deref()
+            == Some("active");
+
+    CpuCapabilities {
+        policy_dirs,
+        epp_supported,
+        no_turbo_supported: sysfs_root
+            .join("devices/system/cpu/intel_pstate/no_turbo")
+            .exists(),
+        min_perf_supported: sysfs_root
+            .join("devices/system/cpu/intel_pstate/min_perf_pct")
+            .exists(),
+        intel_pstate_hwp_active: all_intel_pstate && intel_pstate_active && epp_supported,
+    }
+}
+
+fn plan_for(profile: PowerProfile, capabilities: &CpuCapabilities) -> CpuProfilePlan {
+    let settings = settings_for(profile);
+    let governor = if capabilities.intel_pstate_hwp_active && profile == PowerProfile::Performance {
+        // With HWP, intel_pstate's "powersave" policy is a dynamic scaling
+        // algorithm (not the generic minimum-frequency governor) and is the
+        // policy under which a model-specific, non-zero EPP remains writable.
+        // This gives Performance a real dynamic 50%-to-max CPU tier while
+        // Turbo retains the kernel-defined maximum-only policy below.
+        "powersave"
+    } else {
+        settings.governor
+    };
+    let epp = if !capabilities.epp_supported {
+        None
+    } else if capabilities.intel_pstate_hwp_active && governor == "performance" {
+        // Active intel_pstate HWP performance mode forces EPP 0 and rejects
+        // every non-zero value.  Keep 0 in the plan as the expected semantic
+        // state; the helper selects the governor and lets the kernel enforce
+        // it, which also supports HWP systems without numeric EPP writes.
+        Some("0")
+    } else {
+        Some(settings.epp)
+    };
+
+    CpuProfilePlan {
+        governor,
+        epp,
+        no_turbo: capabilities.no_turbo_supported.then_some(settings.no_turbo),
+        min_perf_pct: capabilities
+            .min_perf_supported
+            .then_some(settings.min_perf_pct),
+    }
+}
+
+fn uniform_policy_value(policy_dirs: &[PathBuf], attribute: &str) -> Option<String> {
+    let mut values = policy_dirs
+        .iter()
+        .map(|policy| read_trimmed(&policy.join(attribute)));
+    let first = values.next()??;
+    values
+        .all(|value| value.as_deref() == Some(first.as_str()))
+        .then_some(first)
+}
+
+fn read_cpu_state_at(sysfs_root: &Path, capabilities: &CpuCapabilities) -> Option<CpuState> {
+    let governor = uniform_policy_value(&capabilities.policy_dirs, "scaling_governor")?;
+    let epp = capabilities
+        .epp_supported
+        .then(|| uniform_policy_value(&capabilities.policy_dirs, "energy_performance_preference"))
+        .flatten();
+    let no_turbo = capabilities
+        .no_turbo_supported
+        .then(|| {
+            read_trimmed(&sysfs_root.join("devices/system/cpu/intel_pstate/no_turbo"))?
+                .parse::<u8>()
+                .ok()
+                .map(|value| value != 0)
+        })
+        .flatten();
+    let min_perf_pct = capabilities
+        .min_perf_supported
+        .then(|| {
+            read_trimmed(&sysfs_root.join("devices/system/cpu/intel_pstate/min_perf_pct"))?
+                .parse::<u32>()
+                .ok()
+        })
+        .flatten();
+
+    Some(CpuState {
+        governor,
+        epp,
+        no_turbo,
+        min_perf_pct,
+    })
+}
+
+fn cpu_policy_info_at(sysfs_root: &Path) -> Option<CpuPolicyInfo> {
+    let capabilities = detect_cpu_capabilities_at(sysfs_root);
+    let state = read_cpu_state_at(sysfs_root, &capabilities)?;
+    let kind = if capabilities.intel_pstate_hwp_active {
+        match state.governor.as_str() {
+            "powersave" => CpuPolicyKind::IntelHwpDynamic,
+            "performance" => CpuPolicyKind::IntelHwpMaximum,
+            _ => CpuPolicyKind::Other,
+        }
+    } else {
+        CpuPolicyKind::Other
+    };
+
+    Some(CpuPolicyInfo {
+        governor: state.governor,
+        epp: state.epp,
+        kind,
+    })
+}
+
+pub fn current_cpu_policy_info() -> Option<CpuPolicyInfo> {
+    cpu_policy_info_at(Path::new(SYSFS_ROOT))
+}
+
+fn state_matches_plan(
+    state: &CpuState,
+    plan: &CpuProfilePlan,
+    capabilities: &CpuCapabilities,
+) -> bool {
+    if state.governor != plan.governor {
+        return false;
+    }
+
+    if let Some(expected_epp) = plan.epp {
+        let kernel_forces_raw_zero = capabilities.intel_pstate_hwp_active
+            && plan.governor == "performance"
+            && expected_epp == "0";
+        // Model-specific tables can render forced raw 0 as "default".  The
+        // active intel_pstate performance governor itself guarantees EPP 0,
+        // so comparing the label in this one case would create a false miss.
+        if !kernel_forces_raw_zero && state.epp.as_deref() != Some(expected_epp) {
+            return false;
+        }
+    }
+    if let Some(expected_no_turbo) = plan.no_turbo {
+        if state.no_turbo != Some(expected_no_turbo) {
+            return false;
+        }
+    }
+    if let Some(expected_min_perf) = plan.min_perf_pct {
+        if state.min_perf_pct != Some(expected_min_perf) {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn get_current_profile() -> Option<PowerProfile> {
@@ -98,7 +364,7 @@ pub fn get_current_profile() -> Option<PowerProfile> {
     // forever after - a hardware key press changed the real governor/EPP/
     // turbo/min-perf values but the UI kept reporting the old cached guess,
     // since the cache file always existed and always "matched" from then on.
-    if let Some(p) = detect_from_hardware() {
+    if let Some(p) = detect_from_hardware_at(Path::new(SYSFS_ROOT)) {
         return Some(p);
     }
 
@@ -121,66 +387,85 @@ pub fn get_current_profile() -> Option<PowerProfile> {
     None
 }
 
-/// Matches live governor/EPP/turbo/min-perf against each of the 4 known
-/// profile presets (`settings_for`) and returns the one that matches
-/// exactly, if any. The old version of this fallback only ever compared
-/// governor+EPP and defaulted anything "performance"-flavored straight to
-/// `Performance` - it could never actually detect `Turbo` at all, since
-/// Performance and Turbo share the same governor/EPP/turbo bit and only
-/// differ in min_perf_pct (50 vs 100), which wasn't being checked.
-fn detect_from_hardware() -> Option<PowerProfile> {
-    let gov = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").ok()?;
-    let epp = fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference")
-        .unwrap_or_default();
-    let no_turbo = fs::read_to_string("/sys/devices/system/cpu/intel_pstate/no_turbo").unwrap_or_default();
-    let min_perf = fs::read_to_string("/sys/devices/system/cpu/intel_pstate/min_perf_pct").unwrap_or_default();
-    let (gov, epp, no_turbo, min_perf) = (gov.trim(), epp.trim(), no_turbo.trim(), min_perf.trim());
+/// Matches the uniform state of every CPU policy and every supported optional
+/// control against the capability-adjusted profile plans. Returns `None` when
+/// no profile matches or when the backend exposes too little state to
+/// distinguish two presets, allowing the caller's cache to resolve only that
+/// genuinely ambiguous case.
+fn detect_from_hardware_at(sysfs_root: &Path) -> Option<PowerProfile> {
+    let capabilities = detect_cpu_capabilities_at(sysfs_root);
+    let state = read_cpu_state_at(sysfs_root, &capabilities)?;
+    let mut matches = [
+        PowerProfile::Quiet,
+        PowerProfile::Balanced,
+        PowerProfile::Performance,
+        PowerProfile::Turbo,
+    ]
+    .into_iter()
+    .filter(|profile| {
+        let plan = plan_for(*profile, &capabilities);
+        state_matches_plan(&state, &plan, &capabilities)
+    });
 
-    for p in [PowerProfile::Quiet, PowerProfile::Balanced, PowerProfile::Performance, PowerProfile::Turbo] {
-        let s = settings_for(p);
-        let expect_no_turbo = if s.no_turbo { "1" } else { "0" };
-        if gov == s.governor
-            && epp == s.epp
-            && no_turbo == expect_no_turbo
-            && min_perf == s.min_perf_pct.to_string()
-        {
-            return Some(p);
-        }
-    }
-    None
+    let first = matches.next()?;
+    // Some backends do not expose EPP or Intel's global min_perf control, so
+    // two presets may intentionally resolve to the same observable CPU state.
+    // Returning a made-up first match would always turn Turbo into Performance
+    // (or Balanced into Quiet); let get_current_profile() use its cache only
+    // for this genuinely ambiguous case.
+    matches.next().is_none().then_some(first)
 }
 
 pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     let s = settings_for(profile);
-    let is_root = std::process::Command::new("id").arg("-u").output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
-        .unwrap_or(false);
-    let turbo_val = if s.no_turbo { "1" } else { "0" };
-    let min_pct = s.min_perf_pct.to_string();
-
-    if is_root {
-        // Running as root: write directly
-        let _ = set_governor_direct(s.governor);
-        let _ = set_epp_direct(s.epp);
-        let _ = fs::write("/sys/devices/system/cpu/intel_pstate/no_turbo", turbo_val);
-        let _ = fs::write("/sys/devices/system/cpu/intel_pstate/min_perf_pct", &min_pct);
-        let _ = set_nvidia_direct(s.gpu_watts);
-    } else {
-        // Running as user: through the registered predator-sense-helper
-        // polkit action (auth_admin_keep - one prompt, then cached for a
-        // few minutes) instead of an ad-hoc `pkexec bash -c <script>`,
-        // which (a) is a DIFFERENT, uncached polkit action so it prompted
-        // for a password on every single call, and (b) had its exit status
-        // completely ignored below, so a cancelled/failed authorization was
-        // silently treated as a successful profile change. Both real bugs,
-        // not just this feature's problem - just never surfaced clearly
-        // until the AI assistant started calling this path unattended.
-        run_helper("set-governor", s.governor)?;
-        run_helper("set-epp", s.epp)?;
-        run_helper("set-no-turbo", turbo_val)?;
-        run_helper("set-min-perf", &min_pct)?;
-        let _ = run_helper("set-gpu-power", &s.gpu_watts.to_string()); // no-op, harmless if no NVIDIA GPU
+    let sysfs_root = Path::new(SYSFS_ROOT);
+    let capabilities = detect_cpu_capabilities_at(sysfs_root);
+    if capabilities.policy_dirs.is_empty() {
+        return Err("No CPU frequency policies were found in sysfs".into());
     }
+    let plan = plan_for(profile, &capabilities);
+    let epp = plan.epp.unwrap_or("skip");
+    let no_turbo = plan
+        .no_turbo
+        .map(|disabled| if disabled { "1" } else { "0" })
+        .unwrap_or("skip");
+    let min_perf = plan
+        .min_perf_pct
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "skip".into());
+
+    crate::hardware::applog::info(&format!(
+        "Applying CPU profile {}: governor={}, epp={}, no_turbo={}, min_perf_pct={}, intel_pstate_hwp={}",
+        profile.to_id(),
+        plan.governor,
+        epp,
+        no_turbo,
+        min_perf,
+        capabilities.intel_pstate_hwp_active,
+    ));
+
+    // One privileged transaction performs preflight, ordered writes,
+    // verification and best-effort rollback.  Root executions use the exact
+    // same helper path without pkexec, avoiding a second implementation.
+    run_helper(
+        "apply-cpu-profile",
+        &[plan.governor, epp, no_turbo, min_perf.as_str()],
+    )?;
+
+    let state = read_cpu_state_at(sysfs_root, &capabilities).ok_or_else(|| {
+        "CPU profile was applied but its state could not be read back".to_string()
+    })?;
+    if !state_matches_plan(&state, &plan, &capabilities) {
+        return Err(format!(
+            "CPU profile verification failed after helper success: expected {:?}, got {:?}",
+            plan, state
+        ));
+    }
+
+    // NVIDIA is optional; preserve the existing behavior where systems
+    // without nvidia-smi still apply the CPU profile successfully.
+    let gpu_watts = s.gpu_watts.to_string();
+    let _ = run_helper("set-gpu-power", &[gpu_watts.as_str()]);
 
     // Save the selected profile to state file
     let _ = fs::write(PROFILE_STATE_FILE, profile.to_id());
@@ -193,40 +478,245 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     Ok(())
 }
 
-fn set_governor_direct(gov: &str) -> Result<(), String> {
-    let n = cpu_count();
-    for i in 0..n {
-        fs::write(format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor", i), gov)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-fn set_epp_direct(epp: &str) -> Result<(), String> {
-    let n = cpu_count();
-    for i in 0..n {
-        let _ = fs::write(format!("/sys/devices/system/cpu/cpu{}/cpufreq/energy_performance_preference", i), epp);
-    }
-    Ok(())
-}
-
-fn set_nvidia_direct(watts: u32) -> Result<(), String> {
-    let _ = Command::new("nvidia-smi").args(["-pm", "1"]).output();
-    let _ = Command::new("nvidia-smi").args(["-pl", &watts.to_string()]).output();
-    Ok(())
-}
-
-fn run_helper(action: &str, value: &str) -> Result<(), String> {
+fn run_helper(action: &str, args: &[&str]) -> Result<(), String> {
     let helper = "/opt/predator-sense/predator-sense-helper";
-    let o = Command::new("pkexec").args([helper, action, value]).output()
-        .map_err(|e| format!("pkexec: {}", e))?;
-    if o.status.success() { Ok(()) } else {
-        Err(format!("Helper failed: {}", String::from_utf8_lossy(&o.stderr).trim()))
+    let mut command = if unsafe { libc::geteuid() } == 0 {
+        Command::new(helper)
+    } else {
+        let mut command = Command::new("pkexec");
+        command.arg(helper);
+        command
+    };
+    let output = command
+        .arg(action)
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to launch hardware helper: {}", e))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        let detail = if detail.is_empty() {
+            "no diagnostic output"
+        } else {
+            detail
+        };
+        Err(format!("Helper failed ({}): {}", output.status, detail))
     }
 }
 
-fn cpu_count() -> usize {
-    let mut c = 0;
-    while std::path::Path::new(&format!("/sys/devices/system/cpu/cpu{}/cpufreq/scaling_governor", c)).exists() { c += 1; }
-    c.max(1)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct SysfsFixture {
+        root: PathBuf,
+    }
+
+    impl SysfsFixture {
+        fn new(driver: &str, status: &str, policies: usize, epp_policies: usize) -> Self {
+            let id = FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "predator-sense-profile-test-{}-{}",
+                std::process::id(),
+                id
+            ));
+            let fixture = Self { root };
+            for index in 0..policies {
+                let policy = format!("devices/system/cpu/cpufreq/policy{index}");
+                fixture.write(&format!("{policy}/scaling_driver"), driver);
+                fixture.write(&format!("{policy}/scaling_governor"), "powersave");
+                fixture.write(
+                    &format!("{policy}/scaling_available_governors"),
+                    "performance powersave",
+                );
+                if index < epp_policies {
+                    fixture.write(
+                        &format!("{policy}/energy_performance_preference"),
+                        "balance_performance",
+                    );
+                    fixture.write(
+                        &format!("{policy}/energy_performance_available_preferences"),
+                        "default performance balance_performance balance_power power",
+                    );
+                }
+            }
+            fixture.write("devices/system/cpu/intel_pstate/status", status);
+            fixture
+        }
+
+        fn write(&self, relative: &str, value: &str) {
+            let path = self.root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, format!("{value}\n")).unwrap();
+        }
+
+        fn add_intel_limits(&self, no_turbo: bool, min_perf_pct: u32) {
+            self.write(
+                "devices/system/cpu/intel_pstate/no_turbo",
+                if no_turbo { "1" } else { "0" },
+            );
+            self.write(
+                "devices/system/cpu/intel_pstate/min_perf_pct",
+                &min_perf_pct.to_string(),
+            );
+        }
+
+        fn set_policy_value(&self, attribute: &str, value: &str, policies: usize) {
+            for index in 0..policies {
+                self.write(
+                    &format!("devices/system/cpu/cpufreq/policy{index}/{attribute}"),
+                    value,
+                );
+            }
+        }
+    }
+
+    impl Drop for SysfsFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn active_intel_pstate_hwp_has_distinct_performance_and_turbo_plans() {
+        let fixture = SysfsFixture::new("intel_pstate", "active", 2, 2);
+        fixture.add_intel_limits(false, 17);
+        let capabilities = detect_cpu_capabilities_at(&fixture.root);
+
+        assert!(capabilities.intel_pstate_hwp_active);
+        let performance = plan_for(PowerProfile::Performance, &capabilities);
+        assert_eq!(performance.governor, "powersave");
+        assert_eq!(performance.epp, Some("performance"));
+        assert_eq!(performance.min_perf_pct, Some(50));
+
+        let turbo = plan_for(PowerProfile::Turbo, &capabilities);
+        assert_eq!(turbo.governor, "performance");
+        assert_eq!(turbo.epp, Some("0"));
+        assert_eq!(turbo.min_perf_pct, Some(100));
+
+        assert_eq!(
+            plan_for(PowerProfile::Balanced, &capabilities).epp,
+            Some("balance_performance")
+        );
+    }
+
+    #[test]
+    fn hwp_detection_requires_driver_status_and_epp_on_every_policy() {
+        let passive = SysfsFixture::new("intel_pstate", "passive", 2, 2);
+        let other_driver = SysfsFixture::new("intel_cpufreq", "active", 2, 2);
+        let incomplete_epp = SysfsFixture::new("intel_pstate", "active", 2, 1);
+
+        assert!(!detect_cpu_capabilities_at(&passive.root).intel_pstate_hwp_active);
+        assert!(!detect_cpu_capabilities_at(&other_driver.root).intel_pstate_hwp_active);
+        let incomplete = detect_cpu_capabilities_at(&incomplete_epp.root);
+        assert!(!incomplete.intel_pstate_hwp_active);
+        assert!(!incomplete.epp_supported);
+        assert_eq!(plan_for(PowerProfile::Performance, &incomplete).epp, None);
+    }
+
+    #[test]
+    fn other_epp_drivers_keep_the_named_preference() {
+        let fixture = SysfsFixture::new("amd-pstate-epp", "off", 2, 2);
+        let capabilities = detect_cpu_capabilities_at(&fixture.root);
+
+        assert!(!capabilities.intel_pstate_hwp_active);
+        let performance = plan_for(PowerProfile::Performance, &capabilities);
+        assert_eq!(performance.governor, "performance");
+        assert_eq!(performance.epp, Some("performance"));
+    }
+
+    #[test]
+    fn unavailable_optional_controls_are_skipped() {
+        let fixture = SysfsFixture::new("acpi-cpufreq", "off", 2, 0);
+        let capabilities = detect_cpu_capabilities_at(&fixture.root);
+        let plan = plan_for(PowerProfile::Balanced, &capabilities);
+
+        assert_eq!(plan.epp, None);
+        assert_eq!(plan.no_turbo, None);
+        assert_eq!(plan.min_perf_pct, None);
+    }
+
+    #[test]
+    fn indistinguishable_profiles_defer_to_the_cached_selection() {
+        let fixture = SysfsFixture::new("acpi-cpufreq", "off", 2, 0);
+
+        // Quiet and Balanced both resolve to powersave when this generic
+        // backend exposes neither EPP nor Intel-specific limits.
+        assert_eq!(detect_from_hardware_at(&fixture.root), None);
+    }
+
+    #[test]
+    fn hwp_hardware_state_distinguishes_performance_from_turbo() {
+        let fixture = SysfsFixture::new("intel_pstate", "active", 2, 2);
+        fixture.add_intel_limits(false, 50);
+        fixture.set_policy_value("scaling_governor", "powersave", 2);
+        fixture.set_policy_value("energy_performance_preference", "performance", 2);
+
+        assert_eq!(
+            detect_from_hardware_at(&fixture.root),
+            Some(PowerProfile::Performance)
+        );
+
+        fixture.set_policy_value("scaling_governor", "performance", 2);
+        // Model-specific EPP tables may render the forced raw zero as
+        // "default" instead of the named "performance" preference.
+        fixture.set_policy_value("energy_performance_preference", "default", 2);
+        fixture.write("devices/system/cpu/intel_pstate/min_perf_pct", "100");
+        assert_eq!(
+            detect_from_hardware_at(&fixture.root),
+            Some(PowerProfile::Turbo)
+        );
+    }
+
+    #[test]
+    fn mixed_policy_state_is_not_reported_as_an_active_profile() {
+        let fixture = SysfsFixture::new("intel_pstate", "active", 2, 2);
+        fixture.add_intel_limits(false, 50);
+        fixture.set_policy_value("scaling_governor", "powersave", 2);
+        fixture.set_policy_value("energy_performance_preference", "performance", 2);
+        fixture.write(
+            "devices/system/cpu/cpufreq/policy1/scaling_governor",
+            "performance",
+        );
+
+        assert_eq!(detect_from_hardware_at(&fixture.root), None);
+    }
+
+    #[test]
+    fn cpu_policy_info_explains_intel_hwp_policy_semantics() {
+        let fixture = SysfsFixture::new("intel_pstate", "active", 2, 2);
+        fixture.add_intel_limits(false, 50);
+
+        let dynamic = cpu_policy_info_at(&fixture.root).unwrap();
+        assert_eq!(dynamic.kind, CpuPolicyKind::IntelHwpDynamic);
+        assert_eq!(dynamic.governor, "powersave");
+        assert_eq!(dynamic.epp.as_deref(), Some("balance_performance"));
+
+        fixture.set_policy_value("scaling_governor", "performance", 2);
+        fixture.set_policy_value("energy_performance_preference", "default", 2);
+        let maximum = cpu_policy_info_at(&fixture.root).unwrap();
+        assert_eq!(maximum.kind, CpuPolicyKind::IntelHwpMaximum);
+        assert_eq!(maximum.governor, "performance");
+        assert_eq!(maximum.epp.as_deref(), Some("default"));
+    }
+
+    #[test]
+    fn cpu_policy_info_keeps_generic_governor_semantics() {
+        let fixture = SysfsFixture::new("acpi-cpufreq", "off", 2, 0);
+        let info = cpu_policy_info_at(&fixture.root).unwrap();
+
+        assert_eq!(info.kind, CpuPolicyKind::Other);
+        assert_eq!(info.governor, "powersave");
+        assert_eq!(info.epp, None);
+    }
 }
