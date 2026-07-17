@@ -1,7 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
 use std::cell::RefCell;
-use std::f64::consts::PI;
+use std::f64::consts::{PI, TAU};
 use std::rc::Rc;
 
 use crate::hardware::procs::{self, ProcessInfo, UsageSample, UsageSampler};
@@ -632,9 +632,9 @@ fn build_mem_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
             format_kb(mi.used_kb()),
             format_kb(mi.total_kb)
         ));
-        used_c.set_text(&format!("{}", format_kb(mi.used_kb())));
-        cached_c.set_text(&format!("{}", format_kb(mi.cached_kb + mi.buffers_kb)));
-        avail_c.set_text(&format!("{}", format_kb(mi.available_kb)));
+        used_c.set_text(&format_kb(mi.used_kb()));
+        cached_c.set_text(&format_kb(mi.cached_kb + mi.buffers_kb));
+        avail_c.set_text(&format_kb(mi.available_kb));
         swap_c.set_text(&format!(
             "{} / {}",
             format_kb(mi.swap_used_kb()),
@@ -1061,7 +1061,7 @@ fn draw_big_gauge(cr: &gtk4::cairo::Context, w: f64, h: f64, value: f64, phase: 
     let cy = h / 2.0;
     let r = w.min(h) / 2.0 - 18.0;
     let fraction = (value / 100.0).clamp(0.0, 1.0);
-    let pulse = 0.75 + 0.25 * ((phase * 6.28).sin() * 0.5 + 0.5);
+    let pulse = 0.75 + 0.25 * ((phase * TAU).sin() * 0.5 + 0.5);
 
     // Anel dashed de fundo
     cr.set_line_width(14.0);
@@ -1146,7 +1146,7 @@ fn draw_per_core(cr: &gtk4::cairo::Context, w: f64, h: f64, cores: &[f64], phase
         } else {
             (0.95, 0.25, 0.2)
         };
-        let pulse = 0.75 + 0.25 * ((phase * 6.28 + i as f64 * 0.3).sin() * 0.5 + 0.5);
+        let pulse = 0.75 + 0.25 * ((phase * TAU + i as f64 * 0.3).sin() * 0.5 + 0.5);
         // Glow
         cr.set_source_rgba(rc, gc, bc, 0.25 * pulse);
         rounded_rect(cr, x - 1.0, y - 1.0, bar_w + 2.0, bar_h + 2.0, 3.5);
@@ -1198,7 +1198,7 @@ fn draw_mem_bar(
     let apps_w = bw * (apps / total).clamp(0.0, 1.0);
     let cached_w = bw * (cached / total).clamp(0.0, 1.0);
 
-    let pulse = 0.85 + 0.15 * ((phase * 6.28).sin() * 0.5 + 0.5);
+    let pulse = 0.85 + 0.15 * ((phase * TAU).sin() * 0.5 + 0.5);
 
     // Apps (azul neon)
     let grad = gtk4::cairo::LinearGradient::new(margin, margin, margin + apps_w, margin);
@@ -1255,7 +1255,7 @@ fn draw_donut(cr: &gtk4::cairo::Context, w: f64, h: f64, pct: f64, phase: f64) {
         } else {
             (0.95, 0.25, 0.2)
         };
-        let pulse = 0.8 + 0.2 * ((phase * 6.28).sin() * 0.5 + 0.5);
+        let pulse = 0.8 + 0.2 * ((phase * TAU).sin() * 0.5 + 0.5);
         // Glow
         cr.set_source_rgba(rc, gc, bc, 0.22 * pulse);
         cr.set_line_width(14.0);
@@ -1302,7 +1302,7 @@ fn draw_proc_bar(
     if f < 0.001 {
         return;
     }
-    let pulse = 0.8 + 0.2 * ((phase * 6.28).sin() * 0.5 + 0.5);
+    let pulse = 0.8 + 0.2 * ((phase * TAU).sin() * 0.5 + 0.5);
     cr.set_source_rgba(color.0, color.1, color.2, 0.95 * pulse);
     rounded_rect(cr, margin, margin, bw * f, bh, 3.0);
     let _ = cr.fill();
@@ -1360,7 +1360,7 @@ fn draw_temp_gauge(cr: &gtk4::cairo::Context, w: f64, h: f64, temp_c: f64, phase
         let _ = cr.fill();
 
         // Bolha pulsante na base
-        let pulse = 0.8 + 0.2 * ((phase * 6.28).sin() * 0.5 + 0.5);
+        let pulse = 0.8 + 0.2 * ((phase * TAU).sin() * 0.5 + 0.5);
         cr.set_source_rgba(1.0, 0.5, 0.1, 0.6 * pulse);
         cr.arc(tube_x + tube_w / 2.0, tube_bottom - 2.0, tube_w * 0.8, 0.0, 2.0 * PI);
         let _ = cr.fill();
@@ -1416,7 +1416,7 @@ fn draw_temp_gauge(cr: &gtk4::cairo::Context, w: f64, h: f64, temp_c: f64, phase
     } else {
         (0.95, 0.2, 0.1)
     };
-    let pulse_border = 0.5 + 0.5 * ((phase * 6.28).sin() * 0.5 + 0.5);
+    let pulse_border = 0.5 + 0.5 * ((phase * TAU).sin() * 0.5 + 0.5);
     cr.set_source_rgba(br, bg, bb, 0.4 + 0.35 * pulse_border);
     cr.set_line_width(2.0);
     rounded_rect(cr, 1.0, 1.0, w - 2.0, h - 2.0, 4.0);
@@ -1762,7 +1762,7 @@ fn draw_vram_donut(
         } else {
             (0.95, 0.25, 0.2)
         };
-        let pulse = 0.8 + 0.2 * ((phase * 6.28).sin() * 0.5 + 0.5);
+        let pulse = 0.8 + 0.2 * ((phase * TAU).sin() * 0.5 + 0.5);
         // Glow
         for gi in 0..3 {
             let alpha = (0.18 / (gi as f64 + 1.0)) * pulse;
@@ -1839,7 +1839,7 @@ fn draw_power_gauge(
     let _ = cr.fill();
 
     if frac > 0.001 {
-        let pulse = 0.8 + 0.2 * ((phase * 6.28).sin() * 0.5 + 0.5);
+        let pulse = 0.8 + 0.2 * ((phase * TAU).sin() * 0.5 + 0.5);
         let grad = gtk4::cairo::LinearGradient::new(bar_x, 0.0, bar_x + bar_w, 0.0);
         grad.add_color_stop_rgba(0.0, 0.15, 0.65, 0.95, 1.0);
         grad.add_color_stop_rgba(0.7, 0.0, 0.8, 0.95, 1.0);

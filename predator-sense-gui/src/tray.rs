@@ -1,11 +1,18 @@
-use std::path::PathBuf;
-use std::process::Command;
+use predator_sense_protocol::{binary, internal, path};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
-const LOCK_FILE: &str = "/tmp/predator-sense-tray.lock";
-const LOG_FILE: &str = "/tmp/predator-sense-tray.log";
+const PROCESS_CMDLINE: &str = "cmdline";
 
-/// Manages the system tray helper process.
-/// The tray runs as a detached process so it survives even if the main app hides.
+struct TrayCommand {
+    executable: PathBuf,
+    arguments: Vec<&'static str>,
+}
+
+/// Manages the detached Rust StatusNotifierItem process.
 pub struct TrayManager {
     pub started: bool,
 }
@@ -15,102 +22,117 @@ impl TrayManager {
         Self { started: false }
     }
 
-    /// Start the tray helper as a detached background process. Idempotente: se já houver
-    /// um tray rodando e saudável, não duplica. Se o anterior morreu sem limpar lock, reinicia.
+    /// Starts the tray process once and recovers from stale lock files.
     pub fn start(&mut self) {
-        let script = match find_tray_script() {
-            Some(s) => s,
-            None => {
-                eprintln!("[tray] tray_helper.py não encontrado");
-                return;
-            }
-        };
-
-        // Se há um tray rodando com PID válido, nada a fazer.
         if let Some(pid) = live_tray_pid() {
-            eprintln!("[tray] já rodando (PID {})", pid);
+            eprintln!("[tray] já rodando (PID {pid})");
             self.started = true;
             return;
         }
-
-        // Limpa lock stale
-        let _ = std::fs::remove_file(LOCK_FILE);
-
-        // Captura stderr em log pra diagnóstico
-        let stderr_stdio = match std::fs::File::create(LOG_FILE) {
-            Ok(f) => std::process::Stdio::from(f),
-            Err(_) => std::process::Stdio::null(),
+        let Some(tray) = find_tray_command() else {
+            eprintln!("[tray] binário Rust não encontrado");
+            return;
         };
-
-        // Usa `setsid --fork` pra criar nova sessão e completamente desacoplar do processo
-        // pai (evita o filho virar zombie ao herdar process-group/signals do GTK).
-        match Command::new("setsid")
-            .arg("--fork")
-            .arg("python3")
-            .arg("-u") // unbuffered stdout/stderr
-            .arg(&script)
-            .env("PYTHONUNBUFFERED", "1")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(stderr_stdio)
-            .spawn()
-        {
+        let _ = std::fs::remove_file(path::TRAY_LOCK);
+        let stderr = std::fs::File::create(path::TRAY_LOG)
+            .map(Stdio::from)
+            .unwrap_or_else(|_| Stdio::null());
+        let mut command = Command::new(&tray.executable);
+        command
+            .args(tray.arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(stderr);
+        // SAFETY: this hook only calls the async-signal-safe setsid syscall in the child between
+        // fork and exec. A separate session lets the tray survive the GUI window/process lifetime.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        match command.spawn() {
             Ok(child) => {
-                eprintln!("[tray] helper spawned via setsid (launcher pid {})", child.id());
-                // Faz reap do launcher imediato pra não virar zombie
-                let _ = child.wait_with_output();
+                eprintln!("[tray] processo Rust iniciado (PID {})", child.id());
                 self.started = true;
             }
-            Err(e) => eprintln!("[tray] falha ao spawnar: {}", e),
+            Err(error) => eprintln!("[tray] falha ao iniciar: {error}"),
         }
     }
 }
 
-/// Lê o PID do lock file e verifica se o processo ainda vive.
 fn live_tray_pid() -> Option<u32> {
-    let content = std::fs::read_to_string(LOCK_FILE).ok()?;
-    let pid: u32 = content.trim().parse().ok()?;
+    let pid = std::fs::read_to_string(path::TRAY_LOCK)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()?;
     if pid == 0 {
         return None;
     }
-    // /proc/<pid>/comm existe se o processo vive
-    if std::path::Path::new(&format!("/proc/{}/comm", pid)).exists() {
-        // Confirma que é python (tray_helper.py)
-        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
-            if comm.trim().starts_with("python") {
-                return Some(pid);
-            }
-        }
-    }
-    None
+    let cmdline = std::fs::read(format!("/proc/{pid}/{PROCESS_CMDLINE}")).ok()?;
+    is_tray_command_line(&cmdline).then_some(pid)
 }
 
-// No Drop implementation - tray process lives independently
+fn is_tray_command_line(command_line: &[u8]) -> bool {
+    let mut arguments = command_line
+        .split(|byte| *byte == 0)
+        .filter(|argument| !argument.is_empty());
+    let Some(argument_zero) = arguments.next() else {
+        return false;
+    };
+    let executable = Path::new(OsStr::from_bytes(argument_zero));
+    executable.file_name() == Some(OsStr::new(binary::TRAY))
+        || arguments.any(|argument| argument == internal::TRAY_ARGUMENT.as_bytes())
+}
 
-fn find_tray_script() -> Option<PathBuf> {
+fn find_tray_command() -> Option<TrayCommand> {
+    let installed = PathBuf::from(path::TRAY);
+    if installed.is_file() {
+        return Some(TrayCommand {
+            executable: installed,
+            arguments: Vec::new(),
+        });
+    }
+    let executable = std::env::current_exe().ok()?;
+    let target_dir = executable.parent()?;
     let candidates = [
-        "/opt/predator-sense/tray_helper.py",
-        "/opt/predator-sense/resources/tray_helper.py",
+        target_dir.join(format!(
+            "../../installer/target/release/{}",
+            binary::INSTALLER
+        )),
+        target_dir.join(format!(
+            "../../installer/target/debug/{}",
+            binary::INSTALLER
+        )),
     ];
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .map(|executable| TrayCommand {
+            executable,
+            arguments: vec![internal::TRAY_ARGUMENT],
+        })
+}
 
-    for path in &candidates {
-        let p = PathBuf::from(path);
-        if p.exists() {
-            return Some(p);
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installed_tray_contract_is_stable() {
+        assert!(path::TRAY.ends_with(binary::TRAY));
+        assert!(is_tray_command_line(
+            b"/opt/predator-sense/predator-sense-tray\0"
+        ));
+        assert!(is_tray_command_line(
+            b"/tmp/predator-sense-installer\0--internal-tray\0"
+        ));
+        assert!(!is_tray_command_line(
+            b"/opt/predator-sense/predator-sense-tray-old\0"
+        ));
     }
-
-    // Try relative to executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for rel in &["tray_helper.py", "resources/tray_helper.py", "../../resources/tray_helper.py"] {
-                let p = dir.join(rel);
-                if p.exists() {
-                    return p.canonicalize().ok();
-                }
-            }
-        }
-    }
-
-    None
 }

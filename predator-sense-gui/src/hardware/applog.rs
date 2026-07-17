@@ -1,5 +1,5 @@
 //! Minimal persistent logging for the app side (issue #7). Complements the
-//! hotkey daemon's own Python logging - together they cover the pieces that
+//! Rust hotkey service's own logging - together they cover the pieces that
 //! were invisible during issue #4's remote debugging (profile switches, RGB
 //! HID writes, permission errors), without needing dmesg or live reproduction.
 

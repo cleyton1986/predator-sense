@@ -15,8 +15,8 @@ use crate::ui::{
 };
 
 thread_local! {
-    static HOLD_GUARD: RefCell<Option<gio::ApplicationHoldGuard>> = RefCell::new(None);
-    static TRAY: RefCell<Option<TrayManager>> = RefCell::new(None);
+    static HOLD_GUARD: RefCell<Option<gio::ApplicationHoldGuard>> = const { RefCell::new(None) };
+    static TRAY: RefCell<Option<TrayManager>> = const { RefCell::new(None) };
 }
 
 pub fn build(app: &adw::Application) {
@@ -881,12 +881,11 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
         // NON_UNIQUE) registered on the session D-Bus - spawning the
         // replacement before this process actually exits would just have it
         // hand off to the dying primary instance and quit immediately,
-        // leaving no window at all. `sleep 0.5` in the child gives the D-Bus
-        // name time to free up before it tries to register.
+        // leaving no window at all. The replacement's typed internal argument
+        // delays GTK initialization long enough for the D-Bus name to be freed.
         if let Ok(exe) = std::env::current_exe() {
-            let _ = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!("sleep 0.5; exec {:?}", exe))
+            let _ = std::process::Command::new(exe)
+                .arg(predator_sense_protocol::internal::DELAYED_APPLICATION_START_ARGUMENT)
                 .spawn();
         }
         std::process::exit(0);

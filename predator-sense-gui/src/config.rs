@@ -60,7 +60,7 @@ pub struct AppConfig {
     pub debug_logging: bool,
     /// Last-applied static RGB zone colors (issue #11: nothing persisted this
     /// before, so a full power cycle always reset the keyboard to its default
-    /// pulsing effect). Reapplied after login/resume by hotkey-daemon.py.
+    /// pulsing effect). Reapplied after login/resume by the Rust hotkey service.
     #[serde(default)]
     pub rgb_static_zones: Option<Vec<ZoneColor>>,
     #[serde(default = "default_rgb_brightness")]
@@ -169,11 +169,7 @@ pub fn set_autostart(enabled: bool) {
     let _ = std::fs::create_dir_all(&autostart_dir);
 
     let app_path = autostart_dir.join("predator-sense.desktop");
-    let hotkey_path = autostart_dir.join("predator-sense-hotkey.desktop");
-    // The installer-managed systemd user service is the only hotkey listener.
-    // Always clean up the legacy XDG entry so toggling app autostart cannot
-    // reintroduce a second listener and duplicate lighting restores.
-    let _ = std::fs::remove_file(&hotkey_path);
+    let legacy_hotkey_path = autostart_dir.join("predator-sense-hotkey.desktop");
 
     if enabled {
         let app_desktop = "[Desktop Entry]\n\
@@ -188,6 +184,9 @@ Comment=Predator Sense for Linux\n";
     } else {
         let _ = std::fs::remove_file(&app_path);
     }
+    // The key listener has a single source of truth: its systemd user unit. Always remove the
+    // legacy desktop entry so enabling app autostart cannot create a duplicate listener.
+    let _ = std::fs::remove_file(&legacy_hotkey_path);
 }
 
 /// Get the configuration directory path

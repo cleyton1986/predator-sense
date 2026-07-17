@@ -248,21 +248,11 @@ fn parse_optional_u32(value: &str) -> Option<u32> {
 
 /// Set GPU power limit (TGP) in watts via the helper (nvidia-smi -pl, root).
 pub fn set_power_limit(watts: u32) -> Result<(), String> {
-    let helper = "/opt/predator-sense/predator-sense-helper";
-    let is_root = Command::new("id").arg("-u").output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
-        .unwrap_or(false);
-    let w = watts.to_string();
-    let result = if is_root {
-        Command::new(helper).args(["set-gpu-power", &w]).output()
-    } else {
-        Command::new("pkexec").args([helper, "set-gpu-power", &w]).output()
-    };
-    match result {
-        Ok(o) if o.status.success() => Ok(()),
-        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
-        Err(e) => Err(e.to_string()),
-    }
+    let watts = watts.to_string();
+    crate::hardware::helper::execute(
+        predator_sense_protocol::helper::Action::SetGpuPower,
+        &[watts.as_str()],
+    )
 }
 
 fn clamp_watts(watts: u32, min_w: f64, max_w: f64) -> u32 {

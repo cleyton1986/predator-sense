@@ -335,11 +335,10 @@
     min-height: 4px;
 }
 
+/* Keep the theme's slider size and negative margins as a matched pair. */
 .accent-scale slider {
     background-color: @cyan;
     border-radius: 2px;
-    min-width: 14px;
-    min-height: 14px;
 }
 
 .color-scale trough {
@@ -356,8 +355,6 @@
 .color-scale slider {
     background-color: @text_main;
     border-radius: 2px;
-    min-width: 12px;
-    min-height: 12px;
 }
 
 .scale-value {

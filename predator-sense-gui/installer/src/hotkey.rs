@@ -1,0 +1,995 @@
+use crate::constants::{app, command, hardware, logging, path, timing};
+use crate::process::process_running;
+use crate::AppResult;
+use serde::{Deserialize, Deserializer};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::mem::{size_of, MaybeUninit};
+use std::os::fd::AsRawFd;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const USER_CONFIG: &str = ".config/predator-sense/config.json";
+const USER_LOG_DIR: &str = ".local/share/predator-sense";
+const DAEMON_LOG: &str = "daemon.log";
+const DEBUG_LOG_LEVEL: &str = "debug";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LightingCommand {
+    target: u8,
+    mode: u8,
+    brightness: u8,
+    speed: u8,
+    flag: u8,
+    red: u8,
+    green: u8,
+    blue: u8,
+    zones: u16,
+}
+
+impl LightingCommand {
+    const fn into_bytes(self) -> [u8; hardware::HID_FEATURE_REPORT_LEN] {
+        [
+            hardware::HID_REPORT_LIGHTING,
+            self.target,
+            self.mode,
+            self.brightness,
+            self.speed,
+            self.flag,
+            self.red,
+            self.green,
+            self.blue,
+            self.zones as u8,
+            (self.zones >> 8) as u8,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TargetCapabilities {
+    zone_mask: u16,
+    mode_mask: u32,
+}
+
+impl TargetCapabilities {
+    fn supports(self, mode: u8) -> bool {
+        (1..=32).contains(&mode) && self.mode_mask & (1u32 << (mode - 1)) != 0
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct Config {
+    #[serde(default)]
+    debug_logging: bool,
+    #[serde(default, deserialize_with = "deserialize_rgb_zones")]
+    rgb_static_zones: Vec<RgbZone>,
+    #[serde(default = "default_brightness")]
+    rgb_brightness: i64,
+    #[serde(default)]
+    cover_logo: Option<CoverLogoConfig>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            debug_logging: false,
+            rgb_static_zones: Vec::new(),
+            rgb_brightness: default_brightness(),
+            cover_logo: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct RgbZone {
+    zone: i64,
+    #[serde(default)]
+    red: i64,
+    #[serde(default)]
+    green: i64,
+    #[serde(default)]
+    blue: i64,
+}
+
+fn deserialize_rgb_zones<'de, D>(deserializer: D) -> Result<Vec<RgbZone>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<Vec<RgbZone>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+#[derive(Debug, Deserialize)]
+struct CoverLogoConfig {
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    config: SavedLightingConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct SavedLightingConfig {
+    #[serde(default)]
+    mode: SavedRgbMode,
+    #[serde(default = "default_effect_speed")]
+    speed: u8,
+    #[serde(default = "default_brightness_u8")]
+    brightness: u8,
+    #[serde(default)]
+    red: u8,
+    #[serde(default = "default_green_blue")]
+    green: u8,
+    #[serde(default = "default_green_blue")]
+    blue: u8,
+}
+
+impl Default for SavedLightingConfig {
+    fn default() -> Self {
+        Self {
+            mode: SavedRgbMode::Static,
+            speed: default_effect_speed(),
+            brightness: default_brightness_u8(),
+            red: 0,
+            green: default_green_blue(),
+            blue: default_green_blue(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
+enum SavedRgbMode {
+    #[default]
+    Static,
+    Breath,
+    Neon,
+    #[serde(other)]
+    Unsupported,
+}
+
+fn default_brightness() -> i64 {
+    hardware::RGB_MAX_BRIGHTNESS
+}
+
+fn default_brightness_u8() -> u8 {
+    hardware::RGB_MAX_BRIGHTNESS as u8
+}
+
+fn default_effect_speed() -> u8 {
+    hardware::RGB_DEFAULT_SPEED
+}
+
+fn default_green_blue() -> u8 {
+    u8::MAX
+}
+
+fn default_true() -> bool {
+    true
+}
+
+struct Logger {
+    file: Option<File>,
+    debug: bool,
+}
+
+impl Logger {
+    fn from_config(config: &Config, home: &Path) -> Self {
+        if !config.debug_logging {
+            return Self {
+                file: None,
+                debug: false,
+            };
+        }
+        let directory = home.join(USER_LOG_DIR);
+        let path = directory.join(DAEMON_LOG);
+        let _ = fs::create_dir_all(&directory);
+        rotate_log(&path);
+        let file = OpenOptions::new().create(true).append(true).open(path).ok();
+        Self {
+            file,
+            debug: std::env::var("PREDATOR_LOG_LEVEL").as_deref() == Ok(DEBUG_LOG_LEVEL),
+        }
+    }
+
+    fn info(&mut self, message: impl AsRef<str>) {
+        self.write("INFO", message.as_ref());
+    }
+
+    fn debug(&mut self, message: impl AsRef<str>) {
+        if self.debug {
+            self.write("DEBUG", message.as_ref());
+        }
+    }
+
+    fn error(&mut self, message: impl AsRef<str>) {
+        self.write("ERROR", message.as_ref());
+    }
+
+    fn write(&mut self, level: &str, message: &str) {
+        let Some(file) = self.file.as_mut() else {
+            return;
+        };
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let _ = writeln!(file, "{timestamp} {level} {message}");
+        let _ = file.flush();
+    }
+}
+
+pub(crate) fn run() -> AppResult {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| "predator-sense-hotkey: HOME não está definido".to_string())?;
+    let config_path = home.join(USER_CONFIG);
+    let config = load_config(&config_path);
+    let mut logger = Logger::from_config(&config, &home);
+    logger.info(format!("Daemon Rust iniciado, PID {}", std::process::id()));
+    restore_lighting_with_retries(&config_path, &mut logger);
+
+    let paths = find_keyboards(Path::new(path::INPUT_DEVICES))?;
+    if paths.is_empty() {
+        return Err(
+            "predator-sense-hotkey: nenhum dispositivo de hotkey compatível encontrado".into(),
+        );
+    }
+    logger.info(format!("Monitorando: {:?}", paths));
+
+    let mut devices = Vec::new();
+    for path in paths {
+        match File::open(&path) {
+            Ok(file) => devices.push((path, file)),
+            Err(error) => logger.error(format!("Falha ao abrir {}: {error}", path.display())),
+        }
+    }
+    if devices.is_empty() {
+        return Err(
+            "predator-sense-hotkey: nenhum dispositivo pôde ser aberto; verifique o grupo input"
+                .into(),
+        );
+    }
+
+    let mut last_activation =
+        Instant::now() - Duration::from_secs(timing::HOTKEY_INITIAL_DEBOUNCE_SECS);
+    let mut last_suspend_offset = suspend_offset();
+    while !devices.is_empty() {
+        let mut poll_fds = devices
+            .iter()
+            .map(|(_, file)| libc::pollfd {
+                fd: file.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            })
+            .collect::<Vec<_>>();
+        // SAFETY: poll_fds points to initialized pollfd values for the duration of this call.
+        let ready = unsafe {
+            libc::poll(
+                poll_fds.as_mut_ptr(),
+                poll_fds.len() as _,
+                timing::HOTKEY_POLL_MS,
+            )
+        };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(format!("predator-sense-hotkey: poll falhou: {error}"));
+        }
+
+        let current_suspend_offset = suspend_offset();
+        if resumed_since(last_suspend_offset, current_suspend_offset) {
+            logger.info("Retorno de suspensão detectado; restaurando iluminação salva");
+            restore_lighting_with_retries(&config_path, &mut logger);
+        }
+        last_suspend_offset = current_suspend_offset;
+
+        for index in (0..devices.len()).rev() {
+            let events = poll_fds[index].revents;
+            if events & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                logger.error(format!(
+                    "Dispositivo {} foi desconectado",
+                    devices[index].0.display()
+                ));
+                devices.remove(index);
+                continue;
+            }
+            if events & libc::POLLIN == 0 {
+                continue;
+            }
+            match read_input_event(&mut devices[index].1) {
+                Ok(event)
+                    if event.type_ == hardware::INPUT_EVENT_KEY
+                        && event.code == hardware::PREDATOR_KEY_CODE
+                        && event.value == hardware::INPUT_VALUE_PRESS =>
+                {
+                    logger.debug(format!(
+                        "Keycode {} em {}",
+                        hardware::PREDATOR_KEY_CODE,
+                        devices[index].0.display()
+                    ));
+                    if last_activation.elapsed() > Duration::from_secs(timing::HOTKEY_DEBOUNCE_SECS)
+                    {
+                        last_activation = Instant::now();
+                        activate_app(&mut logger);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    logger.error(format!(
+                        "Leitura de {} falhou: {error}",
+                        devices[index].0.display()
+                    ));
+                    devices.remove(index);
+                }
+            }
+        }
+    }
+    Err("predator-sense-hotkey: todos os dispositivos foram desconectados".into())
+}
+
+fn load_config(path: &Path) -> Config {
+    fs::read(path)
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_default()
+}
+
+fn rotate_log(path: &Path) {
+    let needs_rotation = fs::metadata(path)
+        .map(|metadata| metadata.len() >= logging::MAX_BYTES)
+        .unwrap_or(false);
+    if !needs_rotation {
+        return;
+    }
+    let backup = |index: u8| path.with_extension(format!("log.{index}"));
+    let _ = fs::remove_file(backup(logging::BACKUP_COUNT));
+    for index in (1..logging::BACKUP_COUNT).rev() {
+        let _ = fs::rename(backup(index), backup(index + 1));
+    }
+    let _ = fs::rename(path, backup(1));
+}
+
+fn find_keyboards(devices_file: &Path) -> AppResult<Vec<PathBuf>> {
+    let contents = fs::read_to_string(devices_file).map_err(|error| {
+        format!(
+            "predator-sense-hotkey: não foi possível ler {}: {error}",
+            devices_file.display()
+        )
+    })?;
+    Ok(parse_keyboard_devices(&contents)
+        .into_iter()
+        .map(|handler| PathBuf::from(path::INPUT_DEVICE_DIR).join(handler))
+        .collect())
+}
+
+fn parse_keyboard_devices(contents: &str) -> Vec<String> {
+    let mut handlers = Vec::new();
+    for block in contents.split("\n\n") {
+        if !hardware::INPUT_DEVICE_NAMES
+            .iter()
+            .any(|name| block.contains(name))
+        {
+            continue;
+        }
+        for line in block
+            .lines()
+            .filter(|line| line.starts_with("H: Handlers="))
+        {
+            for item in line
+                .split_whitespace()
+                .filter(|item| item.starts_with("event"))
+            {
+                if !handlers.iter().any(|existing| existing == item) {
+                    handlers.push(item.to_string());
+                }
+            }
+        }
+    }
+    handlers
+}
+
+fn read_input_event(file: &mut File) -> std::io::Result<libc::input_event> {
+    let mut event = MaybeUninit::<libc::input_event>::zeroed();
+    // SAFETY: the byte slice covers the initialized allocation for input_event exactly. read_exact
+    // fills every byte before assume_init is reached.
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(
+            event.as_mut_ptr().cast::<u8>(),
+            size_of::<libc::input_event>(),
+        )
+    };
+    file.read_exact(bytes)?;
+    // SAFETY: read_exact initialized every byte and the kernel ABI uses this plain C struct.
+    Ok(unsafe { event.assume_init() })
+}
+
+fn activate_app(logger: &mut Logger) {
+    let mut bus = Command::new(command::GDBUS);
+    bus.args([
+        "call",
+        "--session",
+        "--dest",
+        app::DBUS_ID,
+        "--object-path",
+        app::DBUS_OBJECT_PATH,
+        "--method",
+        app::DBUS_ACTIVATE_METHOD,
+        "[]",
+    ])
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+    ensure_display(&mut bus);
+    if let Err(error) = bus.spawn() {
+        logger.error(format!("Falha ao chamar gdbus: {error}"));
+    }
+
+    if !process_running(path::APPLICATION) {
+        let mut application = Command::new(path::APPLICATION);
+        application
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        ensure_display(&mut application);
+        match application.spawn() {
+            Ok(_) => logger.info("Aplicação iniciada"),
+            Err(error) => logger.error(format!("Falha ao iniciar aplicação: {error}")),
+        }
+    } else {
+        logger.info("Aplicação ativada");
+    }
+}
+
+fn ensure_display(command: &mut Command) {
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        command.env("DISPLAY", app::DEFAULT_DISPLAY);
+    }
+}
+
+fn find_enek5130() -> Option<PathBuf> {
+    let entries = fs::read_dir(path::HIDRAW_CLASS).ok()?;
+    for entry in entries.flatten() {
+        let Ok(uevent) = fs::read_to_string(entry.path().join("device/uevent")) else {
+            continue;
+        };
+        if uevent_matches_enek5130(&uevent) {
+            return Some(PathBuf::from(path::DEVICE_DIR).join(entry.file_name()));
+        }
+    }
+    None
+}
+
+fn uevent_matches_enek5130(uevent: &str) -> bool {
+    uevent.lines().any(|line| {
+        (line.starts_with("HID_NAME=") && line.contains(hardware::HID_NAME_MATCH))
+            || line
+                .strip_prefix("HID_ID=")
+                .and_then(|id| {
+                    let mut fields = id.split(':');
+                    Some((fields.next()?, fields.next()?, fields.next()?))
+                })
+                .map(|(_, vendor, product)| {
+                    vendor.eq_ignore_ascii_case(hardware::HID_VENDOR)
+                        && product.eq_ignore_ascii_case(hardware::HID_PRODUCT)
+                })
+                .unwrap_or(false)
+    })
+}
+
+fn hid_feature_ioctl(operation: libc::c_ulong, length: usize) -> libc::c_ulong {
+    hardware::HID_IOCTL_READ_WRITE
+        | ((length as libc::c_ulong) << hardware::HID_IOCTL_LENGTH_SHIFT)
+        | hardware::HID_IOCTL_TYPE
+        | operation
+}
+
+fn get_feature<const N: usize>(file: &File, report_id: u8) -> AppResult<Vec<u8>> {
+    let mut report = [0u8; N];
+    report[0] = report_id;
+    // SAFETY: the ioctl request encodes N and `report` is a writable N-byte buffer
+    // that remains valid for the duration of the call.
+    let received = unsafe {
+        libc::ioctl(
+            file.as_raw_fd(),
+            hid_feature_ioctl(hardware::HID_IOCTL_GET_FEATURE, N),
+            report.as_mut_ptr(),
+        )
+    };
+    if received <= 0 || received as usize > N {
+        let detail = if received < 0 {
+            std::io::Error::last_os_error().to_string()
+        } else {
+            format!("comprimento inválido {received}")
+        };
+        return Err(format!(
+            "leitura do relatório HID 0x{report_id:02x} falhou: {detail}"
+        ));
+    }
+    Ok(report[..received as usize].to_vec())
+}
+
+fn set_feature(file: &File, report: &mut [u8]) -> AppResult {
+    // SAFETY: the ioctl request encodes the slice length and `report` remains a
+    // valid mutable buffer while the kernel consumes the feature report.
+    let written = unsafe {
+        libc::ioctl(
+            file.as_raw_fd(),
+            hid_feature_ioctl(hardware::HID_IOCTL_SET_FEATURE, report.len()),
+            report.as_mut_ptr(),
+        )
+    };
+    if written == report.len() as libc::c_int {
+        Ok(())
+    } else {
+        let detail = if written < 0 {
+            std::io::Error::last_os_error().to_string()
+        } else {
+            format!("comprimento inválido {written}")
+        };
+        Err(format!(
+            "escrita do relatório HID 0x{:02x} falhou: {detail}",
+            report.first().copied().unwrap_or_default()
+        ))
+    }
+}
+
+fn parse_targets(report: &[u8]) -> AppResult<Vec<u8>> {
+    if report.len() < 2 || report[0] != hardware::HID_REPORT_TARGET_LIST {
+        return Err("relatório A1 de alvos HID inválido".into());
+    }
+    let count = report[1] as usize;
+    if count > report.len() - 2 {
+        return Err(format!(
+            "relatório A1 anuncia {count} alvos, mas contém somente {}",
+            report.len() - 2
+        ));
+    }
+    Ok(report[2..2 + count].to_vec())
+}
+
+fn read_targets(file: &File) -> AppResult<Vec<u8>> {
+    parse_targets(&get_feature::<{ hardware::HID_TARGET_LIST_REPORT_LEN }>(
+        file,
+        hardware::HID_REPORT_TARGET_LIST,
+    )?)
+}
+
+fn parse_target_capabilities(target: u8, report: &[u8]) -> AppResult<TargetCapabilities> {
+    if report.len() < hardware::HID_TARGET_CAPABILITIES_MIN_LEN
+        || report[0] != hardware::HID_REPORT_TARGET_CAPABILITIES
+        || report[1] != target
+    {
+        return Err(format!("relatório A3 inválido para o alvo 0x{target:02x}"));
+    }
+    let zone_count = report[3];
+    if !(1..=hardware::HID_TARGET_MAX_ZONES).contains(&zone_count) {
+        return Err(format!(
+            "quantidade de zonas inválida {zone_count} para o alvo 0x{target:02x}"
+        ));
+    }
+    let mut mode_bytes = [0u8; 4];
+    let available = report.len().saturating_sub(5).min(mode_bytes.len());
+    mode_bytes[..available].copy_from_slice(&report[5..5 + available]);
+    let zone_mask = if zone_count == hardware::HID_TARGET_MAX_ZONES {
+        u16::MAX
+    } else {
+        (1u16 << zone_count) - 1
+    };
+    Ok(TargetCapabilities {
+        zone_mask,
+        mode_mask: u32::from_le_bytes(mode_bytes),
+    })
+}
+
+fn target_capabilities(file: &File, target: u8) -> AppResult<TargetCapabilities> {
+    let mut select = [hardware::HID_REPORT_TARGET_SELECT, target];
+    set_feature(file, &mut select)?;
+    let report = get_feature::<{ hardware::HID_TARGET_CAPABILITIES_REPORT_LEN }>(
+        file,
+        hardware::HID_REPORT_TARGET_CAPABILITIES,
+    )?;
+    parse_target_capabilities(target, &report)
+}
+
+fn keyboard_packets(config: &Config) -> Vec<[u8; hardware::HID_FEATURE_REPORT_LEN]> {
+    let brightness = config
+        .rgb_brightness
+        .clamp(hardware::RGB_MIN_BRIGHTNESS, hardware::RGB_MAX_BRIGHTNESS)
+        as u8;
+    config
+        .rgb_static_zones
+        .iter()
+        .filter_map(|zone| {
+            let index = zone
+                .zone
+                .checked_sub(1)
+                .filter(|index| (0..hardware::RGB_ZONE_COUNT as i64).contains(index))?;
+            Some(
+                LightingCommand {
+                    target: hardware::HID_TARGET_KEYBOARD,
+                    mode: hardware::HID_MODE_STATIC,
+                    brightness,
+                    speed: 0,
+                    // The deployed keyboard static ABI uses a zero flag.
+                    flag: hardware::HID_FEATURE_RESERVED,
+                    red: zone
+                        .red
+                        .clamp(hardware::RGB_MIN_CHANNEL, hardware::RGB_MAX_CHANNEL)
+                        as u8,
+                    green: zone
+                        .green
+                        .clamp(hardware::RGB_MIN_CHANNEL, hardware::RGB_MAX_CHANNEL)
+                        as u8,
+                    blue: zone
+                        .blue
+                        .clamp(hardware::RGB_MIN_CHANNEL, hardware::RGB_MAX_CHANNEL)
+                        as u8,
+                    zones: hardware::RGB_ZONE_MASKS[index as usize] as u16,
+                }
+                .into_bytes(),
+            )
+        })
+        .collect()
+}
+
+fn cover_logo_packet(
+    saved: &CoverLogoConfig,
+    capabilities: TargetCapabilities,
+) -> Option<[u8; hardware::HID_FEATURE_REPORT_LEN]> {
+    let (mode, brightness, speed, flag, color) = if saved.enabled {
+        let mode = match saved.config.mode {
+            SavedRgbMode::Static => hardware::HID_MODE_STATIC,
+            SavedRgbMode::Breath => hardware::HID_MODE_BREATH,
+            SavedRgbMode::Neon => hardware::HID_MODE_NEON,
+            SavedRgbMode::Unsupported => return None,
+        };
+        if !capabilities.supports(mode) {
+            return None;
+        }
+        let speed = if mode == hardware::HID_MODE_STATIC {
+            0
+        } else {
+            saved.config.speed.min(hardware::RGB_MAX_SPEED)
+        };
+        let flag = if mode == hardware::HID_MODE_STATIC {
+            hardware::HID_STATIC_FLAG
+        } else {
+            hardware::HID_EFFECT_FLAG
+        };
+        (
+            mode,
+            saved
+                .config
+                .brightness
+                .min(hardware::RGB_MAX_BRIGHTNESS as u8),
+            speed,
+            flag,
+            (saved.config.red, saved.config.green, saved.config.blue),
+        )
+    } else {
+        if !capabilities.supports(hardware::HID_MODE_STATIC) {
+            return None;
+        }
+        (
+            hardware::HID_MODE_STATIC,
+            0,
+            0,
+            hardware::HID_STATIC_FLAG,
+            (0, 0, 0),
+        )
+    };
+    Some(
+        LightingCommand {
+            target: hardware::HID_TARGET_COVER_LOGO,
+            mode,
+            brightness,
+            speed,
+            flag,
+            red: color.0,
+            green: color.1,
+            blue: color.2,
+            zones: capabilities.zone_mask,
+        }
+        .into_bytes(),
+    )
+}
+
+fn reapply_lighting(config_path: &Path) -> AppResult<bool> {
+    let config = match fs::read(config_path) {
+        Ok(data) => serde_json::from_slice::<Config>(&data)
+            .map_err(|error| format!("configuração de iluminação inválida: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => {
+            return Err(format!(
+                "não foi possível ler {}: {error}",
+                config_path.display()
+            ))
+        }
+    };
+    if config.rgb_static_zones.is_empty() && config.cover_logo.is_none() {
+        return Ok(true);
+    }
+    let Some(device) = find_enek5130() else {
+        return Ok(false);
+    };
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&device)
+        .map_err(|error| format!("não foi possível abrir {}: {error}", device.display()))?;
+    let (targets, discovery_failed) = match read_targets(&file) {
+        Ok(targets) if !targets.is_empty() => (targets, false),
+        Ok(_) | Err(_) => (vec![hardware::HID_TARGET_KEYBOARD], true),
+    };
+
+    if targets.contains(&hardware::HID_TARGET_KEYBOARD) {
+        for mut packet in keyboard_packets(&config) {
+            set_feature(&file, &mut packet)?;
+        }
+    }
+    if targets.contains(&hardware::HID_TARGET_COVER_LOGO) {
+        if let Some(saved) = &config.cover_logo {
+            let capabilities = target_capabilities(&file, hardware::HID_TARGET_COVER_LOGO)?;
+            if let Some(mut packet) = cover_logo_packet(saved, capabilities) {
+                set_feature(&file, &mut packet)?;
+            }
+        }
+    }
+    Ok(!(discovery_failed && config.cover_logo.is_some()))
+}
+
+fn restore_lighting_with_retries(config_path: &Path, logger: &mut Logger) -> bool {
+    let mut last_error = None;
+    for delay in timing::LIGHTING_RESTORE_RETRY_DELAYS_SECS {
+        if delay != 0 {
+            std::thread::sleep(Duration::from_secs(delay));
+        }
+        match reapply_lighting(config_path) {
+            Ok(true) => return true,
+            Ok(false) => {
+                last_error = Some("controlador ou descoberta de alvos indisponível".into())
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    logger.error(format!(
+        "Restauração da iluminação falhou após {} tentativas: {}",
+        timing::LIGHTING_RESTORE_RETRY_DELAYS_SECS.len(),
+        last_error.unwrap_or_else(|| "erro desconhecido".into())
+    ));
+    false
+}
+
+fn suspend_offset() -> f64 {
+    clock_seconds(libc::CLOCK_BOOTTIME)
+        .zip(clock_seconds(libc::CLOCK_MONOTONIC))
+        .map(|(boottime, monotonic)| boottime - monotonic)
+        .unwrap_or_default()
+}
+
+fn clock_seconds(clock: libc::clockid_t) -> Option<f64> {
+    let mut value = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `value` is a valid writable timespec and the supplied clock IDs
+    // are Linux constants selected by `suspend_offset`.
+    (unsafe { libc::clock_gettime(clock, &mut value) } == 0)
+        .then_some(value.tv_sec as f64 + value.tv_nsec as f64 / 1_000_000_000.0)
+}
+
+fn resumed_since(previous: f64, current: f64) -> bool {
+    current - previous > timing::RESUME_THRESHOLD_SECS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_all_matching_input_handlers_without_duplicates() {
+        let devices = "N: Name=\"Acer WMI hotkeys\"\nH: Handlers=kbd event7 \n\n\
+                       N: Name=\"AT Translated Set 2 keyboard\"\nH: Handlers=sysrq kbd event3 event7 \n";
+        assert_eq!(parse_keyboard_devices(devices), ["event7", "event3"]);
+    }
+
+    #[test]
+    fn missing_config_uses_safe_defaults() {
+        let config = load_config(Path::new("/definitely/missing/predator-sense.json"));
+        assert!(!config.debug_logging);
+        assert!(config.rgb_static_zones.is_empty());
+        assert_eq!(config.rgb_brightness, hardware::RGB_MAX_BRIGHTNESS);
+        assert!(config.cover_logo.is_none());
+    }
+
+    #[test]
+    fn static_keyboard_report_has_the_expected_wire_layout() {
+        let report = LightingCommand {
+            target: hardware::HID_TARGET_KEYBOARD,
+            mode: hardware::HID_MODE_STATIC,
+            brightness: 75,
+            speed: 0,
+            flag: 0,
+            red: 1,
+            green: 2,
+            blue: 3,
+            zones: hardware::RGB_ZONE_MASKS[2] as u16,
+        }
+        .into_bytes();
+        assert_eq!(report.len(), hardware::HID_FEATURE_REPORT_LEN);
+        assert_eq!(report[0], hardware::HID_REPORT_LIGHTING);
+        assert_eq!(report[1], hardware::HID_TARGET_KEYBOARD);
+        assert_eq!(report[2], hardware::HID_MODE_STATIC);
+        assert_eq!(report[9], hardware::RGB_ZONE_MASKS[2]);
+    }
+
+    #[test]
+    fn recognizes_enek5130_by_name_or_hid_id() {
+        assert!(uevent_matches_enek5130("HID_NAME=ENEK5130:00\n"));
+        assert!(uevent_matches_enek5130("HID_ID=0018:00000CF2:00005130\n"));
+        assert!(!uevent_matches_enek5130("HID_ID=0018:00001234:00005678\n"));
+    }
+
+    #[test]
+    fn ioctl_numbers_are_derived_from_operation_and_buffer_length() {
+        assert_eq!(
+            hid_feature_ioctl(
+                hardware::HID_IOCTL_SET_FEATURE,
+                hardware::HID_FEATURE_REPORT_LEN
+            ),
+            0xc00b_4806
+        );
+        assert_eq!(
+            hid_feature_ioctl(
+                hardware::HID_IOCTL_GET_FEATURE,
+                hardware::HID_TARGET_CAPABILITIES_REPORT_LEN
+            ),
+            0xc009_4807
+        );
+    }
+
+    #[test]
+    fn validates_target_discovery_and_capabilities() {
+        assert_eq!(
+            parse_targets(&[
+                hardware::HID_REPORT_TARGET_LIST,
+                2,
+                hardware::HID_TARGET_KEYBOARD,
+                hardware::HID_TARGET_COVER_LOGO,
+            ])
+            .unwrap(),
+            [
+                hardware::HID_TARGET_KEYBOARD,
+                hardware::HID_TARGET_COVER_LOGO
+            ]
+        );
+        assert!(parse_targets(&[hardware::HID_REPORT_TARGET_LIST, 3, 0x21]).is_err());
+
+        let capabilities = parse_target_capabilities(
+            hardware::HID_TARGET_COVER_LOGO,
+            &[
+                hardware::HID_REPORT_TARGET_CAPABILITIES,
+                hardware::HID_TARGET_COVER_LOGO,
+                1,
+                5,
+                1,
+                0x1a,
+            ],
+        )
+        .unwrap();
+        assert_eq!(capabilities.zone_mask, 0x1f);
+        assert!(capabilities.supports(hardware::HID_MODE_STATIC));
+        assert!(capabilities.supports(hardware::HID_MODE_BREATH));
+        assert!(capabilities.supports(hardware::HID_MODE_NEON));
+    }
+
+    #[test]
+    fn cover_logo_packet_restores_effects_and_off_state() {
+        let capabilities = TargetCapabilities {
+            zone_mask: 0x1f,
+            mode_mask: 0x1a,
+        };
+        let mut saved = CoverLogoConfig {
+            enabled: true,
+            config: SavedLightingConfig {
+                mode: SavedRgbMode::Breath,
+                speed: 42,
+                brightness: 200,
+                red: 12,
+                green: 34,
+                blue: 56,
+            },
+        };
+        assert_eq!(
+            cover_logo_packet(&saved, capabilities).unwrap(),
+            [
+                hardware::HID_REPORT_LIGHTING,
+                hardware::HID_TARGET_COVER_LOGO,
+                hardware::HID_MODE_BREATH,
+                100,
+                hardware::RGB_MAX_SPEED,
+                hardware::HID_EFFECT_FLAG,
+                12,
+                34,
+                56,
+                0x1f,
+                0,
+            ]
+        );
+
+        saved.enabled = false;
+        assert_eq!(
+            cover_logo_packet(&saved, capabilities).unwrap(),
+            [
+                hardware::HID_REPORT_LIGHTING,
+                hardware::HID_TARGET_COVER_LOGO,
+                hardware::HID_MODE_STATIC,
+                0,
+                0,
+                hardware::HID_STATIC_FLAG,
+                0,
+                0,
+                0,
+                0x1f,
+                0,
+            ]
+        );
+    }
+
+    #[test]
+    fn saved_gui_config_deserializes_with_cover_logo_state() {
+        let config: Config = serde_json::from_str(
+            r#"{
+                "rgb_static_zones": [],
+                "cover_logo": {
+                    "enabled": true,
+                    "config": {
+                        "mode": "Neon",
+                        "speed": 7,
+                        "brightness": 80,
+                        "direction": "RightToLeft",
+                        "red": 1,
+                        "green": 2,
+                        "blue": 3
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        let saved = config.cover_logo.unwrap();
+        assert_eq!(saved.config.mode, SavedRgbMode::Neon);
+        assert_eq!(saved.config.speed, 7);
+    }
+
+    #[test]
+    fn null_keyboard_zones_do_not_discard_the_saved_cover_logo() {
+        let config: Config = serde_json::from_str(
+            r#"{
+                "rgb_static_zones": null,
+                "cover_logo": {
+                    "enabled": true,
+                    "config": {
+                        "mode": "Breath",
+                        "speed": 5,
+                        "brightness": 70,
+                        "red": 10,
+                        "green": 20,
+                        "blue": 30
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(config.rgb_static_zones.is_empty());
+        let saved = config.cover_logo.unwrap();
+        assert_eq!(saved.config.mode, SavedRgbMode::Breath);
+        assert_eq!(saved.config.brightness, 70);
+    }
+
+    #[test]
+    fn resume_detection_ignores_normal_clock_drift() {
+        assert!(!resumed_since(2.0, 2.1));
+        assert!(resumed_since(2.0, 2.6));
+    }
+}
