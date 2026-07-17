@@ -588,13 +588,14 @@ func installPermissions() error {
 	return nil
 }
 
-// Some Predator generations (confirmed: PHN16-73) route static RGB color
+// Some Predator generations (confirmed: PHN16-73) route RGB lighting
 // through an I2C-HID controller (ENEK5130, HID_ID 0018:00000CF2:00005130)
 // instead of WMI - see hardware/hid_rgb.rs. /dev/hidraw* defaults to
 // root-only; this rule grants the "input" group (which the user was just
 // added to, above) read/write access, matching hid_rgb.rs's direct-open path.
 func installHidRgbUdevRule() {
-	rule := `SUBSYSTEM=="hidraw", ATTRS{name}=="ENEK5130:00", MODE="0660", GROUP="input"
+	rule := `SUBSYSTEM=="hidraw", ATTRS{name}=="ENEK5130:*", MODE="0660", GROUP="input"
+SUBSYSTEM=="hidraw", KERNELS=="0018:0CF2:5130.*", MODE="0660", GROUP="input"
 `
 	os.MkdirAll("/etc/udev/rules.d", 0755)
 	if err := os.WriteFile("/etc/udev/rules.d/99-predator-hid-rgb.rules", []byte(rule), 0644); err != nil {
@@ -638,128 +639,15 @@ StartupWMClass=com.predator.sense`
 }
 
 func installHotkey() error {
-	// Daemon script
-	daemon := `#!/usr/bin/env python3
-import struct,subprocess,os,signal,sys,time,logging,json,select
-from logging.handlers import RotatingFileHandler
-KEY_CODE=425;EV_KEY=1;KEY_PRESS=1
-KB_NAMES=['Acer WMI hotkeys','AT Translated Set 2 keyboard']
-CONFIG_PATH=os.path.expanduser('~/.config/predator-sense/config.json')
-def _log_enabled():
-    try:
-        with open(CONFIG_PATH) as f: return bool(json.load(f).get('debug_logging',False))
-    except Exception:
-        return False
-if _log_enabled():
-    LOG_DIR=os.path.expanduser('~/.local/share/predator-sense')
-    os.makedirs(LOG_DIR,exist_ok=True)
-    logging.basicConfig(level=logging.DEBUG if os.environ.get('PREDATOR_LOG_LEVEL')=='debug' else logging.INFO,format='%(asctime)s %(levelname)s %(message)s',handlers=[RotatingFileHandler(os.path.join(LOG_DIR,'daemon.log'),maxBytes=5*1024*1024,backupCount=3)])
-else:
-    logging.disable(logging.CRITICAL)
-def find_kbs():
-    # Return ALL matching devices, not just the first name match - on hardware
-    # where more than one exists (e.g. facer.ko exposes "Acer WMI hotkeys" even
-    # when the real PredatorSense key event only ever fires on "AT Translated
-    # Set 2 keyboard"), picking a single "first match" device can permanently
-    # bind to the wrong one and never see the key at all.
-    with open('/proc/bus/input/devices') as f: c=f.read()
-    devs=[]
-    for name in KB_NAMES:
-        for b in c.split('\n\n'):
-            if name in b:
-                for l in b.split('\n'):
-                    if l.startswith('H: Handlers='):
-                        for p in l.split():
-                            if p.startswith('event'):
-                                path=f'/dev/input/{p}'
-                                if path not in devs: devs.append(path)
-    return devs
-def open_app():
-    e={**os.environ,'DISPLAY':':0'}
-    try: subprocess.Popen(["gdbus","call","--session","--dest","com.predator.sense","--object-path","/com/predator/sense","--method","org.gtk.Application.Activate","[]"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,env=e)
-    except Exception as ex: logging.error('gdbus activate failed: %s',ex)
-    try:
-        if subprocess.run(['pgrep','-f','/opt/predator-sense/predator-sense'],capture_output=True).returncode!=0:
-            subprocess.Popen(['/opt/predator-sense/predator-sense'],env=e,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
-            logging.info('App launched (was not running)')
-        else:
-            logging.info('App activated (already running)')
-    except Exception as ex: logging.error('App launch failed: %s',ex)
-HID_ZONE_MASKS=[0x01,0x02,0x04,0x08]
-HIDIOCSFEATURE_11=0xC00B4806
-def _find_enek5130():
-    try:
-        for name in os.listdir('/sys/class/hidraw'):
-            try:
-                with open(f'/sys/class/hidraw/{name}/device/uevent') as f: c=f.read()
-            except Exception:
-                continue
-            if any(l.startswith('HID_NAME=') and 'ENEK5130' in l for l in c.splitlines()):
-                return f'/dev/{name}'
-    except Exception:
-        pass
-    return None
-def reapply_rgb():
-    # The ENEK5130 controller has no memory of its own - a full power cycle
-    # always resets the keyboard to its default pulsing effect (issue #11).
-    # Replays the last static color the GTK app applied, read from the same
-    # config.json it writes to. No root needed (udev grants the "input"
-    # group hidraw access), so this can run unconditionally at daemon start.
-    try:
-        with open(CONFIG_PATH) as f: cfg=json.load(f)
-    except Exception:
-        return
-    zones=cfg.get('rgb_static_zones')
-    if not zones: return
-    dev=_find_enek5130()
-    if not dev: return
-    # Brightness byte is 0-100 (a direct percentage), not 0x01-0x0f (issue #12).
-    brightness=max(0,min(100,cfg.get('rgb_brightness',100)))
-    try:
-        import fcntl
-        with open(dev,'r+b',buffering=0) as f:
-            for z in zones:
-                idx=z.get('zone',1)-1
-                if not (0<=idx<4): continue
-                mask=HID_ZONE_MASKS[idx]
-                packet=bytearray([0xa4,0x21,0x02,brightness,0x00,0x00,z.get('red',0)&0xff,z.get('green',0)&0xff,z.get('blue',0)&0xff,mask,0x00])
-                fcntl.ioctl(f,HIDIOCSFEATURE_11,packet)
-        logging.info('Reapplied RGB static zones from config via %s',dev)
-    except Exception as ex:
-        logging.error('RGB reapply failed: %s',ex)
-def main():
-    logging.info('Daemon started, PID %d',os.getpid())
-    reapply_rgb()
-    devs=find_kbs()
-    if not devs:
-        logging.error('No hotkey device found among %s',KB_NAMES)
-        sys.exit(1)
-    logging.info('Watching hotkey devices: %s',devs)
-    fds={}
-    for path in devs:
-        try: fds[os.open(path,os.O_RDONLY)]=path
-        except OSError as ex: logging.error('Failed to open %s: %s',path,ex)
-    if not fds:
-        sys.exit(1)
-    last=0
-    while fds:
-        ready,_,_=select.select(list(fds.keys()),[],[])
-        for fd in ready:
-            try: data=os.read(fd,24)
-            except OSError: data=b''
-            if len(data)<24:
-                logging.error('Device %s closed unexpectedly',fds[fd])
-                os.close(fd); del fds[fd]
-                continue
-            _,_,t,c,v=struct.unpack('QQHHi',data)
-            if t==EV_KEY and c==KEY_CODE and v==KEY_PRESS:
-                logging.debug('Keycode %d pressed on %s',KEY_CODE,fds[fd])
-                n=time.time()
-                if n-last>1.0: last=n; open_app()
-signal.signal(signal.SIGTERM,lambda s,f:(logging.info('Daemon stopped (SIGTERM)'),sys.exit(0)))
-signal.signal(signal.SIGINT,lambda s,f:(logging.info('Daemon stopped (SIGINT)'),sys.exit(0)))
-if __name__=='__main__': main()`
-	os.WriteFile(installDir+"/hotkey-daemon.py", []byte(daemon), 0755)
+	// Both installers use the same daemon source so lighting restore cannot drift.
+	daemonSource := filepath.Join(guiDir, "resources/hotkey-daemon.py")
+	daemonTarget := installDir + "/hotkey-daemon.py"
+	if err := copyFile(daemonSource, daemonTarget); err != nil {
+		return err
+	}
+	if err := os.Chmod(daemonTarget, 0755); err != nil {
+		return err
+	}
 
 	// Systemd user service
 	svcDir := filepath.Join(realHome, ".config/systemd/user")

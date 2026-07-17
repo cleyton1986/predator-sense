@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 200">
+  <!--
+    Original geometric approximation of the PHN16-73 rear-lid emblem.
+    Six independent, vertically aligned light bars mirror the physical mark.
+    The three pairs are reflected around x=90 for a balanced front-on preview;
+    the standard symbolic foreground fill lets GTK recolor the whole emblem.
+  -->
+  <g fill="#2e3436">
+    <rect x="29" y="52" width="12" height="82" rx="6"/>
+    <rect x="139" y="52" width="12" height="82" rx="6"/>
+    <rect x="59" y="102" width="12" height="80" rx="6"/>
+    <rect x="109" y="102" width="12" height="80" rx="6"/>
+    <rect x="76" y="55" width="12" height="100" rx="6"/>
+    <rect x="92" y="55" width="12" height="100" rx="6"/>
+  </g>
+</svg>
