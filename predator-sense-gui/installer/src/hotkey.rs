@@ -1,7 +1,7 @@
 use crate::constants::{app, command, hardware, logging, path, timing};
 use crate::process::process_running;
 use crate::AppResult;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::mem::{size_of, MaybeUninit};
@@ -62,7 +62,7 @@ impl TargetCapabilities {
 struct Config {
     #[serde(default)]
     debug_logging: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_rgb_zones")]
     rgb_static_zones: Vec<RgbZone>,
     #[serde(default = "default_brightness")]
     rgb_brightness: i64,
@@ -90,6 +90,13 @@ struct RgbZone {
     green: i64,
     #[serde(default)]
     blue: i64,
+}
+
+fn deserialize_rgb_zones<'de, D>(deserializer: D) -> Result<Vec<RgbZone>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<Vec<RgbZone>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize)]
@@ -952,6 +959,32 @@ mod tests {
         let saved = config.cover_logo.unwrap();
         assert_eq!(saved.config.mode, SavedRgbMode::Neon);
         assert_eq!(saved.config.speed, 7);
+    }
+
+    #[test]
+    fn null_keyboard_zones_do_not_discard_the_saved_cover_logo() {
+        let config: Config = serde_json::from_str(
+            r#"{
+                "rgb_static_zones": null,
+                "cover_logo": {
+                    "enabled": true,
+                    "config": {
+                        "mode": "Breath",
+                        "speed": 5,
+                        "brightness": 70,
+                        "red": 10,
+                        "green": 20,
+                        "blue": 30
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(config.rgb_static_zones.is_empty());
+        let saved = config.cover_logo.unwrap();
+        assert_eq!(saved.config.mode, SavedRgbMode::Breath);
+        assert_eq!(saved.config.brightness, 70);
     }
 
     #[test]

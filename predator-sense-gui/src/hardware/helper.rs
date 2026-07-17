@@ -3,6 +3,7 @@ use predator_sense_protocol::path;
 use std::process::{Command, Output};
 
 const PRIVILEGE_BROKER: &str = "pkexec";
+const DISABLED_EC_BYTE: u8 = 0;
 
 pub fn execute(action: Action, arguments: &[&str]) -> Result<(), String> {
     let output = invoke(action, arguments)?;
@@ -33,6 +34,19 @@ pub fn read_switch(action: Action) -> Option<bool> {
         value if value == Switch::Enabled.as_str() => Some(true),
         _ => None,
     }
+}
+
+/// Reads a helper action that exposes a raw EC byte whose boolean contract is
+/// zero for disabled and any nonzero byte for enabled.
+pub fn read_nonzero_byte(action: Action) -> Option<bool> {
+    parse_nonzero_byte(&read(action)?)
+}
+
+fn parse_nonzero_byte(value: &str) -> Option<bool> {
+    value
+        .parse::<u8>()
+        .ok()
+        .map(|byte| byte != DISABLED_EC_BYTE)
 }
 
 pub fn write_switch(action: Action, enabled: bool) -> Result<(), String> {
@@ -97,5 +111,14 @@ mod tests {
         assert!(validate_arity(Action::FanAuto, &["unexpected"]).is_err());
         assert!(validate_arity(Action::SetGpuPower, &["80"]).is_ok());
         assert!(validate_arity(Action::SetGpuPower, &[]).is_err());
+    }
+
+    #[test]
+    fn raw_ec_bytes_use_nonzero_switch_semantics() {
+        assert_eq!(parse_nonzero_byte("0"), Some(false));
+        assert_eq!(parse_nonzero_byte("1"), Some(true));
+        assert_eq!(parse_nonzero_byte("2"), Some(true));
+        assert_eq!(parse_nonzero_byte("255"), Some(true));
+        assert_eq!(parse_nonzero_byte("invalid"), None);
     }
 }
