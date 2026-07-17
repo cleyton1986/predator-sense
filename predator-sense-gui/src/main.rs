@@ -17,6 +17,8 @@ use std::time::Instant;
 const CSS_THEME: &str = include_str!("../resources/style.css");
 const GSK_RENDERER_ENV: &str = "GSK_RENDERER";
 const GSK_GL_RENDERER: &str = "gl";
+const GSK_NGL_RENDERER: &str = "ngl";
+const GTK_NGL_RENAMED_VERSION: (u32, u32) = (4, 18);
 
 static STARTUP_STARTED: OnceLock<Instant> = OnceLock::new();
 static STARTUP_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
@@ -63,7 +65,10 @@ fn main() {
     // only touches the GPU that actually drives the display. An explicit
     // user override still wins.
     if std::env::var_os(GSK_RENDERER_ENV).is_none() {
-        std::env::set_var(GSK_RENDERER_ENV, GSK_GL_RENDERER);
+        std::env::set_var(
+            GSK_RENDERER_ENV,
+            gl_renderer_name(gtk::major_version(), gtk::minor_version()),
+        );
     }
 
     let app = adw::Application::builder()
@@ -131,6 +136,16 @@ fn main() {
     app.run_with_args::<String>(&[]);
 }
 
+fn gl_renderer_name(gtk_major: u32, gtk_minor: u32) -> &'static str {
+    // GTK 4.18 removed the old GL renderer and renamed the unified NGL renderer to GL.
+    // Older supported versions expose the unified renderer under its original NGL name.
+    if (gtk_major, gtk_minor) >= GTK_NGL_RENAMED_VERSION {
+        GSK_GL_RENDERER
+    } else {
+        GSK_NGL_RENDERER
+    }
+}
+
 fn find_icon_path() -> Option<String> {
     let candidates = [
         "resources/logo-128.png",
@@ -148,4 +163,18 @@ fn find_icon_path() -> Option<String> {
     let dev = "/opt/predator-sense/resources/logo-128.png";
     if std::path::Path::new(dev).exists() { return Some(dev.to_string()); }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selects_the_unified_gl_renderer_name_for_the_runtime_gtk_version() {
+        assert_eq!(gl_renderer_name(4, 16), GSK_NGL_RENDERER);
+        assert_eq!(gl_renderer_name(4, 17), GSK_NGL_RENDERER);
+        assert_eq!(gl_renderer_name(4, 18), GSK_GL_RENDERER);
+        assert_eq!(gl_renderer_name(4, 22), GSK_GL_RENDERER);
+        assert_eq!(gl_renderer_name(5, 0), GSK_GL_RENDERER);
+    }
 }

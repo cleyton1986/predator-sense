@@ -33,10 +33,10 @@ pub(crate) mod path {
     pub const HOTKEY_UNIT: &str = "predator-sense-hotkey.service";
     pub const BOOT_UNIT: &str = "/etc/systemd/system/predator-sense-boot-apply.service";
     pub const BOOT_UNIT_NAME: &str = "predator-sense-boot-apply.service";
-    pub const PASSWD: &str = "/etc/passwd";
     pub const OS_RELEASE: &str = "/etc/os-release";
     pub const PRODUCT_NAME: &str = "/sys/class/dmi/id/product_name";
     pub const PROC_DIR: &str = "/proc";
+    pub const PROC_SELF_EXE: &str = "/proc/self/exe";
     pub const PROC_MODULES: &str = "/proc/modules";
     pub const APPLICATIONS_DIR: &str = "/usr/share/applications";
     pub const RUNTIME_USER_DIR: &str = "/run/user";

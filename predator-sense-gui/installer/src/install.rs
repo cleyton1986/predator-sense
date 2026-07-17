@@ -8,12 +8,15 @@ use crate::AppResult;
 use predator_sense_protocol::helper::Action as HelperAction;
 use predator_sense_protocol::installer as cli;
 use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
+use std::mem::MaybeUninit;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::ptr;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -50,6 +53,8 @@ const BOOT_UNIT_ENABLE_ARGUMENTS: [&str; 2] = ["enable", path::BOOT_UNIT_NAME];
 const RUST_TOOL_CANONICAL_PATH: &str = path::INSTALLER;
 const RUST_TOOL_ALIAS_PATHS: [&str; 3] = [path::HELPER, path::HOTKEY, path::TRAY];
 const RUST_TOOL_PROCESSES_TO_STOP: [&str; 3] = [path::HELPER, path::HOTKEY, path::TRAY];
+const NSS_BUFFER_MIN_BYTES: usize = 1_024;
+const NSS_BUFFER_MAX_BYTES: usize = 1_048_576;
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -298,7 +303,7 @@ impl InstallStage {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct UserContext {
     name: String,
     home: PathBuf,
@@ -307,8 +312,6 @@ struct UserContext {
 
 impl UserContext {
     fn detect() -> AppResult<Self> {
-        let passwd = fs::read_to_string(path::PASSWD)
-            .map_err(|error| format!("não foi possível ler {}: {error}", path::PASSWD))?;
         let requested_name = std::env::var("SUDO_USER")
             .ok()
             .filter(|name| name != "root")
@@ -318,18 +321,18 @@ impl UserContext {
             .ok()
             .and_then(|value| value.parse::<u32>().ok());
 
-        let users = parse_passwd(&passwd);
-        let entry = requested_name
-            .as_deref()
-            .and_then(|name| users.iter().find(|user| user.name == name))
-            .or_else(|| requested_uid.and_then(|uid| users.iter().find(|user| user.uid == uid)))
-            .or_else(|| {
-                users
-                    .iter()
-                    .find(|user| user.uid == defaults::DEFAULT_DESKTOP_USER_UID)
-            })
-            .ok_or_else(|| "não foi possível identificar o usuário da sessão".to_string())?;
-        Ok(entry.clone())
+        if let Some(name) = requested_name {
+            if let Some(user) = lookup_user_by_name(&name)? {
+                return Ok(user);
+            }
+        }
+        if let Some(uid) = requested_uid {
+            if let Some(user) = lookup_user_by_uid(uid)? {
+                return Ok(user);
+            }
+        }
+        lookup_user_by_uid(defaults::DEFAULT_DESKTOP_USER_UID)?
+            .ok_or_else(|| "não foi possível identificar o usuário da sessão".to_string())
     }
 
     fn runtime_dir(&self) -> PathBuf {
@@ -337,21 +340,97 @@ impl UserContext {
     }
 }
 
-fn parse_passwd(contents: &str) -> Vec<UserContext> {
-    contents
-        .lines()
-        .filter_map(|line| {
-            let fields = line.split(':').collect::<Vec<_>>();
-            if fields.len() < 7 {
-                return None;
-            }
-            Some(UserContext {
-                name: fields[0].to_string(),
-                uid: fields[2].parse().ok()?,
-                home: PathBuf::from(fields[5]),
-            })
-        })
-        .collect()
+fn lookup_user_by_name(name: &str) -> AppResult<Option<UserContext>> {
+    let name =
+        CString::new(name).map_err(|_| "nome de usuário inválido para consulta NSS".to_string())?;
+    lookup_user_with_nss("nome", |entry, buffer, buffer_len, result| {
+        // SAFETY: all pointers refer to live storage owned by lookup_user_with_nss, and the
+        // NUL-terminated user name remains alive for the duration of the lookup.
+        unsafe { libc::getpwnam_r(name.as_ptr(), entry, buffer, buffer_len, result) }
+    })
+}
+
+fn lookup_user_by_uid(uid: u32) -> AppResult<Option<UserContext>> {
+    lookup_user_with_nss("UID", |entry, buffer, buffer_len, result| {
+        // SAFETY: all pointers refer to live storage owned by lookup_user_with_nss.
+        unsafe { libc::getpwuid_r(uid, entry, buffer, buffer_len, result) }
+    })
+}
+
+fn lookup_user_with_nss(
+    lookup_key: &str,
+    mut lookup: impl FnMut(
+        *mut libc::passwd,
+        *mut libc::c_char,
+        usize,
+        *mut *mut libc::passwd,
+    ) -> libc::c_int,
+) -> AppResult<Option<UserContext>> {
+    let mut buffer_len = initial_nss_buffer_size();
+    loop {
+        let mut entry = MaybeUninit::<libc::passwd>::zeroed();
+        let mut result = ptr::null_mut();
+        let mut buffer = vec![0 as libc::c_char; buffer_len];
+        let status = lookup(
+            entry.as_mut_ptr(),
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut result,
+        );
+
+        if status == 0 {
+            return if result.is_null() {
+                Ok(None)
+            } else {
+                // SAFETY: a successful NSS lookup returned a pointer to the initialized entry,
+                // whose string fields remain backed by buffer until this conversion completes.
+                user_context_from_passwd(unsafe { &*result }).map(Some)
+            };
+        }
+        if status == libc::ERANGE && buffer_len < NSS_BUFFER_MAX_BYTES {
+            buffer_len = buffer_len.saturating_mul(2).min(NSS_BUFFER_MAX_BYTES);
+            continue;
+        }
+        return Err(format!(
+            "falha na consulta NSS por {lookup_key}: {}",
+            io::Error::from_raw_os_error(status)
+        ));
+    }
+}
+
+fn initial_nss_buffer_size() -> usize {
+    // SAFETY: sysconf has no pointer arguments or caller-managed invariants.
+    let recommended = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    if recommended > 0 {
+        usize::try_from(recommended)
+            .unwrap_or(NSS_BUFFER_MAX_BYTES)
+            .clamp(NSS_BUFFER_MIN_BYTES, NSS_BUFFER_MAX_BYTES)
+    } else {
+        NSS_BUFFER_MIN_BYTES
+    }
+}
+
+fn user_context_from_passwd(entry: &libc::passwd) -> AppResult<UserContext> {
+    if entry.pw_name.is_null() || entry.pw_dir.is_null() {
+        return Err("consulta NSS retornou um registro de usuário incompleto".into());
+    }
+    // SAFETY: getpwnam_r/getpwuid_r returned NUL-terminated strings backed by their live buffer.
+    let name = unsafe { CStr::from_ptr(entry.pw_name) }
+        .to_str()
+        .map_err(|_| "consulta NSS retornou um nome de usuário inválido".to_string())?
+        .to_owned();
+    // SAFETY: same lifetime and NUL-termination guarantee as pw_name above.
+    let home = PathBuf::from(OsStr::from_bytes(unsafe {
+        CStr::from_ptr(entry.pw_dir).to_bytes()
+    }));
+    if name.is_empty() || home.as_os_str().is_empty() {
+        return Err("consulta NSS retornou um registro de usuário incompleto".into());
+    }
+    Ok(UserContext {
+        name,
+        home,
+        uid: entry.pw_uid,
+    })
 }
 
 #[derive(Debug)]
@@ -885,8 +964,7 @@ impl Installer {
 
     fn install_rust_tools(&self) -> AppResult {
         self.stop_rust_tools_for_upgrade()?;
-        let executable = std::env::current_exe()
-            .map_err(|error| format!("não foi possível localizar o instalador: {error}"))?;
+        let executable = running_executable_source()?;
         let aliases = RUST_TOOL_ALIAS_PATHS.map(Path::new);
         let outcome =
             install_multicall_binary(&executable, Path::new(RUST_TOOL_CANONICAL_PATH), &aliases)?;
@@ -960,6 +1038,18 @@ impl Installer {
     fn has_rust(&self) -> bool {
         self.run_as_user_quiet(self.cargo_binary().as_os_str(), ["--version"], None)
             .is_ok()
+    }
+}
+
+fn running_executable_source() -> AppResult<PathBuf> {
+    let proc_self_exe = Path::new(path::PROC_SELF_EXE);
+    if proc_self_exe.is_file() {
+        // /proc/self/exe keeps the running inode reachable even when an interactive reinstall
+        // has already removed the launch path under /opt/predator-sense.
+        Ok(proc_self_exe.to_path_buf())
+    } else {
+        std::env::current_exe()
+            .map_err(|error| format!("não foi possível localizar o instalador: {error}"))
     }
 }
 
@@ -1791,14 +1881,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_passwd_by_name_uid_and_home() {
-        let users = parse_passwd(
-            "root:x:0:0:root:/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/zsh\n",
-        );
-        assert_eq!(users.len(), 2);
-        assert_eq!(users[1].name, "alice");
-        assert_eq!(users[1].uid, 1000);
-        assert_eq!(users[1].home, PathBuf::from("/home/alice"));
+    fn resolves_the_current_user_through_nss_by_uid_and_name() {
+        // SAFETY: geteuid has no preconditions.
+        let uid = unsafe { libc::geteuid() };
+        let by_uid = lookup_user_by_uid(uid).unwrap().unwrap();
+        let by_name = lookup_user_by_name(&by_uid.name).unwrap().unwrap();
+
+        assert_eq!(by_uid, by_name);
+        assert_eq!(by_uid.uid, uid);
+        assert!(!by_uid.home.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn reads_the_running_binary_through_proc_self_exe() {
+        let source = running_executable_source().unwrap();
+        assert_eq!(source, PathBuf::from(path::PROC_SELF_EXE));
+        assert!(source.is_file());
     }
 
     #[test]
