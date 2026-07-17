@@ -213,6 +213,9 @@ pub(crate) mod timing {
 pub(crate) mod installer {
     pub const DEFAULT_DESKTOP_USER_UID: u32 = 1000;
     pub const COMPLETE_PERCENT: usize = 100;
+    pub const APT_CONFIG_OPTION: &str = "-o";
+    pub const APT_LOCK_TIMEOUT_KEY: &str = "DPkg::Lock::Timeout";
+    pub const APT_LOCK_TIMEOUT_SECS: u64 = 120;
 }
 
 pub(crate) mod logging {

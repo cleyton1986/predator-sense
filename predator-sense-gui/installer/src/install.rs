@@ -8,7 +8,7 @@ use crate::AppResult;
 use predator_sense_protocol::helper::Action as HelperAction;
 use predator_sense_protocol::installer as cli;
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -199,6 +199,36 @@ impl PackageManager {
             Err("gerenciador de pacotes não detectado (apt/dnf/pacman)".into())
         }
     }
+}
+
+/// Adds APT's native, bounded package-manager lock wait. Other failures still
+/// return immediately instead of being retried as though they were lock races.
+fn apt_arguments<I, S>(args: I) -> Vec<OsString>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut arguments = vec![
+        OsString::from(defaults::APT_CONFIG_OPTION),
+        OsString::from(format!(
+            "{}={}",
+            defaults::APT_LOCK_TIMEOUT_KEY,
+            defaults::APT_LOCK_TIMEOUT_SECS
+        )),
+    ];
+    arguments.extend(
+        args.into_iter()
+            .map(|argument| argument.as_ref().to_os_string()),
+    );
+    arguments
+}
+
+fn run_apt<I, S>(args: I) -> AppResult
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run(command::APT_GET, apt_arguments(args))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -651,24 +681,21 @@ impl Installer {
                 ],
             ),
             PackageManager::Apt => {
-                run(command::APT_GET, ["update", "-qq"])?;
-                run(
-                    command::APT_GET,
-                    [
-                        "install",
-                        "-y",
-                        "libgtk-4-dev",
-                        "libadwaita-1-dev",
-                        "pkg-config",
-                        "build-essential",
-                        "gcc",
-                        "make",
-                        "dkms",
-                        "curl",
-                        "tar",
-                        "sudo",
-                    ],
-                )
+                run_apt(["update", "-qq"])?;
+                run_apt([
+                    "install",
+                    "-y",
+                    "libgtk-4-dev",
+                    "libadwaita-1-dev",
+                    "pkg-config",
+                    "build-essential",
+                    "gcc",
+                    "make",
+                    "dkms",
+                    "curl",
+                    "tar",
+                    "sudo",
+                ])
             }
         }
     }
@@ -683,10 +710,7 @@ impl Installer {
                 command::DNF,
                 ["install", "-y", &format!("kernel-devel-{release}")],
             ),
-            PackageManager::Apt => run(
-                command::APT_GET,
-                ["install", "-y", &format!("linux-headers-{release}")],
-            ),
+            PackageManager::Apt => run_apt(["install", "-y", &format!("linux-headers-{release}")]),
             PackageManager::Pacman => {
                 let pkgbase_path = Path::new(path::KERNEL_MODULES_DIR)
                     .join(&release)
@@ -1395,7 +1419,7 @@ impl Installer {
             PackageManager::Pacman => {
                 run(command::PACMAN, ["-S", "--noconfirm", "--needed", package])
             }
-            PackageManager::Apt => run(command::APT_GET, ["install", "-y", package]),
+            PackageManager::Apt => run_apt(["install", "-y", package]),
         }
     }
 
@@ -1749,6 +1773,21 @@ mod tests {
         );
         assert!(InstallerCommand::parse(&["--unknown".into()]).is_err());
         assert!(InstallerCommand::parse(&["--status".into(), "extra".into()]).is_err());
+    }
+
+    #[test]
+    fn apt_commands_include_a_bounded_native_lock_wait() {
+        assert_eq!(
+            apt_arguments(["install", "-y", "example-package"]),
+            [
+                "-o",
+                "DPkg::Lock::Timeout=120",
+                "install",
+                "-y",
+                "example-package",
+            ]
+            .map(OsString::from)
+        );
     }
 
     #[test]
