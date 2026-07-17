@@ -1,5 +1,4 @@
 use std::fs;
-use std::process::Command;
 
 #[derive(Debug, Clone, Default)]
 pub struct SystemInfo {
@@ -32,19 +31,28 @@ pub struct StorageDevice {
 }
 
 pub fn read_system_info() -> SystemInfo {
+    let gpu = crate::hardware::nvidia::hardware_info();
+    let gpu_name = if gpu.name.is_empty() {
+        crate::hardware::display::primary_name()
+            .unwrap_or_else(|| crate::i18n::t("unknown").to_string())
+    } else {
+        gpu.name
+    };
     SystemInfo {
         product_name: read_trim("/sys/class/dmi/id/product_name").unwrap_or_else(|| "Unknown".into()),
         vendor: read_trim("/sys/class/dmi/id/sys_vendor").unwrap_or_else(|| "Unknown".into()),
         bios_version: read_trim("/sys/class/dmi/id/bios_version").unwrap_or_default(),
         os_pretty: read_os_pretty(),
-        kernel: uname("-r"),
+        kernel: read_trim("/proc/sys/kernel/osrelease").unwrap_or_default(),
         cpu_model: read_cpu_model(),
         cpu_cores: read_cpu_cores(),
         cpu_threads: read_cpu_threads(),
         cpu_max_freq_mhz: read_cpu_max_freq(),
-        gpu_name: read_gpu_name(),
-        gpu_vram_mb: read_gpu_vram(),
-        gpu_driver: read_gpu_driver(),
+        gpu_name,
+        // VRAM requires a live driver query. The Dashboard hydrates it in a
+        // worker after the first frame instead of delaying startup here.
+        gpu_vram_mb: 0,
+        gpu_driver: gpu.driver,
         ram_total_gb: read_ram_total_gb(),
         ram_type: read_ram_type(),
         storage: read_storage(),
@@ -88,16 +96,6 @@ fn read_os_pretty() -> String {
     "Linux".into()
 }
 
-fn uname(flag: &str) -> String {
-    Command::new("uname")
-        .arg(flag)
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
-}
-
 fn read_cpu_model() -> String {
     if let Ok(c) = fs::read_to_string("/proc/cpuinfo") {
         for l in c.lines() {
@@ -127,11 +125,8 @@ fn read_cpu_cores() -> u32 {
 }
 
 fn read_cpu_threads() -> u32 {
-    Command::new("nproc")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| s.trim().parse().ok())
+    std::thread::available_parallelism()
+        .map(|threads| threads.get() as u32)
         .unwrap_or(0)
 }
 
@@ -141,59 +136,6 @@ fn read_cpu_max_freq() -> u32 {
         .and_then(|s| s.trim().parse::<u32>().ok())
         .map(|v| v / 1000)
         .unwrap_or(0)
-}
-
-fn read_gpu_name() -> String {
-    let o = Command::new("nvidia-smi")
-        .args(["--query-gpu=name", "--format=csv,noheader"])
-        .output();
-    if let Ok(o) = o {
-        if o.status.success() {
-            let n = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if !n.is_empty() {
-                return n;
-            }
-        }
-    }
-    // Fallback: lspci
-    let o = Command::new("sh")
-        .arg("-c")
-        .arg("lspci | grep -i 'vga\\|3d' | head -n1")
-        .output();
-    if let Ok(o) = o {
-        let s = String::from_utf8_lossy(&o.stdout);
-        if let Some(rest) = s.split(':').nth(2) {
-            return rest.trim().to_string();
-        }
-    }
-    crate::i18n::t("unknown").to_string()
-}
-
-fn read_gpu_vram() -> u32 {
-    let o = Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
-        .output();
-    if let Ok(o) = o {
-        if o.status.success() {
-            return String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .parse()
-                .unwrap_or(0);
-        }
-    }
-    0
-}
-
-fn read_gpu_driver() -> String {
-    let o = Command::new("nvidia-smi")
-        .args(["--query-gpu=driver_version", "--format=csv,noheader"])
-        .output();
-    if let Ok(o) = o {
-        if o.status.success() {
-            return String::from_utf8_lossy(&o.stdout).trim().to_string();
-        }
-    }
-    String::new()
 }
 
 fn read_ram_total_gb() -> f64 {

@@ -7,7 +7,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 /// All detected capabilities for the current machine. Cheap to build; cached
 /// via `get()` so widgets can query it freely.
@@ -26,7 +25,7 @@ pub struct Capabilities {
     pub cover_logo: bool,
     /// Raw EC access (/dev/ec) — needed for CoolBoost / LCD overdrive / etc.
     pub ec: bool,
-    /// NVIDIA GPU present and queryable via nvidia-smi.
+    /// NVIDIA GPU monitoring available without waking the dGPU during detection.
     pub nvidia_gpu: bool,
     /// Battery charge-limit control.
     pub battery_limit: bool,
@@ -44,7 +43,7 @@ impl Capabilities {
                 || crate::hardware::hid_rgb::is_available(),
             cover_logo: crate::hardware::hid_rgb::has_cover_logo(),
             ec: Path::new("/dev/ec").exists(),
-            nvidia_gpu: nvidia_present(),
+            nvidia_gpu: crate::hardware::nvidia::is_available(),
             battery_limit: battery_limit_present(),
         }
     }
@@ -76,14 +75,6 @@ fn acer_hwmon_has(file: &str) -> bool {
         }
     }
     false
-}
-
-fn nvidia_present() -> bool {
-    Command::new("nvidia-smi")
-        .arg("-L")
-        .output()
-        .map(|o| o.status.success() && !o.stdout.is_empty())
-        .unwrap_or(false)
 }
 
 fn battery_limit_present() -> bool {

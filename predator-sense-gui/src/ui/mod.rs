@@ -13,3 +13,4 @@ pub mod monitor_page;
 pub mod battery_page;
 pub mod font_scale;
 pub mod ai_page;
+pub mod background;
