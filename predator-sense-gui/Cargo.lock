@@ -712,10 +712,15 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "libc",
+ "predator-sense-protocol",
  "serde",
  "serde_json",
  "ureq",
 ]
+
+[[package]]
+name = "predator-sense-protocol"
+version = "0.2.44-preview"
 
 [[package]]
 name = "proc-macro-crate"

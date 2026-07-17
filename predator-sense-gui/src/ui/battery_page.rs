@@ -8,6 +8,17 @@ use std::rc::Rc;
 
 const HISTORY: usize = 60;
 
+fn set_calibration(path: &str, enabled: bool) -> Result<(), String> {
+    let value = predator_sense_protocol::helper::Switch::from(enabled).as_str();
+    if fs::write(path, value).is_ok() {
+        return Ok(());
+    }
+    crate::hardware::helper::write_switch(
+        predator_sense_protocol::helper::Action::BatteryCalibration,
+        enabled,
+    )
+}
+
 struct BatData {
     capacity: u32,
     status: String,
@@ -194,11 +205,7 @@ pub fn build() -> gtk::Box {
             let start_ref = cal_start.clone();
             cal_start.connect_clicked(move |_| {
                 let path = format!("{}/calibration_mode", wmi);
-                let r = if fs::write(&path, "1").is_err() {
-                    std::process::Command::new("pkexec")
-                        .args(["bash", "-c", &format!("echo 1 > {}", path)])
-                        .output().map(|_| ()).map_err(|e| e.to_string())
-                } else { Ok(()) };
+                let r = set_calibration(&path, true);
                 match r {
                     Ok(()) => {
                         st.set_text(crate::i18n::t("bat_calibrating"));
@@ -218,10 +225,7 @@ pub fn build() -> gtk::Box {
             let stop_ref = cal_stop.clone();
             cal_stop.connect_clicked(move |_| {
                 let path = format!("{}/calibration_mode", wmi);
-                let _ = fs::write(&path, "0").or_else(|_|
-                    std::process::Command::new("pkexec")
-                        .args(["bash", "-c", &format!("echo 0 > {}", path)])
-                        .output().map(|_| ()).map_err(|e| e.to_string()));
+                let _ = set_calibration(&path, false);
                 st.set_text(crate::i18n::t("bat_calibrate_done"));
                 st.remove_css_class("status-success");
                 stop_ref.set_visible(false);

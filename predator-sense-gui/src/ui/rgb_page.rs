@@ -466,7 +466,7 @@ fn build_keyboard_panel() -> gtk::Box {
         apply_btn.connect_clicked(move |_| {
             let st = s.borrow();
             let result = if st.is_static {
-                // Static mode - matches facer_rgb.py exactly:
+                // Static mode - matches the controller's documented packet layout:
                 // For EACH zone: write zone color, then send dynamic payload
                 // This is how the original script works (called once per zone)
                 let mut last_err = None;
@@ -510,11 +510,11 @@ fn build_keyboard_panel() -> gtk::Box {
                     wmi_result
                 };
 
-                // Persist so hotkey-daemon.py can reapply it after login or
-                // resume (issue #11) - the keyboard controller has no memory
-                // of its own and resets to the default pulsing effect. Only
-                // the HID path is replayable (the daemon speaks raw HID, not
-                // WMI), so only persist when it applied.
+                // Persist so the Rust hotkey service can reapply it after login
+                // or resume (issue #11) - the keyboard controller has no memory
+                // of its own and resets to the default pulsing effect. Only the
+                // HID path is replayable (the service speaks raw HID, not WMI),
+                // so only persist when it applied.
                 if hid_rgb::is_available() && hid_result.is_ok() {
                     let mut cfg = crate::config::load_app_config();
                     cfg.rgb_static_zones = Some(

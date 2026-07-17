@@ -8,12 +8,17 @@ mod ui;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, gdk, glib};
 use libadwaita as adw;
+use libadwaita::prelude::*;
+use predator_sense_protocol::application;
 use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-const APP_ID: &str = "com.predator.sense";
 const CSS_THEME: &str = include_str!("../resources/style.css");
+const GSK_RENDERER_ENV: &str = "GSK_RENDERER";
+const GSK_GL_RENDERER: &str = "gl";
+const GSK_NGL_RENDERER: &str = "ngl";
+const GTK_NGL_RENAMED_VERSION: (u32, u32) = (4, 18);
 
 static STARTUP_STARTED: OnceLock<Instant> = OnceLock::new();
 static STARTUP_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
@@ -28,7 +33,7 @@ pub(crate) fn startup_mark(stage: &str) {
 }
 
 thread_local! {
-    static CSS_PROVIDER: RefCell<Option<gtk::CssProvider>> = RefCell::new(None);
+    static CSS_PROVIDER: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
 }
 
 /// Re-applies the base stylesheet scaled by `scale` (see `ui::font_scale`).
@@ -45,6 +50,13 @@ pub fn apply_font_scale(scale: f64) {
 fn main() {
     STARTUP_STARTED.get_or_init(Instant::now);
     startup_mark("main entered");
+    if std::env::args().any(|argument| {
+        argument == predator_sense_protocol::internal::DELAYED_APPLICATION_START_ARGUMENT
+    }) {
+        std::thread::sleep(std::time::Duration::from_millis(
+            predator_sense_protocol::internal::APPLICATION_RESTART_DELAY_MS,
+        ));
+    }
     // GTK 4.16+ picks the Vulkan renderer by default. Creating the Vulkan
     // instance enumerates every GPU in the system, which opens /dev/nvidia*
     // and keeps a hybrid laptop's discrete GPU powered — blocked from
@@ -52,16 +64,24 @@ fn main() {
     // visibly janky frame pacing on NVIDIA PRIME setups. The GL renderer
     // only touches the GPU that actually drives the display. An explicit
     // user override still wins.
-    if std::env::var_os("GSK_RENDERER").is_none() {
-        std::env::set_var("GSK_RENDERER", "ngl");
+    if std::env::var_os(GSK_RENDERER_ENV).is_none() {
+        std::env::set_var(
+            GSK_RENDERER_ENV,
+            gl_renderer_name(gtk::major_version(), gtk::minor_version()),
+        );
     }
 
     let app = adw::Application::builder()
-        .application_id(APP_ID)
+        .application_id(application::DBUS_ID)
         .build();
 
-    app.connect_startup(|_| {
+    app.connect_startup(|app| {
         startup_mark("startup signal");
+        // The application uses a deliberately dark, content-matched palette.
+        // Request it through libadwaita instead of GTK's deprecated dark-theme
+        // setting so standard Adwaita widgets use the same appearance.
+        app.style_manager()
+            .set_color_scheme(adw::ColorScheme::ForceDark);
         let provider = gtk::CssProvider::new();
         let scale = config::load_app_config().font_scale;
         provider.load_from_data(&ui::font_scale::scale_css(CSS_THEME, scale));
@@ -112,7 +132,18 @@ fn main() {
         startup_mark("window build returned");
     });
 
+    // Internal lifecycle arguments are consumed above and never exposed to GTK/GApplication.
     app.run_with_args::<String>(&[]);
+}
+
+fn gl_renderer_name(gtk_major: u32, gtk_minor: u32) -> &'static str {
+    // GTK 4.18 removed the old GL renderer and renamed the unified NGL renderer to GL.
+    // Older supported versions expose the unified renderer under its original NGL name.
+    if (gtk_major, gtk_minor) >= GTK_NGL_RENAMED_VERSION {
+        GSK_GL_RENDERER
+    } else {
+        GSK_NGL_RENDERER
+    }
 }
 
 fn find_icon_path() -> Option<String> {
@@ -132,4 +163,18 @@ fn find_icon_path() -> Option<String> {
     let dev = "/opt/predator-sense/resources/logo-128.png";
     if std::path::Path::new(dev).exists() { return Some(dev.to_string()); }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selects_the_unified_gl_renderer_name_for_the_runtime_gtk_version() {
+        assert_eq!(gl_renderer_name(4, 16), GSK_NGL_RENDERER);
+        assert_eq!(gl_renderer_name(4, 17), GSK_NGL_RENDERER);
+        assert_eq!(gl_renderer_name(4, 18), GSK_GL_RENDERER);
+        assert_eq!(gl_renderer_name(4, 22), GSK_GL_RENDERER);
+        assert_eq!(gl_renderer_name(5, 0), GSK_GL_RENDERER);
+    }
 }

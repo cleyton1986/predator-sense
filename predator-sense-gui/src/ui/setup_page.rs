@@ -1,6 +1,5 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::hardware::setup;
@@ -135,16 +134,10 @@ pub fn build(on_complete: Rc<dyn Fn()>) -> gtk::Box {
                 let result = setup::install_service();
                 append_log(&log_tv, &result.details);
                 if result.success {
-                    set_status_msg(&slabel, &result.message, false);
-                    // Also try to load the module now
-                    let load = setup::load_module();
-                    append_log(&log_tv, &load.details);
-                    if load.success {
-                        set_status_msg(&slabel, t("setup_service_module_loaded"), false);
-                        glib::timeout_add_seconds_local_once(2, move || {
-                            on_done();
-                        });
-                    }
+                    set_status_msg(&slabel, t("setup_service_module_loaded"), false);
+                    glib::timeout_add_seconds_local_once(2, move || {
+                        on_done();
+                    });
                 } else {
                     set_status_msg(&slabel, &result.message, true);
                     button.set_sensitive(true);

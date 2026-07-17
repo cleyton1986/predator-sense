@@ -3,6 +3,7 @@ pub mod applog;
 pub mod capabilities;
 pub mod display;
 pub mod hwmon;
+pub mod helper;
 pub mod power_profile;
 pub mod rgb;
 pub mod hid_rgb;
