@@ -51,6 +51,65 @@ pub mod helper {
     pub const PWM_VALUE_MAX: u16 = 255;
     pub const BATTERY_LIMIT_ENABLED_PERCENT: u16 = 80;
     pub const BATTERY_LIMIT_DISABLED_PERCENT: u16 = 100;
+    pub const OPTIONAL_VALUE_SKIP: &str = "skip";
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CpuGovernor {
+        Powersave,
+        Performance,
+    }
+
+    impl CpuGovernor {
+        pub fn parse(value: &str) -> Option<Self> {
+            match value {
+                "powersave" => Some(Self::Powersave),
+                "performance" => Some(Self::Performance),
+                _ => None,
+            }
+        }
+
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::Powersave => "powersave",
+                Self::Performance => "performance",
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum EnergyPreference {
+        RawPerformance,
+        Default,
+        Performance,
+        BalancePerformance,
+        BalancePower,
+        Power,
+    }
+
+    impl EnergyPreference {
+        pub fn parse(value: &str) -> Option<Self> {
+            match value {
+                "0" => Some(Self::RawPerformance),
+                "default" => Some(Self::Default),
+                "performance" => Some(Self::Performance),
+                "balance_performance" => Some(Self::BalancePerformance),
+                "balance_power" => Some(Self::BalancePower),
+                "power" => Some(Self::Power),
+                _ => None,
+            }
+        }
+
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::RawPerformance => "0",
+                Self::Default => "default",
+                Self::Performance => "performance",
+                Self::BalancePerformance => "balance_performance",
+                Self::BalancePower => "balance_power",
+                Self::Power => "power",
+            }
+        }
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Switch {
@@ -59,6 +118,14 @@ pub mod helper {
     }
 
     impl Switch {
+        pub fn parse(value: &str) -> Option<Self> {
+            match value {
+                "0" => Some(Self::Disabled),
+                "1" => Some(Self::Enabled),
+                _ => None,
+            }
+        }
+
         pub const fn as_str(self) -> &'static str {
             match self {
                 Self::Disabled => "0",
@@ -119,6 +186,7 @@ pub mod helper {
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Action {
+        ApplyCpuProfile,
         SetGovernor,
         SetEpp,
         SetGpuPower,
@@ -153,7 +221,8 @@ pub mod helper {
     }
 
     impl Action {
-        pub const ALL: [Self; 31] = [
+        pub const ALL: [Self; 32] = [
+            Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
             Self::SetGpuPower,
@@ -189,6 +258,7 @@ pub mod helper {
 
         pub fn parse(value: &str) -> Option<Self> {
             match value {
+                "apply-cpu-profile" => Some(Self::ApplyCpuProfile),
                 "set-governor" => Some(Self::SetGovernor),
                 "set-epp" => Some(Self::SetEpp),
                 "set-gpu-power" => Some(Self::SetGpuPower),
@@ -226,6 +296,7 @@ pub mod helper {
 
         pub const fn as_str(self) -> &'static str {
             match self {
+                Self::ApplyCpuProfile => "apply-cpu-profile",
                 Self::SetGovernor => "set-governor",
                 Self::SetEpp => "set-epp",
                 Self::SetGpuPower => "set-gpu-power",
@@ -262,6 +333,7 @@ pub mod helper {
 
         pub const fn argument_count(self) -> usize {
             match self {
+                Self::ApplyCpuProfile => 4,
                 Self::SetGovernor
                 | Self::SetEpp
                 | Self::SetGpuPower
@@ -298,6 +370,9 @@ pub mod helper {
 
         pub const fn usage(self) -> &'static str {
             match self {
+                Self::ApplyCpuProfile => {
+                    "apply-cpu-profile GOVERNOR EPP|skip NO_TURBO|skip MIN_PERF|skip"
+                }
                 Self::SetGovernor => "set-governor GOVERNOR",
                 Self::SetEpp => "set-epp PREFERENCE",
                 Self::SetGpuPower => "set-gpu-power WATTS",
@@ -336,7 +411,7 @@ pub mod helper {
 
 #[cfg(test)]
 mod tests {
-    use super::helper::Action;
+    use super::helper::{Action, CpuGovernor, EnergyPreference, Switch};
     use std::path::Path;
 
     #[test]
@@ -374,6 +449,29 @@ mod tests {
                 Path::new(path).file_name().and_then(|name| name.to_str()),
                 Some(binary)
             );
+        }
+    }
+
+    #[test]
+    fn typed_cpu_profile_values_round_trip_through_the_wire_format() {
+        for governor in [CpuGovernor::Powersave, CpuGovernor::Performance] {
+            assert_eq!(CpuGovernor::parse(governor.as_str()), Some(governor));
+        }
+        for preference in [
+            EnergyPreference::RawPerformance,
+            EnergyPreference::Default,
+            EnergyPreference::Performance,
+            EnergyPreference::BalancePerformance,
+            EnergyPreference::BalancePower,
+            EnergyPreference::Power,
+        ] {
+            assert_eq!(
+                EnergyPreference::parse(preference.as_str()),
+                Some(preference)
+            );
+        }
+        for switch in [Switch::Disabled, Switch::Enabled] {
+            assert_eq!(Switch::parse(switch.as_str()), Some(switch));
         }
     }
 }

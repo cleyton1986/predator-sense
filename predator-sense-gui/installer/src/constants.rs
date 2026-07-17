@@ -103,12 +103,33 @@ pub(crate) mod hardware {
     pub const RGB_MAX_BRIGHTNESS: i64 = 100;
     pub const RGB_MIN_CHANNEL: i64 = 0;
     pub const RGB_MAX_CHANNEL: i64 = 255;
+    pub const RGB_DEFAULT_SPEED: u8 = 4;
+    pub const RGB_MAX_SPEED: u8 = 9;
+    pub const HID_NAME_MATCH: &str = "ENEK5130";
+    pub const HID_VENDOR: &str = "00000CF2";
+    pub const HID_PRODUCT: &str = "00005130";
+    pub const HID_REPORT_TARGET_LIST: u8 = 0xa1;
+    pub const HID_REPORT_TARGET_SELECT: u8 = 0xa2;
+    pub const HID_REPORT_TARGET_CAPABILITIES: u8 = 0xa3;
+    pub const HID_REPORT_LIGHTING: u8 = 0xa4;
+    pub const HID_TARGET_KEYBOARD: u8 = 0x21;
+    pub const HID_TARGET_COVER_LOGO: u8 = 0x83;
+    pub const HID_MODE_STATIC: u8 = 0x02;
+    pub const HID_MODE_BREATH: u8 = 0x04;
+    pub const HID_MODE_NEON: u8 = 0x05;
+    pub const HID_STATIC_FLAG: u8 = 0x01;
+    pub const HID_EFFECT_FLAG: u8 = 0x02;
+    pub const HID_TARGET_LIST_REPORT_LEN: usize = 11;
+    pub const HID_TARGET_CAPABILITIES_REPORT_LEN: usize = 9;
+    pub const HID_TARGET_CAPABILITIES_MIN_LEN: usize = 6;
+    pub const HID_TARGET_MAX_ZONES: u8 = 16;
     pub const HID_FEATURE_REPORT_LEN: usize = 11;
-    pub const HID_FEATURE_REPORT_ID: u8 = 0xa4;
-    pub const HID_FEATURE_COMMAND: u8 = 0x21;
-    pub const HID_FEATURE_STATIC_MODE: u8 = 0x02;
     pub const HID_FEATURE_RESERVED: u8 = 0x00;
-    pub const HIDIOCSFEATURE_11: libc::c_ulong = 0xC00B_4806;
+    pub const HID_IOCTL_READ_WRITE: libc::c_ulong = 0xc000_0000;
+    pub const HID_IOCTL_LENGTH_SHIFT: u32 = 16;
+    pub const HID_IOCTL_TYPE: libc::c_ulong = (b'H' as libc::c_ulong) << 8;
+    pub const HID_IOCTL_SET_FEATURE: libc::c_ulong = 0x06;
+    pub const HID_IOCTL_GET_FEATURE: libc::c_ulong = 0x07;
 
     pub const CPU_PERCENT_MIN: u16 = 0;
     pub const CPU_PERCENT_MAX: u16 = predator_sense_protocol::helper::PERCENT_MAX;
@@ -182,7 +203,9 @@ pub(crate) mod hardware {
 pub(crate) mod timing {
     pub const HOTKEY_DEBOUNCE_SECS: u64 = 1;
     pub const HOTKEY_INITIAL_DEBOUNCE_SECS: u64 = 2;
-    pub const POLL_FOREVER_MS: i32 = -1;
+    pub const HOTKEY_POLL_MS: i32 = 5_000;
+    pub const RESUME_THRESHOLD_SECS: f64 = 0.5;
+    pub const LIGHTING_RESTORE_RETRY_DELAYS_SECS: [u64; 3] = [0, 1, 2];
     pub const SERVICE_RESTART_SECS: u64 = 5;
     pub const PROCESS_SHUTDOWN_GRACE_SECS: u64 = 1;
 }

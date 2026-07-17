@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "predator-sense-protocol"
-version = "0.2.43-preview"
+version = "0.2.44-preview"
 
 [[package]]
 name = "proc-macro-crate"

@@ -4,16 +4,33 @@ use crate::constants::hardware::{
 };
 use crate::constants::{command as external, path};
 use crate::AppResult;
-use predator_sense_protocol::helper::Action as HelperAction;
+use predator_sense_protocol::helper::{
+    Action as HelperAction, CpuGovernor, EnergyPreference, Switch, OPTIONAL_VALUE_SKIP,
+};
 use serde::Deserialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const CPUFREQ_RELATIVE_DIR: &str = "devices/system/cpu/cpufreq";
+const SCALING_DRIVER: &str = "scaling_driver";
+const SCALING_GOVERNOR: &str = "scaling_governor";
+const AVAILABLE_GOVERNORS: &str = "scaling_available_governors";
+const CPUINFO_MIN_FREQ: &str = "cpuinfo_min_freq";
+const CPUINFO_MAX_FREQ: &str = "cpuinfo_max_freq";
+const ENERGY_PREFERENCE: &str = "energy_performance_preference";
+const AVAILABLE_ENERGY_PREFERENCES: &str = "energy_performance_available_preferences";
+const INTEL_PSTATE_STATUS: &str = "devices/system/cpu/intel_pstate/status";
 const INTEL_PSTATE_NO_TURBO: &str = "devices/system/cpu/intel_pstate/no_turbo";
 const INTEL_PSTATE_MIN_PERF: &str = "devices/system/cpu/intel_pstate/min_perf_pct";
+const CPU_PROFILE_LOCK: &str = "/run/lock/predator-sense-cpu-profile.lock";
+const CPU_PROFILE_FIXTURE_LOCK: &str = "predator-sense-cpu-profile.lock";
+const CPU_PROFILE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const CPU_PROFILE_LOCK_RETRY: Duration = Duration::from_millis(50);
 const BATTERY_THRESHOLD: &str = "class/power_supply/BAT1/charge_control_end_threshold";
 const BATTERY_HEALTH: &str = "bus/wmi/drivers/acer-wmi-battery/health_mode";
 const BATTERY_CALIBRATION: &str = "bus/wmi/drivers/acer-wmi-battery/calibration_mode";
@@ -58,61 +75,88 @@ impl PwmAttribute {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CpuGovernor {
-    Powersave,
-    Performance,
+struct CpuProfileRequest {
+    governor: CpuGovernor,
+    epp: Option<EnergyPreference>,
+    no_turbo: Option<bool>,
+    min_perf_pct: Option<u16>,
 }
 
-impl CpuGovernor {
-    fn parse(value: &str) -> AppResult<Self> {
-        match value {
-            "powersave" => Ok(Self::Powersave),
-            "performance" => Ok(Self::Performance),
-            _ => Err(fail(format!("invalid CPU governor '{value}'"))),
-        }
-    }
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Powersave => "powersave",
-            Self::Performance => "performance",
-        }
+impl CpuProfileRequest {
+    fn parse(arguments: &[String]) -> AppResult<Self> {
+        let [governor, epp, no_turbo, min_perf_pct] = arguments else {
+            return Err(fail(format!(
+                "usage: {}",
+                HelperAction::ApplyCpuProfile.usage()
+            )));
+        };
+        let governor = CpuGovernor::parse(governor)
+            .ok_or_else(|| fail(format!("invalid CPU governor '{governor}'")))?;
+        let epp = if epp == OPTIONAL_VALUE_SKIP {
+            None
+        } else {
+            Some(EnergyPreference::parse(epp).ok_or_else(|| fail(format!("invalid EPP '{epp}'")))?)
+        };
+        let no_turbo = if no_turbo == OPTIONAL_VALUE_SKIP {
+            None
+        } else {
+            Some(
+                Switch::parse(no_turbo)
+                    .map(|value| value == Switch::Enabled)
+                    .ok_or_else(|| fail(format!("invalid no_turbo value '{no_turbo}'")))?,
+            )
+        };
+        let min_perf_pct = if min_perf_pct == OPTIONAL_VALUE_SKIP {
+            None
+        } else {
+            Some(parse_u16(
+                "min_perf_pct",
+                min_perf_pct,
+                hardware::CPU_PERCENT_MIN,
+                hardware::CPU_PERCENT_MAX,
+            )?)
+        };
+        Ok(Self {
+            governor,
+            epp,
+            no_turbo,
+            min_perf_pct,
+        })
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EnergyPreference {
-    RawPerformance,
-    Default,
-    Performance,
-    BalancePerformance,
-    BalancePower,
-    Power,
+#[derive(Debug)]
+struct CpuProfileContext {
+    policies: Vec<PathBuf>,
+    intel_pstate_hwp_active: bool,
+    min_perf_floor_pct: Option<u16>,
+    no_turbo_path: PathBuf,
+    min_perf_path: PathBuf,
 }
 
-impl EnergyPreference {
-    fn parse(value: &str) -> AppResult<Self> {
-        match value {
-            "0" => Ok(Self::RawPerformance),
-            "default" => Ok(Self::Default),
-            "performance" => Ok(Self::Performance),
-            "balance_performance" => Ok(Self::BalancePerformance),
-            "balance_power" => Ok(Self::BalancePower),
-            "power" => Ok(Self::Power),
-            _ => Err(fail(format!("invalid EPP '{value}'"))),
-        }
-    }
+#[derive(Debug)]
+struct PolicySnapshot {
+    path: PathBuf,
+    governor: String,
+    epp: Option<String>,
+}
 
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::RawPerformance => "0",
-            Self::Default => "default",
-            Self::Performance => "performance",
-            Self::BalancePerformance => "balance_performance",
-            Self::BalancePower => "balance_power",
-            Self::Power => "power",
-        }
-    }
+#[derive(Debug)]
+struct CpuProfileSnapshot {
+    policies: Vec<PolicySnapshot>,
+    no_turbo: Option<String>,
+    min_perf_pct: Option<String>,
+}
+
+#[derive(Debug)]
+struct CpuWrite {
+    label: &'static str,
+    value: String,
+    path: PathBuf,
+}
+
+struct CpuProfileLock {
+    _file: File,
 }
 
 pub(crate) fn run(args: &[String]) -> AppResult {
@@ -135,8 +179,14 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
         .ok_or_else(|| fail(format!("unknown action '{action_name}'")))?;
     ensure_arity(action, args)?;
     match action {
+        HelperAction::ApplyCpuProfile => {
+            let request = CpuProfileRequest::parse(&args[1..])?;
+            let _lock = CpuProfileLock::acquire(sysfs)?;
+            apply_cpu_profile(sysfs, request)
+        }
         HelperAction::SetGovernor => {
-            let governor = CpuGovernor::parse(&args[1])?;
+            let governor = CpuGovernor::parse(&args[1])
+                .ok_or_else(|| fail(format!("invalid CPU governor '{}'", args[1])))?;
             for policy in cpu_policy_dirs(sysfs)? {
                 write_attr(
                     "scaling-governor",
@@ -147,7 +197,8 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
             Ok(())
         }
         HelperAction::SetEpp => {
-            let epp = EnergyPreference::parse(&args[1])?;
+            let epp = EnergyPreference::parse(&args[1])
+                .ok_or_else(|| fail(format!("invalid EPP '{}'", args[1])))?;
             for policy in cpu_policy_dirs(sysfs)? {
                 let attribute = policy.join("energy_performance_preference");
                 if attribute.exists() {
@@ -345,6 +396,372 @@ fn cpu_policy_dirs(sysfs: &Path) -> AppResult<Vec<PathBuf>> {
     }
 }
 
+impl CpuProfileLock {
+    fn acquire(sysfs: &Path) -> AppResult<Self> {
+        let lock_path = if sysfs == Path::new(path::REAL_SYSFS) {
+            PathBuf::from(CPU_PROFILE_LOCK)
+        } else {
+            sysfs.join(CPU_PROFILE_FIXTURE_LOCK)
+        };
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| {
+                fail(format!(
+                    "cannot open CPU profile lock {}: {error}",
+                    lock_path.display()
+                ))
+            })?;
+        let started = Instant::now();
+        loop {
+            // SAFETY: `file` owns a valid descriptor for the duration of the call.
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result == 0 {
+                return Ok(Self { _file: file });
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(fail(format!(
+                    "cannot lock CPU profile changes using {}: {error}",
+                    lock_path.display()
+                )));
+            }
+            if started.elapsed() >= CPU_PROFILE_LOCK_TIMEOUT {
+                return Err(fail("timed out waiting for another CPU profile change"));
+            }
+            thread::sleep(CPU_PROFILE_LOCK_RETRY);
+        }
+    }
+}
+
+fn apply_cpu_profile(sysfs: &Path, request: CpuProfileRequest) -> AppResult {
+    apply_cpu_profile_with(sysfs, request, &mut write_attr)
+}
+
+fn apply_cpu_profile_with(
+    sysfs: &Path,
+    request: CpuProfileRequest,
+    write: &mut impl FnMut(&str, &str, &Path) -> AppResult,
+) -> AppResult {
+    let context = preflight_cpu_profile(sysfs, request)?;
+    let snapshot = snapshot_cpu_profile(&context)?;
+    let writes = cpu_profile_writes(request, &context);
+
+    for update in writes {
+        if let Err(error) = write(update.label, &update.value, &update.path) {
+            return Err(rollback_error(error, &context, &snapshot, write));
+        }
+    }
+    if let Err(error) = verify_cpu_profile(request, &context) {
+        return Err(rollback_error(error, &context, &snapshot, write));
+    }
+    Ok(())
+}
+
+fn preflight_cpu_profile(sysfs: &Path, request: CpuProfileRequest) -> AppResult<CpuProfileContext> {
+    let policies = cpu_policy_dirs(sysfs)?;
+    for policy in &policies {
+        require_attribute(policy, SCALING_GOVERNOR)?;
+        validate_available_value(
+            "governor",
+            request.governor.as_str(),
+            &policy.join(AVAILABLE_GOVERNORS),
+        )?;
+
+        if let Some(epp) = request.epp {
+            require_attribute(policy, ENERGY_PREFERENCE)?;
+            if epp != EnergyPreference::RawPerformance {
+                validate_available_value(
+                    "EPP",
+                    epp.as_str(),
+                    &policy.join(AVAILABLE_ENERGY_PREFERENCES),
+                )?;
+            }
+        }
+    }
+
+    let no_turbo_path = sysfs.join(INTEL_PSTATE_NO_TURBO);
+    let min_perf_path = sysfs.join(INTEL_PSTATE_MIN_PERF);
+    if request.no_turbo.is_some() && !no_turbo_path.exists() {
+        return Err(fail(format!("missing {}", no_turbo_path.display())));
+    }
+    if request.min_perf_pct.is_some() && !min_perf_path.exists() {
+        return Err(fail(format!("missing {}", min_perf_path.display())));
+    }
+
+    Ok(CpuProfileContext {
+        intel_pstate_hwp_active: intel_pstate_hwp_active(sysfs, &policies),
+        min_perf_floor_pct: min_perf_floor_pct(&policies),
+        policies,
+        no_turbo_path,
+        min_perf_path,
+    })
+}
+
+fn require_attribute(policy: &Path, attribute: &str) -> AppResult {
+    let path = policy.join(attribute);
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(fail(format!("missing {attribute} in {}", policy.display())))
+    }
+}
+
+fn validate_available_value(label: &str, expected: &str, path: &Path) -> AppResult {
+    if !path.exists() {
+        return Ok(());
+    }
+    let available = read_attr(&format!("available-{label}"), path)?;
+    if available.split_whitespace().any(|value| value == expected) {
+        Ok(())
+    } else {
+        Err(fail(format!(
+            "{label} '{expected}' is not available according to {}",
+            path.display()
+        )))
+    }
+}
+
+fn intel_pstate_hwp_active(sysfs: &Path, policies: &[PathBuf]) -> bool {
+    !policies.is_empty()
+        && read_attr("intel-pstate-status", &sysfs.join(INTEL_PSTATE_STATUS)).as_deref()
+            == Ok("active")
+        && policies.iter().all(|policy| {
+            read_attr("scaling-driver", &policy.join(SCALING_DRIVER)).as_deref()
+                == Ok("intel_pstate")
+                && policy.join(ENERGY_PREFERENCE).exists()
+        })
+}
+
+fn min_perf_floor_pct(policies: &[PathBuf]) -> Option<u16> {
+    let policy = policies.first()?;
+    let minimum = read_attr("cpuinfo-min-freq", &policy.join(CPUINFO_MIN_FREQ))
+        .ok()?
+        .parse::<u64>()
+        .ok()?;
+    let maximum = read_attr("cpuinfo-max-freq", &policy.join(CPUINFO_MAX_FREQ))
+        .ok()?
+        .parse::<u64>()
+        .ok()?;
+    if maximum == 0 {
+        return None;
+    }
+    u16::try_from(minimum.saturating_mul(100) / maximum).ok()
+}
+
+fn snapshot_cpu_profile(context: &CpuProfileContext) -> AppResult<CpuProfileSnapshot> {
+    let policies = context
+        .policies
+        .iter()
+        .map(|policy| {
+            Ok(PolicySnapshot {
+                path: policy.clone(),
+                governor: read_attr("scaling-governor", &policy.join(SCALING_GOVERNOR))?,
+                epp: policy
+                    .join(ENERGY_PREFERENCE)
+                    .exists()
+                    .then(|| read_attr("epp", &policy.join(ENERGY_PREFERENCE)))
+                    .transpose()?,
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    let no_turbo = context
+        .no_turbo_path
+        .exists()
+        .then(|| read_attr("no-turbo", &context.no_turbo_path))
+        .transpose()?;
+    let min_perf_pct = context
+        .min_perf_path
+        .exists()
+        .then(|| read_attr("min-perf", &context.min_perf_path))
+        .transpose()?;
+    Ok(CpuProfileSnapshot {
+        policies,
+        no_turbo,
+        min_perf_pct,
+    })
+}
+
+fn cpu_profile_writes(request: CpuProfileRequest, context: &CpuProfileContext) -> Vec<CpuWrite> {
+    let mut writes = Vec::new();
+    let kernel_forces_epp_zero = request.governor == CpuGovernor::Performance
+        && request.epp == Some(EnergyPreference::RawPerformance)
+        && context.intel_pstate_hwp_active;
+
+    if request.governor == CpuGovernor::Performance {
+        if let Some(epp) = request.epp.filter(|_| !kernel_forces_epp_zero) {
+            push_policy_writes(&mut writes, context, "epp", epp.as_str(), ENERGY_PREFERENCE);
+        }
+        push_policy_writes(
+            &mut writes,
+            context,
+            "scaling-governor",
+            request.governor.as_str(),
+            SCALING_GOVERNOR,
+        );
+    } else {
+        // A named EPP becomes writable only after leaving the HWP maximum policy.
+        push_policy_writes(
+            &mut writes,
+            context,
+            "scaling-governor",
+            request.governor.as_str(),
+            SCALING_GOVERNOR,
+        );
+        if let Some(epp) = request.epp {
+            push_policy_writes(&mut writes, context, "epp", epp.as_str(), ENERGY_PREFERENCE);
+        }
+    }
+
+    if let Some(no_turbo) = request.no_turbo {
+        writes.push(CpuWrite {
+            label: "no-turbo",
+            value: bool_str(no_turbo).into(),
+            path: context.no_turbo_path.clone(),
+        });
+    }
+    if let Some(min_perf_pct) = request.min_perf_pct {
+        writes.push(CpuWrite {
+            label: "min-perf",
+            value: min_perf_pct.to_string(),
+            path: context.min_perf_path.clone(),
+        });
+    }
+    writes
+}
+
+fn push_policy_writes(
+    writes: &mut Vec<CpuWrite>,
+    context: &CpuProfileContext,
+    label: &'static str,
+    value: &str,
+    attribute: &str,
+) {
+    writes.extend(context.policies.iter().map(|policy| CpuWrite {
+        label,
+        value: value.into(),
+        path: policy.join(attribute),
+    }));
+}
+
+fn verify_cpu_profile(request: CpuProfileRequest, context: &CpuProfileContext) -> AppResult {
+    let kernel_forces_epp_zero = request.governor == CpuGovernor::Performance
+        && request.epp == Some(EnergyPreference::RawPerformance)
+        && context.intel_pstate_hwp_active;
+    for policy in &context.policies {
+        verify_attr(request.governor.as_str(), &policy.join(SCALING_GOVERNOR))?;
+        if let Some(epp) = request.epp.filter(|_| !kernel_forces_epp_zero) {
+            verify_attr(epp.as_str(), &policy.join(ENERGY_PREFERENCE))?;
+        }
+    }
+    if let Some(no_turbo) = request.no_turbo {
+        verify_attr(bool_str(no_turbo), &context.no_turbo_path)?;
+    }
+    if let Some(min_perf_pct) = request.min_perf_pct {
+        let actual = read_attr("min-perf-verification", &context.min_perf_path)?;
+        let actual = actual.parse::<u16>().map_err(|_| {
+            fail(format!(
+                "verification returned invalid min_perf_pct '{}' from {}",
+                actual,
+                context.min_perf_path.display()
+            ))
+        })?;
+        let accepted_hardware_floor =
+            actual > min_perf_pct && context.min_perf_floor_pct == Some(actual);
+        if actual != min_perf_pct && !accepted_hardware_floor {
+            return Err(fail(format!(
+                "verification failed for {}: expected '{min_perf_pct}', got '{actual}'",
+                context.min_perf_path.display()
+            )));
+        }
+        if accepted_hardware_floor {
+            eprintln!(
+                "predator-sense-helper: min_perf_pct was clamped by the kernel from {min_perf_pct} to the hardware floor {actual}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn verify_attr(expected: &str, path: &Path) -> AppResult {
+    let actual = read_attr("profile-verification", path)?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(fail(format!(
+            "verification failed for {}: expected '{expected}', got '{actual}'",
+            path.display()
+        )))
+    }
+}
+
+fn rollback_error(
+    original: String,
+    context: &CpuProfileContext,
+    snapshot: &CpuProfileSnapshot,
+    write: &mut impl FnMut(&str, &str, &Path) -> AppResult,
+) -> String {
+    match rollback_cpu_profile(context, snapshot, write) {
+        Ok(()) => format!("{original}; rolling back CPU profile succeeded"),
+        Err(rollback) => {
+            format!("{original}; rolling back CPU profile was incomplete: {rollback}")
+        }
+    }
+}
+
+fn rollback_cpu_profile(
+    context: &CpuProfileContext,
+    snapshot: &CpuProfileSnapshot,
+    write: &mut impl FnMut(&str, &str, &Path) -> AppResult,
+) -> AppResult {
+    let mut errors = Vec::new();
+    for policy in &snapshot.policies {
+        collect_rollback_error(
+            &mut errors,
+            write(
+                "rollback-scaling-governor",
+                &policy.governor,
+                &policy.path.join(SCALING_GOVERNOR),
+            ),
+        );
+        if !(context.intel_pstate_hwp_active
+            && policy.governor == CpuGovernor::Performance.as_str())
+        {
+            if let Some(epp) = &policy.epp {
+                collect_rollback_error(
+                    &mut errors,
+                    write("rollback-epp", epp, &policy.path.join(ENERGY_PREFERENCE)),
+                );
+            }
+        }
+    }
+    if let Some(no_turbo) = &snapshot.no_turbo {
+        collect_rollback_error(
+            &mut errors,
+            write("rollback-no-turbo", no_turbo, &context.no_turbo_path),
+        );
+    }
+    if let Some(min_perf_pct) = &snapshot.min_perf_pct {
+        collect_rollback_error(
+            &mut errors,
+            write("rollback-min-perf", min_perf_pct, &context.min_perf_path),
+        );
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn collect_rollback_error(errors: &mut Vec<String>, result: AppResult) {
+    if let Err(error) = result {
+        errors.push(error);
+    }
+}
+
 fn ec_write_fan_preset(ec: &Path, preset: FanPreset) -> AppResult {
     ec_write_many(ec, &preset.ec_values())
 }
@@ -503,6 +920,12 @@ mod tests {
         }
     }
 
+    fn intel_controls(root: &Path, status: &str, no_turbo: bool, min_perf_pct: u16) {
+        write(root, INTEL_PSTATE_STATUS, status);
+        write(root, INTEL_PSTATE_NO_TURBO, bool_str(no_turbo));
+        write(root, INTEL_PSTATE_MIN_PERF, &min_perf_pct.to_string());
+    }
+
     fn read(root: &Path, relative: &str) -> String {
         fs::read_to_string(root.join(relative))
             .unwrap()
@@ -540,10 +963,213 @@ mod tests {
 
     #[test]
     fn rejects_untrusted_values_before_writing() {
-        assert!(CpuGovernor::parse("performance;reboot").is_err());
-        assert!(EnergyPreference::parse("performance;reboot").is_err());
+        assert!(CpuGovernor::parse("performance;reboot").is_none());
+        assert!(EnergyPreference::parse("performance;reboot").is_none());
         assert!(parse_bool("yes").is_err());
         assert!(parse_u16("pwm", "256", hardware::PWM_MIN, hardware::PWM_MAX).is_err());
+    }
+
+    #[test]
+    fn applies_hwp_performance_turbo_and_balanced_as_atomic_profiles() {
+        let fixture = TempDir::new().unwrap();
+        policy(fixture.path(), 0, "intel_pstate", true);
+        policy(fixture.path(), 1, "intel_pstate", true);
+        intel_controls(fixture.path(), "active", false, 17);
+
+        let performance = CpuProfileRequest {
+            governor: CpuGovernor::Powersave,
+            epp: Some(EnergyPreference::Performance),
+            no_turbo: Some(false),
+            min_perf_pct: Some(50),
+        };
+        apply_cpu_profile(fixture.path(), performance).unwrap();
+        for index in 0..=1 {
+            let base = format!("devices/system/cpu/cpufreq/policy{index}");
+            assert_eq!(
+                read(fixture.path(), &format!("{base}/{SCALING_GOVERNOR}")),
+                "powersave"
+            );
+            assert_eq!(
+                read(fixture.path(), &format!("{base}/{ENERGY_PREFERENCE}")),
+                "performance"
+            );
+        }
+        assert_eq!(read(fixture.path(), INTEL_PSTATE_MIN_PERF), "50");
+
+        let turbo = CpuProfileRequest {
+            governor: CpuGovernor::Performance,
+            epp: Some(EnergyPreference::RawPerformance),
+            no_turbo: Some(false),
+            min_perf_pct: Some(100),
+        };
+        apply_cpu_profile(fixture.path(), turbo).unwrap();
+        for index in 0..=1 {
+            let base = format!("devices/system/cpu/cpufreq/policy{index}");
+            assert_eq!(
+                read(fixture.path(), &format!("{base}/{SCALING_GOVERNOR}")),
+                "performance"
+            );
+            // Plain fixture files do not emulate the kernel's forced raw EPP 0.
+            assert_eq!(
+                read(fixture.path(), &format!("{base}/{ENERGY_PREFERENCE}")),
+                "performance"
+            );
+        }
+        assert_eq!(read(fixture.path(), INTEL_PSTATE_MIN_PERF), "100");
+
+        let balanced = CpuProfileRequest {
+            governor: CpuGovernor::Powersave,
+            epp: Some(EnergyPreference::BalancePerformance),
+            no_turbo: Some(false),
+            min_perf_pct: Some(17),
+        };
+        apply_cpu_profile(fixture.path(), balanced).unwrap();
+        for index in 0..=1 {
+            let base = format!("devices/system/cpu/cpufreq/policy{index}");
+            assert_eq!(
+                read(fixture.path(), &format!("{base}/{SCALING_GOVERNOR}")),
+                "powersave"
+            );
+            assert_eq!(
+                read(fixture.path(), &format!("{base}/{ENERGY_PREFERENCE}")),
+                "balance_performance"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_cpufreq_accepts_explicitly_skipped_optional_controls() {
+        let fixture = TempDir::new().unwrap();
+        policy(fixture.path(), 0, "acpi-cpufreq", false);
+        let request = CpuProfileRequest::parse(&[
+            CpuGovernor::Performance.as_str().into(),
+            OPTIONAL_VALUE_SKIP.into(),
+            OPTIONAL_VALUE_SKIP.into(),
+            OPTIONAL_VALUE_SKIP.into(),
+        ])
+        .unwrap();
+
+        apply_cpu_profile(fixture.path(), request).unwrap();
+        assert_eq!(
+            read(
+                fixture.path(),
+                "devices/system/cpu/cpufreq/policy0/scaling_governor"
+            ),
+            "performance"
+        );
+    }
+
+    #[test]
+    fn rolls_back_every_policy_when_a_later_write_fails() {
+        let fixture = TempDir::new().unwrap();
+        policy(fixture.path(), 0, "intel_pstate", true);
+        policy(fixture.path(), 1, "intel_pstate", true);
+        intel_controls(fixture.path(), "active", false, 17);
+        let request = CpuProfileRequest {
+            governor: CpuGovernor::Performance,
+            epp: Some(EnergyPreference::RawPerformance),
+            no_turbo: Some(false),
+            min_perf_pct: Some(100),
+        };
+        let failing_path = fixture
+            .path()
+            .join("devices/system/cpu/cpufreq/policy1/scaling_governor");
+        let mut failed_once = false;
+        let error = apply_cpu_profile_with(fixture.path(), request, &mut |label, value, path| {
+            if !failed_once && path == failing_path && value == CpuGovernor::Performance.as_str() {
+                failed_once = true;
+                Err(fail(format!(
+                    "{label}: injected failure at {}",
+                    path.display()
+                )))
+            } else {
+                write_attr(label, value, path)
+            }
+        })
+        .unwrap_err();
+
+        assert!(error.contains("policy1/scaling_governor"));
+        assert!(error.contains("rolling back CPU profile succeeded"));
+        for index in 0..=1 {
+            let base = format!("devices/system/cpu/cpufreq/policy{index}");
+            assert_eq!(
+                read(fixture.path(), &format!("{base}/{SCALING_GOVERNOR}")),
+                "powersave"
+            );
+            assert_eq!(
+                read(fixture.path(), &format!("{base}/{ENERGY_PREFERENCE}")),
+                "balance_performance"
+            );
+        }
+        assert_eq!(read(fixture.path(), INTEL_PSTATE_MIN_PERF), "17");
+    }
+
+    #[test]
+    fn preflight_rejects_an_incomplete_epp_backend_before_any_write() {
+        let fixture = TempDir::new().unwrap();
+        policy(fixture.path(), 0, "intel_pstate", true);
+        policy(fixture.path(), 1, "intel_pstate", false);
+        intel_controls(fixture.path(), "active", false, 17);
+        let request = CpuProfileRequest {
+            governor: CpuGovernor::Performance,
+            epp: Some(EnergyPreference::Performance),
+            no_turbo: Some(false),
+            min_perf_pct: Some(50),
+        };
+
+        let error = apply_cpu_profile(fixture.path(), request).unwrap_err();
+        assert!(error.contains("policy1"));
+        assert_eq!(
+            read(
+                fixture.path(),
+                "devices/system/cpu/cpufreq/policy0/scaling_governor"
+            ),
+            "powersave"
+        );
+    }
+
+    #[test]
+    fn accepts_only_the_kernel_reported_minimum_performance_clamp() {
+        let fixture = TempDir::new().unwrap();
+        policy(fixture.path(), 0, "intel_pstate", true);
+        intel_controls(fixture.path(), "active", false, 17);
+        write(
+            fixture.path(),
+            "devices/system/cpu/cpufreq/policy0/cpuinfo_min_freq",
+            "800000",
+        );
+        write(
+            fixture.path(),
+            "devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq",
+            "4700000",
+        );
+        let request = CpuProfileRequest {
+            governor: CpuGovernor::Powersave,
+            epp: Some(EnergyPreference::Power),
+            no_turbo: Some(true),
+            min_perf_pct: Some(10),
+        };
+        apply_cpu_profile_with(fixture.path(), request, &mut |label, value, path| {
+            if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) && value == "10" {
+                write_attr(label, "17", path)
+            } else {
+                write_attr(label, value, path)
+            }
+        })
+        .unwrap();
+        assert_eq!(read(fixture.path(), INTEL_PSTATE_MIN_PERF), "17");
+
+        write(fixture.path(), INTEL_PSTATE_MIN_PERF, "50");
+        let error = apply_cpu_profile_with(fixture.path(), request, &mut |label, value, path| {
+            if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) && value == "10" {
+                Ok(())
+            } else {
+                write_attr(label, value, path)
+            }
+        })
+        .unwrap_err();
+        assert!(error.contains("expected '10', got '50'"));
+        assert_eq!(read(fixture.path(), INTEL_PSTATE_MIN_PERF), "50");
     }
 
     #[test]
