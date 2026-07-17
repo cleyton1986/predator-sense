@@ -281,6 +281,7 @@ sudo insmod kernel/facer.ko
 sudo mkdir -p /opt/predator-sense/resources
 sudo cp target/release/predator-sense /opt/predator-sense/
 sudo cp resources/* /opt/predator-sense/resources/
+sudo install -m 0755 installer/predator-sense-helper /opt/predator-sense/
 sudo chmod +x /opt/predator-sense/predator-sense
 
 # Executar
@@ -303,12 +304,26 @@ sudo chmod +x /opt/predator-sense/predator-sense
 
 ### Perfis de Desempenho
 
-| Perfil | CPU Governor | Intel EPP | GPU Power | Uso |
-|--------|-------------|-----------|-----------|-----|
-| **Silencioso** | powersave | power | 40W | Trabalho silencioso |
-| **Balanceado** | powersave | balance_performance | 80W | Uso geral |
-| **Performance** | performance | performance | 100W | Jogos |
-| **Turbo** | performance | performance | 110W | Performance máxima |
+Em sistemas com Intel P-State ativo + HWP, a parte de CPU é resolvida assim:
+
+| Perfil | Política HWP | Intel EPP | Performance mínima | GPU Power | Uso |
+|--------|--------------|-----------|--------------------|-----------|-----|
+| **Silencioso** | powersave | power | 10% | 40W | Trabalho silencioso |
+| **Balanceado** | powersave | balance_performance | 17% | 80W | Uso geral |
+| **Performance** | powersave¹ | performance | 50% | 100W | Jogos |
+| **Turbo** | performance² | 0 (forçado pelo kernel) | 100% | 110W | Performance máxima |
+
+¹ A política HWP `powersave` do Intel P-State é um algoritmo de escalonamento
+dinâmico, não o governor genérico que fixa a frequência mínima. Ela mantém o
+EPP nominal específico do modelo gravável e torna Performance uma faixa
+dinâmica de 50% até o máximo.
+
+² A própria política HWP `performance` força EPP 0 e restringe a faixa de
+P-states ao limite superior. O Predator Sense usa esse comportamento garantido
+pelo kernel em vez de exigir escrita numérica de EPP. O backend é detectado em
+todas as políticas cpufreq, sem uma lista de modelos de CPU. Outros drivers
+mantêm o mapeamento existente `performance` + EPP nominal `performance`, e
+sistemas sem EPP ignoram apenas esse controle opcional.
 
 ### Dashboard GPU
 

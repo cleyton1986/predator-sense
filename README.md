@@ -281,6 +281,7 @@ sudo insmod kernel/facer.ko
 sudo mkdir -p /opt/predator-sense/resources
 sudo cp target/release/predator-sense /opt/predator-sense/
 sudo cp resources/* /opt/predator-sense/resources/
+sudo install -m 0755 installer/predator-sense-helper /opt/predator-sense/
 sudo chmod +x /opt/predator-sense/predator-sense
 
 # Run
@@ -303,12 +304,25 @@ sudo chmod +x /opt/predator-sense/predator-sense
 
 ### Performance Profiles
 
-| Profile | CPU Governor | Intel EPP | GPU Power | Use Case |
-|---------|-------------|-----------|-----------|----------|
-| **Quiet** | powersave | power | 40W | Silent work |
-| **Balanced** | powersave | balance_performance | 80W | General use |
-| **Performance** | performance | performance | 100W | Gaming |
-| **Turbo** | performance | performance | 110W | Maximum performance |
+On active Intel P-State + HWP systems, the CPU side resolves as follows:
+
+| Profile | HWP policy | Intel EPP | Min. performance | GPU Power | Use Case |
+|---------|------------|-----------|------------------|-----------|----------|
+| **Quiet** | powersave | power | 10% | 40W | Silent work |
+| **Balanced** | powersave | balance_performance | 17% | 80W | General use |
+| **Performance** | powersave¹ | performance | 50% | 100W | Gaming |
+| **Turbo** | performance² | 0 (kernel-forced) | 100% | 110W | Maximum performance |
+
+¹ Intel P-State's HWP `powersave` policy is a dynamic scaling algorithm, not
+the generic minimum-frequency governor. It keeps the model-specific named EPP
+writable, making Performance a dynamic 50%-to-maximum tier.
+
+² The HWP `performance` policy itself forces EPP 0 and restricts the available
+P-state range to its upper boundary. Predator Sense relies on that kernel
+behavior rather than requiring numeric EPP writes. The backend is detected
+from every cpufreq policy, without a CPU model allowlist. Other drivers retain
+the existing `performance` + named `performance` mapping, and systems without
+EPP skip only that optional control.
 
 ### GPU Dashboard
 

@@ -235,64 +235,13 @@ polkit.addRule(function(action, subject) {
 POLKITRULE
 chmod 644 /etc/polkit-1/rules.d/49-predator-sense.rules
 
-cat > "$INSTALL_DIR/predator-sense-helper" << 'HELPER'
-#!/bin/bash
-# Locate the facer/acer hwmon dir that exposes pwm* (kernel >= 6.14)
-acer_hwmon() {
-  for d in /sys/class/hwmon/hwmon*; do
-    n=$(cat "$d/name" 2>/dev/null)
-    if [ "$n" = "acer" ] && [ -e "$d/pwm1" ]; then echo "$d"; return 0; fi
-  done
-  return 1
-}
-case "$1" in
-  set-governor) for c in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo "$2" > "$c" 2>/dev/null; done ;;
-  set-epp) for c in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do echo "$2" > "$c" 2>/dev/null; done ;;
-  set-gpu-power) nvidia-smi -pm 1 2>/dev/null; nvidia-smi -pl "$2" 2>/dev/null ;;
-  set-no-turbo) echo "$2" > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null ;;
-  set-min-perf) echo "$2" > /sys/devices/system/cpu/intel_pstate/min_perf_pct 2>/dev/null ;;
-  fan-auto) python3 -c "f=open('/dev/ec','rb+');f.seek(0x21);f.write(bytes([0x50]));f.seek(0x22);f.write(bytes([0x54]));f.close()" 2>/dev/null ;;
-  fan-max) python3 -c "f=open('/dev/ec','rb+');f.seek(0x21);f.write(bytes([0x60]));f.seek(0x22);f.write(bytes([0x58]));f.close()" 2>/dev/null ;;
-  fan-mode-read) python3 -c "f=open('/dev/ec','rb');f.seek(0x21);b1=ord(f.read(1));f.close();print('max' if b1==0x60 else ('auto' if b1==0x50 else 'unknown'))" 2>/dev/null ;;
-  coolboost) python3 -c "f=open('/dev/ec','rb+');f.seek(0x10);f.write(bytes([int('$2')]));f.close()" 2>/dev/null ;;
-  coolboost-read) python3 -c "f=open('/dev/ec','rb');f.seek(0x10);print(ord(f.read(1)));f.close()" 2>/dev/null ;;
-  bat-limit) if [ "$2" = "1" ]; then echo 80 > /sys/class/power_supply/BAT1/charge_control_end_threshold 2>/dev/null; else echo 100 > /sys/class/power_supply/BAT1/charge_control_end_threshold 2>/dev/null; fi ;;
-  bat-limit-read) VAL=$(cat /sys/class/power_supply/BAT1/charge_control_end_threshold 2>/dev/null || echo 100); [ "$VAL" -le 80 ] && echo 1 || echo 0 ;;
-  bat-health) echo "$2" > /sys/bus/wmi/drivers/acer-wmi-battery/health_mode 2>/dev/null ;;
-  bat-health-read) cat /sys/bus/wmi/drivers/acer-wmi-battery/health_mode 2>/dev/null || echo 0 ;;
-  lcd-overdrive) python3 -c "f=open('/dev/ec','rb+');f.seek(0x29);f.write(bytes([int('$2')]));f.close()" 2>/dev/null ;;
-  lcd-overdrive-read) python3 -c "f=open('/dev/ec','rb');f.seek(0x29);print(ord(f.read(1)));f.close()" 2>/dev/null ;;
-  boot-anim) python3 -c "f=open('/dev/ec','rb+');v=1 if '$2'=='1' else 0;f.seek(0x1A);f.write(bytes([v]));f.close()" 2>/dev/null ;;
-  boot-anim-read) python3 -c "f=open('/dev/ec','rb');f.seek(0x1A);print(ord(f.read(1)));f.close()" 2>/dev/null ;;
-  usb-charge) python3 -c "f=open('/dev/ec','rb+');v=1 if '$2'=='1' else 0;f.seek(0x1B);f.write(bytes([v]));f.close()" 2>/dev/null ;;
-  usb-charge-read) python3 -c "f=open('/dev/ec','rb');f.seek(0x1B);print(ord(f.read(1)));f.close()" 2>/dev/null ;;
-  # PWM fan control via hwmon (kernel >= 6.14, models with ACER_CAP_PWM).
-  # pwm value 0-255; pwm_enable: 0=max/turbo 1=manual/custom 2=auto.
-  pwm-available) d=$(acer_hwmon) && echo 1 || echo 0 ;;
-  pwm-cpu) d=$(acer_hwmon) && echo "$2" > "$d/pwm1" 2>/dev/null ;;
-  pwm-gpu) d=$(acer_hwmon) && echo "$2" > "$d/pwm2" 2>/dev/null ;;
-  pwm-cpu-read) d=$(acer_hwmon) && cat "$d/pwm1" 2>/dev/null ;;
-  pwm-gpu-read) d=$(acer_hwmon) && cat "$d/pwm2" 2>/dev/null ;;
-  pwm-cpu-enable) d=$(acer_hwmon) && echo "$2" > "$d/pwm1_enable" 2>/dev/null ;;
-  pwm-gpu-enable) d=$(acer_hwmon) && echo "$2" > "$d/pwm2_enable" 2>/dev/null ;;
-  pwm-cpu-enable-read) d=$(acer_hwmon) && cat "$d/pwm1_enable" 2>/dev/null ;;
-  pwm-gpu-enable-read) d=$(acer_hwmon) && cat "$d/pwm2_enable" 2>/dev/null ;;
-  # Re-applies the battery-limit settings the GUI persisted to config.json
-  # (issue #11) - both mechanisms reset on a full power cycle and need
-  # root, so this runs from a system-level (not user) boot service instead
-  # of the interactive pkexec path the GUI uses. $2 = the real user's home.
-  boot-reapply-battery)
-    CONF="$2/.config/predator-sense/config.json"
-    [ -f "$CONF" ] || exit 0
-    LIMITER=$(python3 -c "import json;print(1 if json.load(open('$CONF')).get('battery_limiter') else 0)" 2>/dev/null)
-    HEALTH=$(python3 -c "import json;print(1 if json.load(open('$CONF')).get('battery_health_mode') else 0)" 2>/dev/null)
-    [ "$LIMITER" = "1" ] && { echo 80 > /sys/class/power_supply/BAT1/charge_control_end_threshold; } 2>/dev/null
-    [ "$HEALTH" = "1" ] && { echo 1 > /sys/bus/wmi/drivers/acer-wmi-battery/health_mode; } 2>/dev/null
-    exit 0
-    ;;
-esac
-HELPER
-chmod +x "$INSTALL_DIR/predator-sense-helper"
+# Both installers consume this single, independently testable helper source:
+# the Go installer embeds it at build time, while this source-based installer
+# copies it from the clone. Keeping privileged behavior out of this script
+# prevents the two installation paths from drifting again.
+install -m 0755 \
+    "$GUI_DIR/installer/predator-sense-helper" \
+    "$INSTALL_DIR/predator-sense-helper"
 
 usermod -aG input "$REAL_USER" 2>/dev/null || true
 
