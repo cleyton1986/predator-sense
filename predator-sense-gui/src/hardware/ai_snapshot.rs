@@ -88,7 +88,7 @@ pub fn ask_verdict(base_url: &str, model: &str, question: Option<&str>) -> Resul
             snapshot_text, q
         ),
         None => format!(
-            "Recent hardware state snapshot(s), one JSON object per line:\n{}\n\nEvaluate this state. Check cpu_temp_c and gpu_temp_c first - if either is high, that is the priority and calls for a cooling action (fan/coolboost), not a thermal profile change. Only suggest a change if clearly warranted; otherwise just say everything looks fine.",
+            "Recent hardware state snapshot(s), one JSON object per line:\n{}\n\nEvaluate this state. Check cpu_temp_c and gpu_temp_c first - if either is genuinely high, that is the priority and calls for a cooling action (fan/coolboost) before ever touching the thermal profile. Otherwise, remember the default bias toward performance: if thermal_profile is below performance and temps are fine, that alone is worth moving up to performance - do not just say everything looks fine because it is cool and idle.",
             snapshot_text
         ),
     };
