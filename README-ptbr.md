@@ -317,12 +317,16 @@ O último estado aplicado com sucesso é restaurado quando o serviço de hotkey 
 
 Em sistemas com Intel P-State ativo + HWP, a parte de CPU é resolvida assim:
 
-| Perfil | Política HWP | Intel EPP | Performance mínima | GPU Power | Uso |
-|--------|--------------|-----------|--------------------|-----------|-----|
-| **Silencioso** | powersave | power | 10% | 40W | Trabalho silencioso |
-| **Balanceado** | powersave | balance_performance | 17% | 80W | Uso geral |
-| **Performance** | powersave¹ | performance | 50% | 100W | Jogos |
-| **Turbo** | performance² | 0 (forçado pelo kernel) | 100% | 110W | Performance máxima |
+| Perfil | Política HWP | Intel EPP | Performance mínima | GPU Power | Ventoinha | Uso |
+|--------|--------------|-----------|--------------------|-----------|-----------|-----|
+| **Silencioso** | powersave | power | 10% | 40W³ | Automático | Trabalho silencioso |
+| **Balanceado** | powersave | balance_performance | 17% | 80W³ | Automático | Uso geral |
+| **Performance** | powersave¹ | performance | 50% | 100W³ | Máx | Jogos |
+| **Turbo** | performance² | 0 (forçado pelo kernel) | 100% | 110W³ | Máx | Performance máxima |
+
+Selecionar qualquer perfil já aplica o modo de ventoinha junto - sem passo
+separado. Performance e Turbo colocam a ventoinha em Máx (igual à tecla física
+Turbo); Silencioso e Balanceado deixam em Automático.
 
 ¹ A política HWP `powersave` do Intel P-State é um algoritmo de escalonamento
 dinâmico, não o governor genérico que fixa a frequência mínima. Ela mantém o
@@ -335,6 +339,27 @@ pelo kernel em vez de exigir escrita numérica de EPP. O backend é detectado em
 todas as políticas cpufreq, sem uma lista de modelos de CPU. Outros drivers
 mantêm o mapeamento existente `performance` + EPP nominal `performance`, e
 sistemas sem EPP ignoram apenas esse controle opcional.
+
+³ Melhor esforço via `nvidia-smi -pl`, mesmo mecanismo do slider de limite de
+potência do Dashboard GPU - pulado silenciosamente se `nvidia-smi` não existir,
+e em alguns notebooks a vBIOS nunca expõe o controle de limite de potência que
+o NVML precisa (`nvidia-smi -q` mostra `Power Management Object: N/A`, todo
+valor de `-pl` é rejeitado independente do que for pedido). É limite de
+firmware, não algo que este app - ou qualquer software Linux - consiga mudar;
+aumentar isso exige flashear uma vBIOS diferente com ferramenta Windows-only
+como `nvflash`, risco real de brickar a GPU, decisão exclusivamente do dono do
+hardware.
+
+### Perfil automático por energia
+
+Quando ativado em Configurações (ligado por padrão em instalações novas), não
+é só reação a plugar/desplugar - é aplicado continuamente:
+- **Na tomada:** sempre Performance ou Turbo. Se um dos dois já estiver ativo,
+  fica como está - o auto-switch nunca briga com uma escolha manual entre os
+  dois.
+- **Na bateria:** sempre Balanceado ou Silencioso, nunca Performance/Turbo.
+  Abaixo de 15% de bateria, força Silencioso independente do que estiver
+  configurado.
 
 ### Dashboard GPU
 

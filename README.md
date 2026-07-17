@@ -317,12 +317,16 @@ The last successfully applied state is restored when the user hotkey service sta
 
 On active Intel P-State + HWP systems, the CPU side resolves as follows:
 
-| Profile | HWP policy | Intel EPP | Min. performance | GPU Power | Use Case |
-|---------|------------|-----------|------------------|-----------|----------|
-| **Quiet** | powersave | power | 10% | 40W | Silent work |
-| **Balanced** | powersave | balance_performance | 17% | 80W | General use |
-| **Performance** | powersave¹ | performance | 50% | 100W | Gaming |
-| **Turbo** | performance² | 0 (kernel-forced) | 100% | 110W | Maximum performance |
+| Profile | HWP policy | Intel EPP | Min. performance | GPU Power | Fan | Use Case |
+|---------|------------|-----------|------------------|-----------|-----|----------|
+| **Quiet** | powersave | power | 10% | 40W³ | Auto | Silent work |
+| **Balanced** | powersave | balance_performance | 17% | 80W³ | Auto | General use |
+| **Performance** | powersave¹ | performance | 50% | 100W³ | Max | Gaming |
+| **Turbo** | performance² | 0 (kernel-forced) | 100% | 110W³ | Max | Maximum performance |
+
+Selecting any profile also applies its fan mode - no separate step needed.
+Picking Performance or Turbo pushes the fan to Max (same as the physical
+Turbo key); Quiet and Balanced leave it on Auto.
 
 ¹ Intel P-State's HWP `powersave` policy is a dynamic scaling algorithm, not
 the generic minimum-frequency governor. It keeps the model-specific named EPP
@@ -334,6 +338,25 @@ behavior rather than requiring numeric EPP writes. The backend is detected
 from every cpufreq policy, without a CPU model allowlist. Other drivers retain
 the existing `performance` + named `performance` mapping, and systems without
 EPP skip only that optional control.
+
+³ Best-effort via `nvidia-smi -pl`, same as the GPU Dashboard's power limit
+slider below - silently skipped if `nvidia-smi` isn't present, and on some
+laptops the vBIOS never exposes NVML's power-limit control at all (`nvidia-smi
+-q` reports `Power Management Object: N/A`, every `-pl` value is rejected
+regardless of what's requested). That's a firmware-level limit, not something
+this app - or any Linux software - can change; raising it means flashing a
+different vBIOS with a Windows-only tool like `nvflash`, a real risk of
+bricking the GPU and squarely the owner's own call.
+
+### Perfil automático por energia / Power-source auto-profile
+
+When enabled in Settings (on by default for new installs), this isn't just a
+reaction to plugging/unplugging - it's continuously enforced:
+- **On AC:** always Performance or Turbo. If one of those two is already
+  active, it's left alone - the auto-switcher never fights a manual choice
+  between them.
+- **On battery:** always Balanced or Quiet, never Performance/Turbo. Below
+  15% battery, Quiet is forced regardless of the configured target.
 
 ### GPU Dashboard
 
