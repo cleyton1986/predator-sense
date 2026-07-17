@@ -1,6 +1,5 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::hardware::setup;

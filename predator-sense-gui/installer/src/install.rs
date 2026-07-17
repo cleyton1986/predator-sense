@@ -1125,8 +1125,10 @@ impl Installer {
         )?;
         run(command::USERMOD, ["-aG", "input", self.user.name.as_str()])?;
 
-        const HID_RULE: &str =
-            "SUBSYSTEM==\"hidraw\", ATTRS{name}==\"ENEK5130:00\", MODE=\"0660\", GROUP=\"input\"\n";
+        const HID_RULE: &str = concat!(
+            "SUBSYSTEM==\"hidraw\", ATTRS{name}==\"ENEK5130:*\", MODE=\"0660\", GROUP=\"input\"\n",
+            "SUBSYSTEM==\"hidraw\", KERNELS==\"0018:0CF2:5130.*\", MODE=\"0660\", GROUP=\"input\"\n",
+        );
         const EC_RULE: &str =
             "SUBSYSTEM==\"chardev\", KERNEL==\"ec\", MODE=\"0640\", GROUP=\"input\"\n";
         write_text(Path::new(path::HID_UDEV_RULE), HID_RULE, mode::REGULAR_FILE)?;
