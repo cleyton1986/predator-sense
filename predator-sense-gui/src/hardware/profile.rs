@@ -489,7 +489,17 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     }
 
     // NVIDIA is optional; preserve the existing behavior where systems
-    // without nvidia-smi still apply the CPU profile successfully.
+    // without nvidia-smi still apply the CPU profile successfully. Also
+    // best-effort for a harder reason on some laptops (confirmed on a
+    // PH315-54/RTX 3070): `nvidia-smi -q` reports `Power Management Object:
+    // N/A` and every `-pl` call fails with "not supported", regardless of
+    // the requested wattage - the vBIOS itself never exposed the power-limit
+    // control NVML needs, it's not a permission or driver-version issue.
+    // Raising the actual TGP ceiling on hardware like that means flashing a
+    // different vBIOS with `nvflash` (see outros/acer-PH315-54-70LH's
+    // "Video Bios Mod" section) - a real risk of bricking the GPU, done
+    // outside Linux, and squarely the owner's call, never something this
+    // app should attempt on its own.
     let gpu_watts = s.gpu_watts.to_string();
     let _ = crate::hardware::helper::execute(HelperAction::SetGpuPower, &[gpu_watts.as_str()]);
 
