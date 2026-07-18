@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="933" height="294" viewBox="0 0 933 294" fill="none">
+  <title>Teclado vetorial editável</title>
+  <desc>SVG vetorial com 102 teclas/segmentos independentes e fundo transparente.</desc>
+  <defs>
+    <style><![CDATA[
+      .key {
+        fill: none;
+        stroke: #0ea5b7;
+        stroke-width: 2.2;
+        vector-effect: non-scaling-stroke;
+        shape-rendering: geometricPrecision;
+      }
+    ]]></style>
+  </defs>
+  <g id="keyboard-outline">
+    <rect id="key-001" class="key" x="6.10" y="5.10" width="42.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-002" class="key" x="61.10" y="5.10" width="37.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-003" class="key" x="106.10" y="5.10" width="37.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-004" class="key" x="151.10" y="5.10" width="37.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-005" class="key" x="196.10" y="5.10" width="38.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-006" class="key" x="246.10" y="5.10" width="38.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-007" class="key" x="291.10" y="5.10" width="38.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-008" class="key" x="336.10" y="5.10" width="38.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-009" class="key" x="381.10" y="5.10" width="38.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-010" class="key" x="431.10" y="5.10" width="38.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-011" class="key" x="476.10" y="5.10" width="37.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-012" class="key" x="521.10" y="5.10" width="37.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-013" class="key" x="566.10" y="5.10" width="37.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-014" class="key" x="616.10" y="5.10" width="37.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-015" class="key" x="661.10" y="5.10" width="37.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-016" class="key" x="706.10" y="5.10" width="37.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-017" class="key" x="756.10" y="5.10" width="37.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-018" class="key" x="801.10" y="5.10" width="37.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-019" class="key" x="846.10" y="5.10" width="37.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-020" class="key" x="891.10" y="5.10" width="37.80" height="27.80" rx="4.80" ry="4.80" />
+    <rect id="key-021" class="key" x="6.10" y="40.10" width="32.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-022" class="key" x="46.10" y="40.10" width="42.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-023" class="key" x="96.10" y="40.10" width="42.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-024" class="key" x="146.10" y="40.10" width="42.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-025" class="key" x="196.10" y="40.10" width="43.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-026" class="key" x="246.10" y="40.10" width="43.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-027" class="key" x="296.10" y="40.10" width="43.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-028" class="key" x="346.10" y="40.10" width="43.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-029" class="key" x="396.10" y="40.10" width="43.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-030" class="key" x="446.10" y="40.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-031" class="key" x="496.10" y="40.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-032" class="key" x="546.10" y="40.10" width="42.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-033" class="key" x="596.10" y="40.10" width="42.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-034" class="key" x="646.10" y="40.10" width="97.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-035" class="key" x="756.10" y="40.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-036" class="key" x="801.10" y="40.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-037" class="key" x="846.10" y="40.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-038" class="key" x="891.10" y="40.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-039" class="key" x="6.10" y="90.10" width="55.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-040" class="key" x="68.10" y="90.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-041" class="key" x="118.10" y="90.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-042" class="key" x="168.10" y="90.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-043" class="key" x="218.10" y="90.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-044" class="key" x="269.10" y="90.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-045" class="key" x="319.10" y="90.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-046" class="key" x="369.10" y="90.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-047" class="key" x="419.10" y="90.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-048" class="key" x="468.10" y="90.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-049" class="key" x="518.10" y="90.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-050" class="key" x="568.10" y="90.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-051" class="key" x="618.10" y="90.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-052" class="key" x="631.10" y="90.10" width="112.80" height="93.80" rx="4.80" ry="4.80" />
+    <rect id="key-053" class="key" x="756.10" y="90.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-054" class="key" x="801.10" y="90.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-055" class="key" x="846.10" y="90.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-056" class="key" x="891.10" y="90.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-057" class="key" x="6.10" y="140.10" width="67.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-058" class="key" x="81.10" y="140.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-059" class="key" x="131.10" y="140.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-060" class="key" x="181.10" y="140.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-061" class="key" x="231.10" y="140.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-062" class="key" x="281.10" y="140.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-063" class="key" x="331.10" y="140.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-064" class="key" x="381.10" y="140.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-065" class="key" x="431.10" y="140.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-066" class="key" x="481.10" y="140.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-067" class="key" x="531.10" y="140.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-068" class="key" x="581.10" y="140.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-069" class="key" x="756.10" y="140.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-070" class="key" x="801.10" y="140.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-071" class="key" x="846.10" y="140.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-072" class="key" x="891.10" y="140.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-073" class="key" x="6.10" y="190.10" width="92.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-074" class="key" x="106.10" y="190.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-075" class="key" x="156.10" y="190.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-076" class="key" x="206.10" y="190.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-077" class="key" x="256.10" y="190.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-078" class="key" x="306.10" y="190.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-079" class="key" x="356.10" y="190.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-080" class="key" x="406.10" y="190.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-081" class="key" x="456.10" y="190.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-082" class="key" x="506.10" y="190.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-083" class="key" x="556.10" y="190.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-084" class="key" x="606.10" y="190.10" width="87.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-085" class="key" x="701.10" y="190.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-086" class="key" x="756.10" y="190.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-087" class="key" x="801.10" y="190.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-088" class="key" x="846.10" y="190.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-089" class="key" x="891.10" y="190.10" width="37.80" height="92.80" rx="4.80" ry="4.80" />
+    <rect id="key-090" class="key" x="6.10" y="240.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-091" class="key" x="56.10" y="240.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-092" class="key" x="106.10" y="240.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-093" class="key" x="156.10" y="240.10" width="43.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-094" class="key" x="206.10" y="240.10" width="243.80" height="50.80" rx="4.80" ry="4.80" />
+    <rect id="key-095" class="key" x="456.10" y="240.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-096" class="key" x="506.10" y="240.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-097" class="key" x="556.10" y="240.10" width="87.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-098" class="key" x="651.10" y="240.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-099" class="key" x="701.10" y="240.10" width="42.80" height="43.80" rx="4.80" ry="4.80" />
+    <rect id="key-100" class="key" x="751.10" y="240.10" width="42.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-101" class="key" x="801.10" y="240.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+    <rect id="key-102" class="key" x="846.10" y="240.10" width="37.80" height="42.80" rx="4.80" ry="4.80" />
+  </g>
+</svg>
