@@ -149,7 +149,7 @@ fn build_keyboard_panel() -> gtk::Box {
     status.add_css_class("status-label");
 
     let keyboard_da = gtk::DrawingArea::new();
-    keyboard_da.set_size_request(-1, 180);
+    keyboard_da.set_size_request(-1, 320);
     keyboard_da.set_hexpand(true);
     keyboard_da.set_halign(gtk::Align::Fill);
 
@@ -194,7 +194,10 @@ fn build_keyboard_panel() -> gtk::Box {
     bs.set_value(100.0);
     bs.set_size_request(120, -1);
     bs.add_css_class("accent-scale");
-    { let s = state.clone(); bs.connect_value_changed(move |sc| s.borrow_mut().brightness = sc.value() as u8); }
+    {
+        let s = state.clone();
+        bs.connect_value_changed(move |sc| s.borrow_mut().brightness = sc.value() as u8);
+    }
     bright_box.append(&bl);
     bright_box.append(&bs);
 
@@ -246,7 +249,8 @@ fn build_keyboard_panel() -> gtk::Box {
         keyboard_da.set_draw_func(move |_a, cr, w, h| {
             let st = s.borrow();
             if !st.is_static {
-                let colors = preview_zone_colors(st.mode, st.anim_phase, st.direction, st.dyn_color);
+                let colors =
+                    preview_zone_colors(st.mode, st.anim_phase, st.direction, st.dyn_color);
                 draw_keyboard(cr, w as f64, h as f64, &colors);
             } else {
                 draw_keyboard(cr, w as f64, h as f64, &st.zone_colors);
@@ -335,7 +339,7 @@ fn build_keyboard_panel() -> gtk::Box {
         let zd = zone;
         cd.set_draw_func(move |_a, cr, w, h| {
             let (r, g, b) = sd.borrow().zone_colors[zd];
-            cr.set_source_rgb(r as f64/255.0, g as f64/255.0, b as f64/255.0);
+            cr.set_source_rgb(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
             cr.rectangle(0.0, 0.0, w as f64, h as f64);
             let _ = cr.fill();
             cr.set_source_rgba(0.0, 0.8, 0.9, 0.4);
@@ -364,7 +368,11 @@ fn build_keyboard_panel() -> gtk::Box {
             sl.connect_value_changed(move |sc| {
                 let v = sc.value() as u8;
                 let mut st = s.borrow_mut();
-                match ch { 0 => st.zone_colors[z].0 = v, 1 => st.zone_colors[z].1 = v, _ => st.zone_colors[z].2 = v }
+                match ch {
+                    0 => st.zone_colors[z].0 = v,
+                    1 => st.zone_colors[z].1 = v,
+                    _ => st.zone_colors[z].2 = v,
+                }
                 drop(st);
                 da.queue_draw();
                 kb.queue_draw();
@@ -383,11 +391,20 @@ fn build_keyboard_panel() -> gtk::Box {
 
     let effects_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     effects_row.set_halign(gtk::Align::Center);
-    let effects = [crate::i18n::t("breath"), crate::i18n::t("neon"), crate::i18n::t("wave"), crate::i18n::t("shift"), crate::i18n::t("zoom")];
+    let effects = [
+        crate::i18n::t("breath"),
+        crate::i18n::t("neon"),
+        crate::i18n::t("wave"),
+        crate::i18n::t("shift"),
+        crate::i18n::t("zoom"),
+    ];
     for (i, name) in effects.iter().enumerate() {
         let btn = gtk::ToggleButton::with_label(name);
         btn.add_css_class("mode-button");
-        if i == 0 { btn.set_active(true); btn.add_css_class("mode-active"); }
+        if i == 0 {
+            btn.set_active(true);
+            btn.add_css_class("mode-active");
+        }
         let s = state.clone();
         let er = effects_row.clone();
         let note = preview_note.clone();
@@ -430,7 +447,10 @@ fn build_keyboard_panel() -> gtk::Box {
     sps.set_value(4.0);
     sps.set_size_request(150, -1);
     sps.add_css_class("accent-scale");
-    { let s = state.clone(); sps.connect_value_changed(move |sc| s.borrow_mut().speed = sc.value() as u8); }
+    {
+        let s = state.clone();
+        sps.connect_value_changed(move |sc| s.borrow_mut().speed = sc.value() as u8);
+    }
     sp_row.append(&spl);
     sp_row.append(&sps);
 
@@ -447,7 +467,11 @@ fn build_keyboard_panel() -> gtk::Box {
         sl.connect_value_changed(move |sc| {
             let v = sc.value() as u8;
             let mut st = s.borrow_mut();
-            match ch { 0 => st.dyn_color.0 = v, 1 => st.dyn_color.1 = v, _ => st.dyn_color.2 = v }
+            match ch {
+                0 => st.dyn_color.0 = v,
+                1 => st.dyn_color.1 = v,
+                _ => st.dyn_color.2 = v,
+            }
         });
         sp_row.append(&sl);
     }
@@ -473,22 +497,32 @@ fn build_keyboard_panel() -> gtk::Box {
                 for (i, &(r, g, b)) in st.zone_colors.iter().enumerate() {
                     // Step A: Write zone color to static device
                     if let Err(e) = rgb::apply_static_zone(&StaticZoneConfig {
-                        zone: (i + 1) as u8, red: r, green: g, blue: b,
+                        zone: (i + 1) as u8,
+                        red: r,
+                        green: g,
+                        blue: b,
                     }) {
                         last_err = Some(e);
                         break;
                     }
                     // Step B: Tell WMI to apply static coloring (after each zone)
                     if let Err(e) = rgb::apply_dynamic_effect(&RgbConfig {
-                        mode: RgbMode::Static, speed: 0, brightness: st.brightness,
+                        mode: RgbMode::Static,
+                        speed: 0,
+                        brightness: st.brightness,
                         direction: Direction::RightToLeft,
-                        red: 0, green: 0, blue: 0,
+                        red: 0,
+                        green: 0,
+                        blue: 0,
                     }) {
                         last_err = Some(e);
                         break;
                     }
                 }
-                let wmi_result = match last_err { Some(e) => Err(e), None => Ok(()) };
+                let wmi_result = match last_err {
+                    Some(e) => Err(e),
+                    None => Ok(()),
+                };
 
                 // On hardware where the WMI static path is a confirmed no-op
                 // (e.g. PHN16-73), the real RGB controller is a separate
@@ -500,12 +534,17 @@ fn build_keyboard_panel() -> gtk::Box {
                 let hid_result = if hid_rgb::is_available() {
                     let mut last_err = None;
                     for (i, &(r, g, b)) in st.zone_colors.iter().enumerate() {
-                        if let Err(e) = hid_rgb::set_zone_color(hid_rgb::ZONE_MASKS[i], r, g, b, st.brightness) {
+                        if let Err(e) =
+                            hid_rgb::set_zone_color(hid_rgb::ZONE_MASKS[i], r, g, b, st.brightness)
+                        {
                             last_err = Some(e);
                             break;
                         }
                     }
-                    match last_err { Some(e) => Err(e), None => Ok(()) }
+                    match last_err {
+                        Some(e) => Err(e),
+                        None => Ok(()),
+                    }
                 } else {
                     wmi_result
                 };
@@ -518,9 +557,16 @@ fn build_keyboard_panel() -> gtk::Box {
                 if hid_rgb::is_available() && hid_result.is_ok() {
                     let mut cfg = crate::config::load_app_config();
                     cfg.rgb_static_zones = Some(
-                        st.zone_colors.iter().enumerate().map(|(i, &(r, g, b))| {
-                            crate::config::ZoneColor { zone: (i + 1) as u8, red: r, green: g, blue: b }
-                        }).collect()
+                        st.zone_colors
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &(r, g, b))| crate::config::ZoneColor {
+                                zone: (i + 1) as u8,
+                                red: r,
+                                green: g,
+                                blue: b,
+                            })
+                            .collect(),
                     );
                     cfg.rgb_brightness = st.brightness;
                     let _ = crate::config::save_app_config(&cfg);
@@ -538,8 +584,12 @@ fn build_keyboard_panel() -> gtk::Box {
                     _ => unreachable!("mode_is_hid_native guards this"),
                 };
                 hid_rgb::set_effect(
-                    hid_mode, st.brightness, st.speed,
-                    st.dyn_color.0, st.dyn_color.1, st.dyn_color.2,
+                    hid_mode,
+                    st.brightness,
+                    st.speed,
+                    st.dyn_color.0,
+                    st.dyn_color.1,
+                    st.dyn_color.2,
                 )
             } else if hid_only {
                 // Module-free HID hardware has no confirmed native effect for
@@ -549,9 +599,13 @@ fn build_keyboard_panel() -> gtk::Box {
                 Ok(())
             } else {
                 rgb::apply_dynamic_effect(&RgbConfig {
-                    mode: st.mode, speed: st.speed, brightness: st.brightness,
+                    mode: st.mode,
+                    speed: st.speed,
+                    brightness: st.brightness,
                     direction: st.direction,
-                    red: st.dyn_color.0, green: st.dyn_color.1, blue: st.dyn_color.2,
+                    red: st.dyn_color.0,
+                    green: st.dyn_color.1,
+                    blue: st.dyn_color.2,
                 })
             };
             let preview_applied = !st.is_static && hid_only && !mode_is_hid_native(st.mode);
@@ -597,13 +651,17 @@ fn build_keyboard_panel() -> gtk::Box {
                         break;
                     }
                 }
-                match last_err { Some(e) => Err(e), None => Ok(()) }
+                match last_err {
+                    Some(e) => Err(e),
+                    None => Ok(()),
+                }
             } else {
                 rgb::apply_brightness_only(0)
             };
             match result {
                 Ok(()) => {
-                    st.status.set_text(crate::i18n::t("kbd_backlight_off_applied"));
+                    st.status
+                        .set_text(crate::i18n::t("kbd_backlight_off_applied"));
                     st.status.remove_css_class("status-error");
                     st.status.add_css_class("status-success");
                 }
@@ -1174,7 +1232,12 @@ fn mode_is_hid_native(mode: RgbMode) -> bool {
 /// that's actually running natively via HID - same math either way). Follows
 /// `RgbMode::needs_color()`: Neon and Wave are hardware-autonomous rainbow
 /// patterns that ignore the color picker, the rest use the picked color.
-fn preview_zone_colors(mode: RgbMode, phase: f64, direction: Direction, color: (u8, u8, u8)) -> [(u8, u8, u8); 4] {
+fn preview_zone_colors(
+    mode: RgbMode,
+    phase: f64,
+    direction: Direction,
+    color: (u8, u8, u8),
+) -> [(u8, u8, u8); 4] {
     use std::f64::consts::FRAC_PI_2;
     use std::f64::consts::FRAC_PI_4;
 
@@ -1194,7 +1257,11 @@ fn preview_zone_colors(mode: RgbMode, phase: f64, direction: Direction, color: (
         RgbMode::Wave => {
             // Hardware-autonomous colorful traveling band, ignores the
             // color picker (needs_color() == false for this mode).
-            let sign = if direction == Direction::RightToLeft { 1.0 } else { -1.0 };
+            let sign = if direction == Direction::RightToLeft {
+                1.0
+            } else {
+                -1.0
+            };
             let mut out = [(0u8, 0u8, 0u8); 4];
             for (i, slot) in out.iter_mut().enumerate() {
                 let offset = sign * i as f64 * 0.15;
@@ -1205,7 +1272,11 @@ fn preview_zone_colors(mode: RgbMode, phase: f64, direction: Direction, color: (
         }
         RgbMode::Shifting => {
             // Picked color, traveling brightness wave across zones.
-            let sign = if direction == Direction::RightToLeft { 1.0 } else { -1.0 };
+            let sign = if direction == Direction::RightToLeft {
+                1.0
+            } else {
+                -1.0
+            };
             let mut out = [(0u8, 0u8, 0u8); 4];
             for (i, slot) in out.iter_mut().enumerate() {
                 let offset = sign * i as f64 * FRAC_PI_2;
@@ -1228,7 +1299,11 @@ fn preview_zone_colors(mode: RgbMode, phase: f64, direction: Direction, color: (
 
 fn scale(color: (u8, u8, u8), factor: f64) -> (u8, u8, u8) {
     let f = factor.clamp(0.0, 1.0);
-    ((color.0 as f64 * f) as u8, (color.1 as f64 * f) as u8, (color.2 as f64 * f) as u8)
+    (
+        (color.0 as f64 * f) as u8,
+        (color.1 as f64 * f) as u8,
+        (color.2 as f64 * f) as u8,
+    )
 }
 
 fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
@@ -1249,44 +1324,260 @@ fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (u8, u8, u8) {
     ((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
 }
 
+/// Exact key rects from the reference Windows PredatorSense keyboard
+/// (assets/teclado_vetorial_editavel_sem_fundo.svg, 933x294 SVG space,
+/// full 102-key layout including the numpad - kept as-is even though this
+/// app's actual hardware target has no numpad, per explicit request to
+/// match the reference 1:1). This is a hand-built SVG of plain `<rect>`
+/// elements (x, y, width, height, rx, ry) rather than a raster trace, so
+/// every value here is read directly off the source, not estimated from a
+/// path's bounding box. Enter (key-052 in the source) is excluded here and
+/// drawn separately as an ISO L-shape - see `ENTER_RECT`/`ENTER_NOTCH`.
+/// Each tuple is (x, y, width, height); `draw_keyboard` scales every rect to
+/// the widget's actual size, so proportions stay exact regardless of how
+/// the panel gets resized.
+const SVG_W: f64 = 933.0;
+const SVG_H: f64 = 294.0;
+/// Corner radius in the same SVG space (matches the source's rx/ry="4.80").
+const KEY_RADIUS: f64 = 4.8;
+/// Enter's outer bbox, and the rectangular notch cut out of its top-left
+/// corner: narrow across the QWERTY row, wide across the home row below it.
+/// Verified directly against assets/teclado_editavel.svg's tecla-enter path
+/// (rendered standalone and inspected pixel-by-pixel, not eyeballed) -
+/// that source is unambiguous and this must match it exactly.
+const ENTER_RECT: (f64, f64, f64, f64) = (631.1, 90.1, 112.8, 93.8);
+const ENTER_NOTCH: (f64, f64) = (37.0, 50.0);
+const KEY_RECTS: [(f64, f64, f64, f64); 101] = [
+    (6.1, 5.1, 42.8, 27.8),
+    (61.1, 5.1, 37.8, 27.8),
+    (106.1, 5.1, 37.8, 27.8),
+    (151.1, 5.1, 37.8, 27.8),
+    (196.1, 5.1, 38.8, 27.8),
+    (246.1, 5.1, 38.8, 27.8),
+    (291.1, 5.1, 38.8, 27.8),
+    (336.1, 5.1, 38.8, 27.8),
+    (381.1, 5.1, 38.8, 27.8),
+    (431.1, 5.1, 38.8, 27.8),
+    (476.1, 5.1, 37.8, 27.8),
+    (521.1, 5.1, 37.8, 27.8),
+    (566.1, 5.1, 37.8, 27.8),
+    (616.1, 5.1, 37.8, 27.8),
+    (661.1, 5.1, 37.8, 27.8),
+    (706.1, 5.1, 37.8, 27.8),
+    (756.1, 5.1, 37.8, 27.8),
+    (801.1, 5.1, 37.8, 27.8),
+    (846.1, 5.1, 37.8, 27.8),
+    (891.1, 5.1, 37.8, 27.8),
+    (6.1, 40.1, 32.8, 42.8),
+    (46.1, 40.1, 42.8, 42.8),
+    (96.1, 40.1, 42.8, 42.8),
+    (146.1, 40.1, 42.8, 42.8),
+    (196.1, 40.1, 43.8, 42.8),
+    (246.1, 40.1, 43.8, 42.8),
+    (296.1, 40.1, 43.8, 42.8),
+    (346.1, 40.1, 43.8, 42.8),
+    (396.1, 40.1, 43.8, 42.8),
+    (446.1, 40.1, 42.8, 43.8),
+    (496.1, 40.1, 42.8, 43.8),
+    (546.1, 40.1, 42.8, 42.8),
+    (596.1, 40.1, 42.8, 42.8),
+    (646.1, 40.1, 97.8, 42.8),
+    (756.1, 40.1, 37.8, 42.8),
+    (801.1, 40.1, 37.8, 42.8),
+    (846.1, 40.1, 37.8, 42.8),
+    (891.1, 40.1, 37.8, 42.8),
+    (6.1, 90.1, 55.8, 43.8),
+    (68.1, 90.1, 43.8, 43.8),
+    (118.1, 90.1, 43.8, 43.8),
+    (168.1, 90.1, 43.8, 43.8),
+    (218.1, 90.1, 43.8, 43.8),
+    (269.1, 90.1, 42.8, 43.8),
+    (319.1, 90.1, 42.8, 43.8),
+    (369.1, 90.1, 42.8, 43.8),
+    (419.1, 90.1, 42.8, 43.8),
+    (468.1, 90.1, 43.8, 43.8),
+    (518.1, 90.1, 43.8, 43.8),
+    (568.1, 90.1, 43.8, 43.8),
+    (618.1, 90.1, 43.8, 43.8),
+    (756.1, 90.1, 37.8, 42.8),
+    (801.1, 90.1, 37.8, 42.8),
+    (846.1, 90.1, 37.8, 42.8),
+    (891.1, 90.1, 37.8, 42.8),
+    (6.1, 140.1, 67.8, 43.8),
+    (81.1, 140.1, 42.8, 43.8),
+    (131.1, 140.1, 42.8, 43.8),
+    (181.1, 140.1, 43.8, 43.8),
+    (231.1, 140.1, 43.8, 43.8),
+    (281.1, 140.1, 43.8, 43.8),
+    (331.1, 140.1, 43.8, 43.8),
+    (381.1, 140.1, 43.8, 43.8),
+    (431.1, 140.1, 43.8, 43.8),
+    (481.1, 140.1, 42.8, 43.8),
+    (531.1, 140.1, 42.8, 43.8),
+    (581.1, 140.1, 42.8, 43.8),
+    (756.1, 140.1, 37.8, 42.8),
+    (801.1, 140.1, 37.8, 42.8),
+    (846.1, 140.1, 37.8, 42.8),
+    (891.1, 140.1, 37.8, 42.8),
+    (6.1, 190.1, 92.8, 43.8),
+    (106.1, 190.1, 42.8, 43.8),
+    (156.1, 190.1, 43.8, 43.8),
+    (206.1, 190.1, 43.8, 43.8),
+    (256.1, 190.1, 43.8, 43.8),
+    (306.1, 190.1, 43.8, 43.8),
+    (356.1, 190.1, 43.8, 43.8),
+    (406.1, 190.1, 43.8, 43.8),
+    (456.1, 190.1, 42.8, 43.8),
+    (506.1, 190.1, 42.8, 43.8),
+    (556.1, 190.1, 42.8, 43.8),
+    (606.1, 190.1, 87.8, 43.8),
+    (701.1, 190.1, 42.8, 43.8),
+    (756.1, 190.1, 37.8, 42.8),
+    (801.1, 190.1, 37.8, 42.8),
+    (846.1, 190.1, 37.8, 42.8),
+    (891.1, 190.1, 37.8, 92.8),
+    (6.1, 240.1, 42.8, 43.8),
+    (56.1, 240.1, 42.8, 43.8),
+    (106.1, 240.1, 42.8, 43.8),
+    (156.1, 240.1, 43.8, 43.8),
+    (206.1, 240.1, 243.8, 50.8),
+    (456.1, 240.1, 42.8, 43.8),
+    (506.1, 240.1, 42.8, 43.8),
+    (556.1, 240.1, 87.8, 43.8),
+    (651.1, 240.1, 42.8, 43.8),
+    (701.1, 240.1, 42.8, 43.8),
+    (751.1, 240.1, 42.8, 42.8),
+    (801.1, 240.1, 37.8, 42.8),
+    (846.1, 240.1, 37.8, 42.8),
+];
+
+/// Laptop keyboard silhouette, traced 1:1 from the reference Windows
+/// PredatorSense screenshot (see `KEY_RECTS`), with this app's own
+/// "fill the whole key" style instead of a thin outline. Lighting zones
+/// (Seção 1-4) are vertical strips across the whole keyboard - including
+/// the numpad, since the reference hardware treats it as part of the same
+/// 4-zone split rather than a separate area - so a key's zone comes from
+/// its absolute x position, not its position within a row.
+fn rounded_rect_path(cr: &gtk4::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+    cr.new_sub_path();
+    cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
+    cr.arc(
+        x + r,
+        y + h - r,
+        r,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::PI,
+    );
+    cr.arc(
+        x + r,
+        y + r,
+        r,
+        std::f64::consts::PI,
+        3.0 * std::f64::consts::FRAC_PI_2,
+    );
+    cr.close_path();
+}
+
+/// Traces an L-shaped key: a rect with a rectangular notch removed from the
+/// top-left corner (wide across the bottom, narrower across the top). The
+/// two corners where the notch meets the rest of the key are concave, so
+/// they're left sharp; the four true outer corners round normally.
+#[allow(clippy::too_many_arguments)]
+fn l_shape_path_top_notch(
+    cr: &gtk4::cairo::Context,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    notch_w: f64,
+    notch_h: f64,
+    r: f64,
+) {
+    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+    let pi = std::f64::consts::PI;
+    let half_pi = std::f64::consts::FRAC_PI_2;
+    cr.new_sub_path();
+    cr.move_to(x + notch_w, y);
+    cr.line_to(x + w - r, y);
+    cr.arc(x + w - r, y + r, r, -half_pi, 0.0);
+    cr.line_to(x + w, y + h - r);
+    cr.arc(x + w - r, y + h - r, r, 0.0, half_pi);
+    cr.line_to(x + r, y + h);
+    cr.arc(x + r, y + h - r, r, half_pi, pi);
+    cr.line_to(x, y + notch_h + r);
+    cr.arc(x + r, y + notch_h + r, r, pi, pi + half_pi);
+    cr.line_to(x + notch_w, y + notch_h);
+    cr.close_path();
+}
+
+/// Fills the current path with the app's "whole key lit up" style: a dark
+/// base, the zone color at 85% opacity, then a fully-opaque stroke on top -
+/// shared by every key shape (plain rects and the L-shaped Enter alike).
+fn fill_key_path(cr: &gtk4::cairo::Context, r: u8, g: u8, b: u8) {
+    cr.set_source_rgba(0.08, 0.08, 0.08, 1.0);
+    let _ = cr.fill_preserve();
+    cr.set_source_rgba(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 0.85);
+    let _ = cr.fill_preserve();
+    cr.set_source_rgba(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 1.0);
+    cr.set_line_width(1.0);
+    let _ = cr.stroke();
+}
+
 fn draw_keyboard(cr: &gtk4::cairo::Context, w: f64, h: f64, colors: &[(u8, u8, u8); 4]) {
     cr.set_source_rgb(0.06, 0.06, 0.06);
     cr.rectangle(0.0, 0.0, w, h);
     let _ = cr.fill();
 
-    cr.set_source_rgba(0.0, 0.8, 0.9, 0.25);
-    cr.set_line_width(1.0);
-    cr.rectangle(3.0, 3.0, w - 6.0, h - 6.0);
-    let _ = cr.stroke();
+    let margin = 8.0;
+    // A single uniform scale (not independent scale_x/scale_y) keeps every
+    // key's aspect ratio correct - stretching x and y separately to fill
+    // whatever rectangle the panel happens to be is what made the keyboard
+    // look distorted whenever the window got wider than it is tall. The
+    // keyboard is centered in whichever axis has room to spare instead.
+    let scale = ((w - margin * 2.0) / SVG_W).min((h - margin * 2.0) / SVG_H);
+    let off_x = margin + ((w - margin * 2.0) - SVG_W * scale).max(0.0) / 2.0;
+    let off_y = margin + ((h - margin * 2.0) - SVG_H * scale).max(0.0) / 2.0;
+    let pad = 1.5;
+    let radius = KEY_RADIUS * scale;
+    // Fraction across the *keyboard's own* rendered width, not the widget's
+    // - when the panel is wider than the locked aspect ratio needs, the
+    // keyboard is centered with empty space on the sides (see `off_x`
+    // above), and dividing by the full widget width `w` put nearly every
+    // key in zones 1-2 instead of spreading 0-3 across the actual keys,
+    // which is what made only 2 zones ever light up.
+    let zone_of =
+        |center_x: f64| (((center_x - off_x) / (SVG_W * scale)) * 4.0).clamp(0.0, 3.0) as usize;
 
-    let rows = 6;
-    let cols = 15;
-    let kw = (w - 30.0) / cols as f64;
-    let kh = (h - 24.0) / rows as f64;
-    let pad = 2.0;
-    let sx = 14.0;
-    let sy = 10.0;
+    for &(kx, ky, kw, kh) in KEY_RECTS.iter() {
+        let x = off_x + kx * scale;
+        let y = off_y + ky * scale;
+        let key_w = kw * scale;
+        let key_h = kh * scale;
 
-    for row in 0..rows {
-        let nc = if row == 5 { 10 } else { cols };
-        for col in 0..nc {
-            let x = sx + col as f64 * kw;
-            let y = sy + row as f64 * kh;
-            let zone = ((col as f64 / nc as f64) * 4.0).min(3.0) as usize;
-            let (r, g, b) = colors[zone];
-
-            cr.set_source_rgba(0.08, 0.08, 0.08, 1.0);
-            cr.rectangle(x + pad, y + pad, kw - pad * 2.0, kh - pad * 2.0);
-            let _ = cr.fill();
-
-            cr.set_source_rgba(r as f64/255.0, g as f64/255.0, b as f64/255.0, 0.85);
-            cr.rectangle(x + pad, y + pad, kw - pad * 2.0, kh - pad * 2.0);
-            let _ = cr.fill();
-
-            cr.set_source_rgba(r as f64/255.0, g as f64/255.0, b as f64/255.0, 1.0);
-            cr.set_line_width(1.0);
-            cr.rectangle(x + pad, y + pad, kw - pad * 2.0, kh - pad * 2.0);
-            let _ = cr.stroke();
-        }
+        let (r, g, b) = colors[zone_of(x + key_w / 2.0)];
+        let (rx, ry, rw, rh) = (x + pad, y + pad, key_w - pad * 2.0, key_h - pad * 2.0);
+        rounded_rect_path(cr, rx, ry, rw, rh, radius);
+        fill_key_path(cr, r, g, b);
     }
+
+    let (ex, ey, ew, eh) = ENTER_RECT;
+    let (nw, nh) = ENTER_NOTCH;
+    let x = off_x + ex * scale;
+    let y = off_y + ey * scale;
+    let key_w = ew * scale;
+    let key_h = eh * scale;
+    let (r, g, b) = colors[zone_of(x + key_w / 2.0)];
+    l_shape_path_top_notch(
+        cr,
+        x + pad,
+        y + pad,
+        key_w - pad * 2.0,
+        key_h - pad * 2.0,
+        nw * scale - pad,
+        nh * scale - pad,
+        radius,
+    );
+    fill_key_path(cr, r, g, b);
 }

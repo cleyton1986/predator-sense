@@ -1,0 +1,355 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- teclado_editavel.svg -->
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="933"
+  height="294"
+  viewBox="0 0 933 294"
+  role="img"
+  aria-label="Teclado vetorial com teclas individuais coloriveis"
+  shape-rendering="geometricPrecision">
+  <style>
+    .tecla { fill: #176773; transition: fill 0.15s ease; }
+  </style>
+  <!-- Fundo -->
+  <rect width="933" height="294" fill="#191919"/>
+
+  <!-- Linha 0 -->
+  <g id="linha-0" data-linha="0">
+    <path id="tecla-esc" class="tecla" data-linha="0" data-coluna="0" data-tecla="Esc" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 6 6 L 6 7 L 5 8 L 5 29 L 6 30 L 6 31 L 8 33 L 46 33 L 49 30 L 49 7 L 46 4 L 9 4 Z M 7 11 L 8 10 L 8 9 L 11 6 L 45 6 L 46 7 L 46 8 L 48 10 L 48 28 L 45 31 L 44 31 L 43 32 L 12 32 L 11 31 L 10 31 L 7 28 Z"/>
+    <path id="tecla-f1" class="tecla" data-linha="0" data-coluna="1" data-tecla="F1" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 61 6 L 61 7 L 60 8 L 60 30 L 63 33 L 96 33 L 99 30 L 99 7 L 97 5 L 96 5 L 95 4 L 64 4 Z M 63 9 L 65 7 L 66 7 L 67 6 L 94 6 L 95 7 L 96 7 L 98 10 L 98 28 L 97 29 L 97 30 L 94 32 L 67 32 L 66 31 L 65 31 L 63 29 L 63 27 L 62 26 L 62 11 L 63 10 Z"/>
+    <path id="tecla-f2" class="tecla" data-linha="0" data-coluna="2" data-tecla="F2" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 106 6 L 106 7 L 105 8 L 105 29 L 106 30 L 106 31 L 108 33 L 141 33 L 144 30 L 144 7 L 141 4 L 109 4 Z M 108 9 L 111 6 L 138 6 L 139 7 L 141 7 L 143 10 L 143 28 L 142 29 L 142 30 L 139 32 L 113 32 L 112 31 L 110 31 L 108 29 L 108 28 L 107 27 L 107 11 L 108 10 Z"/>
+    <path id="tecla-f3" class="tecla" data-linha="0" data-coluna="3" data-tecla="F3" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 150 7 L 150 30 L 153 33 L 186 33 L 187 32 L 188 32 L 188 31 L 189 30 L 189 7 L 186 4 L 154 4 L 153 5 L 152 5 Z M 153 9 L 156 6 L 184 6 L 187 9 L 187 10 L 188 11 L 188 28 L 185 31 L 183 31 L 182 32 L 156 32 L 153 29 L 153 27 L 152 26 L 152 11 L 153 10 Z"/>
+    <path id="tecla-f4" class="tecla" data-linha="0" data-coluna="4" data-tecla="F4" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 195 7 L 195 30 L 198 33 L 232 33 L 234 31 L 234 30 L 235 29 L 235 8 L 233 5 L 232 5 L 231 4 L 198 4 Z M 198 9 L 200 7 L 201 7 L 202 6 L 229 6 L 232 9 L 232 10 L 233 11 L 233 28 L 229 32 L 201 32 L 197 28 L 197 11 L 198 10 Z"/>
+    <path id="tecla-f5" class="tecla" data-linha="0" data-coluna="5" data-tecla="F5" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 246 6 L 246 9 L 245 10 L 245 28 L 246 29 L 246 31 L 248 33 L 282 33 L 284 31 L 284 30 L 285 29 L 285 9 L 284 8 L 283 5 L 282 5 L 281 4 L 249 4 Z M 248 9 L 250 7 L 251 7 L 252 6 L 279 6 L 283 10 L 283 27 L 282 28 L 282 29 L 279 32 L 253 32 L 252 31 L 250 31 L 247 28 L 247 11 L 248 10 Z"/>
+    <path id="tecla-f6" class="tecla" data-linha="0" data-coluna="6" data-tecla="F6" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 291 7 L 291 9 L 290 10 L 290 28 L 291 29 L 291 31 L 292 32 L 293 32 L 294 33 L 327 33 L 329 31 L 329 30 L 330 29 L 330 9 L 329 8 L 329 6 L 328 5 L 327 5 L 326 4 L 294 4 Z M 293 8 L 294 7 L 296 7 L 297 6 L 325 6 L 328 11 L 328 28 L 327 29 L 327 30 L 326 31 L 324 31 L 323 32 L 297 32 L 296 31 L 294 31 L 292 28 L 292 10 L 293 9 Z"/>
+    <path id="tecla-f7" class="tecla" data-linha="0" data-coluna="7" data-tecla="F7" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 336 7 L 336 9 L 335 10 L 335 26 L 336 27 L 336 30 L 337 31 L 337 32 L 338 32 L 339 33 L 371 33 L 372 32 L 373 32 L 373 31 L 375 29 L 375 9 L 374 8 L 373 5 L 372 5 L 371 4 L 339 4 Z M 337 10 L 340 7 L 341 7 L 342 6 L 368 6 L 369 7 L 370 7 L 372 9 L 372 10 L 373 11 L 373 27 L 372 28 L 372 29 L 369 32 L 342 32 L 341 31 L 340 31 L 338 29 L 338 28 L 337 27 Z"/>
+    <path id="tecla-f8" class="tecla" data-linha="0" data-coluna="8" data-tecla="F8" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 381 7 L 381 9 L 380 10 L 380 28 L 381 29 L 382 32 L 383 32 L 384 33 L 416 33 L 419 31 L 419 30 L 420 29 L 420 9 L 419 8 L 419 6 L 418 5 L 417 5 L 416 4 L 384 4 Z M 383 9 L 385 7 L 386 7 L 387 6 L 413 6 L 414 7 L 415 7 L 418 10 L 418 28 L 417 29 L 417 30 L 414 32 L 387 32 L 386 31 L 385 31 L 383 29 L 383 28 L 382 27 L 382 11 L 383 10 Z"/>
+    <path id="tecla-f9" class="tecla" data-linha="0" data-coluna="9" data-tecla="F9" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 431 6 L 431 8 L 430 9 L 430 29 L 431 30 L 431 31 L 433 33 L 466 33 L 469 31 L 469 28 L 470 27 L 470 11 L 469 10 L 469 7 L 468 6 L 468 5 L 467 5 L 466 4 L 434 4 Z M 433 9 L 435 7 L 437 7 L 438 6 L 464 6 L 467 9 L 467 10 L 468 11 L 468 28 L 467 29 L 467 30 L 466 31 L 464 31 L 463 32 L 437 32 L 436 31 L 435 31 L 433 29 L 433 28 L 432 27 L 432 11 L 433 10 Z"/>
+    <path id="tecla-f10" class="tecla" data-linha="0" data-coluna="10" data-tecla="F10" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 476 6 L 476 7 L 475 8 L 475 30 L 478 33 L 511 33 L 514 30 L 514 7 L 512 5 L 511 5 L 510 4 L 479 4 Z M 478 9 L 481 6 L 509 6 L 512 9 L 512 10 L 513 11 L 513 28 L 509 32 L 481 32 L 477 28 L 477 11 L 478 10 Z"/>
+    <path id="tecla-f11" class="tecla" data-linha="0" data-coluna="11" data-tecla="F11" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 520 7 L 520 29 L 522 32 L 523 32 L 524 33 L 556 33 L 559 30 L 559 7 L 557 5 L 556 5 L 555 4 L 524 4 L 523 5 L 522 5 Z M 523 9 L 526 6 L 553 6 L 554 7 L 557 8 L 558 9 L 558 29 L 557 30 L 556 30 L 554 32 L 526 32 L 522 28 L 522 11 L 523 10 Z"/>
+    <path id="tecla-f12" class="tecla" data-linha="0" data-coluna="12" data-tecla="F12" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 566 6 L 566 7 L 565 8 L 565 29 L 566 30 L 566 31 L 568 33 L 601 33 L 604 30 L 604 7 L 601 4 L 569 4 Z M 568 9 L 571 6 L 598 6 L 599 7 L 600 7 L 603 10 L 603 28 L 599 32 L 572 32 L 571 31 L 570 31 L 567 28 L 567 11 L 568 10 Z"/>
+    <path id="tecla-prtsc" class="tecla" data-linha="0" data-coluna="13" data-tecla="Print Screen" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 616 6 L 616 7 L 615 8 L 615 30 L 618 33 L 651 33 L 653 31 L 653 30 L 654 29 L 654 8 L 653 7 L 653 6 L 651 4 L 619 4 Z M 618 8 L 619 7 L 621 7 L 622 6 L 648 6 L 649 7 L 650 7 L 652 9 L 652 10 L 653 11 L 653 28 L 650 31 L 649 31 L 648 32 L 621 32 L 617 28 L 617 11 L 618 10 Z"/>
+    <path id="tecla-scrlk" class="tecla" data-linha="0" data-coluna="14" data-tecla="Scroll Lock" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 660 7 L 660 30 L 663 33 L 696 33 L 699 30 L 699 7 L 696 4 L 664 4 L 663 5 L 662 5 Z M 663 9 L 665 7 L 666 7 L 667 6 L 693 6 L 694 7 L 696 7 L 698 10 L 698 28 L 694 32 L 667 32 L 666 31 L 665 31 L 663 29 L 663 27 L 662 26 L 662 11 L 663 10 Z"/>
+    <path id="tecla-pause" class="tecla" data-linha="0" data-coluna="15" data-tecla="Pause/Break" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 705 7 L 705 30 L 706 31 L 706 32 L 707 32 L 708 33 L 741 33 L 742 32 L 743 32 L 743 31 L 744 30 L 744 7 L 741 4 L 708 4 Z M 708 9 L 711 6 L 738 6 L 739 7 L 741 7 L 743 10 L 743 28 L 742 29 L 742 30 L 741 31 L 739 31 L 738 32 L 715 32 L 714 31 L 710 31 L 708 29 L 708 28 L 707 27 L 707 11 L 708 10 Z"/>
+    <path id="tecla-extra1" class="tecla" data-linha="0" data-coluna="16" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 755 7 L 755 30 L 758 33 L 791 33 L 794 30 L 794 8 L 792 5 L 791 5 L 790 4 L 758 4 Z M 757 10 L 760 7 L 762 7 L 763 6 L 789 6 L 793 10 L 793 28 L 789 32 L 761 32 L 757 28 Z"/>
+    <path id="tecla-extra2" class="tecla" data-linha="0" data-coluna="17" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 800 7 L 800 29 L 801 30 L 801 31 L 803 33 L 836 33 L 839 30 L 839 7 L 837 5 L 836 5 L 835 4 L 804 4 L 803 5 L 802 5 Z M 803 9 L 806 6 L 834 6 L 836 8 L 837 8 L 838 9 L 838 29 L 837 30 L 836 30 L 834 32 L 806 32 L 802 28 L 802 11 L 803 10 Z"/>
+    <path id="tecla-extra3" class="tecla" data-linha="0" data-coluna="18" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 846 6 L 846 7 L 845 8 L 845 29 L 846 30 L 846 31 L 848 33 L 881 33 L 884 30 L 884 7 L 882 5 L 881 5 L 880 4 L 849 4 Z M 848 9 L 851 6 L 879 6 L 880 7 L 881 7 L 883 10 L 883 28 L 879 32 L 853 32 L 852 31 L 850 31 L 847 28 L 847 11 L 848 10 Z"/>
+    <path id="tecla-extra4" class="tecla" data-linha="0" data-coluna="19" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 890 7 L 890 29 L 891 30 L 891 31 L 893 33 L 926 33 L 929 30 L 929 7 L 927 5 L 926 5 L 925 4 L 894 4 L 893 5 L 892 5 Z M 893 8 L 894 7 L 896 7 L 897 6 L 925 6 L 926 7 L 926 8 L 928 10 L 928 28 L 925 31 L 922 31 L 921 32 L 898 32 L 897 31 L 894 31 L 893 30 L 893 28 L 892 27 L 892 10 L 893 9 Z"/>
+  </g>
+
+  <!-- Linha 1 -->
+  <g id="linha-1" data-linha="1">
+    <path id="tecla-grave" class="tecla" data-linha="1" data-coluna="0" data-tecla="`" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 7 40 L 5 43 L 5 79 L 6 80 L 6 81 L 9 83 L 36 83 L 39 80 L 39 42 L 37 40 L 36 40 L 35 39 L 9 39 L 8 40 Z M 9 42 L 10 42 L 11 41 L 34 41 L 37 43 L 37 44 L 38 45 L 38 78 L 35 81 L 34 81 L 33 82 L 14 82 L 13 81 L 10 81 L 8 79 L 8 78 L 7 77 L 7 45 Z"/>
+    <path id="tecla-1" class="tecla" data-linha="1" data-coluna="1" data-tecla="1" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 47 40 L 45 43 L 45 79 L 46 80 L 46 81 L 48 83 L 85 83 L 86 82 L 87 82 L 89 80 L 89 42 L 87 40 L 86 40 L 85 39 L 49 39 L 48 40 Z M 49 42 L 50 42 L 51 41 L 84 41 L 85 42 L 86 42 L 88 45 L 88 78 L 85 81 L 50 81 L 47 78 L 47 46 L 48 45 L 48 43 Z"/>
+    <path id="tecla-2" class="tecla" data-linha="1" data-coluna="2" data-tecla="2" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 97 40 L 95 42 L 95 80 L 98 83 L 136 83 L 139 80 L 139 42 L 136 39 L 99 39 L 98 40 Z M 99 42 L 100 42 L 101 41 L 134 41 L 135 42 L 136 42 L 138 45 L 138 78 L 135 81 L 122 81 L 121 82 L 118 82 L 117 81 L 100 81 L 98 79 L 98 78 L 97 77 L 97 46 L 98 45 L 98 43 Z"/>
+    <path id="tecla-3" class="tecla" data-linha="1" data-coluna="3" data-tecla="3" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 145 42 L 145 79 L 146 80 L 146 82 L 147 82 L 148 83 L 186 83 L 189 81 L 189 42 L 186 39 L 149 39 L 148 40 L 147 40 Z M 149 42 L 150 42 L 151 41 L 184 41 L 185 42 L 186 42 L 187 43 L 187 45 L 188 46 L 188 78 L 185 81 L 169 81 L 168 82 L 164 82 L 163 81 L 150 81 L 148 79 L 148 78 L 147 77 L 147 46 L 148 45 L 148 43 Z"/>
+    <path id="tecla-4" class="tecla" data-linha="1" data-coluna="4" data-tecla="4" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 197 40 L 195 43 L 195 80 L 198 83 L 237 83 L 239 81 L 239 80 L 240 79 L 240 44 L 239 43 L 239 41 L 236 39 L 199 39 L 198 40 Z M 199 42 L 201 42 L 202 41 L 233 41 L 234 42 L 235 42 L 238 45 L 238 78 L 235 81 L 200 81 L 197 78 L 197 45 Z"/>
+    <path id="tecla-5" class="tecla" data-linha="1" data-coluna="5" data-tecla="5" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 247 40 L 246 41 L 246 43 L 245 44 L 245 78 L 246 79 L 246 81 L 249 83 L 286 83 L 287 82 L 288 82 L 289 81 L 289 79 L 290 78 L 290 44 L 289 43 L 288 40 L 287 40 L 286 39 L 249 39 L 248 40 Z M 249 42 L 250 42 L 251 41 L 285 41 L 287 43 L 287 44 L 288 45 L 288 78 L 285 81 L 250 81 L 248 79 L 248 78 L 247 77 L 247 46 L 248 45 L 248 43 Z"/>
+    <path id="tecla-6" class="tecla" data-linha="1" data-coluna="6" data-tecla="6" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 299 39 L 296 42 L 296 45 L 295 46 L 295 77 L 296 78 L 296 81 L 299 83 L 336 83 L 337 82 L 338 82 L 340 79 L 340 44 L 339 43 L 339 41 L 336 39 Z M 299 42 L 300 42 L 301 41 L 334 41 L 335 42 L 336 42 L 338 45 L 338 78 L 335 81 L 334 81 L 333 82 L 326 82 L 325 81 L 300 81 L 298 79 L 298 78 L 297 77 L 297 46 L 298 45 L 298 43 Z"/>
+    <path id="tecla-7" class="tecla" data-linha="1" data-coluna="7" data-tecla="7" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 349 39 L 346 42 L 346 44 L 345 45 L 345 77 L 346 78 L 346 81 L 349 83 L 387 83 L 389 81 L 389 79 L 390 78 L 390 44 L 389 43 L 389 41 L 388 41 L 386 39 Z M 349 42 L 350 42 L 351 41 L 383 41 L 384 42 L 386 42 L 388 45 L 388 78 L 385 81 L 366 81 L 365 82 L 360 82 L 359 81 L 350 81 L 347 78 L 347 46 L 348 45 L 348 43 Z"/>
+    <path id="tecla-8" class="tecla" data-linha="1" data-coluna="8" data-tecla="8" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 398 40 L 396 42 L 396 44 L 395 45 L 395 78 L 396 79 L 396 81 L 399 83 L 437 83 L 439 81 L 439 80 L 440 79 L 440 43 L 439 42 L 439 41 L 436 39 L 400 39 L 399 40 Z M 400 42 L 401 42 L 402 41 L 433 41 L 434 42 L 435 42 L 438 45 L 438 78 L 435 81 L 406 81 L 405 82 L 403 82 L 402 81 L 400 81 L 397 78 L 397 45 Z"/>
+    <path id="tecla-9" class="tecla" data-linha="1" data-coluna="9" data-tecla="9" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 447 40 L 445 43 L 445 79 L 446 80 L 446 81 L 448 83 L 458 83 L 459 84 L 471 84 L 472 83 L 476 83 L 477 84 L 478 83 L 486 83 L 487 82 L 488 82 L 489 81 L 489 42 L 487 40 L 486 40 L 485 39 L 449 39 L 448 40 Z M 449 42 L 451 42 L 452 41 L 483 41 L 484 42 L 486 42 L 487 43 L 487 45 L 488 46 L 488 78 L 485 81 L 450 81 L 447 78 L 447 51 L 448 50 L 447 49 L 447 46 L 448 45 L 448 43 Z"/>
+    <path id="tecla-0" class="tecla" data-linha="1" data-coluna="10" data-tecla="0" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 497 40 L 495 42 L 495 80 L 496 81 L 496 82 L 497 82 L 498 83 L 501 83 L 502 84 L 503 83 L 536 83 L 539 80 L 539 42 L 537 40 L 536 40 L 535 39 L 499 39 L 498 40 Z M 499 42 L 501 42 L 502 41 L 533 41 L 534 42 L 536 42 L 538 45 L 538 78 L 535 81 L 522 81 L 521 82 L 518 82 L 517 81 L 500 81 L 498 79 L 498 78 L 497 77 L 497 46 L 498 45 L 498 43 Z"/>
+    <path id="tecla-minus" class="tecla" data-linha="1" data-coluna="11" data-tecla="-" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 547 40 L 545 42 L 545 79 L 546 80 L 546 82 L 547 82 L 548 83 L 586 83 L 589 80 L 589 42 L 586 39 L 549 39 L 548 40 Z M 549 42 L 551 42 L 552 41 L 583 41 L 584 42 L 586 42 L 588 45 L 588 78 L 585 81 L 569 81 L 568 82 L 562 82 L 561 81 L 550 81 L 548 79 L 548 78 L 547 77 L 547 46 L 548 45 L 548 43 Z"/>
+    <path id="tecla-equal" class="tecla" data-linha="1" data-coluna="12" data-tecla="=" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 597 40 L 595 43 L 595 80 L 596 81 L 596 82 L 597 82 L 598 83 L 636 83 L 639 80 L 639 42 L 637 40 L 636 40 L 635 39 L 599 39 L 598 40 Z M 598 43 L 599 42 L 601 42 L 602 41 L 633 41 L 634 42 L 636 42 L 638 45 L 638 79 L 633 82 L 630 82 L 629 81 L 617 81 L 616 82 L 614 82 L 613 81 L 600 81 L 597 78 L 597 45 L 598 44 Z"/>
+    <path id="tecla-backspace" class="tecla" data-linha="1" data-coluna="13" data-tecla="Backspace" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 645 43 L 645 79 L 646 80 L 646 81 L 648 83 L 741 83 L 742 82 L 743 82 L 743 81 L 744 80 L 744 42 L 741 39 L 649 39 L 648 40 L 647 40 Z M 647 45 L 648 44 L 648 43 L 651 41 L 738 41 L 739 42 L 741 42 L 743 45 L 743 77 L 742 78 L 742 80 L 741 81 L 674 81 L 673 82 L 670 82 L 669 81 L 663 81 L 662 82 L 654 82 L 653 81 L 650 81 L 647 78 Z"/>
+    <path id="tecla-numlock" class="tecla" data-linha="1" data-coluna="14" data-tecla="Num Lock" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 758 39 L 755 42 L 755 80 L 756 81 L 756 82 L 757 82 L 758 83 L 790 83 L 791 82 L 792 82 L 794 80 L 794 42 L 791 39 Z M 760 42 L 761 42 L 762 41 L 789 41 L 792 43 L 792 44 L 793 45 L 793 78 L 790 81 L 785 81 L 784 82 L 778 82 L 777 81 L 766 81 L 765 82 L 763 82 L 762 81 L 760 81 L 757 78 L 757 45 Z"/>
+    <path id="tecla-divide" class="tecla" data-linha="1" data-coluna="15" data-tecla="/" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 803 39 L 801 41 L 801 42 L 800 43 L 800 79 L 801 80 L 801 81 L 804 83 L 835 83 L 836 82 L 837 82 L 839 80 L 839 42 L 837 40 L 836 40 L 835 39 Z M 804 42 L 805 42 L 806 41 L 834 41 L 837 43 L 837 44 L 838 45 L 838 79 L 836 81 L 835 81 L 834 82 L 814 82 L 813 81 L 805 81 L 803 79 L 803 77 L 802 76 L 802 46 L 803 45 L 803 43 Z"/>
+    <path id="tecla-multiply" class="tecla" data-linha="1" data-coluna="16" data-tecla="*" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 847 40 L 845 43 L 845 79 L 846 80 L 846 81 L 849 83 L 880 83 L 881 82 L 882 82 L 884 80 L 884 42 L 881 39 L 849 39 L 848 40 Z M 849 42 L 850 42 L 851 41 L 879 41 L 882 43 L 882 45 L 883 46 L 883 74 L 882 75 L 883 76 L 883 78 L 881 81 L 878 81 L 877 82 L 862 82 L 861 81 L 850 81 L 848 79 L 848 78 L 847 77 L 847 46 L 848 45 L 848 43 Z"/>
+    <path id="tecla-subtract" class="tecla" data-linha="1" data-coluna="17" data-tecla="-" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 892 40 L 890 42 L 890 80 L 892 82 L 893 82 L 894 83 L 925 83 L 926 82 L 927 82 L 929 80 L 929 42 L 927 40 L 926 40 L 925 39 L 894 39 L 893 40 Z M 894 42 L 896 42 L 897 41 L 925 41 L 927 43 L 927 44 L 928 45 L 928 78 L 925 81 L 902 81 L 901 82 L 898 82 L 897 81 L 894 81 L 893 80 L 893 78 L 892 77 L 892 46 L 893 45 L 893 43 Z"/>
+  </g>
+
+  <!-- Linha 2 -->
+  <g id="linha-2" data-linha="2">
+    <path id="tecla-tab" class="tecla" data-linha="2" data-coluna="0" data-tecla="Tab" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 6 91 L 6 92 L 5 93 L 5 130 L 6 131 L 6 132 L 7 132 L 8 133 L 11 133 L 12 134 L 21 134 L 22 133 L 37 133 L 38 134 L 45 134 L 46 133 L 53 133 L 54 134 L 55 134 L 56 133 L 59 133 L 61 131 L 61 129 L 62 128 L 62 95 L 61 94 L 61 92 L 58 89 L 9 89 Z M 8 94 L 10 92 L 11 92 L 12 91 L 57 91 L 60 94 L 60 129 L 58 131 L 9 131 L 7 128 L 7 96 L 8 95 Z"/>
+    <path id="tecla-q" class="tecla" data-linha="2" data-coluna="1" data-tecla="Q" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 71 89 L 68 92 L 68 93 L 67 94 L 67 127 L 68 128 L 68 131 L 70 133 L 74 133 L 75 134 L 105 134 L 106 133 L 109 133 L 111 131 L 111 130 L 112 129 L 112 94 L 111 93 L 111 92 L 108 89 Z M 70 94 L 72 92 L 73 92 L 74 91 L 106 91 L 107 92 L 109 92 L 110 93 L 110 130 L 109 131 L 72 131 L 70 128 Z"/>
+    <path id="tecla-w" class="tecla" data-linha="2" data-coluna="2" data-tecla="W" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 121 89 L 118 92 L 118 94 L 117 95 L 117 128 L 118 129 L 119 132 L 120 133 L 122 133 L 123 134 L 141 134 L 142 133 L 149 133 L 150 134 L 157 134 L 158 133 L 159 133 L 161 131 L 161 130 L 162 129 L 162 94 L 161 93 L 161 92 L 158 89 Z M 122 92 L 123 92 L 124 91 L 157 91 L 160 94 L 160 129 L 158 131 L 122 131 L 121 130 L 121 129 L 120 128 L 120 95 Z"/>
+    <path id="tecla-e" class="tecla" data-linha="2" data-coluna="3" data-tecla="E" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 171 89 L 168 92 L 168 93 L 167 94 L 167 128 L 168 129 L 169 132 L 170 133 L 173 133 L 174 134 L 207 134 L 208 133 L 209 133 L 212 130 L 212 93 L 211 92 L 211 91 L 209 89 Z M 172 92 L 173 92 L 174 91 L 205 91 L 206 92 L 208 92 L 210 94 L 210 129 L 208 131 L 172 131 L 171 130 L 171 129 L 170 128 L 170 95 Z"/>
+    <path id="tecla-r" class="tecla" data-linha="2" data-coluna="4" data-tecla="R" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 221 89 L 218 92 L 218 95 L 217 96 L 217 127 L 218 128 L 218 130 L 219 131 L 219 132 L 220 133 L 222 133 L 223 134 L 256 134 L 257 133 L 259 133 L 260 132 L 261 132 L 261 131 L 262 130 L 262 93 L 261 92 L 261 91 L 258 89 Z M 222 92 L 224 92 L 225 91 L 256 91 L 257 92 L 258 92 L 260 94 L 260 128 L 258 131 L 222 131 L 221 130 L 221 129 L 220 128 L 220 95 Z"/>
+    <path id="tecla-t" class="tecla" data-linha="2" data-coluna="5" data-tecla="T" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 270 90 L 268 93 L 268 130 L 271 133 L 274 133 L 275 134 L 306 134 L 307 133 L 309 133 L 310 132 L 311 132 L 311 131 L 312 130 L 312 93 L 311 92 L 311 91 L 309 89 L 272 89 L 271 90 Z M 272 92 L 273 92 L 274 91 L 306 91 L 307 92 L 308 92 L 310 94 L 310 129 L 308 131 L 272 131 L 271 130 L 271 129 L 270 128 L 270 94 Z"/>
+    <path id="tecla-y" class="tecla" data-linha="2" data-coluna="6" data-tecla="Y" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 320 90 L 318 93 L 318 130 L 321 133 L 323 133 L 324 134 L 357 134 L 358 133 L 360 133 L 360 132 L 362 130 L 362 93 L 361 92 L 361 91 L 358 89 L 322 89 L 321 90 Z M 323 91 L 357 91 L 360 94 L 360 128 L 358 131 L 322 131 L 321 130 L 321 129 L 320 128 L 320 94 Z"/>
+    <path id="tecla-u" class="tecla" data-linha="2" data-coluna="7" data-tecla="U" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 371 89 L 369 91 L 369 92 L 368 93 L 368 130 L 371 133 L 375 133 L 376 134 L 405 134 L 406 133 L 409 133 L 410 132 L 411 132 L 411 131 L 412 130 L 412 92 L 409 89 Z M 372 92 L 373 92 L 374 91 L 407 91 L 410 94 L 410 129 L 408 131 L 372 131 L 371 130 L 371 129 L 370 128 L 370 94 Z"/>
+    <path id="tecla-i" class="tecla" data-linha="2" data-coluna="8" data-tecla="I" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 420 90 L 418 93 L 418 130 L 419 131 L 419 132 L 420 132 L 423 134 L 457 134 L 458 133 L 461 132 L 461 131 L 462 130 L 462 93 L 461 92 L 461 91 L 459 89 L 422 89 L 421 90 Z M 422 92 L 424 92 L 425 91 L 455 91 L 456 92 L 458 92 L 460 94 L 460 128 L 458 131 L 422 131 L 421 130 L 421 129 L 420 128 L 420 94 Z"/>
+    <path id="tecla-o" class="tecla" data-linha="2" data-coluna="9" data-tecla="O" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 468 91 L 468 94 L 467 95 L 467 127 L 468 128 L 468 131 L 470 133 L 472 133 L 473 134 L 506 134 L 507 133 L 509 133 L 511 131 L 511 129 L 512 128 L 512 94 L 511 93 L 511 91 L 510 91 L 508 89 L 471 89 L 469 91 Z M 472 92 L 475 92 L 476 91 L 506 91 L 507 92 L 508 92 L 510 94 L 510 130 L 509 131 L 472 131 L 471 130 L 471 129 L 470 128 L 470 95 Z"/>
+    <path id="tecla-p" class="tecla" data-linha="2" data-coluna="10" data-tecla="P" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 521 89 L 518 92 L 518 94 L 517 95 L 517 128 L 518 129 L 518 131 L 520 133 L 522 133 L 523 134 L 541 134 L 542 133 L 549 133 L 550 134 L 557 134 L 558 133 L 559 133 L 561 131 L 561 130 L 562 129 L 562 94 L 561 93 L 561 92 L 558 89 Z M 522 92 L 523 92 L 524 91 L 557 91 L 560 94 L 560 129 L 558 131 L 522 131 L 520 129 L 520 95 Z"/>
+    <path id="tecla-bracketleft" class="tecla" data-linha="2" data-coluna="11" data-tecla="[" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 571 89 L 568 92 L 568 93 L 567 94 L 567 128 L 568 129 L 569 132 L 570 133 L 573 133 L 574 134 L 605 134 L 606 133 L 609 133 L 611 131 L 611 128 L 612 127 L 612 94 L 611 93 L 611 91 L 610 91 L 608 89 Z M 572 92 L 573 92 L 574 91 L 605 91 L 606 92 L 608 92 L 610 94 L 610 129 L 608 131 L 572 131 L 571 130 L 571 129 L 570 128 L 570 95 Z"/>
+    <path id="tecla-bracketright" class="tecla" data-linha="2" data-coluna="12" data-tecla="]" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 621 89 L 618 92 L 618 93 L 617 94 L 617 128 L 618 129 L 619 132 L 620 133 L 624 133 L 625 134 L 645 134 L 646 133 L 653 133 L 654 134 L 655 134 L 656 133 L 659 133 L 661 131 L 661 129 L 662 128 L 662 95 L 661 94 L 661 92 L 658 89 Z M 622 92 L 624 92 L 625 91 L 656 91 L 657 92 L 658 92 L 660 94 L 660 129 L 658 131 L 622 131 L 621 130 L 621 129 L 620 128 L 620 94 Z"/>
+    <path id="tecla-numpad7" class="tecla" data-linha="2" data-coluna="13" data-tecla="7" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 758 89 L 756 91 L 756 92 L 755 93 L 755 130 L 758 133 L 791 133 L 794 130 L 794 93 L 793 92 L 793 91 L 791 89 Z M 761 91 L 789 91 L 792 93 L 792 94 L 793 95 L 793 127 L 792 128 L 792 130 L 791 131 L 760 131 L 757 128 L 757 95 Z"/>
+    <path id="tecla-numpad8" class="tecla" data-linha="2" data-coluna="14" data-tecla="8" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 803 89 L 801 91 L 801 92 L 800 93 L 800 130 L 803 133 L 835 133 L 836 132 L 837 132 L 839 130 L 839 93 L 838 92 L 838 91 L 835 89 Z M 806 91 L 834 91 L 836 93 L 837 93 L 838 94 L 838 128 L 835 131 L 804 131 L 803 130 L 803 128 L 802 127 L 802 96 L 803 95 L 803 94 Z"/>
+    <path id="tecla-numpad9" class="tecla" data-linha="2" data-coluna="15" data-tecla="9" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 848 89 L 846 91 L 846 92 L 845 93 L 845 130 L 848 133 L 881 133 L 884 130 L 884 92 L 881 89 Z M 849 92 L 851 92 L 852 91 L 878 91 L 879 92 L 880 92 L 883 95 L 883 127 L 882 128 L 882 130 L 881 131 L 849 131 L 848 130 L 848 129 L 847 128 L 847 96 L 848 95 L 848 93 Z"/>
+    <path id="tecla-numpadplus" class="tecla" data-linha="2" data-coluna="16" data-tecla="+" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 893 89 L 891 91 L 891 92 L 890 93 L 890 129 L 891 130 L 891 131 L 894 133 L 925 133 L 926 132 L 927 132 L 929 130 L 929 92 L 926 89 Z M 894 92 L 896 92 L 897 91 L 924 91 L 928 95 L 928 128 L 926 131 L 894 131 L 893 130 L 893 128 L 892 127 L 892 95 Z"/>
+  </g>
+
+  <!-- Linha 3 -->
+  <g id="linha-3" data-linha="3">
+    <path id="tecla-enter" class="tecla" data-linha="3" data-coluna="0" data-tecla="Enter" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 630 143 L 630 180 L 633 183 L 635 183 L 636 184 L 736 184 L 737 183 L 741 183 L 742 182 L 743 182 L 743 181 L 744 180 L 744 92 L 741 89 L 671 89 L 668 92 L 668 93 L 667 94 L 667 138 L 666 139 L 634 139 L 632 141 L 631 141 L 631 142 Z M 632 146 L 633 145 L 633 144 L 636 141 L 669 141 L 669 140 L 670 139 L 670 94 L 672 92 L 673 92 L 674 91 L 738 91 L 739 92 L 741 92 L 743 95 L 743 178 L 740 181 L 635 181 L 632 178 Z"/>
+  </g>
+
+  <!-- Linha 4 -->
+  <g id="linha-4" data-linha="4">
+    <path id="tecla-capslock" class="tecla" data-linha="4" data-coluna="0" data-tecla="Caps Lock" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 6 141 L 6 142 L 5 143 L 5 179 L 6 180 L 6 182 L 7 182 L 10 184 L 69 184 L 70 183 L 73 182 L 73 181 L 74 180 L 74 143 L 72 140 L 71 140 L 70 139 L 9 139 L 7 141 Z M 8 143 L 11 141 L 69 141 L 70 142 L 71 142 L 73 145 L 73 178 L 70 181 L 10 181 L 7 178 L 7 145 L 8 144 Z"/>
+    <path id="tecla-a" class="tecla" data-linha="4" data-coluna="1" data-tecla="A" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 82 140 L 80 143 L 80 180 L 83 183 L 85 183 L 86 184 L 119 184 L 120 183 L 123 182 L 123 181 L 124 180 L 124 142 L 122 140 L 121 140 L 120 139 L 84 139 L 83 140 Z M 86 141 L 119 141 L 122 143 L 122 144 L 123 145 L 123 178 L 120 181 L 85 181 L 82 178 L 82 145 Z"/>
+    <path id="tecla-s" class="tecla" data-linha="4" data-coluna="2" data-tecla="S" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 131 141 L 131 142 L 130 143 L 130 180 L 133 183 L 136 183 L 137 184 L 169 184 L 170 183 L 173 182 L 173 181 L 174 180 L 174 143 L 172 140 L 171 140 L 170 139 L 134 139 L 132 141 Z M 134 142 L 135 142 L 136 141 L 169 141 L 170 142 L 171 142 L 173 145 L 173 178 L 170 181 L 134 181 L 132 178 L 132 145 Z"/>
+    <path id="tecla-d" class="tecla" data-linha="4" data-coluna="3" data-tecla="D" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 182 140 L 180 143 L 180 180 L 183 183 L 184 183 L 185 184 L 219 184 L 220 183 L 222 183 L 224 181 L 224 179 L 225 178 L 225 144 L 224 143 L 224 142 L 222 140 L 221 140 L 220 139 L 184 139 L 183 140 Z M 185 142 L 186 142 L 187 141 L 218 141 L 219 142 L 221 142 L 222 143 L 222 144 L 223 145 L 223 178 L 221 181 L 185 181 L 183 179 L 183 178 L 182 177 L 182 146 L 183 145 L 183 144 Z"/>
+    <path id="tecla-f" class="tecla" data-linha="4" data-coluna="4" data-tecla="F" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 231 141 L 231 143 L 230 144 L 230 180 L 233 183 L 234 183 L 235 184 L 269 184 L 270 183 L 272 183 L 274 181 L 274 180 L 275 179 L 275 144 L 274 143 L 274 142 L 272 140 L 271 140 L 270 139 L 234 139 L 232 141 Z M 236 141 L 269 141 L 272 143 L 272 145 L 273 146 L 273 178 L 270 181 L 235 181 L 232 178 L 232 147 L 233 146 L 233 144 Z"/>
+    <path id="tecla-g" class="tecla" data-linha="4" data-coluna="5" data-tecla="G" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 283 140 L 281 142 L 281 144 L 280 145 L 280 178 L 281 179 L 281 181 L 283 183 L 285 183 L 286 184 L 319 184 L 320 183 L 322 183 L 324 181 L 324 180 L 325 179 L 325 144 L 324 143 L 324 142 L 322 140 L 321 140 L 320 139 L 285 139 L 284 140 Z M 286 141 L 319 141 L 322 143 L 322 144 L 323 145 L 323 178 L 320 181 L 285 181 L 282 178 L 282 146 L 283 145 L 283 144 Z"/>
+    <path id="tecla-h" class="tecla" data-linha="4" data-coluna="6" data-tecla="H" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 333 140 L 331 142 L 331 144 L 330 145 L 330 178 L 331 179 L 331 181 L 332 182 L 333 182 L 334 183 L 336 183 L 337 184 L 369 184 L 370 183 L 372 183 L 374 181 L 374 179 L 375 178 L 375 145 L 374 144 L 374 142 L 372 140 L 371 140 L 370 139 L 335 139 L 334 140 Z M 334 142 L 336 142 L 337 141 L 369 141 L 370 142 L 371 142 L 373 145 L 373 178 L 370 181 L 334 181 L 332 178 L 332 145 Z"/>
+    <path id="tecla-j" class="tecla" data-linha="4" data-coluna="7" data-tecla="J" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 383 140 L 381 142 L 381 144 L 380 145 L 380 178 L 381 179 L 381 181 L 383 183 L 386 183 L 387 184 L 419 184 L 420 183 L 422 183 L 424 181 L 424 179 L 425 178 L 425 144 L 424 143 L 424 141 L 423 141 L 421 139 L 385 139 L 384 140 Z M 386 141 L 388 141 L 389 142 L 390 141 L 419 141 L 422 143 L 422 144 L 423 145 L 423 178 L 420 181 L 385 181 L 382 178 L 382 146 L 383 145 L 383 144 Z"/>
+    <path id="tecla-k" class="tecla" data-linha="4" data-coluna="8" data-tecla="K" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 434 139 L 431 142 L 431 143 L 430 144 L 430 179 L 431 180 L 431 181 L 433 183 L 434 183 L 435 184 L 469 184 L 470 183 L 472 183 L 474 181 L 474 179 L 475 178 L 475 145 L 474 144 L 474 142 L 472 140 L 471 140 L 470 139 Z M 436 141 L 469 141 L 472 143 L 472 144 L 473 145 L 473 178 L 470 181 L 435 181 L 432 178 L 432 147 L 433 146 L 433 144 Z"/>
+    <path id="tecla-l" class="tecla" data-linha="4" data-coluna="9" data-tecla="L" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 482 140 L 480 143 L 480 180 L 481 181 L 481 182 L 482 182 L 483 183 L 485 183 L 486 184 L 519 184 L 520 183 L 523 182 L 523 181 L 524 180 L 524 142 L 522 140 L 521 140 L 520 139 L 484 139 L 483 140 Z M 486 141 L 519 141 L 522 143 L 522 144 L 523 145 L 523 178 L 520 181 L 485 181 L 483 179 L 483 177 L 482 176 L 482 145 Z"/>
+    <path id="tecla-semicolon" class="tecla" data-linha="4" data-coluna="10" data-tecla=";" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 531 141 L 531 142 L 530 143 L 530 180 L 533 183 L 536 183 L 537 184 L 569 184 L 570 183 L 573 182 L 573 181 L 574 180 L 574 143 L 572 140 L 571 140 L 570 139 L 534 139 L 532 141 Z M 534 142 L 535 142 L 536 141 L 569 141 L 570 142 L 571 142 L 573 145 L 573 178 L 570 181 L 534 181 L 532 178 L 532 145 Z"/>
+    <path id="tecla-apostrophe" class="tecla" data-linha="4" data-coluna="11" data-tecla="'" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 582 140 L 580 143 L 580 180 L 581 181 L 581 182 L 582 182 L 583 183 L 585 183 L 586 184 L 618 184 L 619 183 L 621 183 L 622 182 L 623 182 L 623 181 L 624 180 L 624 143 L 623 142 L 623 141 L 622 140 L 620 140 L 619 139 L 584 139 L 583 140 Z M 585 142 L 586 142 L 587 141 L 619 141 L 622 143 L 622 144 L 623 145 L 623 178 L 620 181 L 585 181 L 582 178 L 582 145 Z"/>
+    <path id="tecla-numpad4" class="tecla" data-linha="4" data-coluna="12" data-tecla="4" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 758 139 L 756 141 L 756 142 L 755 143 L 755 180 L 758 183 L 790 183 L 791 182 L 792 182 L 794 180 L 794 143 L 793 142 L 793 141 L 791 139 Z M 761 141 L 789 141 L 792 143 L 792 144 L 793 145 L 793 178 L 790 181 L 760 181 L 757 178 L 757 145 Z"/>
+    <path id="tecla-numpad5" class="tecla" data-linha="4" data-coluna="13" data-tecla="5" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 802 140 L 800 142 L 800 180 L 803 183 L 836 183 L 839 180 L 839 142 L 837 140 L 836 140 L 835 139 L 804 139 L 803 140 Z M 806 141 L 834 141 L 836 143 L 837 143 L 838 144 L 838 178 L 835 181 L 805 181 L 802 178 L 802 145 Z"/>
+    <path id="tecla-numpad6" class="tecla" data-linha="4" data-coluna="14" data-tecla="6" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 848 139 L 846 141 L 846 142 L 845 143 L 845 179 L 846 180 L 846 181 L 849 183 L 881 183 L 884 180 L 884 142 L 881 139 Z M 851 141 L 879 141 L 882 143 L 882 145 L 883 146 L 883 178 L 880 181 L 850 181 L 847 178 L 847 145 Z"/>
+    <path id="tecla-extra5" class="tecla" data-linha="4" data-coluna="15" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 893 139 L 890 142 L 890 180 L 892 182 L 893 182 L 894 183 L 926 183 L 929 180 L 929 142 L 927 140 L 926 140 L 925 139 Z M 894 142 L 895 142 L 896 141 L 925 141 L 927 143 L 927 144 L 928 145 L 928 178 L 925 181 L 894 181 L 893 180 L 893 179 L 892 178 L 892 145 Z"/>
+  </g>
+
+  <!-- Linha 5 -->
+  <g id="linha-5" data-linha="5">
+    <path id="tecla-shiftleft" class="tecla" data-linha="5" data-coluna="0" data-tecla="Shift" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 5 193 L 5 230 L 6 231 L 6 232 L 7 232 L 8 233 L 10 233 L 11 234 L 93 234 L 94 233 L 96 233 L 97 232 L 98 232 L 98 231 L 99 230 L 99 193 L 98 192 L 98 191 L 95 189 L 10 189 L 9 190 L 7 190 Z M 7 195 L 8 194 L 8 193 L 11 191 L 94 191 L 95 192 L 96 192 L 98 194 L 98 228 L 95 231 L 10 231 L 8 229 L 8 228 L 7 227 Z"/>
+    <path id="tecla-z" class="tecla" data-linha="5" data-coluna="1" data-tecla="Z" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 107 190 L 105 193 L 105 230 L 106 231 L 106 232 L 107 232 L 110 234 L 143 234 L 144 233 L 147 233 L 149 230 L 149 193 L 148 192 L 148 191 L 145 189 L 110 189 L 109 190 Z M 108 193 L 110 191 L 144 191 L 145 192 L 146 192 L 148 195 L 148 228 L 145 231 L 110 231 L 108 229 L 108 228 L 107 227 L 107 195 L 108 194 Z"/>
+    <path id="tecla-x" class="tecla" data-linha="5" data-coluna="2" data-tecla="X" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 156 191 L 156 192 L 155 193 L 155 230 L 156 231 L 156 232 L 157 232 L 160 234 L 195 234 L 196 233 L 197 233 L 199 231 L 199 228 L 200 227 L 200 218 L 199 217 L 199 211 L 200 210 L 199 209 L 199 203 L 200 202 L 200 195 L 199 194 L 199 192 L 197 190 L 196 190 L 195 189 L 159 189 L 157 191 Z M 159 192 L 160 192 L 161 191 L 194 191 L 196 193 L 197 193 L 198 194 L 198 228 L 195 231 L 160 231 L 157 228 L 157 194 Z"/>
+    <path id="tecla-c" class="tecla" data-linha="5" data-coluna="3" data-tecla="C" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 207 190 L 205 193 L 205 230 L 206 231 L 206 232 L 207 232 L 210 234 L 245 234 L 246 233 L 247 233 L 249 231 L 249 230 L 250 229 L 250 194 L 249 193 L 249 192 L 247 190 L 246 190 L 245 189 L 209 189 L 208 190 Z M 209 192 L 210 192 L 211 191 L 245 191 L 247 193 L 247 194 L 248 195 L 248 226 L 247 227 L 247 229 L 245 231 L 210 231 L 208 229 L 208 228 L 207 227 L 207 195 Z"/>
+    <path id="tecla-v" class="tecla" data-linha="5" data-coluna="4" data-tecla="V" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 258 190 L 256 192 L 256 194 L 255 195 L 255 228 L 256 229 L 256 231 L 258 233 L 260 233 L 261 234 L 295 234 L 296 233 L 297 233 L 299 231 L 299 230 L 300 229 L 300 194 L 299 193 L 299 192 L 297 190 L 296 190 L 295 189 L 260 189 L 259 190 Z M 259 192 L 260 192 L 261 191 L 294 191 L 295 192 L 296 192 L 298 195 L 298 228 L 295 231 L 260 231 L 258 229 L 258 228 L 257 227 L 257 195 Z"/>
+    <path id="tecla-b" class="tecla" data-linha="5" data-coluna="5" data-tecla="B" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 308 190 L 306 192 L 306 194 L 305 195 L 305 228 L 306 229 L 306 231 L 308 233 L 310 233 L 311 234 L 344 234 L 345 233 L 347 233 L 349 231 L 349 229 L 350 228 L 350 195 L 349 194 L 349 192 L 347 190 L 346 190 L 345 189 L 310 189 L 309 190 Z M 308 193 L 310 191 L 344 191 L 345 192 L 346 192 L 348 195 L 348 228 L 345 231 L 310 231 L 308 229 L 308 227 L 307 226 L 307 195 L 308 194 Z"/>
+    <path id="tecla-n" class="tecla" data-linha="5" data-coluna="6" data-tecla="N" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 358 190 L 356 192 L 356 194 L 355 195 L 355 228 L 356 229 L 356 231 L 358 233 L 359 233 L 360 234 L 394 234 L 395 233 L 397 233 L 399 231 L 399 230 L 400 229 L 400 195 L 399 194 L 399 192 L 397 190 L 396 190 L 395 189 L 360 189 L 359 190 Z M 361 191 L 394 191 L 395 192 L 396 192 L 398 194 L 398 228 L 395 231 L 360 231 L 357 228 L 357 195 Z"/>
+    <path id="tecla-m" class="tecla" data-linha="5" data-coluna="7" data-tecla="M" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 408 190 L 406 192 L 406 194 L 405 195 L 405 227 L 406 228 L 406 231 L 408 233 L 410 233 L 411 234 L 445 234 L 446 233 L 447 233 L 449 231 L 449 230 L 450 229 L 450 194 L 449 193 L 449 192 L 446 189 L 410 189 L 409 190 Z M 409 192 L 410 192 L 411 191 L 445 191 L 447 193 L 447 194 L 448 195 L 448 227 L 447 228 L 447 229 L 445 231 L 410 231 L 408 229 L 408 228 L 407 227 L 407 195 Z"/>
+    <path id="tecla-comma" class="tecla" data-linha="5" data-coluna="8" data-tecla="," data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 459 189 L 455 193 L 455 230 L 458 233 L 459 233 L 460 234 L 495 234 L 496 233 L 497 233 L 499 231 L 499 192 L 497 190 L 496 190 L 495 189 Z M 459 192 L 460 192 L 461 191 L 494 191 L 495 192 L 496 192 L 498 194 L 498 228 L 495 231 L 460 231 L 458 229 L 458 227 L 457 226 L 457 195 Z"/>
+    <path id="tecla-period" class="tecla" data-linha="5" data-coluna="9" data-tecla="." data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 507 190 L 505 193 L 505 230 L 506 231 L 506 232 L 507 232 L 510 234 L 543 234 L 544 233 L 547 233 L 549 230 L 549 193 L 548 192 L 548 191 L 545 189 L 510 189 L 509 190 Z M 508 193 L 510 191 L 544 191 L 545 192 L 546 192 L 548 195 L 548 228 L 545 231 L 510 231 L 508 229 L 508 228 L 507 227 L 507 195 L 508 194 Z"/>
+    <path id="tecla-slash" class="tecla" data-linha="5" data-coluna="10" data-tecla="/" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 556 191 L 556 192 L 555 193 L 555 230 L 556 231 L 556 232 L 557 232 L 560 234 L 593 234 L 594 233 L 597 233 L 597 232 L 599 230 L 599 193 L 598 192 L 598 191 L 595 189 L 559 189 L 557 191 Z M 559 192 L 560 192 L 561 191 L 594 191 L 596 193 L 597 193 L 598 194 L 598 228 L 595 231 L 560 231 L 557 228 L 557 195 Z"/>
+    <path id="tecla-shiftright" class="tecla" data-linha="5" data-coluna="11" data-tecla="Shift" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 605 193 L 605 230 L 606 231 L 606 232 L 607 232 L 610 234 L 689 234 L 690 233 L 692 233 L 694 230 L 694 193 L 693 192 L 693 191 L 690 189 L 610 189 L 609 190 L 606 191 L 606 192 Z M 607 195 L 608 194 L 608 193 L 611 191 L 689 191 L 690 192 L 691 192 L 693 195 L 693 227 L 692 228 L 692 229 L 690 231 L 610 231 L 608 229 L 608 228 L 607 227 Z"/>
+    <path id="tecla-arrowup" class="tecla" data-linha="5" data-coluna="12" data-tecla="Seta Cima" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 700 192 L 700 230 L 702 232 L 702 233 L 704 233 L 705 234 L 736 234 L 737 233 L 741 233 L 742 232 L 743 232 L 743 231 L 744 230 L 744 192 L 741 189 L 704 189 L 703 190 L 702 190 Z M 706 191 L 739 191 L 742 193 L 742 194 L 743 195 L 743 227 L 742 228 L 742 229 L 740 231 L 705 231 L 703 229 L 703 227 L 702 226 L 702 195 Z"/>
+    <path id="tecla-numpad1" class="tecla" data-linha="5" data-coluna="13" data-tecla="1" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 758 189 L 755 192 L 755 230 L 758 233 L 791 233 L 794 230 L 794 192 L 791 189 Z M 761 191 L 790 191 L 792 193 L 792 194 L 793 195 L 793 228 L 790 231 L 760 231 L 757 228 L 757 195 Z"/>
+    <path id="tecla-numpad2" class="tecla" data-linha="5" data-coluna="14" data-tecla="2" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 803 189 L 801 191 L 801 192 L 800 193 L 800 229 L 801 230 L 801 231 L 803 233 L 836 233 L 839 230 L 839 192 L 837 190 L 836 190 L 835 189 Z M 804 192 L 805 192 L 806 191 L 834 191 L 836 193 L 837 193 L 838 194 L 838 228 L 835 231 L 805 231 L 803 229 L 803 228 L 802 227 L 802 195 Z"/>
+    <path id="tecla-numpad3" class="tecla" data-linha="5" data-coluna="15" data-tecla="3" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 848 189 L 846 191 L 846 192 L 845 193 L 845 229 L 846 230 L 846 231 L 848 233 L 881 233 L 884 230 L 884 193 L 883 192 L 883 191 L 881 189 Z M 849 192 L 850 192 L 851 191 L 880 191 L 882 193 L 882 194 L 883 195 L 883 226 L 882 227 L 882 229 L 880 231 L 850 231 L 848 229 L 848 228 L 847 227 L 847 195 Z"/>
+  </g>
+
+  <!-- Linha 6 -->
+  <g id="linha-6" data-linha="6">
+    <path id="tecla-numpadenter" class="tecla" data-linha="6" data-coluna="0" data-tecla="Enter" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 894 189 L 893 190 L 892 190 L 890 193 L 890 280 L 892 282 L 893 282 L 894 283 L 925 283 L 926 282 L 927 282 L 929 280 L 929 192 L 927 190 L 926 190 L 925 189 Z M 896 191 L 925 191 L 927 193 L 927 194 L 928 195 L 928 277 L 927 278 L 927 279 L 925 281 L 895 281 L 893 279 L 893 278 L 892 277 L 892 195 L 893 194 L 893 193 Z"/>
+  </g>
+
+  <!-- Linha 7 -->
+  <g id="linha-7" data-linha="7">
+    <path id="tecla-ctrlleft" class="tecla" data-linha="7" data-coluna="0" data-tecla="Ctrl" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 6 241 L 6 242 L 5 243 L 5 280 L 6 281 L 6 282 L 7 282 L 10 284 L 45 284 L 47 282 L 48 282 L 48 281 L 49 280 L 49 243 L 48 242 L 48 241 L 47 241 L 45 239 L 10 239 L 9 240 Z M 8 243 L 10 241 L 45 241 L 47 243 L 47 244 L 48 245 L 48 278 L 45 281 L 10 281 L 8 279 L 8 278 L 7 277 L 7 245 L 8 244 Z"/>
+    <path id="tecla-winleft" class="tecla" data-linha="7" data-coluna="1" data-tecla="Win" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 56 241 L 56 242 L 55 243 L 55 280 L 56 281 L 56 282 L 57 282 L 60 284 L 94 284 L 95 283 L 98 282 L 98 281 L 99 280 L 99 243 L 98 242 L 98 241 L 97 241 L 94 239 L 60 239 L 59 240 Z M 58 243 L 60 241 L 95 241 L 97 243 L 97 244 L 98 245 L 98 278 L 95 281 L 60 281 L 58 279 L 58 278 L 57 277 L 57 246 L 58 245 Z"/>
+    <path id="tecla-altleft" class="tecla" data-linha="7" data-coluna="2" data-tecla="Alt" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 106 241 L 106 242 L 105 243 L 105 280 L 106 281 L 106 282 L 107 282 L 110 284 L 145 284 L 147 282 L 148 282 L 148 281 L 149 280 L 149 243 L 148 242 L 148 241 L 147 241 L 144 239 L 110 239 L 109 240 Z M 108 243 L 110 241 L 145 241 L 147 243 L 147 244 L 148 245 L 148 278 L 145 281 L 110 281 L 108 279 L 108 278 L 107 277 L 107 246 L 108 245 Z"/>
+    <path id="tecla-extra6" class="tecla" data-linha="7" data-coluna="3" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 156 241 L 156 242 L 155 243 L 155 280 L 156 281 L 156 282 L 157 282 L 160 284 L 195 284 L 196 283 L 197 283 L 199 281 L 199 278 L 200 277 L 200 274 L 199 273 L 199 267 L 200 266 L 199 265 L 199 259 L 200 258 L 199 257 L 199 242 L 197 240 L 196 240 L 195 239 L 160 239 L 159 240 Z M 158 243 L 161 241 L 194 241 L 195 242 L 196 242 L 198 245 L 198 277 L 197 278 L 197 279 L 194 281 L 160 281 L 157 278 L 157 245 L 158 244 Z"/>
+    <path id="tecla-space" class="tecla" data-linha="7" data-coluna="4" data-tecla="Espaco" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 205 243 L 205 287 L 206 288 L 206 289 L 208 291 L 446 291 L 449 289 L 449 287 L 450 286 L 450 245 L 449 244 L 449 242 L 447 240 L 446 240 L 445 239 L 210 239 L 209 240 L 206 241 L 206 242 Z M 207 246 L 208 245 L 208 243 L 211 241 L 445 241 L 447 243 L 447 244 L 448 245 L 448 285 L 446 287 L 446 288 L 445 289 L 212 289 L 211 288 L 210 288 L 208 286 L 208 285 L 207 284 Z"/>
+    <path id="tecla-altright" class="tecla" data-linha="7" data-coluna="5" data-tecla="Alt" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 456 241 L 456 242 L 455 243 L 455 279 L 456 280 L 456 282 L 457 282 L 459 284 L 495 284 L 496 283 L 497 283 L 499 281 L 499 242 L 497 240 L 495 240 L 494 239 L 460 239 L 459 240 Z M 460 241 L 495 241 L 498 244 L 498 277 L 497 278 L 497 279 L 495 281 L 461 281 L 457 277 L 457 246 L 458 245 L 458 243 Z"/>
+    <path id="tecla-winright" class="tecla" data-linha="7" data-coluna="6" data-tecla="Win" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 506 241 L 506 242 L 505 243 L 505 280 L 506 281 L 506 282 L 507 282 L 509 284 L 545 284 L 547 282 L 548 282 L 548 281 L 549 280 L 549 243 L 548 242 L 548 241 L 547 241 L 544 239 L 510 239 L 509 240 Z M 508 243 L 510 241 L 545 241 L 547 243 L 547 244 L 548 245 L 548 278 L 545 281 L 510 281 L 508 279 L 508 278 L 507 277 L 507 246 L 508 245 Z"/>
+    <path id="tecla-menu" class="tecla" data-linha="7" data-coluna="7" data-tecla="Menu" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 555 243 L 555 280 L 556 281 L 556 282 L 557 282 L 560 284 L 639 284 L 640 283 L 643 282 L 643 281 L 644 280 L 644 243 L 643 242 L 643 241 L 642 241 L 639 239 L 560 239 L 559 240 L 556 241 L 556 242 Z M 557 245 L 558 244 L 558 243 L 561 241 L 640 241 L 642 243 L 642 245 L 643 246 L 643 277 L 642 278 L 642 279 L 640 281 L 560 281 L 557 278 Z"/>
+    <path id="tecla-arrowleft" class="tecla" data-linha="7" data-coluna="8" data-tecla="Seta Esquerda" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 651 241 L 651 242 L 650 243 L 650 280 L 651 281 L 651 282 L 652 282 L 654 284 L 690 284 L 692 282 L 693 282 L 693 281 L 694 280 L 694 243 L 693 242 L 693 241 L 692 241 L 690 239 L 655 239 L 654 240 Z M 655 241 L 690 241 L 692 243 L 692 244 L 693 245 L 693 277 L 692 278 L 692 279 L 690 281 L 655 281 L 653 279 L 653 278 L 652 277 L 652 246 L 653 245 L 653 243 Z"/>
+    <path id="tecla-arrowright" class="tecla" data-linha="7" data-coluna="9" data-tecla="Seta Direita" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 700 242 L 700 280 L 701 281 L 701 282 L 702 282 L 704 284 L 738 284 L 739 283 L 741 283 L 742 282 L 743 282 L 743 281 L 744 280 L 744 242 L 741 239 L 704 239 L 703 240 L 702 240 Z M 704 242 L 705 242 L 706 241 L 739 241 L 742 243 L 742 244 L 743 245 L 743 277 L 742 278 L 742 279 L 740 281 L 705 281 L 703 279 L 703 277 L 702 276 L 702 246 L 703 245 L 703 243 Z"/>
+    <path id="tecla-numpad0" class="tecla" data-linha="7" data-coluna="10" data-tecla="0" data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 753 239 L 750 242 L 750 280 L 751 281 L 751 282 L 752 282 L 753 283 L 790 283 L 791 282 L 792 282 L 794 280 L 794 242 L 791 239 Z M 754 242 L 755 242 L 756 241 L 790 241 L 792 243 L 792 244 L 793 245 L 793 278 L 790 281 L 755 281 L 753 279 L 753 278 L 752 277 L 752 246 L 753 245 L 753 243 Z"/>
+    <path id="tecla-numpaddecimal" class="tecla" data-linha="7" data-coluna="11" data-tecla="." data-confianca="alta"
+      fill-rule="evenodd"
+      d="M 803 239 L 800 242 L 800 279 L 801 280 L 801 281 L 804 283 L 835 283 L 836 282 L 837 282 L 839 280 L 839 242 L 837 240 L 836 240 L 835 239 Z M 805 241 L 834 241 L 835 242 L 836 242 L 838 244 L 838 278 L 835 281 L 805 281 L 803 279 L 803 278 L 802 277 L 802 246 L 803 245 L 803 243 Z"/>
+    <path id="tecla-extra7" class="tecla" data-linha="7" data-coluna="12" data-confianca="baixa"
+      fill-rule="evenodd"
+      d="M 848 239 L 846 241 L 846 242 L 845 243 L 845 279 L 846 280 L 846 281 L 849 283 L 880 283 L 881 282 L 882 282 L 884 280 L 884 242 L 881 239 Z M 849 242 L 850 242 L 851 241 L 880 241 L 882 243 L 882 245 L 883 246 L 883 277 L 882 278 L 882 279 L 880 281 L 850 281 L 848 279 L 848 278 L 847 277 L 847 245 Z"/>
+  </g>
+
+</svg>
