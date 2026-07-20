@@ -323,6 +323,8 @@ fn build_keyboard_panel() -> gtk::Box {
     let zones_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     zones_row.set_halign(gtk::Align::Center);
 
+    let mut zone_sliders: Vec<[gtk::Scale; 3]> = Vec::new();
+
     for zone in 0..4 {
         let zb = gtk::Box::new(gtk::Orientation::Vertical, 3);
         zb.set_size_request(140, -1);
@@ -352,6 +354,7 @@ fn build_keyboard_panel() -> gtk::Box {
         // R, G, B sliders
         let channels = ["R", "G", "B"];
         let defaults = [0.0, 200.0, 230.0];
+        let mut channel_sliders: Vec<gtk::Scale> = Vec::new();
         for (ch, (name, def)) in channels.iter().zip(defaults.iter()).enumerate() {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
             let cl = gtk::Label::new(Some(name));
@@ -380,7 +383,13 @@ fn build_keyboard_panel() -> gtk::Box {
             row.append(&cl);
             row.append(&sl);
             zb.append(&row);
+            channel_sliders.push(sl);
         }
+        zone_sliders.push([
+            channel_sliders[0].clone(),
+            channel_sliders[1].clone(),
+            channel_sliders[2].clone(),
+        ]);
         zones_row.append(&zb);
     }
     zone_controls.append(&zones_row);
@@ -398,6 +407,7 @@ fn build_keyboard_panel() -> gtk::Box {
         crate::i18n::t("shift"),
         crate::i18n::t("zoom"),
     ];
+    let mut effect_buttons: Vec<gtk::ToggleButton> = Vec::new();
     for (i, name) in effects.iter().enumerate() {
         let btn = gtk::ToggleButton::with_label(name);
         btn.add_css_class("mode-button");
@@ -405,6 +415,7 @@ fn build_keyboard_panel() -> gtk::Box {
             btn.set_active(true);
             btn.add_css_class("mode-active");
         }
+        effect_buttons.push(btn.clone());
         let s = state.clone();
         let er = effects_row.clone();
         let note = preview_note.clone();
@@ -458,6 +469,7 @@ fn build_keyboard_panel() -> gtk::Box {
     let cr_l = gtk::Label::new(Some(crate::i18n::t("color")));
     cr_l.add_css_class("rgb-channel-label");
     sp_row.append(&cr_l);
+    let mut dyn_color_sliders: Vec<gtk::Scale> = Vec::new();
     for (ch, def) in [(0u8, 0.0f64), (1, 255.0), (2, 255.0)] {
         let sl = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 255.0, 1.0);
         sl.set_value(def);
@@ -474,6 +486,7 @@ fn build_keyboard_panel() -> gtk::Box {
             }
         });
         sp_row.append(&sl);
+        dyn_color_sliders.push(sl);
     }
     dyn_controls.append(&sp_row);
     page.append(&dyn_controls);
@@ -675,6 +688,52 @@ fn build_keyboard_panel() -> gtk::Box {
     }
     btn_box.append(&off_btn);
 
+    // Reset to default (issue #24): restores the same factory values the
+    // panel opens with the first time (Static, all 4 zones at (0,200,230),
+    // brightness 100, Breath/speed 4/color (0,255,255) for Dynamic) by
+    // driving the existing widgets, so every already-wired value-changed
+    // handler updates RgbState the same way manual input would - then
+    // reuses the Apply button's own logic (hardware write + persist) via
+    // emit_clicked() instead of duplicating it here.
+    let reset_btn = gtk::Button::with_label(crate::i18n::t("rgb_reset_default"));
+    reset_btn.add_css_class("secondary-button");
+    {
+        let static_btn = static_btn.clone();
+        let zone_sliders = zone_sliders.clone();
+        let bs = bs.clone();
+        let effect_buttons = effect_buttons.clone();
+        let sps = sps.clone();
+        let dyn_color_sliders = dyn_color_sliders.clone();
+        let keyboard_da = keyboard_da.clone();
+        let apply_btn = apply_btn.clone();
+        let s = state.clone();
+        reset_btn.connect_clicked(move |_| {
+            static_btn.set_active(true);
+            for sliders in &zone_sliders {
+                sliders[0].set_value(0.0);
+                sliders[1].set_value(200.0);
+                sliders[2].set_value(230.0);
+            }
+            bs.set_value(100.0);
+            if let Some(breath_btn) = effect_buttons.first() {
+                breath_btn.set_active(true);
+            }
+            sps.set_value(4.0);
+            if dyn_color_sliders.len() == 3 {
+                dyn_color_sliders[0].set_value(0.0);
+                dyn_color_sliders[1].set_value(255.0);
+                dyn_color_sliders[2].set_value(255.0);
+            }
+            keyboard_da.queue_draw();
+            apply_btn.emit_clicked();
+            let st = s.borrow();
+            if st.status.has_css_class("status-success") {
+                st.status.set_text(crate::i18n::t("rgb_reset_applied"));
+            }
+        });
+    }
+    btn_box.append(&reset_btn);
+
     page.append(&btn_box);
     page.append(&status);
 
@@ -842,6 +901,7 @@ fn build_cover_logo_panel(caps: hid_rgb::TargetCapabilities) -> gtk::Box {
     color_controls.set_sensitive(initial_config.mode == RgbMode::Static);
     speed_controls.set_sensitive(initial_config.mode != RgbMode::Static);
 
+    let mut effect_row_buttons: Vec<(RgbMode, gtk::ToggleButton)> = Vec::new();
     for (mode, label) in [
         (RgbMode::Static, crate::i18n::t("static_mode")),
         (RgbMode::Breath, crate::i18n::t("breath")),
@@ -856,6 +916,7 @@ fn build_cover_logo_panel(caps: hid_rgb::TargetCapabilities) -> gtk::Box {
             button.set_active(true);
             button.add_css_class("mode-active");
         }
+        effect_row_buttons.push((mode, button.clone()));
         let state = state.clone();
         let effect_row_for_cb = effect_row.clone();
         let color_controls = color_controls.clone();
@@ -1100,12 +1161,53 @@ fn build_cover_logo_panel(caps: hid_rgb::TargetCapabilities) -> gtk::Box {
             }
         });
     }
+    // Reset to default (issue #24): restores effect/brightness/speed/color to
+    // RgbConfig::default() (Static, brightness 100, speed 4, cyan) by driving
+    // the existing widgets - leaves the power switch untouched, since turning
+    // the logo on/off is a separate user choice, not a "customizable" value -
+    // then reuses the Apply button's own logic via emit_clicked() instead of
+    // duplicating the hardware-write + persist path here.
+    let reset_button = gtk::Button::with_label(crate::i18n::t("cover_logo_reset"));
+    reset_button.add_css_class("secondary-button");
+    reset_button.set_halign(gtk::Align::End);
+    {
+        let effect_row_buttons = effect_row_buttons.clone();
+        let brightness_scale = brightness_scale.clone();
+        let speed_scale = speed_scale.clone();
+        let color_scales = color_scales.clone();
+        let apply_button = apply_button.clone();
+        let s = state.clone();
+        reset_button.connect_clicked(move |_| {
+            if let Some((_, button)) = effect_row_buttons
+                .iter()
+                .find(|(mode, _)| *mode == RgbMode::Static)
+            {
+                button.set_active(true);
+            }
+            brightness_scale.set_value(100.0);
+            speed_scale.set_value(4.0);
+            if color_scales.len() == 3 {
+                color_scales[0].set_value(0.0);
+                color_scales[1].set_value(255.0);
+                color_scales[2].set_value(255.0);
+            }
+            apply_button.emit_clicked();
+            let state = s.borrow();
+            if state.status.has_css_class("status-success") {
+                state
+                    .status
+                    .set_text(crate::i18n::t("cover_logo_reset_applied"));
+            }
+        });
+    }
+
     let apply_footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     status.set_hexpand(true);
     status.set_halign(gtk::Align::Start);
     status.set_valign(gtk::Align::Center);
     status.set_xalign(0.0);
     apply_footer.append(&status);
+    apply_footer.append(&reset_button);
     apply_footer.append(&apply_button);
     controls_card.append(&apply_footer);
     content.append(&controls_card);
