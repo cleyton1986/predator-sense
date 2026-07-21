@@ -343,10 +343,29 @@ pub fn current_cpu_policy_info() -> Option<CpuPolicyInfo> {
     cpu_policy_info_at(Path::new(SYSFS_ROOT))
 }
 
-fn state_matches_plan(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MinPerfMatch {
+    /// Reverse-detecting which of the 4 known profiles a machine is
+    /// CURRENTLY in needs an exact match - a looser floor check here would
+    /// make any state with a naturally high min_perf_pct match every lower
+    /// profile's plan too, and get_current_profile() would misreport it.
+    Exact,
+    /// Verifying a write this process just made can tolerate the kernel
+    /// enforcing a *higher* min_perf_pct floor than our cpuinfo-derived
+    /// estimate (min_perf_floor_pct's frequency-ratio math can undershoot a
+    /// CPU's real internal step by a percent or two - e.g. estimating 16%
+    /// when the kernel's actual granularity floor is 17% - see issue #23).
+    /// The kernel silently rounds the write up rather than rejecting it, so
+    /// treating "higher than asked" as a failure here just makes Quiet/Eco
+    /// permanently unusable on any CPU where the estimate is slightly off.
+    AtLeast,
+}
+
+fn state_satisfies_plan(
     state: &CpuState,
     plan: &CpuProfilePlan,
     capabilities: &CpuCapabilities,
+    min_perf_match: MinPerfMatch,
 ) -> bool {
     if state.governor != plan.governor.as_str() {
         return false;
@@ -369,11 +388,34 @@ fn state_matches_plan(
         }
     }
     if let Some(expected_min_perf) = plan.min_perf_pct {
-        if state.min_perf_pct != Some(expected_min_perf) {
+        let satisfied = match (state.min_perf_pct, min_perf_match) {
+            (Some(actual), MinPerfMatch::Exact) => actual == expected_min_perf,
+            (Some(actual), MinPerfMatch::AtLeast) => actual >= expected_min_perf,
+            (None, _) => false,
+        };
+        if !satisfied {
             return false;
         }
     }
     true
+}
+
+fn state_matches_plan(
+    state: &CpuState,
+    plan: &CpuProfilePlan,
+    capabilities: &CpuCapabilities,
+) -> bool {
+    state_satisfies_plan(state, plan, capabilities, MinPerfMatch::Exact)
+}
+
+/// Same checks `state_matches_plan` makes, but only for confirming a write
+/// `set_profile()` just performed actually took effect - see `MinPerfMatch`.
+fn write_took_effect(
+    state: &CpuState,
+    plan: &CpuProfilePlan,
+    capabilities: &CpuCapabilities,
+) -> bool {
+    state_satisfies_plan(state, plan, capabilities, MinPerfMatch::AtLeast)
 }
 
 pub fn get_current_profile() -> Option<PowerProfile> {
@@ -481,7 +523,7 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     let state = read_cpu_state_at(sysfs_root, &capabilities).ok_or_else(|| {
         "CPU profile was applied but its state could not be read back".to_string()
     })?;
-    if !state_matches_plan(&state, &plan, &capabilities) {
+    if !write_took_effect(&state, &plan, &capabilities) {
         return Err(format!(
             "CPU profile verification failed after helper success: expected {:?}, got {:?}",
             plan, state
@@ -648,6 +690,38 @@ mod tests {
             plan_for(PowerProfile::Quiet, &capabilities).min_perf_pct,
             Some(17)
         );
+    }
+
+    #[test]
+    fn write_verification_tolerates_a_kernel_floor_above_the_plan_but_detection_stays_exact() {
+        // Regression for issue #23: the helper wrote what the plan asked
+        // for, but this CPU's real min_perf_pct floor sits one point above
+        // our cpuinfo-ratio estimate. That should count as the write taking
+        // effect, but must NOT make `get_current_profile()`'s reverse
+        // lookup treat every profile with a lower min_perf_pct as a match.
+        let capabilities = CpuCapabilities {
+            policy_dirs: vec![],
+            epp_supported: false,
+            no_turbo_supported: false,
+            min_perf_supported: true,
+            min_perf_floor_pct: None,
+            intel_pstate_hwp_active: false,
+        };
+        let plan = CpuProfilePlan {
+            governor: CpuGovernor::Powersave,
+            epp: None,
+            no_turbo: None,
+            min_perf_pct: Some(16),
+        };
+        let state = CpuState {
+            governor: CpuGovernor::Powersave.as_str().to_string(),
+            epp: None,
+            no_turbo: None,
+            min_perf_pct: Some(17),
+        };
+
+        assert!(write_took_effect(&state, &plan, &capabilities));
+        assert!(!state_matches_plan(&state, &plan, &capabilities));
     }
 
     #[test]

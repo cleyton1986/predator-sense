@@ -676,8 +676,22 @@ fn verify_cpu_profile(request: CpuProfileRequest, context: &CpuProfileContext) -
                 context.min_perf_path.display()
             ))
         })?;
-        let accepted_hardware_floor =
-            actual > min_perf_pct && context.min_perf_floor_pct == Some(actual);
+        // The kernel is free to round a requested min_perf_pct up to its own
+        // internal frequency step. `min_perf_floor_pct`'s cpuinfo-ratio math
+        // is only ever an estimate of that step, truncated to a whole
+        // percent, and can itself land a point or two under the CPU's real
+        // floor (issue #23: estimated 16%, kernel's actual floor was 17%).
+        // Requiring the actual value to match the estimate exactly made
+        // Quiet permanently fail to apply on any CPU where the estimate
+        // undershot. A small tolerance around the estimate still catches a
+        // write that silently did nothing (the readback would then be
+        // whatever unrelated value the attribute already held, not a number
+        // anywhere near our own floor estimate).
+        const FLOOR_ESTIMATE_TOLERANCE_PCT: u16 = 2;
+        let accepted_hardware_floor = actual > min_perf_pct
+            && context
+                .min_perf_floor_pct
+                .is_some_and(|floor| actual.abs_diff(floor) <= FLOOR_ESTIMATE_TOLERANCE_PCT);
         if actual != min_perf_pct && !accepted_hardware_floor {
             return Err(fail(format!(
                 "verification failed for {}: expected '{min_perf_pct}', got '{actual}'",
@@ -1206,6 +1220,41 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("expected '10', got '50'"));
         assert_eq!(read(fixture.path(), INTEL_PSTATE_MIN_PERF), "50");
+    }
+
+    #[test]
+    fn accepts_a_kernel_floor_that_overshoots_the_cpuinfo_estimate_by_a_point_or_two() {
+        // Regression for issue #23: cpuinfo_min_freq/cpuinfo_max_freq gives a
+        // truncated estimate of 16% here, but the reporter's real kernel
+        // floor was 17% - one point above the estimate, not an exact match.
+        let fixture = TempDir::new().unwrap();
+        policy(fixture.path(), 0, "intel_pstate", true);
+        intel_controls(fixture.path(), "active", false, 17);
+        write(
+            fixture.path(),
+            "devices/system/cpu/cpufreq/policy0/cpuinfo_min_freq",
+            "1600000",
+        );
+        write(
+            fixture.path(),
+            "devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq",
+            "10000000",
+        );
+        let request = CpuProfileRequest {
+            governor: CpuGovernor::Powersave,
+            epp: Some(EnergyPreference::Power),
+            no_turbo: Some(true),
+            min_perf_pct: Some(10),
+        };
+        apply_cpu_profile_with(fixture.path(), request, &mut |label, value, path| {
+            if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) && value == "10" {
+                write_attr(label, "17", path)
+            } else {
+                write_attr(label, value, path)
+            }
+        })
+        .unwrap();
+        assert_eq!(read(fixture.path(), INTEL_PSTATE_MIN_PERF), "17");
     }
 
     #[test]
