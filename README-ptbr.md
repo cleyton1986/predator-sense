@@ -149,9 +149,9 @@ Legenda: ✅ testado e funcionando · 🟡 implementado, não testado (precisa d
 | PH517-52 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-61 | ✅ | 🟡 | ✅ | ✅ | 🟡 | - | ❌ |
 | PHN16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
-| PHN16S-71 | ✅ | ✅ | ✅ | 🟡 | ✅ | - | ❌ |
-| PHN16-72 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 🧪 |
-| **PHN16-73** | ✅ | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 🧪 |
+| PHN16S-71 | ✅ | ✅ | ✅ | ✅ | ✅ | - | ❌ |
+| PHN16-72 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 |
+| **PHN16-73** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | PHN18-71 | ✅ | ✅ | ✅ | ✅ | 🟡 | - | ❌ |
 | PT314-51 | ❌ | ❌ | ✅ | ✅ | 🟡 | - | ❌ |
 | PT314-52s | ✅ | ✅ | ✅ | 🟡 | 🟡 | - | ❌ |
@@ -180,7 +180,7 @@ Alguns modelos (confirmado: PHN16S-71, PHN16-73) roteiam o controlador RGB do te
 | Recurso | Status |
 |---|---|
 | Cor estática por zona, brilho, desligar luz | ✅ confirmado funcionando (PHN16S-71) |
-| Efeitos dinâmicos — Respiração, Neon 🧪 | Nativo, um único write HID, hardware faz o loop do padrão sozinho — **aguardando confirmação** em hardware real |
+| Efeitos dinâmicos — Respiração, Neon | ✅ confirmado funcionando (PHN16S-71) — nativo, um único write HID, hardware faz o loop do padrão sozinho. Nesta unidade, Respiração ignora a cor escolhida e cicla o arco-íris sozinho; pode variar em outro hardware |
 | Efeitos dinâmicos — Onda, Deslizar, Zoom | Só prévia visual na tela (sem escrita em hardware) — os códigos desses efeitos variam de significado entre gerações de hardware, então ainda não foram ativados |
 | Logo RGB da tampa — desligar, cor estática, brilho, Respiração, Neon | ✅ confirmado funcionando (PHN16-73) |
 
