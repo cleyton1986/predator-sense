@@ -149,9 +149,9 @@ Legend: ✅ tested & working · 🟡 implemented, not tested (needs a tester) ·
 | PH517-52 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-61 | ✅ | 🟡 | ✅ | ✅ | 🟡 | - | ❌ |
 | PHN16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
-| PHN16S-71 | ✅ | ✅ | ✅ | 🟡 | ✅ | - | ❌ |
-| PHN16-72 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 🧪 |
-| **PHN16-73** | ✅ | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 🧪 |
+| PHN16S-71 | ✅ | ✅ | ✅ | ✅ | ✅ | - | ❌ |
+| PHN16-72 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 |
+| **PHN16-73** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | PHN18-71 | ✅ | ✅ | ✅ | ✅ | 🟡 | - | ❌ |
 | PT314-51 | ❌ | ❌ | ✅ | ✅ | 🟡 | - | ❌ |
 | PT314-52s | ✅ | ✅ | ✅ | 🟡 | 🟡 | - | ❌ |
@@ -180,7 +180,7 @@ Some models (confirmed: PHN16S-71, PHN16-73) route the keyboard's RGB controller
 | Feature | Status |
 |---|---|
 | Static per-zone color, brightness, backlight-off | ✅ confirmed working (PHN16S-71) |
-| Dynamic effects — Breathing, Neon 🧪 | Native, single HID write, hardware loops the pattern on its own — **awaiting confirmation** on real hardware |
+| Dynamic effects — Breathing, Neon | ✅ confirmed working (PHN16S-71) — native, single HID write, hardware loops the pattern on its own. On this unit Breathing ignores the picked color and rainbow-cycles instead; may vary on other hardware |
 | Dynamic effects — Wave, Shifting, Zoom | On-screen preview only (no hardware writes) — the effect codes for these were found to mean different things across hardware generations, so they're not wired up yet |
 | RGB cover logo — off, solid color, brightness, Breathing, Neon | ✅ confirmed working (PHN16-73) |
 
