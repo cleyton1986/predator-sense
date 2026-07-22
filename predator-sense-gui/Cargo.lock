@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "predator-sense"
-version = "0.2.51-preview"
+version = "0.2.52-preview"
 dependencies = [
  "dirs",
  "gtk4",
@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "predator-sense-protocol"
-version = "0.2.51-preview"
+version = "0.2.52-preview"
 
 [[package]]
 name = "proc-macro-crate"
