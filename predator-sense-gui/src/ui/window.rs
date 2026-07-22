@@ -962,13 +962,6 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     let acp_switch = gtk::Switch::new();
     acp_switch.set_active(cfg.auto_profile_ac);
     acp_switch.set_valign(gtk::Align::Center);
-    acp_switch.connect_state_set(move |_, active| {
-        let mut c = config::load_app_config();
-        c.auto_profile_ac = active;
-        let _ = config::save_app_config(&c);
-        crate::hardware::power_profile::set_auto(active);
-        glib::Propagation::Proceed
-    });
     acp_row.append(&acp_switch);
     page.append(&acp_row);
 
@@ -981,6 +974,7 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     let profile_labels: Vec<&str> = profile_choices.iter().map(|(k, _)| t(k)).collect();
 
     let ac_profile_row = create_setting_row(t("profile_when_ac"), t("profile_when_ac_desc"));
+    ac_profile_row.set_sensitive(cfg.auto_profile_ac);
     let ac_profile_dd = gtk::DropDown::from_strings(&profile_labels);
     ac_profile_dd.set_selected(cfg.profile_ac.index() as u32);
     ac_profile_dd.set_valign(gtk::Align::Center);
@@ -998,6 +992,7 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     page.append(&ac_profile_row);
 
     let battery_profile_row = create_setting_row(t("profile_when_battery"), t("profile_when_battery_desc"));
+    battery_profile_row.set_sensitive(cfg.auto_profile_ac);
     let battery_profile_dd = gtk::DropDown::from_strings(&profile_labels);
     battery_profile_dd.set_selected(cfg.profile_battery.index() as u32);
     battery_profile_dd.set_valign(gtk::Align::Center);
@@ -1013,6 +1008,20 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     });
     battery_profile_row.append(&battery_profile_dd);
     page.append(&battery_profile_row);
+
+    {
+        let ac_row = ac_profile_row.clone();
+        let bat_row = battery_profile_row.clone();
+        acp_switch.connect_state_set(move |_, active| {
+            let mut c = config::load_app_config();
+            c.auto_profile_ac = active;
+            let _ = config::save_app_config(&c);
+            crate::hardware::power_profile::set_auto(active);
+            ac_row.set_sensitive(active);
+            bat_row.set_sensitive(active);
+            glib::Propagation::Proceed
+        });
+    }
 
     // Persistent debug log (issue #7) - off by default, only meant for
     // remote debugging sessions like the one that motivated it.
