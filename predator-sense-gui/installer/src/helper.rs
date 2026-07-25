@@ -12,7 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -915,16 +915,21 @@ fn reapply_battery_with(
 fn command(name: &str, args: &[&str]) -> AppResult {
     let output = Command::new(name)
         .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
         .output()
         .map_err(|error| fail(format!("cannot execute {name}: {error}")))?;
-    if output.status.success() {
-        Ok(())
-    } else {
+    if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
-        Err(fail(format!("{name} failed: {}", detail.trim())))
+        return Err(fail(format!("{name} failed: {}", detail.trim())));
     }
+    // nvidia-smi exits 0 even when it refuses a change (e.g. a vBIOS-locked
+    // power limit): it prints "... is not supported ..." to stdout and
+    // "treats it as a warning" instead of failing the process. Without this
+    // check a refused write reads as success to every caller.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.to_lowercase().contains("not supported") {
+        return Err(fail(format!("{name}: {}", stdout.trim())));
+    }
+    Ok(())
 }
 
 fn set_gpu_power_limit(
