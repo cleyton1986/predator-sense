@@ -3008,6 +3008,92 @@ static ssize_t turbo_state_show(struct device *dev, struct device_attribute *att
 }
 static DEVICE_ATTR_RO(turbo_state);
 
+/*
+ * Keyboard backlight auto-off timer (turns the keyboard backlight off after
+ * ~30s of no key presses). Uses the same WMID_GUID3 WMI interface as the
+ * wireless/bluetooth device-status calls above, but as a plain u64 in/out
+ * method (function 1 = set, function 2 = get) instead of the wmid3_gds_*
+ * struct format those use - this encoding is confirmed working on real
+ * hardware by the out-of-tree Linuwu-Sense driver, a sibling fork of this
+ * one. Read/write and best-effort like turbo_state above: on a model where
+ * this WMI method isn't implemented, show/store just return an error and
+ * nothing else in the driver is affected.
+ */
+#define ACER_WMID_SET_FUNCTION		1
+#define ACER_WMID_GET_FUNCTION		2
+#define ACER_BACKLIGHT_TIMEOUT_GET_ARG		0x88401ULL
+#define ACER_BACKLIGHT_TIMEOUT_ON		0x1E0000088402ULL
+#define ACER_BACKLIGHT_TIMEOUT_OFF		0x88402ULL
+#define ACER_BACKLIGHT_TIMEOUT_ON_RESULT	0x1E0000080000ULL
+#define ACER_BACKLIGHT_TIMEOUT_OFF_RESULT	0x80000ULL
+
+static acpi_status WMI_function_execute_u64(u32 method_id, u64 in, u64 *out)
+{
+	struct acpi_buffer input = { (acpi_size) sizeof(u64), (void *)(&in) };
+	struct acpi_buffer result = { ACPI_ALLOCATE_BUFFER, NULL };
+	union acpi_object *obj;
+	u64 tmp = 0;
+	acpi_status status;
+
+	status = wmi_evaluate_method(WMID_GUID3, 0, method_id, &input, &result);
+	if (ACPI_FAILURE(status))
+		return status;
+
+	obj = (union acpi_object *) result.pointer;
+	if (obj) {
+		if (obj->type == ACPI_TYPE_BUFFER) {
+			if (obj->buffer.length == sizeof(u32))
+				tmp = *((u32 *) obj->buffer.pointer);
+			else if (obj->buffer.length == sizeof(u64))
+				tmp = *((u64 *) obj->buffer.pointer);
+		} else if (obj->type == ACPI_TYPE_INTEGER) {
+			tmp = (u64) obj->integer.value;
+		}
+	}
+	if (out)
+		*out = tmp;
+	kfree(result.pointer);
+	return status;
+}
+
+static ssize_t backlight_timeout_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	acpi_status status;
+	u64 result;
+
+	status = WMI_function_execute_u64(ACER_WMID_GET_FUNCTION,
+					   ACER_BACKLIGHT_TIMEOUT_GET_ARG, &result);
+	if (ACPI_FAILURE(status))
+		return -ENODEV;
+
+	if (result == ACER_BACKLIGHT_TIMEOUT_ON_RESULT)
+		return sysfs_emit(buf, "1\n");
+	if (result == ACER_BACKLIGHT_TIMEOUT_OFF_RESULT)
+		return sysfs_emit(buf, "0\n");
+	return -ENODATA;
+}
+
+static ssize_t backlight_timeout_store(struct device *dev, struct device_attribute *attr,
+					const char *buf, size_t count)
+{
+	acpi_status status;
+	u64 result;
+	bool enable;
+
+	if (kstrtobool(buf, &enable))
+		return -EINVAL;
+
+	status = WMI_function_execute_u64(ACER_WMID_SET_FUNCTION,
+					   enable ? ACER_BACKLIGHT_TIMEOUT_ON
+						  : ACER_BACKLIGHT_TIMEOUT_OFF,
+					   &result);
+	if (ACPI_FAILURE(status))
+		return -ENODEV;
+
+	return count;
+}
+static DEVICE_ATTR_RW(backlight_timeout);
+
 static void acer_toggle_turbo(void)
 {
 	if (turbo_state) {
@@ -3974,6 +4060,10 @@ static int acer_platform_probe(struct platform_device *device)
 	if (device_create_file(&device->dev, &dev_attr_turbo_state))
 		dev_warn(&device->dev, "failed to create turbo_state sysfs attribute\n");
 
+	/* Best-effort too - see the comment above backlight_timeout_show(). */
+	if (device_create_file(&device->dev, &dev_attr_backlight_timeout))
+		dev_warn(&device->dev, "failed to create backlight_timeout sysfs attribute\n");
+
 	return 0;
 
 	error_hwmon:
@@ -3992,6 +4082,7 @@ static int acer_platform_probe(struct platform_device *device)
 static void acer_platform_remove(struct platform_device *device)
 {
 	device_remove_file(&device->dev, &dev_attr_turbo_state);
+	device_remove_file(&device->dev, &dev_attr_backlight_timeout);
 
 	if (has_cap(ACER_CAP_MAILLED))
 		acer_led_exit();

@@ -208,6 +208,8 @@ pub mod helper {
         BootAnimationRead,
         UsbCharging,
         UsbChargingRead,
+        BacklightTimeout,
+        BacklightTimeoutRead,
         PwmAvailable,
         PwmCpu,
         PwmGpu,
@@ -221,7 +223,7 @@ pub mod helper {
     }
 
     impl Action {
-        pub const ALL: [Self; 32] = [
+        pub const ALL: [Self; 34] = [
             Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
@@ -244,6 +246,8 @@ pub mod helper {
             Self::BootAnimationRead,
             Self::UsbCharging,
             Self::UsbChargingRead,
+            Self::BacklightTimeout,
+            Self::BacklightTimeoutRead,
             Self::PwmAvailable,
             Self::PwmCpu,
             Self::PwmGpu,
@@ -280,6 +284,8 @@ pub mod helper {
                 "boot-anim-read" => Some(Self::BootAnimationRead),
                 "usb-charge" => Some(Self::UsbCharging),
                 "usb-charge-read" => Some(Self::UsbChargingRead),
+                "backlight-timeout" => Some(Self::BacklightTimeout),
+                "backlight-timeout-read" => Some(Self::BacklightTimeoutRead),
                 "pwm-available" => Some(Self::PwmAvailable),
                 "pwm-cpu" => Some(Self::PwmCpu),
                 "pwm-gpu" => Some(Self::PwmGpu),
@@ -318,6 +324,8 @@ pub mod helper {
                 Self::BootAnimationRead => "boot-anim-read",
                 Self::UsbCharging => "usb-charge",
                 Self::UsbChargingRead => "usb-charge-read",
+                Self::BacklightTimeout => "backlight-timeout",
+                Self::BacklightTimeoutRead => "backlight-timeout-read",
                 Self::PwmAvailable => "pwm-available",
                 Self::PwmCpu => "pwm-cpu",
                 Self::PwmGpu => "pwm-gpu",
@@ -346,6 +354,7 @@ pub mod helper {
                 | Self::LcdOverdrive
                 | Self::BootAnimation
                 | Self::UsbCharging
+                | Self::BacklightTimeout
                 | Self::PwmCpu
                 | Self::PwmGpu
                 | Self::PwmCpuEnable
@@ -360,6 +369,7 @@ pub mod helper {
                 | Self::LcdOverdriveRead
                 | Self::BootAnimationRead
                 | Self::UsbChargingRead
+                | Self::BacklightTimeoutRead
                 | Self::PwmAvailable
                 | Self::PwmCpuRead
                 | Self::PwmGpuRead
@@ -394,6 +404,8 @@ pub mod helper {
                 Self::BootAnimationRead => "boot-anim-read",
                 Self::UsbCharging => "usb-charge 0|1",
                 Self::UsbChargingRead => "usb-charge-read",
+                Self::BacklightTimeout => "backlight-timeout 0|1",
+                Self::BacklightTimeoutRead => "backlight-timeout-read",
                 Self::PwmAvailable => "pwm-available",
                 Self::PwmCpu => "pwm-cpu VALUE",
                 Self::PwmGpu => "pwm-gpu VALUE",
