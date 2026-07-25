@@ -164,6 +164,20 @@ pub fn build() -> gtk::Box {
     pl_scale.set_sensitive(m0.live);
     pl_scale.set_hexpand(true);
     pl_scale.add_css_class("accent-scale");
+    pl_box.append(&pl_scale);
+
+    // Full failure text (the helper reports the driver's own diagnostic
+    // verbatim, which can be a long sentence) gets its own wrapping row
+    // instead of replacing the short W value, otherwise a long message
+    // forces the header row wider than the page and clips off-screen.
+    let pl_error = gtk::Label::new(None);
+    pl_error.add_css_class("warning-text");
+    pl_error.set_wrap(true);
+    pl_error.set_halign(gtk::Align::Start);
+    pl_error.set_margin_top(4);
+    pl_error.set_visible(false);
+    pl_box.append(&pl_error);
+
     // Apply after the value settles (covers mouse drag, click, and keyboard
     // arrows alike). A GestureClick's "released" never fires for a normal
     // drag-to-a-position interaction, which used to make the slider look
@@ -171,13 +185,16 @@ pub fn build() -> gtk::Box {
     let pl_generation = Rc::new(Cell::new(0u64));
     {
         let v = pl_value.clone();
+        let err_label = pl_error.clone();
         let generation = pl_generation.clone();
         pl_scale.connect_value_changed(move |s| {
             let w = s.value().round() as u32;
             v.set_text(&format!("{w} W"));
+            err_label.set_visible(false);
             let this_gen = generation.get() + 1;
             generation.set(this_gen);
             let v = v.clone();
+            let err_label = err_label.clone();
             let generation = generation.clone();
             glib::timeout_add_local_once(std::time::Duration::from_millis(350), move || {
                 if generation.get() != this_gen {
@@ -185,12 +202,15 @@ pub fn build() -> gtk::Box {
                 }
                 match crate::hardware::gpu::set_power_limit(w) {
                     Ok(()) => v.set_text(&format!("{w} W ✓")),
-                    Err(e) => v.set_text(&format!("⚠ {e}")),
+                    Err(e) => {
+                        v.set_text(&format!("⚠ {w} W"));
+                        err_label.set_text(&e);
+                        err_label.set_visible(true);
+                    }
                 }
             });
         });
     }
-    pl_box.append(&pl_scale);
     page.append(&pl_box);
 
     // === Graph draw functions ===
