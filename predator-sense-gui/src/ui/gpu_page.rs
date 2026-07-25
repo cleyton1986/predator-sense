@@ -164,24 +164,32 @@ pub fn build() -> gtk::Box {
     pl_scale.set_sensitive(m0.live);
     pl_scale.set_hexpand(true);
     pl_scale.add_css_class("accent-scale");
+    // Apply after the value settles (covers mouse drag, click, and keyboard
+    // arrows alike). A GestureClick's "released" never fires for a normal
+    // drag-to-a-position interaction, which used to make the slider look
+    // completely inert.
+    let pl_generation = Rc::new(Cell::new(0u64));
     {
         let v = pl_value.clone();
-        pl_scale.connect_value_changed(move |s| v.set_text(&format!("{:.0} W", s.value())));
-    }
-    // Apply when the user releases the slider.
-    let gesture = gtk::GestureClick::new();
-    {
-        let s = pl_scale.clone();
-        let v = pl_value.clone();
-        gesture.connect_released(move |_, _, _, _| {
+        let generation = pl_generation.clone();
+        pl_scale.connect_value_changed(move |s| {
             let w = s.value().round() as u32;
-            match crate::hardware::gpu::set_power_limit(w) {
-                Ok(()) => v.set_text(&format!("{} W ✓", w)),
-                Err(e) => v.set_text(&format!("⚠ {}", e)),
-            }
+            v.set_text(&format!("{w} W"));
+            let this_gen = generation.get() + 1;
+            generation.set(this_gen);
+            let v = v.clone();
+            let generation = generation.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(350), move || {
+                if generation.get() != this_gen {
+                    return; // A newer change superseded this one.
+                }
+                match crate::hardware::gpu::set_power_limit(w) {
+                    Ok(()) => v.set_text(&format!("{w} W ✓")),
+                    Err(e) => v.set_text(&format!("⚠ {e}")),
+                }
+            });
         });
     }
-    pl_scale.add_controller(gesture);
     pl_box.append(&pl_scale);
     page.append(&pl_box);
 
