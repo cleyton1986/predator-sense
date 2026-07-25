@@ -34,6 +34,7 @@ const CPU_PROFILE_LOCK_RETRY: Duration = Duration::from_millis(50);
 const BATTERY_THRESHOLD: &str = "class/power_supply/BAT1/charge_control_end_threshold";
 const BATTERY_HEALTH: &str = "bus/wmi/drivers/acer-wmi-battery/health_mode";
 const BATTERY_CALIBRATION: &str = "bus/wmi/drivers/acer-wmi-battery/calibration_mode";
+const BACKLIGHT_TIMEOUT: &str = "devices/platform/acer-wmi/backlight_timeout";
 const HWMON_CLASS: &str = "class/hwmon";
 const USER_CONFIG: &str = ".config/predator-sense/config.json";
 const ACER_HWMON_NAME: &str = "acer";
@@ -295,6 +296,20 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
         HelperAction::BootAnimationRead => ec_print(ec, EcRegister::BootAnimation),
         HelperAction::UsbCharging => ec_bool_write(&args[1], ec, EcRegister::UsbCharging),
         HelperAction::UsbChargingRead => ec_print(ec, EcRegister::UsbCharging),
+        HelperAction::BacklightTimeout => {
+            let enabled = parse_bool(&args[1])?;
+            write_attr(
+                "backlight-timeout",
+                bool_str(enabled),
+                &sysfs.join(BACKLIGHT_TIMEOUT),
+            )
+        }
+        HelperAction::BacklightTimeoutRead => {
+            let value = read_attr("backlight-timeout", &sysfs.join(BACKLIGHT_TIMEOUT))
+                .unwrap_or_else(|_| bool_str(false).into());
+            println!("{value}");
+            Ok(())
+        }
         HelperAction::PwmAvailable => {
             println!("{}", u8::from(acer_hwmon(sysfs).is_some()));
             Ok(())

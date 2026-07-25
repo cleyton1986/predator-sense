@@ -1200,18 +1200,28 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
         usb_row.append(&usb_switch);
         page.append(&usb_row);
 
+        // Keyboard backlight auto-off timer
+        let backlight_timeout_row =
+            create_setting_row(t("backlight_timeout"), t("backlight_timeout_desc"));
+        let backlight_timeout_switch = gtk::Switch::new();
+        backlight_timeout_switch.set_valign(gtk::Align::Center);
+        backlight_timeout_switch.set_sensitive(false);
+        backlight_timeout_row.append(&backlight_timeout_switch);
+        page.append(&backlight_timeout_row);
+
         // These reads each launch the EC helper and can take ~150 ms. Keep
-        // the switches disabled until all three states arrive off-thread,
-        // then attach write handlers only after setting their initial values.
+        // the switches disabled until all states arrive off-thread, then
+        // attach write handlers only after setting their initial values.
         background::run(
             || {
                 (
                     crate::hardware::extras::get_lcd_overdrive(),
                     crate::hardware::extras::get_boot_animation(),
                     crate::hardware::extras::get_usb_charging(),
+                    crate::hardware::extras::get_backlight_timeout(),
                 )
             },
-            move |(lcd_enabled, boot_enabled, usb_enabled)| {
+            move |(lcd_enabled, boot_enabled, usb_enabled, backlight_timeout_enabled)| {
                 lcd_switch.set_active(lcd_enabled);
                 lcd_switch.connect_state_set(|_, active| {
                     let _ = crate::hardware::extras::set_lcd_overdrive(active);
@@ -1232,6 +1242,13 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
                     glib::Propagation::Proceed
                 });
                 usb_switch.set_sensitive(true);
+
+                backlight_timeout_switch.set_active(backlight_timeout_enabled);
+                backlight_timeout_switch.connect_state_set(|_, active| {
+                    let _ = crate::hardware::extras::set_backlight_timeout(active);
+                    glib::Propagation::Proceed
+                });
+                backlight_timeout_switch.set_sensitive(true);
             },
         );
     }

@@ -104,3 +104,15 @@ pub fn get_usb_charging() -> bool {
 pub fn set_usb_charging(enabled: bool) -> Result<(), String> {
     crate::hardware::helper::write_switch(HelperAction::UsbCharging, enabled)
 }
+
+/// Keyboard backlight auto-off after ~30s of no key presses.
+pub fn get_backlight_timeout() -> bool {
+    if let Ok(v) = fs::read_to_string("/sys/devices/platform/acer-wmi/backlight_timeout") {
+        return v.trim() == "1";
+    }
+    crate::hardware::helper::read_switch(HelperAction::BacklightTimeoutRead).unwrap_or(false)
+}
+
+pub fn set_backlight_timeout(enabled: bool) -> Result<(), String> {
+    crate::hardware::helper::write_switch(HelperAction::BacklightTimeout, enabled)
+}
