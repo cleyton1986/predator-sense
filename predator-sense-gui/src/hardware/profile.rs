@@ -542,8 +542,20 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     // "Video Bios Mod" section) - a real risk of bricking the GPU, done
     // outside Linux, and squarely the owner's call, never something this
     // app should attempt on its own.
-    let gpu_watts = s.gpu_watts.to_string();
-    let _ = crate::hardware::helper::execute(HelperAction::SetGpuPower, &[gpu_watts.as_str()]);
+    // Clamped (not the raw helper call) so a preset watt above this model's
+    // real TGP ceiling gets pulled back into range instead of being rejected
+    // outright. Best-effort: some hardware's vBIOS never exposes power-limit
+    // control at all (see the comment above), so a failure here must not
+    // fail the whole profile switch - but it must not be silently swallowed
+    // either, or the profile page would claim success while the GPU watt
+    // silently stayed wherever it was, the exact "not supported" false
+    // success bug already fixed once in the manual slider (ui/gpu_page.rs).
+    if let Err(e) = crate::hardware::gpu::set_power_limit_clamped(s.gpu_watts) {
+        crate::hardware::applog::error(&format!(
+            "GPU power limit for profile {} not applied: {e}",
+            profile.to_id()
+        ));
+    }
 
     // Fan mode used to only follow the physical Predator/Turbo key (see
     // window.rs's turbo-key handler); picking a profile from the "Modo" page
