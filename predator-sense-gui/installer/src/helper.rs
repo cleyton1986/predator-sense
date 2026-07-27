@@ -242,10 +242,10 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
             )?;
             write_attr("min-perf", &args[1], &sysfs.join(INTEL_PSTATE_MIN_PERF))
         }
-        HelperAction::FanAuto => ec_write_fan_preset(ec, FanPreset::Automatic),
-        HelperAction::FanMax => ec_write_fan_preset(ec, FanPreset::Maximum),
+        HelperAction::FanAuto => set_fan_preset(ec, sysfs, FanPreset::Automatic),
+        HelperAction::FanMax => set_fan_preset(ec, sysfs, FanPreset::Maximum),
         HelperAction::FanModeRead => {
-            let preset = FanPreset::from_cpu_register(ec_read(ec, EcRegister::CpuFanMode)?);
+            let preset = read_fan_preset(ec, sysfs)?;
             println!("{}", preset.map(FanPreset::as_str).unwrap_or("unknown"));
             Ok(())
         }
@@ -801,6 +801,57 @@ fn collect_rollback_error(errors: &mut Vec<String>, result: AppResult) {
 
 fn ec_write_fan_preset(ec: &Path, preset: FanPreset) -> AppResult {
     ec_write_many(ec, &preset.ec_values())
+}
+
+/// hwmon's `pwmN_enable` directory when this build/kernel exposes it
+/// (kernel >= 6.14 + `ACER_CAP_PWM` - see facer.c's `acer_wmi_hwmon_write`,
+/// which backs it with `WMID_gaming_set_fan_behavior`/`WMID_gaming_get_fan_
+/// behavior`, real WMI methods the EC firmware validates). `None` on older
+/// kernels/facer builds without hwmon PWM support at all.
+fn hwmon_fan_enable_dir(sysfs: &Path) -> Option<PathBuf> {
+    let hwmon = acer_hwmon(sysfs)?;
+    hwmon
+        .join(PwmAttribute::CpuEnable.file_name())
+        .exists()
+        .then_some(hwmon)
+}
+
+/// Sets the CPU+GPU fan preset. Prefers the WMI-backed hwmon path over a raw
+/// EC register write: `ec_write_fan_preset` pokes `CpuFanMode`/`GpuFanMode`
+/// (offsets 0x21/0x22) with hardcoded magic values from one EC generation,
+/// with no firmware validation - the official Windows app never does this,
+/// it always goes through the equivalent WMI method (confirmed by
+/// decompiling `PSSvc.exe`/`PSAdminAgent.exe`). Falls back to the EC write
+/// only where hwmon PWM isn't exposed at all.
+fn set_fan_preset(ec: &Path, sysfs: &Path, preset: FanPreset) -> AppResult {
+    if let Some(hwmon) = hwmon_fan_enable_dir(sysfs) {
+        // pwm_enable: 0=full speed/turbo, 1=custom (per-fan %), 2=automatic
+        // - see facer.c's acer_wmi_hwmon_write. "Custom" has no equivalent
+        // FanPreset variant; only Auto/Maximum are ever requested here.
+        let value = match preset {
+            FanPreset::Automatic => "2",
+            FanPreset::Maximum => "0",
+        };
+        write_attr("pwm1_enable", value, &hwmon.join(PwmAttribute::CpuEnable.file_name()))?;
+        write_attr("pwm2_enable", value, &hwmon.join(PwmAttribute::GpuEnable.file_name()))?;
+        return Ok(());
+    }
+    ec_write_fan_preset(ec, preset)
+}
+
+/// Symmetric with `set_fan_preset`: reads back through the same hwmon path
+/// when available, so a preset set via WMI is never misreported by reading
+/// a raw EC register that path may not update the same way.
+fn read_fan_preset(ec: &Path, sysfs: &Path) -> AppResult<Option<FanPreset>> {
+    if let Some(hwmon) = hwmon_fan_enable_dir(sysfs) {
+        let value = read_attr("pwm-enable", &hwmon.join(PwmAttribute::CpuEnable.file_name()))?;
+        return Ok(match value.trim() {
+            "2" => Some(FanPreset::Automatic),
+            "0" => Some(FanPreset::Maximum),
+            _ => None, // "1" = Custom (per-fan %), not a preset FanPreset models
+        });
+    }
+    Ok(FanPreset::from_cpu_register(ec_read(ec, EcRegister::CpuFanMode)?))
 }
 
 fn ec_bool_write(value: &str, ec: &Path, register: EcRegister) -> AppResult {
@@ -1386,5 +1437,55 @@ mod tests {
         });
 
         assert_eq!(result.unwrap_err(), "power limit rejected");
+    }
+
+    #[test]
+    fn fan_preset_prefers_hwmon_pwm_enable_when_present() {
+        let fixture = TempDir::new().unwrap();
+        write(fixture.path(), "class/hwmon/hwmon3/name", "acer");
+        write(fixture.path(), "class/hwmon/hwmon3/pwm1", "128");
+        write(fixture.path(), "class/hwmon/hwmon3/pwm1_enable", "1");
+        write(fixture.path(), "class/hwmon/hwmon3/pwm2_enable", "1");
+        let ec = fixture.path().join("unused-ec-device"); // never opened when hwmon is used
+
+        set_fan_preset(&ec, fixture.path(), FanPreset::Automatic).unwrap();
+        assert_eq!(read(fixture.path(), "class/hwmon/hwmon3/pwm1_enable"), "2");
+        assert_eq!(read(fixture.path(), "class/hwmon/hwmon3/pwm2_enable"), "2");
+        assert_eq!(
+            read_fan_preset(&ec, fixture.path()).unwrap(),
+            Some(FanPreset::Automatic)
+        );
+
+        set_fan_preset(&ec, fixture.path(), FanPreset::Maximum).unwrap();
+        assert_eq!(read(fixture.path(), "class/hwmon/hwmon3/pwm1_enable"), "0");
+        assert_eq!(read(fixture.path(), "class/hwmon/hwmon3/pwm2_enable"), "0");
+        assert_eq!(
+            read_fan_preset(&ec, fixture.path()).unwrap(),
+            Some(FanPreset::Maximum)
+        );
+    }
+
+    #[test]
+    fn fan_preset_falls_back_to_raw_ec_without_hwmon_pwm() {
+        let fixture = TempDir::new().unwrap();
+        // No hwmon class directory at all - acer_hwmon() must return None,
+        // and both functions must fall back to the legacy EC register path.
+        let ec = fixture.path().join("ec-device");
+        File::create(&ec).unwrap();
+
+        set_fan_preset(&ec, fixture.path(), FanPreset::Automatic).unwrap();
+        assert_eq!(ec_read(&ec, EcRegister::CpuFanMode).unwrap(), 0x50);
+        assert_eq!(ec_read(&ec, EcRegister::GpuFanMode).unwrap(), 0x54);
+        assert_eq!(
+            read_fan_preset(&ec, fixture.path()).unwrap(),
+            Some(FanPreset::Automatic)
+        );
+
+        set_fan_preset(&ec, fixture.path(), FanPreset::Maximum).unwrap();
+        assert_eq!(ec_read(&ec, EcRegister::CpuFanMode).unwrap(), 0x60);
+        assert_eq!(
+            read_fan_preset(&ec, fixture.path()).unwrap(),
+            Some(FanPreset::Maximum)
+        );
     }
 }
