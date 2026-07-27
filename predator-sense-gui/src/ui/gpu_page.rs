@@ -161,7 +161,7 @@ pub fn build() -> gtk::Box {
 
     let pl_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, min_w, max_w, 5.0);
     pl_scale.set_value(cur_w);
-    pl_scale.set_sensitive(m0.live);
+    pl_scale.set_sensitive(m0.power_limit_supported());
     pl_scale.set_hexpand(true);
     pl_scale.add_css_class("accent-scale");
     pl_box.append(&pl_scale);
@@ -169,13 +169,21 @@ pub fn build() -> gtk::Box {
     // Full failure text (the helper reports the driver's own diagnostic
     // verbatim, which can be a long sentence) gets its own wrapping row
     // instead of replacing the short W value, otherwise a long message
-    // forces the header row wider than the page and clips off-screen.
+    // forces the header row wider than the page and clips off-screen. Also
+    // doubles as the proactive "this hardware doesn't support it at all"
+    // note below - same label, same reason to exist (don't let the user
+    // discover a fixed vBIOS limit only after dragging the slider and
+    // getting a runtime error).
     let pl_error = gtk::Label::new(None);
     pl_error.add_css_class("warning-text");
     pl_error.set_wrap(true);
     pl_error.set_halign(gtk::Align::Start);
     pl_error.set_margin_top(4);
     pl_error.set_visible(false);
+    if m0.live && !m0.power_limit_supported() {
+        pl_error.set_text(crate::i18n::t("gpu_power_limit_unsupported"));
+        pl_error.set_visible(true);
+    }
     pl_box.append(&pl_error);
 
     // Apply after the value settles (covers mouse drag, click, and keyboard
@@ -237,7 +245,7 @@ pub fn build() -> gtk::Box {
         core_val: core_clk.1, mem_val: mem_clk.1,
         pstate_val: pstate_w.1, pcie_val: pcie_w.1, vbios_val: vbios_w.1,
         temp_graph_da: temp_graph, util_graph_da: util_graph,
-        power_scale: pl_scale, power_value: pl_value, power_controls_ready,
+        power_scale: pl_scale, power_value: pl_value, power_error: pl_error, power_controls_ready,
     };
 
     // Initial update
@@ -293,7 +301,7 @@ struct AllWidgets {
     core_val: gtk::Label, mem_val: gtk::Label,
     pstate_val: gtk::Label, pcie_val: gtk::Label, vbios_val: gtk::Label,
     temp_graph_da: gtk::DrawingArea, util_graph_da: gtk::DrawingArea,
-    power_scale: gtk::Scale, power_value: gtk::Label,
+    power_scale: gtk::Scale, power_value: gtk::Label, power_error: gtk::Label,
     power_controls_ready: Rc<Cell<bool>>,
 }
 
@@ -350,8 +358,13 @@ fn update(state: &Rc<RefCell<GpuState>>, w: &AllWidgets) {
         let current_w = if m.power_limit_w > 0.0 { m.power_limit_w } else { max_w };
         w.power_scale.set_range(min_w, max_w);
         w.power_scale.set_value(current_w);
-        w.power_scale.set_sensitive(true);
+        w.power_scale.set_sensitive(m.power_limit_supported());
         w.power_value.set_text(&format!("{current_w:.0} W"));
+        if !m.power_limit_supported() {
+            w.power_error
+                .set_text(crate::i18n::t("gpu_power_limit_unsupported"));
+            w.power_error.set_visible(true);
+        }
     }
 
     // Update gauges

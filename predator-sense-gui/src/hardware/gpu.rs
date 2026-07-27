@@ -24,6 +24,11 @@ pub struct GpuMetrics {
     pub power_limit_w: f64,
     pub power_max_w: f64,
     pub power_min_w: f64,
+    /// Whether the inforom Power Management Object exists at all
+    /// (`nvidia-smi -q`'s "Power Management Object"). Distinct from the
+    /// min/max range above, which can report plausible-looking numbers even
+    /// when this is absent and every `-pl` write is silently refused.
+    pub power_management_object_present: bool,
     /// `None` when the driver reports `[N/A]`, which is common on laptops.
     pub fan_speed_pct: Option<u32>,
     pub pstate: String,
@@ -45,6 +50,23 @@ impl GpuMetrics {
         } else {
             (self.power_draw_w / self.power_max_w * 100.0).clamp(0.0, 100.0)
         }
+    }
+
+    /// Whether this GPU's power limit can actually be changed. `live` alone
+    /// (usage/temp telemetry available) is not enough, and neither is a
+    /// plausible-looking min/max range - confirmed on real hardware
+    /// (PH315-54/RTX 3070, driver 595.84) that `power.min_limit`/
+    /// `power.max_limit` report normal-looking numbers (1-110W) while every
+    /// `-pl` write is still silently refused by the vBIOS
+    /// ("Changing power management limit is not supported... Treating as
+    /// warning"). The one signal that actually correlates with the refusal
+    /// is the inforom Power Management Object being absent (`-q`'s
+    /// "Power Management Object: N/A"). Acer's own Windows app reflects this
+    /// per model too (`Feature.ini`'s `PowerLimitHidden` flag) - this is the
+    /// runtime-detected equivalent, so the slider is never shown as
+    /// interactive on hardware confirmed to always reject it.
+    pub fn power_limit_supported(&self) -> bool {
+        self.live && self.power_management_object_present
     }
 }
 
@@ -186,7 +208,7 @@ fn static_metrics_with_cached_invariants() -> GpuMetrics {
 fn fetch_gpu_metrics() -> Option<GpuMetrics> {
     let o = Command::new("nvidia-smi")
         .args([
-            "--query-gpu=name,driver_version,vbios_version,memory.total,memory.used,memory.free,temperature.gpu,clocks.gr,clocks.mem,clocks.max.gr,clocks.max.mem,utilization.gpu,utilization.memory,power.draw,power.limit,power.max_limit,fan.speed,pstate,pcie.link.gen.current,pcie.link.width.current,power.min_limit",
+            "--query-gpu=name,driver_version,vbios_version,memory.total,memory.used,memory.free,temperature.gpu,clocks.gr,clocks.mem,clocks.max.gr,clocks.max.mem,utilization.gpu,utilization.memory,power.draw,power.limit,power.max_limit,fan.speed,pstate,pcie.link.gen.current,pcie.link.width.current,power.min_limit,inforom.pwr",
             "--format=csv,noheader,nounits",
         ])
         .output();
@@ -196,7 +218,7 @@ fn fetch_gpu_metrics() -> Option<GpuMetrics> {
 
 fn parse_gpu_metrics(contents: &str) -> Option<GpuMetrics> {
     let p: Vec<&str> = contents.lines().next()?.split(',').map(str::trim).collect();
-    if p.len() < 21 {
+    if p.len() < 22 {
         return None;
     }
     let parse_u32 = |s: &str| parse_optional_u32(s).unwrap_or(0);
@@ -232,6 +254,13 @@ fn parse_gpu_metrics(contents: &str) -> Option<GpuMetrics> {
         pcie_gen: p[18].into(),
         pcie_width: p[19].into(),
         power_min_w: parse_f64(p[20]),
+        // `power.min_limit`/`power.max_limit` return plausible-looking static
+        // numbers (confirmed on real hardware: 1-110W) even when writes are
+        // always rejected - the actual tell is the inforom Power Management
+        // Object itself being absent (`nvidia-smi -q`'s "Power Management
+        // Object: N/A", queryable as `inforom.pwr`). `[N/A]` here means the
+        // vBIOS never exposed the NVML power-limit control at all.
+        power_management_object_present: !p[21].contains("N/A"),
     })
 }
 
@@ -282,6 +311,45 @@ mod tests {
     }
 
     #[test]
+    fn power_limit_supported_requires_the_inforom_power_object() {
+        let mut m = GpuMetrics {
+            live: true,
+            power_min_w: 1.0,
+            power_max_w: 110.0,
+            power_management_object_present: true,
+            ..GpuMetrics::default()
+        };
+        assert!(m.power_limit_supported());
+
+        // The confirmed real-hardware case (PH315-54/RTX 3070, driver
+        // 595.84): min/max still report plausible numbers (1-110W), live
+        // telemetry works, but the Power Management Object itself is absent
+        // and every `-pl` write is silently refused regardless. A range
+        // check alone would have missed this.
+        m.power_management_object_present = false;
+        assert!(!m.power_limit_supported());
+
+        // Not live at all - can't tell either way, so treated as unsupported.
+        m.live = false;
+        m.power_management_object_present = true;
+        assert!(!m.power_limit_supported());
+    }
+
+    #[test]
+    fn parses_the_inforom_power_object_field() {
+        // Real `nvidia-smi --query-gpu=...,inforom.pwr --format=csv,noheader,nounits`
+        // output on the confirmed unsupported hardware (trailing field is
+        // `inforom.pwr`, appended after `power.min_limit`).
+        let unsupported = "NVIDIA GeForce RTX 3070 Laptop GPU, 595.84, 94.04.43.00.7F, 8192, 310, 7882, 41, 270, 405, 1710, 8001, 0, 0, 16.30, 80.00, 110.00, [N/A], P8, 1, 8, 1.00, [N/A]";
+        assert!(!parse_gpu_metrics(unsupported).unwrap().power_management_object_present);
+
+        let mut fields: Vec<String> = unsupported.split(',').map(str::to_string).collect();
+        *fields.last_mut().unwrap() = " 3.0".to_string();
+        let supported = fields.join(",");
+        assert!(parse_gpu_metrics(&supported).unwrap().power_management_object_present);
+    }
+
+    #[test]
     fn clamps_above_max() {
         assert_eq!(clamp_watts(500, 20.0, 100.0), 100);
     }
@@ -301,7 +369,7 @@ mod tests {
         let metrics = parse_gpu_metrics(
             "NVIDIA GeForce RTX 5070 Laptop GPU, 610.43.03, 98.06.2a.80.e1, \
              8192, 512, 7680, 46, 2100, 9001, 3000, 10001, 12, 4, 32.5, \
-             80.0, 115.0, 25, P8, 4, 16, 20.0\n",
+             80.0, 115.0, 25, P8, 4, 16, 20.0, 3.0\n",
         )
         .unwrap();
 
@@ -312,6 +380,7 @@ mod tests {
         assert_eq!(metrics.power_limit_w, 80.0);
         assert_eq!(metrics.fan_speed_pct, Some(25));
         assert_eq!(metrics.pstate, "P8");
+        assert!(metrics.power_management_object_present);
     }
 
     #[test]
@@ -319,12 +388,13 @@ mod tests {
         let metrics = parse_gpu_metrics(
             "NVIDIA GPU, 610.43.03, 98.06.2a.80.e1, 8192, 512, 7680, 46, \
              2100, 9001, 3000, 10001, 12, 4, 32.5, 80.0, 115.0, [N/A], \
-             P8, 4, 16, 20.0\n",
+             P8, 4, 16, 20.0, [N/A]\n",
         )
         .unwrap();
 
         assert!(metrics.live);
         assert_eq!(metrics.fan_speed_pct, None);
+        assert!(!metrics.power_management_object_present);
     }
 
     #[test]
