@@ -16,14 +16,37 @@
 
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicI8, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use super::profile::{get_current_profile, set_profile, PowerProfile};
 
 const CRITICAL_BATTERY_PCT: u32 = 15;
 
+/// How long a manually-picked profile that violates the AC/battery policy is
+/// left alone before this policy overrides it. `check()` runs every 5s, and
+/// enforcing the target the moment it saw a mismatch made a manual pick on
+/// the "Modo" page feel like it never took effect - the user would select
+/// Quiet on AC and watch it jump back to Performance/Turbo within 5 seconds
+/// (reported in issue #23). The Windows app this policy is inspired by never
+/// has this problem because it isn't timer-driven at all - it only reapplies
+/// a profile on a discrete event (GameSync detecting a game launch/exit), so
+/// it never fights a manual choice in real time. A grace window is the
+/// smallest change that keeps this policy timer-driven (simpler than
+/// reimplementing GameSync) while giving a fresh manual pick a comfortable
+/// window before the policy reasserts itself.
+const OVERRIDE_GRACE: Duration = Duration::from_secs(60);
+
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static AC_PROFILE: AtomicI8 = AtomicI8::new(2); // PowerProfile::Performance
 static BATTERY_PROFILE: AtomicI8 = AtomicI8::new(1); // PowerProfile::Balanced
+
+/// `(profile index seen out of policy, when first seen)` - `None` once the
+/// machine is compliant again. Guarded by a mutex rather than a pair of
+/// atomics since the two fields must always be read/written together (a torn
+/// update could pair a stale timestamp with a fresh profile index and let a
+/// change slip through the grace window instantly).
+static PENDING_OVERRIDE: Mutex<Option<(i8, Instant)>> = Mutex::new(None);
 
 pub fn set_auto(v: bool) {
     ENABLED.store(v, Ordering::Relaxed);
@@ -98,15 +121,39 @@ fn desired_profile(
 }
 
 /// Call periodically. Enforces the profile matching the current power
-/// source/battery level; a no-op whenever the machine is already compliant.
+/// source/battery level; a no-op whenever the machine is already compliant
+/// or a mismatch is still within its grace window (see `OVERRIDE_GRACE`).
 pub fn check() {
     if !is_auto() {
+        clear_pending_override();
         return;
     }
     let Some(ac) = ac_online() else { return };
-    let Some(target) = desired_profile(ac, get_current_profile(), battery_capacity_pct()) else {
+    let current = get_current_profile();
+    let Some(target) = desired_profile(ac, current, battery_capacity_pct()) else {
+        clear_pending_override();
         return;
     };
+
+    // -1 has no matching PowerProfile variant, so an unreadable current state
+    // (`current == None`) never accidentally matches a genuine previous
+    // profile index and skips its own grace window.
+    let current_index = current.map(|p| p.index()).unwrap_or(-1);
+    {
+        let mut pending = PENDING_OVERRIDE.lock().unwrap();
+        match *pending {
+            Some((idx, since)) if idx == current_index && since.elapsed() < OVERRIDE_GRACE => {
+                return;
+            }
+            Some((idx, _)) if idx == current_index => {} // Grace window elapsed; enforce below.
+            _ => {
+                *pending = Some((current_index, Instant::now()));
+                return; // Freshly out of policy; start the grace window.
+            }
+        }
+        *pending = None;
+    }
+
     crate::hardware::applog::info(&format!(
         "Power policy: {} -> profile {}",
         if ac { "AC" } else { "battery" },
@@ -119,6 +166,10 @@ pub fn check() {
             e
         ));
     }
+}
+
+fn clear_pending_override() {
+    *PENDING_OVERRIDE.lock().unwrap() = None;
 }
 
 #[cfg(test)]
