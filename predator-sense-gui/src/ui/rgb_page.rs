@@ -32,6 +32,17 @@ struct CoverLogoState {
 }
 
 pub fn build() -> gtk::ScrolledWindow {
+    // 2024+ hardware (issue #26) moved RGB entirely off WMI/EC onto plain USB
+    // HID - a different chip/protocol from everything below this point, with
+    // no independent zones and a much larger effect list. Routed to its own
+    // page instead of branching this one, so the WMI/ENEK5130 path below
+    // (and every model it already supports) is completely untouched.
+    if crate::hardware::magic_rgb::is_keyboard_available()
+        || crate::hardware::magic_rgb::is_logo_available()
+    {
+        return crate::ui::magic_rgb_page::build();
+    }
+
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_propagate_natural_width(false);

@@ -7,6 +7,7 @@ pub mod helper;
 pub mod power_profile;
 pub mod rgb;
 pub mod hid_rgb;
+pub mod magic_rgb;
 pub mod sensors;
 pub mod profile;
 pub mod setup;

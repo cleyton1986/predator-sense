@@ -170,7 +170,10 @@ fn hid_feature_ioctl(operation: u8, len: usize) -> libc::c_ulong {
         as libc::c_ulong
 }
 
-fn set_feature(file: &File, report: &mut [u8]) -> Result<(), String> {
+/// Shared with `magic_rgb.rs` (the unrelated 2024+ USB HID keyboard/logo
+/// backend) - both write raw HID feature reports via the exact same
+/// `HIDIOCSFEATURE` ioctl mechanics, just to a different chip/protocol.
+pub(crate) fn set_feature(file: &File, report: &mut [u8]) -> Result<(), String> {
     let ret = unsafe {
         libc::ioctl(
             file.as_raw_fd(),
