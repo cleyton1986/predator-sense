@@ -40,10 +40,6 @@
 
 This application was created for **personal use**, to get the most out of an Acer gaming laptop on Linux — since Acer does not provide official Linux support for PredatorSense. It is shared freely for anyone who wants the same.
 
-### Icons
-
-The Dashboard and Temperaturas icons under `predator-sense-gui/resources/icons/` are from [Flaticon](https://www.flaticon.com), created by Hilmy Abiyyu A., magnific and mehwish.
-
 ---
 
 ## Screenshots
@@ -555,6 +551,7 @@ predator-sense-gui/
 - **Kernel module `acpi_ec`** by [Sayafdine Said (MusiKid)](https://github.com/MusiKid/acpi_ec) — exposes `/dev/ec` for raw EC read/write. Used by the helper to set fan modes, CoolBoost, LCD overdrive, USB charging and boot animation.
 - **GUI Application** built with [Rust](https://www.rust-lang.org/) + [GTK4](https://gtk.org/) + [libadwaita](https://gnome.pages.gitlab.gnome.org/libadwaita/)
 - **Installer and background services** built with [Rust](https://www.rust-lang.org/); tray integration uses [ksni](https://crates.io/crates/ksni)
+- **Dashboard and Temperaturas icons** (`predator-sense-gui/resources/icons/`) from [Flaticon](https://www.flaticon.com), created by Hilmy Abiyyu A., magnific and mehwish
 
 ### Forking or reusing this project
 
