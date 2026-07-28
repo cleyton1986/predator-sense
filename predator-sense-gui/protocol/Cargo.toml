@@ -1,6 +1,6 @@
 [package]
 name = "predator-sense-protocol"
-version = "0.2.52-preview"
+version = "0.2.57"
 edition = "2021"
 rust-version = "1.80"
 description = "Typed userspace protocol shared by Predator Sense components"
