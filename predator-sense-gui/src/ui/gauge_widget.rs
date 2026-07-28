@@ -9,7 +9,7 @@ pub fn create_gauge(label_text: &str, value: Option<f64>, max_value: f64) -> gtk
 
 /// Same as [`create_gauge`], with a small icon overlaid above the
 /// temperature number - experimental, only used where `icon_file` (a
-/// `resources/imagens/<name>.png` file name) is `Some`.
+/// `resources/icons/<name>.png` file name) is `Some`.
 pub fn create_gauge_with_icon(
     label_text: &str,
     value: Option<f64>,
@@ -86,7 +86,7 @@ pub fn create_gauge_with_icon(
         }
     });
 
-    if let Some(name) = icon_file.and_then(|n| crate::ui::window::find_resource(&format!("imagens/{n}"))) {
+    if let Some(name) = icon_file.and_then(|n| crate::ui::window::find_resource(&format!("icons/{n}"))) {
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&drawing_area));
         let icon = gtk::Image::from_file(&name);

@@ -308,7 +308,7 @@ fn create_spec_card(icon: &str, image: Option<&str>, title: &str, value: &str) -
     card.set_valign(gtk::Align::Fill);
     card.set_vexpand(true);
 
-    let icon_w: gtk::Widget = match image.and_then(|name| find_resource(&format!("imagens/{name}"))) {
+    let icon_w: gtk::Widget = match image.and_then(|name| find_resource(&format!("icons/{name}"))) {
         Some(path) => {
             let img = gtk::Image::from_file(path);
             img.add_css_class("spec-icon-img");
