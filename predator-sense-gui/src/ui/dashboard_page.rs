@@ -339,6 +339,12 @@ fn create_spec_card(icon: &str, image: Option<&str>, title: &str, value: &str) -
     v.add_css_class("spec-value");
     v.set_halign(gtk::Align::Start);
     v.set_wrap(true);
+    // A wrapping label's *natural* width is its full unwrapped line by
+    // default, regardless of set_wrap - long values like a CPU or storage
+    // model name were silently inflating the window's initial size far
+    // past the requested default. Cap it so wrapping is what it actually
+    // does, not just what it's allowed to do.
+    v.set_max_width_chars(34);
     v.set_xalign(0.0);
     text.append(&v);
 

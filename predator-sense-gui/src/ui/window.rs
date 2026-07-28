@@ -25,8 +25,14 @@ pub fn build(app: &adw::Application) {
     let window = gtk::ApplicationWindow::builder()
         .application(app)
         .title("Predator Sense")
+        // The actual mapped window ends up default_width+122 (fixed CSD/chrome
+        // overhead) x max(default_height, ~1172 - the sidebar+dashboard
+        // content's natural height floor, which default_height alone cannot
+        // go below). Values picked so the window opens at a consistent
+        // 1482x1172 every time - as close to the requested 1482x1126 as the
+        // content's own minimum allows.
         .default_width(1360)
-        .default_height(900)
+        .default_height(1172)
         .resizable(true)
         .decorated(true)
         .build();
@@ -366,6 +372,13 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     stack.set_transition_type(gtk::StackTransitionType::Crossfade);
     stack.set_hexpand(true);
     stack.set_vexpand(true);
+    // Homogeneous sizing (the GTK default) makes the window's minimum size
+    // track whichever page has ever been built, however heavy - once
+    // Temperaturas is opened once, later app starts would inherit its larger
+    // gauges before the user ever sees that page. Size to whatever page is
+    // actually showing instead.
+    stack.set_hhomogeneous(false);
+    stack.set_vhomogeneous(false);
 
     let dashboard = dashboard_page::build();
     crate::startup_mark("dashboard page");
