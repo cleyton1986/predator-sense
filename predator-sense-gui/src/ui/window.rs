@@ -10,8 +10,8 @@ use crate::config;
 use crate::hardware::{rgb, sensors, setup};
 use crate::tray::TrayManager;
 use crate::ui::{
-    ai_page, background, battery_page, dashboard_page, fan_control_page, fan_page, gpu_page,
-    monitor_page, network_page, rgb_page, setup_page, temperatures_page, usage_page,
+    ai_page, background, battery_page, dashboard_page, drivers_page, fan_control_page, fan_page,
+    gpu_page, monitor_page, network_page, rgb_page, setup_page, temperatures_page, usage_page,
 };
 
 thread_local! {
@@ -396,6 +396,7 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
                 ai_page::build(&window).upcast()
             }),
         );
+        pages.insert("drivers".into(), Box::new(|| drivers_page::build().upcast()));
         let app_weak = app.downgrade();
         pages.insert(
             "settings".into(),
@@ -421,6 +422,7 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
         (crate::i18n::t("gpu_menu"), "gpu"),
         (crate::i18n::t("monitoring"), "monitor"),
         (crate::i18n::t("ai_page_nav"), "ai"),
+        (crate::i18n::t("drivers_and_manuals"), "drivers"),
         (crate::i18n::t("settings"), "settings"),
     ];
 
@@ -652,7 +654,7 @@ fn find_model_photo(product_name: &str) -> Option<String> {
     None
 }
 
-fn find_resource(name: &str) -> Option<String> {
+pub(crate) fn find_resource(name: &str) -> Option<String> {
     find_resource_path(name).map(|p| p.to_string_lossy().to_string())
 }
 
@@ -1333,7 +1335,7 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     scroll
 }
 
-fn create_setting_row(title: &str, desc: &str) -> gtk::Box {
+pub(crate) fn create_setting_row(title: &str, desc: &str) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     row.add_css_class("settings-row");
     let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
