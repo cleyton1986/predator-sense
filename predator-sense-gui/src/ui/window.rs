@@ -938,6 +938,20 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     auto_row.append(&auto_switch);
     page.append(&auto_row);
 
+    // Custom icons (Dashboard + Temperaturas)
+    let icons_row = create_setting_row(t("custom_icons"), t("custom_icons_desc"));
+    let icons_switch = gtk::Switch::new();
+    icons_switch.set_active(cfg.custom_icons_enabled);
+    icons_switch.set_valign(gtk::Align::Center);
+    icons_switch.connect_state_set(move |_, active| {
+        let mut c = config::load_app_config();
+        c.custom_icons_enabled = active;
+        let _ = config::save_app_config(&c);
+        glib::Propagation::Proceed
+    });
+    icons_row.append(&icons_switch);
+    page.append(&icons_row);
+
     // Start on boot
     let boot_row = create_setting_row(t("start_on_boot"), t("start_on_boot_desc"));
     let boot_switch = gtk::Switch::new();
