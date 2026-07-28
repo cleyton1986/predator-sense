@@ -1,18 +1,21 @@
-//! Lighting panel for the 2024+ Predator generation (PH16-72 and similar),
-//! whose RGB moved entirely off WMI/EC onto plain USB HID (see issue #26 and
-//! `hardware/magic_rgb.rs`). This is a separate, self-contained page instead
-//! of a branch inside `rgb_page.rs` on purpose: this hardware has no
-//! independent zones (see `single_zone_note`) and a much larger effect list
-//! than the WMI/ENEK5130 path, so folding it into that page's zone-based
-//! state machine would risk the existing, already-working path for every
-//! other supported model. `rgb_page::build()` picks this page instead of its
-//! own whenever `hardware::magic_rgb` detects the new hardware.
+//! Lighting panel for USB HID RGB hardware outside the WMI/ENEK5130 path
+//! that `rgb_page.rs` already covers: the 2024+ Predator generation (PH16-72
+//! and similar, `hardware/magic_rgb.rs`, see issue #26) and the older Helios
+//! 300/PH317-56 generation's Chicony keyboard (`hardware/chicony_rgb.rs`).
+//! This is a separate, self-contained page instead of a branch inside
+//! `rgb_page.rs` on purpose: none of this hardware has independent zones
+//! (see `single_zone_note`) and each has its own larger/different effect
+//! list than the WMI/ENEK5130 path, so folding it into that page's
+//! zone-based state machine would risk the existing, already-working path
+//! for every other supported model. `rgb_page::build()` picks this page
+//! instead of its own whenever any of these is detected.
 
 use gtk4::prelude::*;
 use gtk4::{self as gtk};
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::hardware::chicony_rgb;
 use crate::hardware::magic_rgb::{self, KeyboardEffect, LogoEffect};
 
 pub fn build() -> gtk::ScrolledWindow {
@@ -31,6 +34,9 @@ pub fn build() -> gtk::ScrolledWindow {
     }
     if magic_rgb::is_logo_available() {
         shell.append(&build_logo_section());
+    }
+    if chicony_rgb::is_available() {
+        shell.append(&build_chicony_section());
     }
 
     scroll.set_child(Some(&shell));
@@ -392,6 +398,162 @@ fn build_logo_section() -> gtk::Box {
         });
     }
     btn_row.append(&off_btn);
+    page.append(&btn_row);
+    page.append(&status);
+
+    page
+}
+
+struct ChiconyState {
+    effect: usize,
+    color: usize,
+    brightness: u8,
+    speed: u8,
+    status: gtk::Label,
+}
+
+fn build_chicony_section() -> gtk::Box {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    page.set_margin_top(6);
+
+    page.append(&section_title(crate::i18n::t("chicony_rgb_section")));
+
+    let note = gtk::Label::new(Some(crate::i18n::t("single_zone_note")));
+    note.add_css_class("cover-logo-hint");
+    note.set_wrap(true);
+    note.set_halign(gtk::Align::Start);
+    page.append(&note);
+
+    let status = gtk::Label::new(None);
+    status.add_css_class("status-label");
+
+    let state = Rc::new(RefCell::new(ChiconyState {
+        effect: 1,
+        color: 1,
+        brightness: 30,
+        speed: 0,
+        status: status.clone(),
+    }));
+
+    let effects_row = gtk::FlowBox::new();
+    effects_row.set_selection_mode(gtk::SelectionMode::None);
+    effects_row.set_max_children_per_line(6);
+    effects_row.set_min_children_per_line(2);
+    effects_row.set_row_spacing(6);
+    effects_row.set_column_spacing(6);
+    effects_row.set_homogeneous(true);
+
+    let mut effect_buttons = Vec::new();
+    for (index, name) in chicony_rgb::EFFECTS.iter().enumerate() {
+        let wire_index = index + 1;
+        let key = format!("chicony_effect_{name}");
+        let btn = gtk::ToggleButton::with_label(crate::i18n::t(&key));
+        btn.add_css_class("mode-button");
+        if wire_index == 1 {
+            btn.set_active(true);
+            btn.add_css_class("mode-active");
+        }
+        effects_row.insert(&btn, -1);
+        effect_buttons.push((wire_index, btn));
+    }
+    let effect_buttons = Rc::new(effect_buttons);
+    for (wire_index, btn) in effect_buttons.iter() {
+        let wire_index = *wire_index;
+        let state = state.clone();
+        let effect_buttons = effect_buttons.clone();
+        btn.connect_toggled(move |b| {
+            if !b.is_active() {
+                if effect_buttons.iter().all(|(_, other)| !other.is_active()) {
+                    b.set_active(true);
+                }
+                return;
+            }
+            for (_, other) in effect_buttons.iter() {
+                if other != b {
+                    other.set_active(false);
+                    other.remove_css_class("mode-active");
+                }
+            }
+            b.add_css_class("mode-active");
+            state.borrow_mut().effect = wire_index;
+        });
+    }
+    page.append(&effects_row);
+
+    let colors_row = gtk::FlowBox::new();
+    colors_row.set_selection_mode(gtk::SelectionMode::None);
+    colors_row.set_max_children_per_line(7);
+    colors_row.set_min_children_per_line(2);
+    colors_row.set_row_spacing(6);
+    colors_row.set_column_spacing(6);
+    colors_row.set_homogeneous(true);
+
+    let mut color_buttons = Vec::new();
+    for (index, name) in chicony_rgb::COLORS.iter().enumerate() {
+        let wire_index = index + 1;
+        let key = format!("chicony_color_{name}");
+        let btn = gtk::ToggleButton::with_label(crate::i18n::t(&key));
+        btn.add_css_class("mode-button");
+        if wire_index == 1 {
+            btn.set_active(true);
+            btn.add_css_class("mode-active");
+        }
+        colors_row.insert(&btn, -1);
+        color_buttons.push((wire_index, btn));
+    }
+    let color_buttons = Rc::new(color_buttons);
+    for (wire_index, btn) in color_buttons.iter() {
+        let wire_index = *wire_index;
+        let state = state.clone();
+        let color_buttons = color_buttons.clone();
+        btn.connect_toggled(move |b| {
+            if !b.is_active() {
+                if color_buttons.iter().all(|(_, other)| !other.is_active()) {
+                    b.set_active(true);
+                }
+                return;
+            }
+            for (_, other) in color_buttons.iter() {
+                if other != b {
+                    other.set_active(false);
+                    other.remove_css_class("mode-active");
+                }
+            }
+            b.add_css_class("mode-active");
+            state.borrow_mut().color = wire_index;
+        });
+    }
+    page.append(&colors_row);
+
+    let (bright_row, bright_scale) = labeled_scale(crate::i18n::t("brightness"), 0.0, 255.0, 30.0);
+    {
+        let state = state.clone();
+        bright_scale.connect_value_changed(move |s| state.borrow_mut().brightness = s.value() as u8);
+    }
+    page.append(&bright_row);
+
+    let (speed_row, speed_scale) = labeled_scale(crate::i18n::t("speed"), 0.0, 255.0, 0.0);
+    {
+        let state = state.clone();
+        speed_scale.connect_value_changed(move |s| state.borrow_mut().speed = s.value() as u8);
+    }
+    page.append(&speed_row);
+
+    let btn_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    btn_row.set_halign(gtk::Align::Center);
+    btn_row.set_margin_top(6);
+
+    let apply_btn = gtk::Button::with_label(crate::i18n::t("apply"));
+    apply_btn.add_css_class("accent-button");
+    {
+        let state = state.clone();
+        apply_btn.connect_clicked(move |_| {
+            let st = state.borrow();
+            let result = chicony_rgb::set_effect(st.effect, st.brightness, st.color, st.speed);
+            apply_result(&st.status, result);
+        });
+    }
+    btn_row.append(&apply_btn);
     page.append(&btn_row);
     page.append(&status);
 

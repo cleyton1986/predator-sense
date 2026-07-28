@@ -221,10 +221,11 @@ pub mod helper {
         PwmGpuEnableRead,
         BootReapplyBattery,
         SerialNumberRead,
+        ChiconyRgb,
     }
 
     impl Action {
-        pub const ALL: [Self; 35] = [
+        pub const ALL: [Self; 36] = [
             Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
@@ -260,6 +261,7 @@ pub mod helper {
             Self::PwmGpuEnableRead,
             Self::BootReapplyBattery,
             Self::SerialNumberRead,
+            Self::ChiconyRgb,
         ];
 
         pub fn parse(value: &str) -> Option<Self> {
@@ -299,6 +301,7 @@ pub mod helper {
                 "pwm-gpu-enable-read" => Some(Self::PwmGpuEnableRead),
                 "boot-reapply-battery" => Some(Self::BootReapplyBattery),
                 "serial-number-read" => Some(Self::SerialNumberRead),
+                "chicony-rgb" => Some(Self::ChiconyRgb),
                 _ => None,
             }
         }
@@ -340,6 +343,7 @@ pub mod helper {
                 Self::PwmGpuEnableRead => "pwm-gpu-enable-read",
                 Self::BootReapplyBattery => "boot-reapply-battery",
                 Self::SerialNumberRead => "serial-number-read",
+                Self::ChiconyRgb => "chicony-rgb",
             }
         }
 
@@ -380,6 +384,7 @@ pub mod helper {
                 | Self::PwmCpuEnableRead
                 | Self::PwmGpuEnableRead
                 | Self::SerialNumberRead => 0,
+                Self::ChiconyRgb => 4,
             }
         }
 
@@ -422,6 +427,7 @@ pub mod helper {
                 Self::PwmGpuEnableRead => "pwm-gpu-enable-read",
                 Self::BootReapplyBattery => "boot-reapply-battery USER_HOME",
                 Self::SerialNumberRead => "serial-number-read",
+                Self::ChiconyRgb => "chicony-rgb EFFECT BRIGHTNESS COLOR SPEED",
             }
         }
     }

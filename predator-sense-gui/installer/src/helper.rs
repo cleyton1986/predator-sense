@@ -39,6 +39,84 @@ const BACKLIGHT_TIMEOUT: &str = "devices/platform/acer-wmi/backlight_timeout";
 // hence a dedicated privileged read instead of the unprivileged sysfs path
 // most other settings-page fields use.
 const DMI_SERIAL: &str = "class/dmi/id/product_serial";
+
+// Chicony USB-HID gaming keyboard, found on the Helios 300/PH317-56
+// generation (a different chip/protocol from both the WMI path in facer.c
+// and the 2024+ Sunrex/Darfon USB HID backend in the GUI's magic_rgb.rs).
+// Protocol confirmed by community reverse engineering (github.com/NT411/
+// Acer-Predator-Fan-RGB-Controller-Linux, MIT-equivalent, no license
+// restriction on reimplementing the wire format it documents), verified
+// against real PH317-56 hardware. This device answers a HID SET_REPORT
+// class request directly over USB control transfer rather than a hidraw
+// feature report, hence rusb here instead of the HIDIOCSFEATURE ioctl the
+// GUI's other RGB backends use.
+const CHICONY_VENDOR_ID: u16 = 0x04F2;
+const CHICONY_PRODUCT_ID: u16 = 0x0117;
+const CHICONY_INTERFACE: u8 = 3;
+const CHICONY_TERMINATOR: u8 = 0xBE;
+/// bmRequestType: host-to-device, class, interface recipient.
+const CHICONY_REQUEST_TYPE: u8 = 0x21;
+/// bRequest: HID SET_REPORT.
+const CHICONY_SET_REPORT: u8 = 0x09;
+/// wValue: report type 3 (Feature) in the high byte, report ID 0 in the low
+/// byte - this device does not use numbered reports.
+const CHICONY_REPORT_VALUE: u16 = 0x0300;
+
+fn chicony_rgb_apply(effect: u8, brightness: u8, color: u8, speed: u8) -> AppResult {
+    let payload = [
+        0x08,
+        0x00,
+        effect,
+        speed,
+        brightness,
+        color,
+        0x00,
+        CHICONY_TERMINATOR,
+    ];
+    let devices =
+        rusb::devices().map_err(|error| fail(format!("cannot list USB devices: {error}")))?;
+    for device in devices.iter() {
+        let Ok(descriptor) = device.device_descriptor() else {
+            continue;
+        };
+        if descriptor.vendor_id() != CHICONY_VENDOR_ID
+            || descriptor.product_id() != CHICONY_PRODUCT_ID
+        {
+            continue;
+        }
+        let handle = device
+            .open()
+            .map_err(|error| fail(format!("cannot open Chicony keyboard: {error}")))?;
+        let had_kernel_driver = handle
+            .kernel_driver_active(CHICONY_INTERFACE)
+            .unwrap_or(false);
+        if had_kernel_driver {
+            handle
+                .detach_kernel_driver(CHICONY_INTERFACE)
+                .map_err(|error| fail(format!("cannot detach kernel driver: {error}")))?;
+        }
+        handle
+            .claim_interface(CHICONY_INTERFACE)
+            .map_err(|error| fail(format!("cannot claim USB interface: {error}")))?;
+        let result = handle.write_control(
+            CHICONY_REQUEST_TYPE,
+            CHICONY_SET_REPORT,
+            CHICONY_REPORT_VALUE,
+            CHICONY_INTERFACE as u16,
+            &payload,
+            Duration::from_millis(1000),
+        );
+        let _ = handle.release_interface(CHICONY_INTERFACE);
+        if had_kernel_driver {
+            let _ = handle.attach_kernel_driver(CHICONY_INTERFACE);
+        }
+        result.map_err(|error| fail(format!("USB control transfer failed: {error}")))?;
+        return Ok(());
+    }
+    Err(fail(format!(
+        "Chicony RGB keyboard ({CHICONY_VENDOR_ID:04x}:{CHICONY_PRODUCT_ID:04x}) not found"
+    )))
+}
 const HWMON_CLASS: &str = "class/hwmon";
 const USER_CONFIG: &str = ".config/predator-sense/config.json";
 const ACER_HWMON_NAME: &str = "acer";
@@ -330,6 +408,13 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
         HelperAction::SerialNumberRead => {
             println!("{}", read_attr("serial-number", &sysfs.join(DMI_SERIAL))?);
             Ok(())
+        }
+        HelperAction::ChiconyRgb => {
+            let effect = parse_u16("effect", &args[1], 1, 12)? as u8;
+            let brightness = parse_u16("brightness", &args[2], 0, 255)? as u8;
+            let color = parse_u16("color", &args[3], 1, 7)? as u8;
+            let speed = parse_u16("speed", &args[4], 0, 255)? as u8;
+            chicony_rgb_apply(effect, brightness, color, speed)
         }
     }
 }

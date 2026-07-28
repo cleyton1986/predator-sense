@@ -39,6 +39,7 @@ pub fn build() -> gtk::ScrolledWindow {
     // (and every model it already supports) is completely untouched.
     if crate::hardware::magic_rgb::is_keyboard_available()
         || crate::hardware::magic_rgb::is_logo_available()
+        || crate::hardware::chicony_rgb::is_available()
     {
         return crate::ui::magic_rgb_page::build();
     }
