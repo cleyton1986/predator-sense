@@ -116,3 +116,35 @@ pub fn get_backlight_timeout() -> bool {
 pub fn set_backlight_timeout(enabled: bool) -> Result<(), String> {
     crate::hardware::helper::write_switch(HelperAction::BacklightTimeout, enabled)
 }
+
+/// Placeholder values motherboard vendors/VMs commonly ship in DMI fields
+/// when no real serial was ever set, instead of leaving it empty. Not
+/// exhaustive, just the values actually seen in the wild - showing one of
+/// these would be more confusing than showing nothing.
+const SERIAL_PLACEHOLDERS: &[&str] = &[
+    "0",
+    "to be filled by o.e.m.",
+    "system serial number",
+    "not specified",
+    "default string",
+    "none",
+    "n/a",
+    "serial number",
+];
+
+/// System serial number (DMI). Cached for the process lifetime: the kernel
+/// keeps this path root-only (0400) regardless of the installer's usual
+/// permission relaxation, so every read is a real pkexec prompt - fetching
+/// it once means opening Settings repeatedly only prompts the first time.
+pub fn get_serial_number() -> Option<String> {
+    use std::sync::OnceLock;
+    static SERIAL: OnceLock<Option<String>> = OnceLock::new();
+    SERIAL
+        .get_or_init(|| {
+            crate::hardware::helper::read_privileged(HelperAction::SerialNumberRead).filter(|s| {
+                let normalized = s.trim().to_ascii_lowercase();
+                !normalized.is_empty() && !SERIAL_PLACEHOLDERS.contains(&normalized.as_str())
+            })
+        })
+        .clone()
+}

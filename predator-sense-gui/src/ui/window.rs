@@ -1282,6 +1282,20 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     mod_row.append(&dot);
     page.append(&mod_row);
 
+    if let Some(serial) = crate::hardware::extras::get_serial_number() {
+        let serial_row = create_setting_row(t("serial_number"), &serial);
+        let copy_btn = gtk::Button::from_icon_name("edit-copy-symbolic");
+        copy_btn.set_tooltip_text(Some(t("copy")));
+        copy_btn.add_css_class("flat");
+        copy_btn.connect_clicked(move |_btn| {
+            if let Some(display) = gtk::gdk::Display::default() {
+                display.clipboard().set_text(&serial);
+            }
+        });
+        serial_row.append(&copy_btn);
+        page.append(&serial_row);
+    }
+
     if status != setup::ModuleStatus::Ready {
         let sl = gtk::Label::new(None);
         sl.add_css_class("status-label");
