@@ -313,7 +313,7 @@ fn create_spec_card(icon: &str, image: Option<&str>, title: &str, value: &str) -
             // Fixed square size so every card icon lines up regardless of the
             // source PNG's own resolution - never distorted, never inflates
             // the card past the emoji it replaces.
-            img.set_pixel_size(28);
+            img.set_pixel_size(40);
             img.upcast()
         }
         None => {
