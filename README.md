@@ -40,6 +40,8 @@
 
 This application was created for **personal use**, to get the most out of an Acer gaming laptop on Linux — since Acer does not provide official Linux support for PredatorSense. It is shared freely for anyone who wants the same.
 
+If this app/project helped you and/or you liked it in some way, consider leaving a star, it helps a lot ⭐
+
 ---
 
 ## Screenshots

@@ -40,6 +40,8 @@
 
 Esta aplicação foi criada para **uso pessoal**, para tirar o máximo proveito de um notebook Acer gaming no Linux — já que a Acer não oferece suporte oficial do PredatorSense para Linux. É compartilhada livremente para quem quiser o mesmo.
 
+Se este app/projeto te ajudou e/ou gostou de alguma forma, considere deixar uma estrela, isso ajuda bastante ⭐
+
 ---
 
 ## Capturas de Tela
