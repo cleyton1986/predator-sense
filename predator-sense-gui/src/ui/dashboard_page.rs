@@ -151,9 +151,11 @@ pub fn build() -> gtk::ScrolledWindow {
         ("BIOS", "⚙", Some("bios.png"), bios_detail),
     ];
 
+    let custom_icons = crate::config::load_app_config().custom_icons_enabled;
     let mut gpu_value_label = None;
     for (i, (title, icon, image, value)) in cards.iter().enumerate() {
-        let (card, value_label) = create_spec_card(icon, *image, title, value);
+        let image = if custom_icons { *image } else { None };
+        let (card, value_label) = create_spec_card(icon, image, title, value);
         if *title == "GPU" {
             gpu_value_label = Some(value_label);
         }

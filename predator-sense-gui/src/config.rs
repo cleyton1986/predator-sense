@@ -119,6 +119,10 @@ pub struct AppConfig {
     pub game_sync_enabled: bool,
     #[serde(default)]
     pub game_profiles: Vec<GameProfile>,
+    /// Custom PNG icons (resources/imagens/) on the Dashboard spec cards and
+    /// Temperaturas gauges, instead of the original emoji/plain rings.
+    #[serde(default = "default_true")]
+    pub custom_icons_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -179,6 +183,7 @@ impl Default for AppConfig {
             language: None,
             game_sync_enabled: false,
             game_profiles: Vec::new(),
+            custom_icons_enabled: true,
         }
     }
 }

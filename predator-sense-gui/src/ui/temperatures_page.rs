@@ -71,15 +71,29 @@ pub fn build(sensor_data: &SensorData) -> gtk::Box {
     gauges_container.set_valign(gtk::Align::Center);
     gauges_container.set_vexpand(true);
 
+    let custom_icons = crate::config::load_app_config().custom_icons_enabled;
+    let icon = |name: &'static str| custom_icons.then_some(name);
+
     // Row 1: CPU, GPU, Sistema
     let row1 = gtk::Box::new(gtk::Orientation::Horizontal, 20);
     row1.set_halign(gtk::Align::Center);
-    row1.append(&gauge_widget::create_gauge("CPU", sensor_data.cpu_temp, 100.0));
-    row1.append(&gauge_widget::create_gauge("GPU", sensor_data.gpu_temp, 100.0));
-    row1.append(&gauge_widget::create_gauge(
+    row1.append(&gauge_widget::create_gauge_with_icon(
+        "CPU",
+        sensor_data.cpu_temp,
+        100.0,
+        icon("cpu.png"),
+    ));
+    row1.append(&gauge_widget::create_gauge_with_icon(
+        "GPU",
+        sensor_data.gpu_temp,
+        100.0,
+        icon("gpu.png"),
+    ));
+    row1.append(&gauge_widget::create_gauge_with_icon(
         crate::i18n::t("system_label"),
         sensor_data.system_temp,
         100.0,
+        icon("linux.png"),
     ));
     gauges_container.append(&row1);
 
@@ -88,13 +102,28 @@ pub fn build(sensor_data: &SensorData) -> gtk::Box {
     row2.set_halign(gtk::Align::Center);
 
     if sensor_data.nvme0_temp.is_some() {
-        row2.append(&gauge_widget::create_gauge("SSD 1", sensor_data.nvme0_temp, 100.0));
+        row2.append(&gauge_widget::create_gauge_with_icon(
+            "SSD 1",
+            sensor_data.nvme0_temp,
+            100.0,
+            icon("ssd.png"),
+        ));
     }
     if sensor_data.nvme1_temp.is_some() {
-        row2.append(&gauge_widget::create_gauge("SSD 2", sensor_data.nvme1_temp, 100.0));
+        row2.append(&gauge_widget::create_gauge_with_icon(
+            "SSD 2",
+            sensor_data.nvme1_temp,
+            100.0,
+            icon("ssd.png"),
+        ));
     }
     if sensor_data.wifi_temp.is_some() {
-        row2.append(&gauge_widget::create_gauge("WiFi", sensor_data.wifi_temp, 100.0));
+        row2.append(&gauge_widget::create_gauge_with_icon(
+            "WiFi",
+            sensor_data.wifi_temp,
+            100.0,
+            icon("internet.png"),
+        ));
     }
     if sensor_data.ram_used_pct.is_some() {
         let ram_label = format!(
@@ -102,10 +131,11 @@ pub fn build(sensor_data: &SensorData) -> gtk::Box {
             sensor_data.ram_used_gb.unwrap_or(0.0),
             sensor_data.ram_total_gb.unwrap_or(0.0)
         );
-        row2.append(&gauge_widget::create_gauge(
+        row2.append(&gauge_widget::create_gauge_with_icon(
             &ram_label,
             sensor_data.ram_used_pct,
             100.0,
+            icon("memoria-ram.png"),
         ));
     }
     gauges_container.append(&row2);
