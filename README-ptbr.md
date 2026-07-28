@@ -64,6 +64,9 @@ Se este app/projeto te ajudou e/ou gostou de alguma forma, considere deixar uma 
 <p align="center"><b>Modos</b> — Perfis de desempenho: Silencioso, Balanceado, Performance e Turbo (CPU governor + Intel EPP + limite de potência da GPU).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modos"></p>
 
+<p align="center"><b>GameSync</b> — Cadastre um jogo e o perfil desejado; o app troca automaticamente enquanto o jogo está rodando e restaura o que estava ativo antes assim que ele fecha.</p>
+<p align="center"><img src="assets/psense-15.png" width="800" alt="GameSync"></p>
+
 <p align="center"><b>Controle de Ventoinha</b> — RPM ao vivo com animação girando, toggle do CoolBoost e modos Auto/Max.</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Controle de Ventoinha"></p>
 
@@ -78,6 +81,9 @@ Se este app/projeto te ajudou e/ou gostou de alguma forma, considere deixar uma 
 
 <p align="center"><b>Assistente de IA (beta)</b> — Assistente de IA local via Ollama: chat, gerenciador de modelos (listar instalados, baixar novos, escolher qual roda), consumo de recurso/VRAM ao vivo enquanto ele pensa, e log de ações persistente.</p>
 <p align="center"><img src="assets/psense-11.png" width="800" alt="Assistente de IA"></p>
+
+<p align="center"><b>Drivers e manuais</b> — Mostra o número de série (com botão de copiar) e um link direto pra página oficial de drivers e manuais da Acer, além de uma ilustração de onde achar a etiqueta do número de série no notebook.</p>
+<p align="center"><img src="assets/psense-16.png" width="800" alt="Drivers e manuais"></p>
 
 <p align="center"><b>Configurações</b> — Minimizar para a bandeja, iniciar com o sistema, aplicar perfil automaticamente no início, preferências de idioma, e lista de recursos suportados por modelo.</p>
 <p align="center"><img src="assets/psense-12.png" width="800" alt="Configurações"></p>

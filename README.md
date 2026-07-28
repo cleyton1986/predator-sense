@@ -64,6 +64,9 @@ If this app/project helped you and/or you liked it in some way, consider leaving
 <p align="center"><b>Modes</b> — Performance profiles: Quiet, Balanced, Performance and Turbo (CPU governor + Intel EPP + GPU power limit).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modes"></p>
 
+<p align="center"><b>GameSync</b> — Register a game and its profile; the app switches to it automatically while the game is running and restores whatever was active before once it exits.</p>
+<p align="center"><img src="assets/psense-15.png" width="800" alt="GameSync"></p>
+
 <p align="center"><b>Fan Control</b> — Live RPM with animated spinning fans, CoolBoost toggle and Auto/Max modes.</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Fan Control"></p>
 
@@ -78,6 +81,9 @@ If this app/project helped you and/or you liked it in some way, consider leaving
 
 <p align="center"><b>AI Assistant (beta)</b> — Local AI assistant powered by Ollama: chat, model manager (list installed models, download new ones, pick which one runs), live VRAM/GPU resource usage while it's thinking, and a persistent action log.</p>
 <p align="center"><img src="assets/psense-11.png" width="800" alt="AI Assistant"></p>
+
+<p align="center"><b>Drivers and manuals</b> — Shows the serial number (with a copy button) and a direct link to Acer's official drivers-and-manuals page, plus an illustration of where to find the serial number sticker on the laptop.</p>
+<p align="center"><img src="assets/psense-16.png" width="800" alt="Drivers and manuals"></p>
 
 <p align="center"><b>Settings</b> — Minimize to tray, start on boot, auto-apply profile on start, language preferences, and per-model supported-features list.</p>
 <p align="center"><img src="assets/psense-12.png" width="800" alt="Settings"></p>
