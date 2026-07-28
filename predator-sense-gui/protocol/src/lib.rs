@@ -220,10 +220,11 @@ pub mod helper {
         PwmCpuEnableRead,
         PwmGpuEnableRead,
         BootReapplyBattery,
+        SerialNumberRead,
     }
 
     impl Action {
-        pub const ALL: [Self; 34] = [
+        pub const ALL: [Self; 35] = [
             Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
@@ -258,6 +259,7 @@ pub mod helper {
             Self::PwmCpuEnableRead,
             Self::PwmGpuEnableRead,
             Self::BootReapplyBattery,
+            Self::SerialNumberRead,
         ];
 
         pub fn parse(value: &str) -> Option<Self> {
@@ -296,6 +298,7 @@ pub mod helper {
                 "pwm-cpu-enable-read" => Some(Self::PwmCpuEnableRead),
                 "pwm-gpu-enable-read" => Some(Self::PwmGpuEnableRead),
                 "boot-reapply-battery" => Some(Self::BootReapplyBattery),
+                "serial-number-read" => Some(Self::SerialNumberRead),
                 _ => None,
             }
         }
@@ -336,6 +339,7 @@ pub mod helper {
                 Self::PwmCpuEnableRead => "pwm-cpu-enable-read",
                 Self::PwmGpuEnableRead => "pwm-gpu-enable-read",
                 Self::BootReapplyBattery => "boot-reapply-battery",
+                Self::SerialNumberRead => "serial-number-read",
             }
         }
 
@@ -374,7 +378,8 @@ pub mod helper {
                 | Self::PwmCpuRead
                 | Self::PwmGpuRead
                 | Self::PwmCpuEnableRead
-                | Self::PwmGpuEnableRead => 0,
+                | Self::PwmGpuEnableRead
+                | Self::SerialNumberRead => 0,
             }
         }
 
@@ -416,6 +421,7 @@ pub mod helper {
                 Self::PwmCpuEnableRead => "pwm-cpu-enable-read",
                 Self::PwmGpuEnableRead => "pwm-gpu-enable-read",
                 Self::BootReapplyBattery => "boot-reapply-battery USER_HOME",
+                Self::SerialNumberRead => "serial-number-read",
             }
         }
     }

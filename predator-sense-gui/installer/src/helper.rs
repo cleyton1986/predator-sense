@@ -35,6 +35,10 @@ const BATTERY_THRESHOLD: &str = "class/power_supply/BAT1/charge_control_end_thre
 const BATTERY_HEALTH: &str = "bus/wmi/drivers/acer-wmi-battery/health_mode";
 const BATTERY_CALIBRATION: &str = "bus/wmi/drivers/acer-wmi-battery/calibration_mode";
 const BACKLIGHT_TIMEOUT: &str = "devices/platform/acer-wmi/backlight_timeout";
+// Root-only by kernel design (0400) unlike product_name/board_name (0444),
+// hence a dedicated privileged read instead of the unprivileged sysfs path
+// most other settings-page fields use.
+const DMI_SERIAL: &str = "class/dmi/id/product_serial";
 const HWMON_CLASS: &str = "class/hwmon";
 const USER_CONFIG: &str = ".config/predator-sense/config.json";
 const ACER_HWMON_NAME: &str = "acer";
@@ -323,6 +327,10 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
         HelperAction::PwmCpuEnableRead => pwm_read(sysfs, PwmAttribute::CpuEnable),
         HelperAction::PwmGpuEnableRead => pwm_read(sysfs, PwmAttribute::GpuEnable),
         HelperAction::BootReapplyBattery => reapply_battery(sysfs, Path::new(&args[1])),
+        HelperAction::SerialNumberRead => {
+            println!("{}", read_attr("serial-number", &sysfs.join(DMI_SERIAL))?);
+            Ok(())
+        }
     }
 }
 

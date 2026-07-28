@@ -28,6 +28,22 @@ pub fn read(action: Action) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Like `read`, but goes through `invoke` (pkexec-elevated when not already
+/// root) instead of calling the helper unprivileged. `read` works for every
+/// other read action because their underlying sysfs paths get their
+/// permissions relaxed by the installer; a few kernel-owned paths (like the
+/// DMI serial number, 0400 root-only by design) never do, and need this.
+pub fn read_privileged(action: Action) -> Option<String> {
+    if action.argument_count() != 0 {
+        return None;
+    }
+    let output = invoke(action, &[]).ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 pub fn read_switch(action: Action) -> Option<bool> {
     match read(action)?.as_str() {
         value if value == Switch::Disabled.as_str() => Some(false),
