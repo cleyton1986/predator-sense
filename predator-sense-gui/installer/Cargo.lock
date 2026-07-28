@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "predator-sense-installer"
-version = "0.2.57"
+version = "0.2.58"
 dependencies = [
  "ksni",
  "libc",
@@ -534,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "predator-sense-protocol"
-version = "0.2.57"
+version = "0.2.58"
 
 [[package]]
 name = "proc-macro-crate"
