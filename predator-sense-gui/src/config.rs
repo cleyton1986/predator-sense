@@ -20,6 +20,17 @@ pub struct ZoneColor {
     pub blue: u8,
 }
 
+/// One entry in the GameSync list: launching `executable` (matched against
+/// `/proc/*/exe`, either the full path or just the basename) switches the
+/// active thermal/power profile to `profile` for as long as it keeps
+/// running, then restores whatever was active before once it exits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GameProfile {
+    pub name: String,
+    pub executable: String,
+    pub profile: PowerProfile,
+}
+
 /// Last successfully applied state for the independently controlled RGB logo
 /// on the display lid. `RgbConfig` is shared with keyboard lighting so mode,
 /// brightness, speed and color keep one serialization contract.
@@ -100,6 +111,14 @@ pub struct AppConfig {
     /// LANG/LANGUAGE env vars, same as before this setting existed (issue #17).
     #[serde(default)]
     pub language: Option<String>,
+    /// GameSync: automatically switch profile while a registered game is
+    /// running, restoring the previous one when it exits. Off by default -
+    /// unlike `auto_profile_ac`, this touches the profile based on what's
+    /// running, not just the power source, so it starts opt-in.
+    #[serde(default)]
+    pub game_sync_enabled: bool,
+    #[serde(default)]
+    pub game_profiles: Vec<GameProfile>,
 }
 
 fn default_true() -> bool {
@@ -158,6 +177,8 @@ impl Default for AppConfig {
             ai_model: default_ai_model(),
             ai_check_interval_min: default_ai_check_interval_min(),
             language: None,
+            game_sync_enabled: false,
+            game_profiles: Vec::new(),
         }
     }
 }

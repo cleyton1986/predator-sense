@@ -11,7 +11,8 @@ use crate::hardware::{rgb, sensors, setup};
 use crate::tray::TrayManager;
 use crate::ui::{
     ai_page, background, battery_page, dashboard_page, drivers_page, fan_control_page, fan_page,
-    gpu_page, monitor_page, network_page, rgb_page, setup_page, temperatures_page, usage_page,
+    game_sync_page, gpu_page, monitor_page, network_page, rgb_page, setup_page, temperatures_page,
+    usage_page,
 };
 
 thread_local! {
@@ -168,10 +169,16 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         crate::hardware::power_profile::set_auto(cfg.auto_profile_ac);
         crate::hardware::power_profile::set_target_profiles(cfg.profile_ac, cfg.profile_battery);
         crate::hardware::applog::set_enabled(cfg.debug_logging);
+        crate::hardware::game_sync::set_enabled(cfg.game_sync_enabled);
         glib::timeout_add_seconds_local(5, || {
             let (cpu, gpu) = sensors::read_critical_temps();
             crate::hardware::alerts::check(cpu, gpu);
             crate::hardware::power_profile::check();
+            // Re-reads the game list from config every tick (cheap: a small
+            // Vec clone), same reasoning as re-reading `ai_check_interval_min`
+            // below - editing the list in the UI takes effect on the next
+            // tick, no restart needed.
+            crate::hardware::game_sync::check(&config::load_app_config().game_profiles);
             glib::ControlFlow::Continue
         });
     }
@@ -397,6 +404,7 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
             }),
         );
         pages.insert("drivers".into(), Box::new(|| drivers_page::build().upcast()));
+        pages.insert("game_sync".into(), Box::new(|| game_sync_page::build().upcast()));
         let app_weak = app.downgrade();
         pages.insert(
             "settings".into(),
@@ -417,6 +425,7 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
         (crate::i18n::t("network"), "network"),
         (crate::i18n::t("lighting"), "lighting"),
         (crate::i18n::t("perf_mode"), "fan"),
+        (crate::i18n::t("game_sync_nav"), "game_sync"),
         (crate::i18n::t("fan_control"), "fan_ctrl"),
         (crate::i18n::t("battery"), "battery"),
         (crate::i18n::t("gpu_menu"), "gpu"),
