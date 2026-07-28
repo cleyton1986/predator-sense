@@ -2623,23 +2623,51 @@ static int __init gaming_kbbl_cdev_init(void)
 	#else
 		gkbbl_dev_class = class_create(THIS_MODULE, GAMING_KBBL_CHR);
 	#endif
+	if (IS_ERR(gkbbl_dev_class)) {
+		err = PTR_ERR(gkbbl_dev_class);
+		pr_err("Class creation for gaming keyboard backlight failed (likely a name collision with another Acer driver, e.g. linuwu-sense): %d\n",
+		       err);
+		gkbbl_dev_class = NULL;
+		unregister_chrdev_region(gkbbl_dynamic_dev, 1);
+		return err;
+	}
 
 	gkbbl_dev_class->dev_uevent = gkbbl_dev_uevent;
 
 	cdev_init(&gkbbl_dev_data.cdev, &gkbbl_dev_fops);
 	gkbbl_dev_data.cdev.owner = THIS_MODULE;
 
-	cdev_add(&gkbbl_dev_data.cdev, gkbbl_dynamic_dev, 1);
+	err = cdev_add(&gkbbl_dev_data.cdev, gkbbl_dynamic_dev, 1);
+	if (err < 0) {
+		pr_err("cdev_add for gaming keyboard backlight failed: %d\n", err);
+		class_destroy(gkbbl_dev_class);
+		gkbbl_dev_class = NULL;
+		unregister_chrdev_region(gkbbl_dynamic_dev, 1);
+		return err;
+	}
 
-	device_create(gkbbl_dev_class, NULL, gkbbl_dynamic_dev, NULL, "%s-%d",
+	if (IS_ERR(device_create(gkbbl_dev_class, NULL, gkbbl_dynamic_dev, NULL, "%s-%d",
 			   GAMING_KBBL_CHR,
-			   GAMING_KBBL_MINOR);
+			   GAMING_KBBL_MINOR))) {
+		pr_err("device_create for gaming keyboard backlight failed\n");
+		cdev_del(&gkbbl_dev_data.cdev);
+		class_destroy(gkbbl_dev_class);
+		gkbbl_dev_class = NULL;
+		unregister_chrdev_region(gkbbl_dynamic_dev, 1);
+		return -ENODEV;
+	}
 
 	return 0;
 }
 
 static void __exit gaming_kbbl_cdev_exit(void)
 {
+	/* init() already tears down and NULLs this on any failure path, so
+	 * this only runs the real teardown when init actually succeeded -
+	 * otherwise we'd double-free/double-unregister everything below. */
+	if (!gkbbl_dev_class)
+		return;
+
 	device_destroy(gkbbl_dev_class, gkbbl_dynamic_dev);
 
 	class_unregister(gkbbl_dev_class);
@@ -2821,17 +2849,39 @@ static int __init gaming_kbbl_static_cdev_init(void)
 	#else
 		gkbbl_static_dev_class = class_create(THIS_MODULE, GAMING_KBBL_STATIC_CHR);
 	#endif
+	if (IS_ERR(gkbbl_static_dev_class)) {
+		err = PTR_ERR(gkbbl_static_dev_class);
+		pr_err("Class creation for gaming keyboard static backlight failed (likely a name collision with another Acer driver, e.g. linuwu-sense): %d\n",
+		       err);
+		gkbbl_static_dev_class = NULL;
+		unregister_chrdev_region(gkbbl_static_dev, 1);
+		return err;
+	}
 
 	gkbbl_static_dev_class->dev_uevent = gkbbl_static_dev_uevent;
 
 	cdev_init(&gkbbl_static_dev_data.cdev, &gkbbl_static_dev_fops);
 	gkbbl_static_dev_data.cdev.owner = THIS_MODULE;
 
-	cdev_add(&gkbbl_static_dev_data.cdev, gkbbl_static_dev, 1);
+	err = cdev_add(&gkbbl_static_dev_data.cdev, gkbbl_static_dev, 1);
+	if (err < 0) {
+		pr_err("cdev_add for gaming keyboard static backlight failed: %d\n", err);
+		class_destroy(gkbbl_static_dev_class);
+		gkbbl_static_dev_class = NULL;
+		unregister_chrdev_region(gkbbl_static_dev, 1);
+		return err;
+	}
 
-	device_create(gkbbl_static_dev_class, NULL, gkbbl_static_dev, NULL, "%s-%d",
+	if (IS_ERR(device_create(gkbbl_static_dev_class, NULL, gkbbl_static_dev, NULL, "%s-%d",
 				  GAMING_KBBL_STATIC_CHR,
-				  GAMING_KBBL_STATIC_MINOR);
+				  GAMING_KBBL_STATIC_MINOR))) {
+		pr_err("device_create for gaming keyboard static backlight failed\n");
+		cdev_del(&gkbbl_static_dev_data.cdev);
+		class_destroy(gkbbl_static_dev_class);
+		gkbbl_static_dev_class = NULL;
+		unregister_chrdev_region(gkbbl_static_dev, 1);
+		return -ENODEV;
+	}
 
 	return 0;
 }
@@ -2851,6 +2901,11 @@ static int __init gaming_kbbl_poll_and_enable_zones(void)
 
 static void __exit gaming_kbbl_static_cdev_exit(void)
 {
+	/* Mirrors gaming_kbbl_cdev_exit(): init() already tears down and
+	 * NULLs this on any failure path, so skip if it never succeeded. */
+	if (!gkbbl_static_dev_class)
+		return;
+
 	device_destroy(gkbbl_static_dev_class, gkbbl_static_dev);
 
 	class_unregister(gkbbl_static_dev_class);
