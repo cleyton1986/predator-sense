@@ -454,6 +454,38 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     // Captured by the shared sidebar pulse timer created after the loop.
     let beta_badge: Rc<RefCell<Option<gtk::Label>>> = Rc::new(RefCell::new(None));
 
+    // Shared by every item's click handler AND the Up/Down key navigation
+    // added below - both just need to land on the same index. nav_widgets
+    // is read lazily (through the Rc<RefCell<..>>) so this can be built
+    // before the loop below has populated it.
+    let page_names: Rc<Vec<String>> = Rc::new(
+        nav_items
+            .iter()
+            .map(|(_, name)| name.to_string())
+            .collect(),
+    );
+    let navigate_to: Rc<dyn Fn(usize)> = {
+        let stack_c = stack.clone();
+        let pending_c = pending.clone();
+        let active_c = active_idx.clone();
+        let widgets_c = nav_widgets.clone();
+        let page_names_c = page_names.clone();
+        Rc::new(move |idx: usize| {
+            let Some(page) = page_names_c.get(idx) else {
+                return;
+            };
+            *active_c.borrow_mut() = idx;
+            ensure_page_built(&stack_c, &pending_c, page);
+            stack_c.set_visible_child_name(page);
+            for (j, (bg_da, lbl_w)) in widgets_c.borrow().iter().enumerate() {
+                bg_da.queue_draw();
+                lbl_w.remove_css_class("nav-label-active");
+                lbl_w.remove_css_class("nav-label");
+                lbl_w.add_css_class(if j == idx { "nav-label-active" } else { "nav-label" });
+            }
+        })
+    };
+
     for (i, (label, page_name)) in nav_items.iter().enumerate() {
         let item_overlay = gtk::Overlay::new();
 
@@ -501,27 +533,44 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
 
         // Click
         let gesture = gtk::GestureClick::new();
-        let stack_c = stack.clone();
-        let pending_c = pending.clone();
-        let page = page_name.to_string();
-        let active_c = active_idx.clone();
-        let widgets_c = nav_widgets.clone();
+        let navigate_to_c = navigate_to.clone();
         gesture.connect_released(move |_, _, _, _| {
-            *active_c.borrow_mut() = idx;
-            ensure_page_built(&stack_c, &pending_c, &page);
-            stack_c.set_visible_child_name(&page);
-            for (j, (bg_da, lbl_w)) in widgets_c.borrow().iter().enumerate() {
-                bg_da.queue_draw();
-                lbl_w.remove_css_class("nav-label-active");
-                lbl_w.remove_css_class("nav-label");
-                lbl_w.add_css_class(if j == idx { "nav-label-active" } else { "nav-label" });
-            }
+            navigate_to_c(idx);
         });
         item_overlay.add_controller(gesture);
 
         nav_widgets.borrow_mut().push((bg.clone(), lbl.clone()));
         sidebar.append(&item_overlay);
     }
+
+    // Up/Down anywhere in the window move the sidebar selection by one,
+    // same as clicking the item above/below the current one - lets
+    // screenshot-automation (and anyone else) drive the whole sidebar from
+    // the keyboard instead of needing exact per-item pixel coordinates,
+    // which drift with window size/placement in a way mouse clicks can't
+    // route around. Capture phase so it fires before any focused child
+    // widget (e.g. a page's own entry/slider) would otherwise eat the key.
+    let key_controller = gtk::EventControllerKey::new();
+    key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+    {
+        let active_for_key = active_idx.clone();
+        let navigate_to_key = navigate_to.clone();
+        let count = page_names.len();
+        key_controller.connect_key_pressed(move |_, keyval, _, _| match keyval {
+            gtk::gdk::Key::Down => {
+                let cur = *active_for_key.borrow();
+                navigate_to_key((cur + 1).min(count - 1));
+                glib::Propagation::Stop
+            }
+            gtk::gdk::Key::Up => {
+                let cur = *active_for_key.borrow();
+                navigate_to_key(cur.saturating_sub(1));
+                glib::Propagation::Stop
+            }
+            _ => glib::Propagation::Proceed,
+        });
+    }
+    window.add_controller(key_controller);
 
     // Spacer to push info to bottom
     let spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
