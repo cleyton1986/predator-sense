@@ -41,7 +41,8 @@ impl Capabilities {
             rgb: Path::new("/dev/acer-gkbbl-0").exists()
                 || Path::new("/dev/acer-gkbbl-static-0").exists()
                 || crate::hardware::hid_rgb::is_available()
-                || crate::hardware::magic_rgb::is_keyboard_available(),
+                || crate::hardware::magic_rgb::is_keyboard_available()
+                || crate::hardware::chicony_rgb::is_available(),
             cover_logo: crate::hardware::hid_rgb::has_cover_logo()
                 || crate::hardware::magic_rgb::is_logo_available(),
             ec: Path::new("/dev/ec").exists(),
