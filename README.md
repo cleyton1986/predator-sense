@@ -40,6 +40,10 @@
 
 This application was created for **personal use**, to get the most out of an Acer gaming laptop on Linux — since Acer does not provide official Linux support for PredatorSense. It is shared freely for anyone who wants the same.
 
+### Icons
+
+The Dashboard and Temperaturas icons under `predator-sense-gui/resources/icons/` are from [Flaticon](https://www.flaticon.com), created by Hilmy Abiyyu A., magnific and mehwish.
+
 ---
 
 ## Screenshots
