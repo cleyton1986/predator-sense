@@ -147,7 +147,7 @@ pub fn build() -> gtk::ScrolledWindow {
         (crate::i18n::t("memory"), "🧠", Some("memoria-ram.png"), ram_detail),
         (crate::i18n::t("storage"), "💾", Some("ssd.png"), storage_detail),
         (crate::i18n::t("network"), "🌐", Some("internet.png"), net_detail),
-        (crate::i18n::t("system_os"), "🐧", None, os_detail),
+        (crate::i18n::t("system_os"), "🐧", Some("linux.png"), os_detail),
         ("BIOS", "⚙", Some("bios.png"), bios_detail),
     ];
 
