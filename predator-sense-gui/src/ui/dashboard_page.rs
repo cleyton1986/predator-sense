@@ -142,18 +142,18 @@ pub fn build() -> gtk::ScrolledWindow {
     };
 
     let cards = [
-        ("CPU", "💻", cpu_detail),
-        ("GPU", "🎮", gpu_detail),
-        (crate::i18n::t("memory"), "🧠", ram_detail),
-        (crate::i18n::t("storage"), "💾", storage_detail),
-        (crate::i18n::t("network"), "🌐", net_detail),
-        (crate::i18n::t("system_os"), "🐧", os_detail),
-        ("BIOS", "⚙", bios_detail),
+        ("CPU", "💻", Some("cpu.png"), cpu_detail),
+        ("GPU", "🎮", Some("gpu.png"), gpu_detail),
+        (crate::i18n::t("memory"), "🧠", Some("memoria-ram.png"), ram_detail),
+        (crate::i18n::t("storage"), "💾", Some("ssd.png"), storage_detail),
+        (crate::i18n::t("network"), "🌐", Some("internet.png"), net_detail),
+        (crate::i18n::t("system_os"), "🐧", None, os_detail),
+        ("BIOS", "⚙", Some("bios.png"), bios_detail),
     ];
 
     let mut gpu_value_label = None;
-    for (i, (title, icon, value)) in cards.iter().enumerate() {
-        let (card, value_label) = create_spec_card(icon, title, value);
+    for (i, (title, icon, image, value)) in cards.iter().enumerate() {
+        let (card, value_label) = create_spec_card(icon, *image, title, value);
         if *title == "GPU" {
             gpu_value_label = Some(value_label);
         }
@@ -299,17 +299,31 @@ fn build_short_summary(info: &SystemInfo) -> String {
     parts.join(" · ")
 }
 
-fn create_spec_card(icon: &str, title: &str, value: &str) -> (gtk::Box, gtk::Label) {
+fn create_spec_card(icon: &str, image: Option<&str>, title: &str, value: &str) -> (gtk::Box, gtk::Label) {
     let card = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     card.add_css_class("spec-card");
     // Fill the grid row so both cards on a row keep the same height (no misalign).
     card.set_valign(gtk::Align::Fill);
     card.set_vexpand(true);
 
-    let icon_l = gtk::Label::new(Some(icon));
-    icon_l.add_css_class("spec-icon");
-    icon_l.set_valign(gtk::Align::Start);
-    card.append(&icon_l);
+    let icon_w: gtk::Widget = match image.and_then(|name| find_resource(&format!("imagens/{name}"))) {
+        Some(path) => {
+            let img = gtk::Image::from_file(path);
+            img.add_css_class("spec-icon-img");
+            // Fixed square size so every card icon lines up regardless of the
+            // source PNG's own resolution - never distorted, never inflates
+            // the card past the emoji it replaces.
+            img.set_pixel_size(28);
+            img.upcast()
+        }
+        None => {
+            let l = gtk::Label::new(Some(icon));
+            l.add_css_class("spec-icon");
+            l.upcast()
+        }
+    };
+    icon_w.set_valign(gtk::Align::Start);
+    card.append(&icon_w);
 
     let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
     text.set_hexpand(true);
