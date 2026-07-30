@@ -433,6 +433,66 @@ pub mod helper {
     }
 }
 
+/// Where the battery lives in sysfs.
+///
+/// The device name is not fixed: it is `BAT1` on some Acer models and `BAT0`
+/// on others, so it has to be discovered instead of hard-coded. The GUI and
+/// the privileged helper both resolve it through here so a write and the
+/// read-back that follows it can never land on different devices.
+pub mod battery {
+    use std::path::{Path, PathBuf};
+
+    /// Sysfs mount point. The helper takes its root as a parameter so tests
+    /// can point it at a fixture tree; the GUI always reads the real one.
+    pub const SYSFS_ROOT: &str = "/sys";
+
+    /// Paths below are relative to a sysfs root.
+    pub const POWER_SUPPLY_CLASS: &str = "class/power_supply";
+    /// Charge ceiling in percent, exposed by the generic power_supply class.
+    pub const CHARGE_LIMIT_ATTRIBUTE: &str = "charge_control_end_threshold";
+    /// 80% charge cap of the `acer-wmi-battery` WMI driver — an independent
+    /// mechanism from [`CHARGE_LIMIT_ATTRIBUTE`]; a machine may expose either,
+    /// both, or neither.
+    pub const WMI_HEALTH_MODE: &str = "bus/wmi/drivers/acer-wmi-battery/health_mode";
+    pub const WMI_CALIBRATION_MODE: &str = "bus/wmi/drivers/acer-wmi-battery/calibration_mode";
+    /// Charge cap of the out-of-tree `acer-wmi` predator_sense interface.
+    pub const PREDATOR_SENSE_LIMITER: &str =
+        "bus/platform/drivers/acer-wmi/acer-wmi/predator_sense/battery_limiter";
+
+    const TYPE_ATTRIBUTE: &str = "type";
+    const BATTERY_TYPE: &str = "Battery";
+
+    /// The system battery, i.e. the first `power_supply` device reporting
+    /// `type` = `Battery`. Mains adapters and USB-C source ports also live
+    /// under that class, hence the type filter.
+    ///
+    /// Devices are considered in name order so a machine that somehow exposes
+    /// several batteries always resolves to the same one — `read_dir` yields
+    /// entries in an arbitrary order.
+    pub fn device(sysfs: &Path) -> Option<PathBuf> {
+        let mut batteries: Vec<PathBuf> = std::fs::read_dir(sysfs.join(POWER_SUPPLY_CLASS))
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                std::fs::read_to_string(path.join(TYPE_ATTRIBUTE))
+                    .map(|kind| kind.trim() == BATTERY_TYPE)
+                    .unwrap_or(false)
+            })
+            .collect();
+        batteries.sort();
+        batteries.into_iter().next()
+    }
+
+    /// The battery's `charge_control_end_threshold`, when the kernel exposes
+    /// one. `None` means this machine has no charge limit through the generic
+    /// power_supply interface (it may still have [`WMI_HEALTH_MODE`]).
+    pub fn charge_limit(sysfs: &Path) -> Option<PathBuf> {
+        let attribute = device(sysfs)?.join(CHARGE_LIMIT_ATTRIBUTE);
+        attribute.exists().then_some(attribute)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::helper::{Action, CpuGovernor, EnergyPreference, Switch};
@@ -497,5 +557,95 @@ mod tests {
         for switch in [Switch::Disabled, Switch::Enabled] {
             assert_eq!(Switch::parse(switch.as_str()), Some(switch));
         }
+    }
+
+    fn power_supply(sysfs: &Path, name: &str, kind: &str, attributes: &[(&str, &str)]) {
+        let device = sysfs.join(super::battery::POWER_SUPPLY_CLASS).join(name);
+        std::fs::create_dir_all(&device).unwrap();
+        std::fs::write(device.join("type"), format!("{kind}\n")).unwrap();
+        for (attribute, value) in attributes {
+            std::fs::write(device.join(attribute), format!("{value}\n")).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_battery_is_found_whatever_its_device_number_is() {
+        for name in ["BAT0", "BAT1", "BAT2"] {
+            let sysfs = tempfile::tempdir().unwrap();
+            power_supply(sysfs.path(), name, "Battery", &[]);
+            assert_eq!(
+                super::battery::device(sysfs.path()),
+                Some(
+                    sysfs
+                        .path()
+                        .join(super::battery::POWER_SUPPLY_CLASS)
+                        .join(name)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn mains_and_usb_power_supplies_are_never_taken_for_the_battery() {
+        let sysfs = tempfile::tempdir().unwrap();
+        power_supply(sysfs.path(), "ACAD", "Mains", &[]);
+        power_supply(sysfs.path(), "ucsi-source-psy-USBC000:001", "USB", &[]);
+        assert_eq!(super::battery::device(sysfs.path()), None);
+        assert_eq!(super::battery::charge_limit(sysfs.path()), None);
+    }
+
+    #[test]
+    fn several_batteries_always_resolve_to_the_same_device() {
+        let sysfs = tempfile::tempdir().unwrap();
+        power_supply(sysfs.path(), "BAT1", "Battery", &[]);
+        power_supply(sysfs.path(), "BAT0", "Battery", &[]);
+        power_supply(sysfs.path(), "ACAD", "Mains", &[]);
+        for _ in 0..8 {
+            assert_eq!(
+                super::battery::device(sysfs.path()),
+                Some(
+                    sysfs
+                        .path()
+                        .join(super::battery::POWER_SUPPLY_CLASS)
+                        .join("BAT0")
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_battery_without_a_charge_ceiling_reports_no_charge_limit_path() {
+        let sysfs = tempfile::tempdir().unwrap();
+        power_supply(sysfs.path(), "BAT1", "Battery", &[("capacity", "80")]);
+        assert!(super::battery::device(sysfs.path()).is_some());
+        assert_eq!(super::battery::charge_limit(sysfs.path()), None);
+    }
+
+    #[test]
+    fn the_charge_limit_is_resolved_on_the_battery_that_exposes_it() {
+        let sysfs = tempfile::tempdir().unwrap();
+        power_supply(
+            sysfs.path(),
+            "BAT0",
+            "Battery",
+            &[(super::battery::CHARGE_LIMIT_ATTRIBUTE, "100")],
+        );
+        assert_eq!(
+            super::battery::charge_limit(sysfs.path()),
+            Some(
+                sysfs
+                    .path()
+                    .join(super::battery::POWER_SUPPLY_CLASS)
+                    .join("BAT0")
+                    .join(super::battery::CHARGE_LIMIT_ATTRIBUTE)
+            )
+        );
+    }
+
+    #[test]
+    fn a_missing_power_supply_class_is_not_an_error() {
+        let sysfs = tempfile::tempdir().unwrap();
+        assert_eq!(super::battery::device(sysfs.path()), None);
+        assert_eq!(super::battery::charge_limit(sysfs.path()), None);
     }
 }

@@ -1,20 +1,18 @@
+use crate::hardware::capabilities::{battery_charge_limit, sysfs};
+use predator_sense_protocol::battery;
 use predator_sense_protocol::helper::{
     Action as HelperAction, BATTERY_LIMIT_DISABLED_PERCENT, BATTERY_LIMIT_ENABLED_PERCENT,
 };
 use std::fs;
 
-const BATTERY_THRESHOLD_PATH: &str = "/sys/class/power_supply/BAT1/charge_control_end_threshold";
-
 /// Battery charge limit (80%) - preserves battery longevity
 pub fn get_battery_limiter() -> bool {
     // Check via sysfs (if available from kernel module)
-    if let Ok(v) = fs::read_to_string(
-        "/sys/bus/platform/drivers/acer-wmi/acer-wmi/predator_sense/battery_limiter",
-    ) {
+    if let Ok(v) = fs::read_to_string(sysfs(battery::PREDATOR_SENSE_LIMITER)) {
         return v.trim() == "1";
     }
     // Fallback: check charge_control_end_threshold
-    if let Ok(v) = fs::read_to_string(BATTERY_THRESHOLD_PATH) {
+    if let Some(v) = battery_charge_limit().and_then(|path| fs::read_to_string(path).ok()) {
         return v
             .trim()
             .parse::<u16>()
@@ -31,20 +29,20 @@ pub fn set_battery_limiter(enabled: bool) -> Result<(), String> {
     } else {
         BATTERY_LIMIT_DISABLED_PERCENT
     };
-    if fs::write(BATTERY_THRESHOLD_PATH, threshold.to_string()).is_ok() {
-        return Ok(());
+    if let Some(path) = battery_charge_limit() {
+        if fs::write(path, threshold.to_string()).is_ok() {
+            return Ok(());
+        }
     }
     crate::hardware::helper::write_switch(HelperAction::BatteryLimit, enabled)
 }
-
-const BATTERY_HEALTH_PATH: &str = "/sys/bus/wmi/drivers/acer-wmi-battery/health_mode";
 
 /// Battery "Health Mode" - a separate WMI mechanism from `set_battery_limiter`
 /// above (some hardware only exposes one or the other). Extracted from what
 /// was inline UI logic in battery_page.rs so the Battery page switch and the
 /// AI assistant's tool dispatcher share one implementation.
 pub fn get_battery_health_mode() -> bool {
-    if let Ok(v) = fs::read_to_string(BATTERY_HEALTH_PATH) {
+    if let Ok(v) = fs::read_to_string(sysfs(battery::WMI_HEALTH_MODE)) {
         return v.trim() == "1";
     }
     crate::hardware::helper::read_switch(HelperAction::BatteryHealthRead).unwrap_or(false)
@@ -53,7 +51,7 @@ pub fn get_battery_health_mode() -> bool {
 pub fn set_battery_health_mode(enabled: bool) -> Result<(), String> {
     let value = predator_sense_protocol::helper::Switch::from(enabled).as_str();
     // Try sysfs first (works if already root or if udev grants write access).
-    if fs::write(BATTERY_HEALTH_PATH, value).is_ok() {
+    if fs::write(sysfs(battery::WMI_HEALTH_MODE), value).is_ok() {
         return Ok(());
     }
     // Through the registered predator-sense-helper polkit action
