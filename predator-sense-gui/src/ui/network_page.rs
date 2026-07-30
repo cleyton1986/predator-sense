@@ -425,7 +425,7 @@ fn ip_stat(title: &str, value: &str) -> (gtk::Box, gtk::Label) {
 /// and binds the local endpoint, it never actually sends a packet, so this
 /// works offline too as long as a default route exists). Reflects the active
 /// interface without needing to parse `ip addr` output or walk getifaddrs.
-fn local_ip() -> Option<String> {
+pub(crate) fn local_ip() -> Option<String> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("1.1.1.1:80").ok()?;
     socket.local_addr().ok().map(|addr| addr.ip().to_string())
