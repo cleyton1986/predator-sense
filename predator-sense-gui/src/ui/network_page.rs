@@ -3,8 +3,11 @@ use gtk4::{self as gtk, glib};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fs;
+use std::net::UdpSocket;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+use crate::ui::background;
 
 const HISTORY_SIZE: usize = 60;
 
@@ -71,6 +74,22 @@ pub fn build() -> gtk::Box {
     header.append(&iface_label);
 
     page.append(&header);
+
+    // === IPs: local (instant, from the OS routing table) + public (needs a
+    // network round-trip, so it's fetched on a background thread and starts
+    // on a placeholder like every other async-populated label in this app).
+    let ip_row = gtk::Box::new(gtk::Orientation::Horizontal, 20);
+    ip_row.set_margin_top(2);
+    let (local_ip_box, _local_ip_label) =
+        ip_stat(crate::i18n::t("local_ip"), local_ip().as_deref().unwrap_or("--"));
+    let (public_ip_box, public_ip_label) = ip_stat(crate::i18n::t("public_ip"), crate::i18n::t("checking"));
+    ip_row.append(&local_ip_box);
+    ip_row.append(&public_ip_box);
+    page.append(&ip_row);
+
+    background::run(fetch_public_ip, move |result| {
+        public_ip_label.set_text(result.as_deref().unwrap_or(crate::i18n::t("public_ip_unavailable")));
+    });
 
     // === Big numbers: download e upload ===
     let big_row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
@@ -388,6 +407,41 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
+}
+
+fn ip_stat(title: &str, value: &str) -> (gtk::Box, gtk::Label) {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let t = gtk::Label::new(Some(title));
+    t.add_css_class("info-text-dim");
+    let v = gtk::Label::new(Some(value));
+    v.add_css_class("info-card-value");
+    row.append(&t);
+    row.append(&v);
+    (row, v)
+}
+
+/// The IP the OS would use to reach the internet, read off the routing table
+/// via a UDP "connect" (`connect(2)` on `SOCK_DGRAM` just resolves a route
+/// and binds the local endpoint, it never actually sends a packet, so this
+/// works offline too as long as a default route exists). Reflects the active
+/// interface without needing to parse `ip addr` output or walk getifaddrs.
+fn local_ip() -> Option<String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("1.1.1.1:80").ok()?;
+    socket.local_addr().ok().map(|addr| addr.ip().to_string())
+}
+
+const PUBLIC_IP_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// Real public-facing IP, only known by asking an external service - there is
+/// no local source for this. Runs on a background thread (see call site);
+/// `None` on any network error, DNS failure or malformed reply, all equally
+/// "can't tell you right now" from the UI's point of view.
+fn fetch_public_ip() -> Option<String> {
+    let agent = ureq::AgentBuilder::new().timeout(PUBLIC_IP_TIMEOUT).build();
+    let body = agent.get("https://api.ipify.org").call().ok()?.into_string().ok()?;
+    let ip = body.trim();
+    (!ip.is_empty() && ip.parse::<std::net::IpAddr>().is_ok()).then(|| ip.to_string())
 }
 
 fn format_iface_label(iface: &str) -> String {
