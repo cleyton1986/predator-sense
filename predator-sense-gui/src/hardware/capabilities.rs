@@ -106,26 +106,27 @@ pub fn sysfs(relative: &str) -> PathBuf {
     Path::new(battery::SYSFS_ROOT).join(relative)
 }
 
-/// The battery devices (`BAT0`, `BAT1`, ...), discovered once. Cached like the
-/// capabilities themselves: scanning `class/power_supply` on every read would
-/// put a directory listing on the Battery page's refresh timer.
-fn battery_devices() -> &'static [PathBuf] {
-    use std::sync::OnceLock;
-    static DEVICES: OnceLock<Vec<PathBuf>> = OnceLock::new();
-    DEVICES.get_or_init(|| battery::devices(Path::new(battery::SYSFS_ROOT)))
+/// The battery devices (`BAT0`, `BAT1`, ...).
+///
+/// Deliberately not cached, unlike the capabilities themselves: sysfs topology
+/// is not fixed for the life of the process. A battery can register after the
+/// app starts (autostart racing the ACPI battery) or be attached later, and a
+/// cached empty list would keep the Battery page blank until a restart. The
+/// scan costs ~12 µs against the real `class/power_supply`, next to nothing on
+/// the Battery page's 2-second timer.
+fn battery_devices() -> Vec<PathBuf> {
+    battery::devices(Path::new(battery::SYSFS_ROOT))
 }
 
 /// The battery to report readings for.
-pub fn battery_device() -> Option<&'static Path> {
-    battery_devices().first().map(PathBuf::as_path)
+pub fn battery_device() -> Option<PathBuf> {
+    battery_devices().into_iter().next()
 }
 
 /// The charge ceiling this machine can write, on whichever battery carries it.
-/// Re-checked on each call (a stat per battery, and machines have one) because
-/// a driver can create the attribute after startup.
 pub fn battery_charge_limit() -> Option<PathBuf> {
     battery_devices()
-        .iter()
+        .into_iter()
         .map(|device| device.join(battery::CHARGE_LIMIT_ATTRIBUTE))
         .find(|attribute| attribute.exists())
 }
