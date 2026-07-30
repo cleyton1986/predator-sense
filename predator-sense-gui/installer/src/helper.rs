@@ -4,6 +4,7 @@ use crate::constants::hardware::{
 };
 use crate::constants::{command as external, path};
 use crate::AppResult;
+use predator_sense_protocol::battery;
 use predator_sense_protocol::helper::{
     Action as HelperAction, CpuGovernor, EnergyPreference, Switch, OPTIONAL_VALUE_SKIP,
 };
@@ -31,9 +32,12 @@ const CPU_PROFILE_LOCK: &str = "/run/lock/predator-sense-cpu-profile.lock";
 const CPU_PROFILE_FIXTURE_LOCK: &str = "predator-sense-cpu-profile.lock";
 const CPU_PROFILE_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const CPU_PROFILE_LOCK_RETRY: Duration = Duration::from_millis(50);
-const BATTERY_THRESHOLD: &str = "class/power_supply/BAT1/charge_control_end_threshold";
-const BATTERY_HEALTH: &str = "bus/wmi/drivers/acer-wmi-battery/health_mode";
-const BATTERY_CALIBRATION: &str = "bus/wmi/drivers/acer-wmi-battery/calibration_mode";
+// charge_control_end_threshold has no fixed path: the battery is BAT1 on some
+// models and BAT0 on others, so it is discovered at runtime (battery_threshold
+// below) instead of being a constant. These two do have fixed paths. All three
+// come from the shared protocol crate so the GUI resolves them identically.
+const BATTERY_HEALTH: &str = battery::WMI_HEALTH_MODE;
+const BATTERY_CALIBRATION: &str = battery::WMI_CALIBRATION_MODE;
 const BACKLIGHT_TIMEOUT: &str = "devices/platform/acer-wmi/backlight_timeout";
 // Root-only by kernel design (0400) unlike product_name/board_name (0444),
 // hence a dedicated privileged read instead of the unprivileged sysfs path
@@ -129,12 +133,13 @@ struct PersistedBatteryConfig {
     battery_health_mode: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct BatteryReapplySetting {
     enabled: bool,
     label: &'static str,
     value: &'static str,
-    relative_path: &'static str,
+    /// `None` when this machine does not expose the attribute at all.
+    attribute: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,12 +345,12 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
             } else {
                 BATTERY_LIMIT_DISABLED
             };
-            write_attr("battery-limit", threshold, &sysfs.join(BATTERY_THRESHOLD))
+            write_attr("battery-limit", threshold, &battery_threshold(sysfs)?)
         }
         HelperAction::BatteryLimitRead => {
-            let value = read_attr("battery-limit", &sysfs.join(BATTERY_THRESHOLD))
-                .unwrap_or_else(|_| BATTERY_LIMIT_DISABLED.into())
-                .parse::<u16>()
+            let value = battery::charge_limit(sysfs)
+                .and_then(|threshold| read_attr("battery-limit", &threshold).ok())
+                .and_then(|value| value.parse::<u16>().ok())
                 .unwrap_or(BATTERY_LIMIT_DISABLED_PERCENT);
             println!("{}", u8::from(value <= BATTERY_LIMIT_ENABLED_PERCENT));
             Ok(())
@@ -983,6 +988,18 @@ fn ec_read(path: &Path, register: EcRegister) -> AppResult<u8> {
     Ok(value[0])
 }
 
+/// The battery charge threshold to write, or a diagnosable error when this
+/// machine caps its charge some other way (or not at all).
+fn battery_threshold(sysfs: &Path) -> AppResult<PathBuf> {
+    battery::charge_limit(sysfs).ok_or_else(|| {
+        fail(format!(
+            "no battery {} attribute found under {}",
+            battery::CHARGE_LIMIT_ATTRIBUTE,
+            sysfs.join(battery::POWER_SUPPLY_CLASS).display()
+        ))
+    })
+}
+
 fn acer_hwmon(sysfs: &Path) -> Option<PathBuf> {
     fs::read_dir(sysfs.join(HWMON_CLASS))
         .ok()?
@@ -1040,28 +1057,36 @@ fn reapply_battery_with(
             enabled: config.battery_limiter,
             label: "battery-limit",
             value: BATTERY_LIMIT_ENABLED,
-            relative_path: BATTERY_THRESHOLD,
+            attribute: battery::charge_limit(sysfs),
         },
         BatteryReapplySetting {
             enabled: config.battery_health_mode,
             label: "battery-health",
             value: bool_str(true),
-            relative_path: BATTERY_HEALTH,
+            attribute: Some(sysfs.join(BATTERY_HEALTH)),
         },
     ];
     let mut errors = Vec::new();
     for setting in settings.into_iter().filter(|setting| setting.enabled) {
-        let attribute = sysfs.join(setting.relative_path);
-        if !attribute.exists() {
-            eprintln!(
+        // A setting the running kernel does not expose is not a boot failure:
+        // the persisted config is shared by both mechanisms and most machines
+        // only have one of them.
+        match setting.attribute {
+            Some(attribute) if attribute.exists() => {
+                if let Err(error) = write(setting.label, setting.value, &attribute) {
+                    errors.push(error);
+                }
+            }
+            Some(attribute) => eprintln!(
                 "predator-sense-helper: skipping unavailable {} attribute {}",
                 setting.label,
                 attribute.display()
-            );
-            continue;
-        }
-        if let Err(error) = write(setting.label, setting.value, &attribute) {
-            errors.push(error);
+            ),
+            None => eprintln!(
+                "predator-sense-helper: skipping {}: this machine exposes no battery {}",
+                setting.label,
+                battery::CHARGE_LIMIT_ATTRIBUTE
+            ),
         }
     }
     if errors.is_empty() {
@@ -1145,6 +1170,21 @@ mod tests {
             .unwrap()
             .trim()
             .into()
+    }
+
+    /// A `power_supply` battery device, with a charge ceiling only when the
+    /// modelled machine exposes one. Returns the device directory.
+    fn battery_device(root: &Path, name: &str, threshold: Option<&str>) -> PathBuf {
+        let relative = format!("{}/{name}", battery::POWER_SUPPLY_CLASS);
+        write(root, &format!("{relative}/type"), "Battery");
+        if let Some(threshold) = threshold {
+            write(
+                root,
+                &format!("{relative}/{}", battery::CHARGE_LIMIT_ATTRIBUTE),
+                threshold,
+            );
+        }
+        root.join(relative)
     }
 
     #[test]
@@ -1441,6 +1481,66 @@ mod tests {
     }
 
     #[test]
+    fn battery_limit_is_written_to_the_battery_device_this_machine_actually_has() {
+        for name in ["BAT0", "BAT1"] {
+            let fixture = TempDir::new().unwrap();
+            let device = battery_device(fixture.path(), name, Some(BATTERY_LIMIT_DISABLED));
+            let ec = fixture.path().join("unused-ec-device");
+
+            run_with_paths(
+                &[HelperAction::BatteryLimit.as_str().into(), "1".into()],
+                fixture.path(),
+                &ec,
+            )
+            .unwrap();
+
+            assert_eq!(
+                read(&device, battery::CHARGE_LIMIT_ATTRIBUTE),
+                BATTERY_LIMIT_ENABLED
+            );
+        }
+    }
+
+    #[test]
+    fn battery_limit_finds_a_charge_ceiling_that_is_not_on_the_first_battery() {
+        let fixture = TempDir::new().unwrap();
+        battery_device(fixture.path(), "BAT0", None);
+        let device = battery_device(fixture.path(), "BAT1", Some(BATTERY_LIMIT_DISABLED));
+        let ec = fixture.path().join("unused-ec-device");
+
+        run_with_paths(
+            &[HelperAction::BatteryLimit.as_str().into(), "1".into()],
+            fixture.path(),
+            &ec,
+        )
+        .unwrap();
+
+        assert_eq!(
+            read(&device, battery::CHARGE_LIMIT_ATTRIBUTE),
+            BATTERY_LIMIT_ENABLED
+        );
+    }
+
+    #[test]
+    fn battery_limit_reports_where_it_looked_when_the_machine_has_no_charge_ceiling() {
+        let fixture = TempDir::new().unwrap();
+        // A battery that caps its charge through acer-wmi-battery health_mode
+        // instead - it has no charge_control_end_threshold at all.
+        battery_device(fixture.path(), "BAT1", None);
+        let ec = fixture.path().join("unused-ec-device");
+
+        let error = run_with_paths(
+            &[HelperAction::BatteryLimit.as_str().into(), "1".into()],
+            fixture.path(),
+            &ec,
+        )
+        .unwrap_err();
+
+        assert!(error.contains(battery::CHARGE_LIMIT_ATTRIBUTE), "{error}");
+        assert!(error.contains(battery::POWER_SUPPLY_CLASS), "{error}");
+    }
+
+    #[test]
     fn boot_battery_restore_continues_when_an_optional_path_is_missing() {
         let fixture = TempDir::new().unwrap();
         let sysfs = fixture.path().join("sys");
@@ -1450,11 +1550,12 @@ mod tests {
             USER_CONFIG,
             r#"{"battery_limiter":true,"battery_health_mode":true}"#,
         );
+        battery_device(&sysfs, "BAT1", None);
         write(&sysfs, BATTERY_HEALTH, bool_str(false));
 
         reapply_battery(&sysfs, &home).unwrap();
 
-        assert!(!sysfs.join(BATTERY_THRESHOLD).exists());
+        assert!(battery::charge_limit(&sysfs).is_none());
         assert_eq!(read(&sysfs, BATTERY_HEALTH), bool_str(true));
     }
 
@@ -1468,9 +1569,9 @@ mod tests {
             USER_CONFIG,
             r#"{"battery_limiter":true,"battery_health_mode":true}"#,
         );
-        write(&sysfs, BATTERY_THRESHOLD, BATTERY_LIMIT_DISABLED);
+        let limiter = battery_device(&sysfs, "BAT1", Some(BATTERY_LIMIT_DISABLED))
+            .join(battery::CHARGE_LIMIT_ATTRIBUTE);
         write(&sysfs, BATTERY_HEALTH, bool_str(false));
-        let limiter = sysfs.join(BATTERY_THRESHOLD);
         let health = sysfs.join(BATTERY_HEALTH);
         let mut attempted = Vec::new();
 

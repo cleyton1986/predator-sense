@@ -1,14 +1,16 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
+use predator_sense_protocol::battery;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::f64::consts::PI;
 use std::fs;
+use std::path::Path;
 use std::rc::Rc;
 
 const HISTORY: usize = 60;
 
-fn set_calibration(path: &str, enabled: bool) -> Result<(), String> {
+fn set_calibration(path: &Path, enabled: bool) -> Result<(), String> {
     let value = predator_sense_protocol::helper::Switch::from(enabled).as_str();
     if fs::write(path, value).is_ok() {
         return Ok(());
@@ -37,7 +39,15 @@ struct BatData {
 }
 
 fn read_bat() -> BatData {
-    let r = |f: &str| fs::read_to_string(format!("/sys/class/power_supply/BAT1/{}", f)).unwrap_or_default();
+    // BAT0 on some models, BAT1 on others - discovered, never assumed. Looked
+    // up per refresh so a battery that registers after startup shows up.
+    let device = crate::hardware::capabilities::battery_device();
+    let r = |f: &str| {
+        device
+            .as_ref()
+            .and_then(|device| fs::read_to_string(device.join(f)).ok())
+            .unwrap_or_default()
+    };
     let p = |s: &str| s.trim().parse::<f64>().unwrap_or(0.0);
 
     let charge_full = p(&r("charge_full"));
@@ -146,99 +156,109 @@ pub fn build() -> gtk::Box {
     page.append(&top_row);
 
     // === Battery WMI Controls ===
-    let wmi_path = "/sys/bus/wmi/drivers/acer-wmi-battery";
-    let wmi_available = std::path::Path::new(wmi_path).exists();
+    // Gated per control on the attribute each one writes, and through the same
+    // capability the "Battery limit" feature chip reads - Health Mode *is* the
+    // charge cap on models with no writable charge_control_end_threshold, so
+    // the two must never disagree about whether it exists.
+    let caps = crate::hardware::capabilities::get();
+    let calibration_path = crate::hardware::capabilities::sysfs(battery::WMI_CALIBRATION_MODE);
+    // Not `.exists()`: the driver creates calibration_mode even where the
+    // firmware does not implement it, and reports -1 for that case.
+    let calibration_available =
+        crate::hardware::capabilities::wmi_battery_function_supported(battery::WMI_CALIBRATION_MODE);
 
-    if wmi_available {
+    if caps.battery_health || calibration_available {
         let controls_box = gtk::Box::new(gtk::Orientation::Horizontal, 16);
         controls_box.set_halign(gtk::Align::Center);
         controls_box.set_margin_top(6);
 
         // Health Mode (80% charge limit)
-        let health_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        health_box.add_css_class("fan-display");
-        let health_label = gtk::Label::new(Some(t("bat_health_mode")));
-        health_label.add_css_class("control-label");
-        health_label.set_tooltip_text(Some(t("bat_health_mode_desc")));
-        let health_switch = gtk::Switch::new();
-        health_switch.set_valign(gtk::Align::Center);
-        health_switch.set_tooltip_text(Some(t("bat_health_mode_desc")));
-        health_switch.set_active(crate::hardware::extras::get_battery_health_mode());
-        health_switch.connect_state_set(move |_, active| {
-            let _ = crate::hardware::extras::set_battery_health_mode(active);
-            // Persist so it can be re-applied on boot (issue #11) - the
-            // EC resets health_mode on a full power cycle, this sysfs
-            // write alone doesn't survive it.
-            let mut cfg = crate::config::load_app_config();
-            cfg.battery_health_mode = active;
-            let _ = crate::config::save_app_config(&cfg);
-            glib::Propagation::Proceed
-        });
-        health_box.append(&health_label);
-        health_box.append(&health_switch);
-        controls_box.append(&health_box);
+        if caps.battery_health {
+            let health_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            health_box.add_css_class("fan-display");
+            let health_label = gtk::Label::new(Some(t("bat_health_mode")));
+            health_label.add_css_class("control-label");
+            health_label.set_tooltip_text(Some(t("bat_health_mode_desc")));
+            let health_switch = gtk::Switch::new();
+            health_switch.set_valign(gtk::Align::Center);
+            health_switch.set_tooltip_text(Some(t("bat_health_mode_desc")));
+            health_switch.set_active(crate::hardware::extras::get_battery_health_mode());
+            health_switch.connect_state_set(move |_, active| {
+                let _ = crate::hardware::extras::set_battery_health_mode(active);
+                // Persist so it can be re-applied on boot (issue #11) - the
+                // EC resets health_mode on a full power cycle, this sysfs
+                // write alone doesn't survive it.
+                let mut cfg = crate::config::load_app_config();
+                cfg.battery_health_mode = active;
+                let _ = crate::config::save_app_config(&cfg);
+                glib::Propagation::Proceed
+            });
+            health_box.append(&health_label);
+            health_box.append(&health_switch);
+            controls_box.append(&health_box);
+        }
 
         // Calibration button
-        let cal_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        cal_box.add_css_class("fan-display");
-        let cal_status = gtk::Label::new(None);
-        cal_status.add_css_class("info-text-dim");
+        if calibration_available {
+            let cal_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
+            cal_box.add_css_class("fan-display");
+            let cal_status = gtk::Label::new(None);
+            cal_status.add_css_class("info-text-dim");
 
-        let cal_start = gtk::Button::with_label(t("bat_calibrate"));
-        cal_start.add_css_class("secondary-button");
+            let cal_start = gtk::Button::with_label(t("bat_calibrate"));
+            cal_start.add_css_class("secondary-button");
 
-        let cal_stop = gtk::Button::with_label(t("bat_calibrate_stop"));
-        cal_stop.add_css_class("secondary-button");
+            let cal_stop = gtk::Button::with_label(t("bat_calibrate_stop"));
+            cal_stop.add_css_class("secondary-button");
 
-        let cal_val = fs::read_to_string(format!("{}/calibration_mode", wmi_path))
-            .unwrap_or_default().trim().to_string();
-        if cal_val == "1" {
-            cal_status.set_text(t("bat_calibrating"));
-            cal_status.add_css_class("status-success");
-            cal_start.set_visible(false);
-        } else {
-            cal_stop.set_visible(false);
-        }
+            let cal_val = fs::read_to_string(&calibration_path)
+                .unwrap_or_default().trim().to_string();
+            if cal_val == "1" {
+                cal_status.set_text(t("bat_calibrating"));
+                cal_status.add_css_class("status-success");
+                cal_start.set_visible(false);
+            } else {
+                cal_stop.set_visible(false);
+            }
 
-        {
-            let wmi = wmi_path.to_string();
-            let st = cal_status.clone();
-            let stop = cal_stop.clone();
-            let start_ref = cal_start.clone();
-            cal_start.connect_clicked(move |_| {
-                let path = format!("{}/calibration_mode", wmi);
-                let r = set_calibration(&path, true);
-                match r {
-                    Ok(()) => {
-                        st.set_text(crate::i18n::t("bat_calibrating"));
-                        st.remove_css_class("status-error");
-                        st.add_css_class("status-success");
-                        start_ref.set_visible(false);
-                        stop.set_visible(true);
+            {
+                let path = calibration_path.clone();
+                let st = cal_status.clone();
+                let stop = cal_stop.clone();
+                let start_ref = cal_start.clone();
+                cal_start.connect_clicked(move |_| {
+                    let r = set_calibration(&path, true);
+                    match r {
+                        Ok(()) => {
+                            st.set_text(crate::i18n::t("bat_calibrating"));
+                            st.remove_css_class("status-error");
+                            st.add_css_class("status-success");
+                            start_ref.set_visible(false);
+                            stop.set_visible(true);
+                        }
+                        Err(e) => { st.set_text(&e); st.add_css_class("status-error"); }
                     }
-                    Err(e) => { st.set_text(&e); st.add_css_class("status-error"); }
-                }
-            });
-        }
-        {
-            let wmi = wmi_path.to_string();
-            let st = cal_status.clone();
-            let start = cal_start.clone();
-            let stop_ref = cal_stop.clone();
-            cal_stop.connect_clicked(move |_| {
-                let path = format!("{}/calibration_mode", wmi);
-                let _ = set_calibration(&path, false);
-                st.set_text(crate::i18n::t("bat_calibrate_done"));
-                st.remove_css_class("status-success");
-                stop_ref.set_visible(false);
-                start.set_visible(true);
-            });
-        }
+                });
+            }
+            {
+                let path = calibration_path.clone();
+                let st = cal_status.clone();
+                let start = cal_start.clone();
+                let stop_ref = cal_stop.clone();
+                cal_stop.connect_clicked(move |_| {
+                    let _ = set_calibration(&path, false);
+                    st.set_text(crate::i18n::t("bat_calibrate_done"));
+                    st.remove_css_class("status-success");
+                    stop_ref.set_visible(false);
+                    start.set_visible(true);
+                });
+            }
 
-        cal_box.append(&cal_start);
-        cal_box.append(&cal_stop);
-        cal_box.append(&cal_status);
-        controls_box.append(&cal_box);
+            cal_box.append(&cal_start);
+            cal_box.append(&cal_stop);
+            cal_box.append(&cal_status);
+            controls_box.append(&cal_box);
+        }
 
         page.append(&controls_box);
     }
