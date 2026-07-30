@@ -146,12 +146,27 @@ fn build_keyboard_section() -> gtk::Box {
     let status = gtk::Label::new(None);
     status.add_css_class("status-label");
 
+    // Restore whatever was last actually applied instead of always opening
+    // on Static - same fix as the WMI/ENEK5130 Lighting page (issues #25/#26):
+    // the EC/HID controller keeps a Dynamic effect running fine across
+    // reboots on its own, only the app's own memory of "which one" was
+    // missing, which is what made it look like the setting had been lost.
+    let saved = crate::config::load_app_config().magic_rgb_keyboard;
+    let initial_effect = saved.as_ref().map(|s| s.effect).unwrap_or(KeyboardEffect::Static);
+    let initial_brightness = saved.as_ref().map(|s| s.brightness).unwrap_or(100);
+    let initial_speed = saved.as_ref().map(|s| s.speed).unwrap_or(4);
+    let initial_reverse = saved.as_ref().map(|s| s.reverse).unwrap_or(false);
+    let initial_color = saved
+        .as_ref()
+        .map(|s| (s.red, s.green, s.blue))
+        .unwrap_or((0, 200, 230));
+
     let state = Rc::new(RefCell::new(KeyboardState {
-        effect: KeyboardEffect::Static,
-        brightness: 100,
-        speed: 4,
-        reverse: false,
-        color: (0, 200, 230),
+        effect: initial_effect,
+        brightness: initial_brightness,
+        speed: initial_speed,
+        reverse: initial_reverse,
+        color: initial_color,
         status: status.clone(),
     }));
 
@@ -167,7 +182,7 @@ fn build_keyboard_section() -> gtk::Box {
     for (effect, label) in keyboard_effect_options() {
         let btn = gtk::ToggleButton::with_label(&label);
         btn.add_css_class("mode-button");
-        if effect == KeyboardEffect::Static {
+        if effect == initial_effect {
             btn.set_active(true);
             btn.add_css_class("mode-active");
         }
@@ -200,14 +215,16 @@ fn build_keyboard_section() -> gtk::Box {
     }
     page.append(&effects_row);
 
-    let (bright_row, bright_scale) = labeled_scale(crate::i18n::t("brightness"), 0.0, 100.0, 100.0);
+    let (bright_row, bright_scale) =
+        labeled_scale(crate::i18n::t("brightness"), 0.0, 100.0, initial_brightness as f64);
     {
         let state = state.clone();
         bright_scale.connect_value_changed(move |s| state.borrow_mut().brightness = s.value() as u8);
     }
     page.append(&bright_row);
 
-    let (speed_row, speed_scale) = labeled_scale(crate::i18n::t("speed"), 0.0, 9.0, 4.0);
+    let (speed_row, speed_scale) =
+        labeled_scale(crate::i18n::t("speed"), 0.0, 9.0, initial_speed as f64);
     {
         let state = state.clone();
         speed_scale.connect_value_changed(move |s| state.borrow_mut().speed = s.value() as u8);
@@ -220,6 +237,7 @@ fn build_keyboard_section() -> gtk::Box {
     let reverse_label = gtk::Label::new(Some(crate::i18n::t("magic_rgb_reverse_direction")));
     reverse_label.add_css_class("rgb-channel-label");
     let reverse_switch = gtk::Switch::new();
+    reverse_switch.set_active(initial_reverse);
     {
         let state = state.clone();
         reverse_switch.connect_active_notify(move |s| state.borrow_mut().reverse = s.is_active());
@@ -228,7 +246,11 @@ fn build_keyboard_section() -> gtk::Box {
     reverse_row.append(&reverse_switch);
     page.append(&reverse_row);
 
-    let (color_row_widget, color_scales) = color_row((0.0, 200.0, 230.0));
+    let (color_row_widget, color_scales) = color_row((
+        initial_color.0 as f64,
+        initial_color.1 as f64,
+        initial_color.2 as f64,
+    ));
     for (ch, scale) in color_scales.iter().enumerate() {
         let state = state.clone();
         scale.connect_value_changed(move |s| {
@@ -275,6 +297,19 @@ fn build_keyboard_section() -> gtk::Box {
             background::run(
                 move || magic_rgb::set_keyboard_effect(effect, brightness, speed, reverse, color.0, color.1, color.2),
                 move |result| {
+                    if result.is_ok() {
+                        let mut cfg = crate::config::load_app_config();
+                        cfg.magic_rgb_keyboard = Some(crate::config::MagicRgbKeyboardState {
+                            effect,
+                            brightness,
+                            speed,
+                            reverse,
+                            red: color.0,
+                            green: color.1,
+                            blue: color.2,
+                        });
+                        let _ = crate::config::save_app_config(&cfg);
+                    }
                     apply_result(&status, result);
                     result_apply_btn.set_sensitive(true);
                     result_off_btn.set_sensitive(true);
@@ -328,11 +363,20 @@ fn build_logo_section() -> gtk::Box {
     let status = gtk::Label::new(None);
     status.add_css_class("status-label");
 
+    let saved = crate::config::load_app_config().magic_rgb_logo;
+    let initial_effect = saved.as_ref().and_then(|s| s.effect).unwrap_or(LogoEffect::Static);
+    let initial_brightness = saved.as_ref().map(|s| s.brightness).unwrap_or(100);
+    let initial_speed = saved.as_ref().map(|s| s.speed).unwrap_or(4);
+    let initial_color = saved
+        .as_ref()
+        .map(|s| (s.red, s.green, s.blue))
+        .unwrap_or((0, 220, 255));
+
     let state = Rc::new(RefCell::new(LogoState {
-        effect: Some(LogoEffect::Static),
-        brightness: 100,
-        speed: 4,
-        color: (0, 220, 255),
+        effect: Some(initial_effect),
+        brightness: initial_brightness,
+        speed: initial_speed,
+        color: initial_color,
         status: status.clone(),
     }));
 
@@ -341,7 +385,7 @@ fn build_logo_section() -> gtk::Box {
     for (effect, key) in [(LogoEffect::Static, "static_mode"), (LogoEffect::Breathing, "breath")] {
         let btn = gtk::ToggleButton::with_label(crate::i18n::t(key));
         btn.add_css_class("mode-button");
-        if effect == LogoEffect::Static {
+        if effect == initial_effect {
             btn.set_active(true);
             btn.add_css_class("mode-active");
         }
@@ -372,21 +416,27 @@ fn build_logo_section() -> gtk::Box {
     }
     page.append(&effects_row);
 
-    let (bright_row, bright_scale) = labeled_scale(crate::i18n::t("brightness"), 0.0, 100.0, 100.0);
+    let (bright_row, bright_scale) =
+        labeled_scale(crate::i18n::t("brightness"), 0.0, 100.0, initial_brightness as f64);
     {
         let state = state.clone();
         bright_scale.connect_value_changed(move |s| state.borrow_mut().brightness = s.value() as u8);
     }
     page.append(&bright_row);
 
-    let (speed_row, speed_scale) = labeled_scale(crate::i18n::t("speed"), 0.0, 9.0, 4.0);
+    let (speed_row, speed_scale) =
+        labeled_scale(crate::i18n::t("speed"), 0.0, 9.0, initial_speed as f64);
     {
         let state = state.clone();
         speed_scale.connect_value_changed(move |s| state.borrow_mut().speed = s.value() as u8);
     }
     page.append(&speed_row);
 
-    let (color_row_widget, color_scales) = color_row((0.0, 220.0, 255.0));
+    let (color_row_widget, color_scales) = color_row((
+        initial_color.0 as f64,
+        initial_color.1 as f64,
+        initial_color.2 as f64,
+    ));
     for (ch, scale) in color_scales.iter().enumerate() {
         let state = state.clone();
         scale.connect_value_changed(move |s| {
@@ -427,6 +477,18 @@ fn build_logo_section() -> gtk::Box {
             background::run(
                 move || magic_rgb::set_logo(effect, brightness, speed, color),
                 move |result| {
+                    if result.is_ok() {
+                        let mut cfg = crate::config::load_app_config();
+                        cfg.magic_rgb_logo = Some(crate::config::MagicRgbLogoState {
+                            effect,
+                            brightness,
+                            speed,
+                            red: color.0,
+                            green: color.1,
+                            blue: color.2,
+                        });
+                        let _ = crate::config::save_app_config(&cfg);
+                    }
                     apply_result(&status, result);
                     result_apply_btn.set_sensitive(true);
                     result_off_btn.set_sensitive(true);
@@ -486,11 +548,17 @@ fn build_chicony_section() -> gtk::Box {
     let status = gtk::Label::new(None);
     status.add_css_class("status-label");
 
+    let saved = crate::config::load_app_config().chicony_rgb;
+    let initial_effect = saved.as_ref().map(|s| s.effect).unwrap_or(1);
+    let initial_color = saved.as_ref().map(|s| s.color).unwrap_or(1);
+    let initial_brightness = saved.as_ref().map(|s| s.brightness).unwrap_or(30);
+    let initial_speed = saved.as_ref().map(|s| s.speed).unwrap_or(0);
+
     let state = Rc::new(RefCell::new(ChiconyState {
-        effect: 1,
-        color: 1,
-        brightness: 30,
-        speed: 0,
+        effect: initial_effect,
+        color: initial_color,
+        brightness: initial_brightness,
+        speed: initial_speed,
         status: status.clone(),
     }));
 
@@ -508,7 +576,7 @@ fn build_chicony_section() -> gtk::Box {
         let key = format!("chicony_effect_{name}");
         let btn = gtk::ToggleButton::with_label(crate::i18n::t(&key));
         btn.add_css_class("mode-button");
-        if wire_index == 1 {
+        if wire_index == initial_effect {
             btn.set_active(true);
             btn.add_css_class("mode-active");
         }
@@ -553,7 +621,7 @@ fn build_chicony_section() -> gtk::Box {
         let key = format!("chicony_color_{name}");
         let btn = gtk::ToggleButton::with_label(crate::i18n::t(&key));
         btn.add_css_class("mode-button");
-        if wire_index == 1 {
+        if wire_index == initial_color {
             btn.set_active(true);
             btn.add_css_class("mode-active");
         }
@@ -584,14 +652,16 @@ fn build_chicony_section() -> gtk::Box {
     }
     page.append(&colors_row);
 
-    let (bright_row, bright_scale) = labeled_scale(crate::i18n::t("brightness"), 0.0, 255.0, 30.0);
+    let (bright_row, bright_scale) =
+        labeled_scale(crate::i18n::t("brightness"), 0.0, 255.0, initial_brightness as f64);
     {
         let state = state.clone();
         bright_scale.connect_value_changed(move |s| state.borrow_mut().brightness = s.value() as u8);
     }
     page.append(&bright_row);
 
-    let (speed_row, speed_scale) = labeled_scale(crate::i18n::t("speed"), 0.0, 255.0, 0.0);
+    let (speed_row, speed_scale) =
+        labeled_scale(crate::i18n::t("speed"), 0.0, 255.0, initial_speed as f64);
     {
         let state = state.clone();
         speed_scale.connect_value_changed(move |s| state.borrow_mut().speed = s.value() as u8);
@@ -609,6 +679,16 @@ fn build_chicony_section() -> gtk::Box {
         apply_btn.connect_clicked(move |_| {
             let st = state.borrow();
             let result = chicony_rgb::set_effect(st.effect, st.brightness, st.color, st.speed);
+            if result.is_ok() {
+                let mut cfg = crate::config::load_app_config();
+                cfg.chicony_rgb = Some(crate::config::ChiconyRgbState {
+                    effect: st.effect,
+                    color: st.color,
+                    brightness: st.brightness,
+                    speed: st.speed,
+                });
+                let _ = crate::config::save_app_config(&cfg);
+            }
             apply_result(&st.status, result);
         });
     }
