@@ -24,8 +24,11 @@ pub fn append_snapshot() {
     let s = sensors::read_all_sensors();
     let current_profile = profile::get_current_profile().map(|p| p.to_id().to_string());
     let battery = crate::hardware::capabilities::battery_device();
-    let battery_attribute =
-        |name: &str| battery.and_then(|device| fs::read_to_string(device.join(name)).ok());
+    let battery_attribute = |name: &str| {
+        battery
+            .as_ref()
+            .and_then(|device| fs::read_to_string(device.join(name)).ok())
+    };
     let battery_capacity_pct =
         battery_attribute("capacity").and_then(|v| v.trim().parse::<u32>().ok());
     let battery_status = battery_attribute("status").map(|v| v.trim().to_string());

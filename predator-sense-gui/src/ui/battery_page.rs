@@ -39,10 +39,12 @@ struct BatData {
 }
 
 fn read_bat() -> BatData {
-    // BAT0 on some models, BAT1 on others - discovered once, never assumed.
+    // BAT0 on some models, BAT1 on others - discovered, never assumed. Looked
+    // up per refresh so a battery that registers after startup shows up.
     let device = crate::hardware::capabilities::battery_device();
     let r = |f: &str| {
         device
+            .as_ref()
             .and_then(|device| fs::read_to_string(device.join(f)).ok())
             .unwrap_or_default()
     };
