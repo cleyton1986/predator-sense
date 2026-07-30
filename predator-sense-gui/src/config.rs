@@ -1,8 +1,47 @@
+use crate::hardware::magic_rgb::{KeyboardEffect, LogoEffect};
 use crate::hardware::profile::PowerProfile;
 use crate::hardware::rgb::RgbConfig;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+
+/// Last-applied 2024+ HID keyboard lighting state (`hardware::magic_rgb`,
+/// issues #25/#26) - same "the app forgets which effect was last applied and
+/// always reopens on Static" gap the WMI/ENEK5130 path had, just on the
+/// sibling implementation for this newer hardware generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MagicRgbKeyboardState {
+    pub effect: KeyboardEffect,
+    pub brightness: u8,
+    pub speed: u8,
+    pub reverse: bool,
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+/// Last-applied 2024+ HID cover-logo lighting state, independent of the
+/// keyboard above (single LED/zone, its own effect list).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MagicRgbLogoState {
+    pub effect: Option<LogoEffect>,
+    pub brightness: u8,
+    pub speed: u8,
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+/// Last-applied Chicony USB-HID keyboard lighting state (Helios 300/PH317-56
+/// generation, `hardware::chicony_rgb`) - fixed palette, wire-order indices
+/// rather than an enum.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChiconyRgbState {
+    pub effect: usize,
+    pub color: usize,
+    pub brightness: u8,
+    pub speed: u8,
+}
 
 /// A saved lighting profile
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +128,17 @@ pub struct AppConfig {
     /// defaulting to Breath.
     #[serde(default)]
     pub rgb_dynamic_last: Option<RgbConfig>,
+    /// Same "remember what was last applied" fix as rgb_is_static/
+    /// rgb_dynamic_last above, for the separate 2024+ HID lighting page
+    /// (`ui::magic_rgb_page`, issues #25/#26) and the Chicony/Helios 300
+    /// page. None means never applied - the page keeps opening on its
+    /// hardcoded Static/first-effect default until the user applies once.
+    #[serde(default)]
+    pub magic_rgb_keyboard: Option<MagicRgbKeyboardState>,
+    #[serde(default)]
+    pub magic_rgb_logo: Option<MagicRgbLogoState>,
+    #[serde(default)]
+    pub chicony_rgb: Option<ChiconyRgbState>,
     /// None means the user has never applied a cover-logo setting, so automatic
     /// restoration must leave the controller's firmware default untouched.
     #[serde(default)]
@@ -187,6 +237,9 @@ impl Default for AppConfig {
             rgb_brightness: 100,
             rgb_is_static: true,
             rgb_dynamic_last: None,
+            magic_rgb_keyboard: None,
+            magic_rgb_logo: None,
+            chicony_rgb: None,
             cover_logo: None,
             battery_limiter: false,
             battery_health_mode: false,

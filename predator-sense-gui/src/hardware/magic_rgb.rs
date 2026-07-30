@@ -66,7 +66,7 @@ enum DeviceKind {
 /// Keyboard lighting effects, named and wire-coded after the `MAG_*` strings
 /// found in `SunrexUSBKeyboard.dll` (its own debug/config strings, not our
 /// naming). Ordered by wire code, matching the byte each one sends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum KeyboardEffect {
     Off,
     Static,
@@ -116,7 +116,7 @@ impl KeyboardEffect {
 
 /// The cover logo only ever confirmed two real effects plus off - it is a
 /// single LED/zone, not a multi-zone controller like the keyboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LogoEffect {
     Static,
     Breathing,
