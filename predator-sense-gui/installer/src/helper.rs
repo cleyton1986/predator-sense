@@ -1502,6 +1502,26 @@ mod tests {
     }
 
     #[test]
+    fn battery_limit_finds_a_charge_ceiling_that_is_not_on_the_first_battery() {
+        let fixture = TempDir::new().unwrap();
+        battery_device(fixture.path(), "BAT0", None);
+        let device = battery_device(fixture.path(), "BAT1", Some(BATTERY_LIMIT_DISABLED));
+        let ec = fixture.path().join("unused-ec-device");
+
+        run_with_paths(
+            &[HelperAction::BatteryLimit.as_str().into(), "1".into()],
+            fixture.path(),
+            &ec,
+        )
+        .unwrap();
+
+        assert_eq!(
+            read(&device, battery::CHARGE_LIMIT_ATTRIBUTE),
+            BATTERY_LIMIT_ENABLED
+        );
+    }
+
+    #[test]
     fn battery_limit_reports_where_it_looked_when_the_machine_has_no_charge_ceiling() {
         let fixture = TempDir::new().unwrap();
         // A battery that caps its charge through acer-wmi-battery health_mode

@@ -160,7 +160,10 @@ pub fn build() -> gtk::Box {
     // the two must never disagree about whether it exists.
     let caps = crate::hardware::capabilities::get();
     let calibration_path = crate::hardware::capabilities::sysfs(battery::WMI_CALIBRATION_MODE);
-    let calibration_available = calibration_path.exists();
+    // Not `.exists()`: the driver creates calibration_mode even where the
+    // firmware does not implement it, and reports -1 for that case.
+    let calibration_available =
+        crate::hardware::capabilities::wmi_battery_function_supported(battery::WMI_CALIBRATION_MODE);
 
     if caps.battery_health || calibration_available {
         let controls_box = gtk::Box::new(gtk::Orientation::Horizontal, 16);
