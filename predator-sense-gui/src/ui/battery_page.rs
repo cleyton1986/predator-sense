@@ -159,8 +159,10 @@ pub fn build() -> gtk::Box {
         health_box.add_css_class("fan-display");
         let health_label = gtk::Label::new(Some(t("bat_health_mode")));
         health_label.add_css_class("control-label");
+        health_label.set_tooltip_text(Some(t("bat_health_mode_desc")));
         let health_switch = gtk::Switch::new();
         health_switch.set_valign(gtk::Align::Center);
+        health_switch.set_tooltip_text(Some(t("bat_health_mode_desc")));
         health_switch.set_active(crate::hardware::extras::get_battery_health_mode());
         health_switch.connect_state_set(move |_, active| {
             let _ = crate::hardware::extras::set_battery_health_mode(active);
