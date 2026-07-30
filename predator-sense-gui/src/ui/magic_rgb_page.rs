@@ -17,6 +17,7 @@ use std::rc::Rc;
 
 use crate::hardware::chicony_rgb;
 use crate::hardware::magic_rgb::{self, KeyboardEffect, LogoEffect};
+use crate::ui::background;
 
 pub fn build() -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
@@ -248,31 +249,59 @@ fn build_keyboard_section() -> gtk::Box {
 
     let apply_btn = gtk::Button::with_label(crate::i18n::t("apply"));
     apply_btn.add_css_class("accent-button");
+    let off_btn = gtk::Button::with_label(crate::i18n::t("kbd_backlight_off"));
+
+    // Each HID command is up to 4 feature-report writes plus deliberate
+    // 15ms gaps between them (see `magic_rgb::send_sequence`) - on hardware
+    // that stalls answering any one of those (this backend's first real
+    // hardware test, issue #25), a blocking ioctl on the GTK thread freezes
+    // the whole UI for as long as it hangs. Both buttons are disabled for
+    // the duration of the call so a second click can't queue a second
+    // command against the same device while one is still in flight.
     {
         let state = state.clone();
-        apply_btn.connect_clicked(move |_| {
+        let apply_btn = apply_btn.clone();
+        let off_btn = off_btn.clone();
+        apply_btn.clone().connect_clicked(move |_| {
             let st = state.borrow();
-            let result = magic_rgb::set_keyboard_effect(
-                st.effect,
-                st.brightness,
-                st.speed,
-                st.reverse,
-                st.color.0,
-                st.color.1,
-                st.color.2,
+            let (effect, brightness, speed, reverse, color) =
+                (st.effect, st.brightness, st.speed, st.reverse, st.color);
+            let status = st.status.clone();
+            drop(st);
+            apply_btn.set_sensitive(false);
+            off_btn.set_sensitive(false);
+            let result_apply_btn = apply_btn.clone();
+            let result_off_btn = off_btn.clone();
+            background::run(
+                move || magic_rgb::set_keyboard_effect(effect, brightness, speed, reverse, color.0, color.1, color.2),
+                move |result| {
+                    apply_result(&status, result);
+                    result_apply_btn.set_sensitive(true);
+                    result_off_btn.set_sensitive(true);
+                },
             );
-            apply_result(&st.status, result);
         });
     }
     btn_row.append(&apply_btn);
 
-    let off_btn = gtk::Button::with_label(crate::i18n::t("kbd_backlight_off"));
     {
         let state = state.clone();
-        off_btn.connect_clicked(move |_| {
-            let st = state.borrow();
-            let result = magic_rgb::set_keyboard_effect(KeyboardEffect::Off, 0, 0, false, 0, 0, 0);
-            apply_result(&st.status, result);
+        let apply_btn = apply_btn.clone();
+        let off_btn = off_btn.clone();
+        off_btn.clone().connect_clicked(move |_| {
+            let status = state.borrow().status.clone();
+            apply_btn.set_sensitive(false);
+            off_btn.set_sensitive(false);
+            let result_apply_btn = apply_btn.clone();
+            let result_off_btn = off_btn.clone();
+            background::run(
+                || magic_rgb::set_keyboard_effect(KeyboardEffect::Off, 0, 0, false, 0, 0, 0),
+                move |result| {
+                    apply_result(&status, result);
+                    result_apply_btn.set_sensitive(true);
+                    result_off_btn.set_sensitive(true);
+                },
+            );
         });
     }
     btn_row.append(&off_btn);
@@ -378,23 +407,53 @@ fn build_logo_section() -> gtk::Box {
 
     let apply_btn = gtk::Button::with_label(crate::i18n::t("cover_logo_apply"));
     apply_btn.add_css_class("accent-button");
+    let off_btn = gtk::Button::with_label(crate::i18n::t("kbd_backlight_off"));
+
+    // Same off-main-thread treatment as the keyboard section above - see the
+    // comment there for why this matters (issue #25).
     {
         let state = state.clone();
-        apply_btn.connect_clicked(move |_| {
+        let apply_btn = apply_btn.clone();
+        let off_btn = off_btn.clone();
+        apply_btn.clone().connect_clicked(move |_| {
             let st = state.borrow();
-            let result = magic_rgb::set_logo(st.effect, st.brightness, st.speed, st.color);
-            apply_result(&st.status, result);
+            let (effect, brightness, speed, color) = (st.effect, st.brightness, st.speed, st.color);
+            let status = st.status.clone();
+            drop(st);
+            apply_btn.set_sensitive(false);
+            off_btn.set_sensitive(false);
+            let result_apply_btn = apply_btn.clone();
+            let result_off_btn = off_btn.clone();
+            background::run(
+                move || magic_rgb::set_logo(effect, brightness, speed, color),
+                move |result| {
+                    apply_result(&status, result);
+                    result_apply_btn.set_sensitive(true);
+                    result_off_btn.set_sensitive(true);
+                },
+            );
         });
     }
     btn_row.append(&apply_btn);
 
-    let off_btn = gtk::Button::with_label(crate::i18n::t("kbd_backlight_off"));
     {
         let state = state.clone();
-        off_btn.connect_clicked(move |_| {
-            let st = state.borrow();
-            let result = magic_rgb::set_logo(None, 0, 0, (0, 0, 0));
-            apply_result(&st.status, result);
+        let apply_btn = apply_btn.clone();
+        let off_btn = off_btn.clone();
+        off_btn.clone().connect_clicked(move |_| {
+            let status = state.borrow().status.clone();
+            apply_btn.set_sensitive(false);
+            off_btn.set_sensitive(false);
+            let result_apply_btn = apply_btn.clone();
+            let result_off_btn = off_btn.clone();
+            background::run(
+                || magic_rgb::set_logo(None, 0, 0, (0, 0, 0)),
+                move |result| {
+                    apply_result(&status, result);
+                    result_apply_btn.set_sensitive(true);
+                    result_off_btn.set_sensitive(true);
+                },
+            );
         });
     }
     btn_row.append(&off_btn);
