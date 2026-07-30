@@ -76,6 +76,19 @@ pub struct AppConfig {
     pub rgb_static_zones: Option<Vec<ZoneColor>>,
     #[serde(default = "default_rgb_brightness")]
     pub rgb_brightness: u8,
+    /// Whether the last-applied keyboard lighting was Static (true) or a
+    /// Dynamic effect (false). The Lighting page used to always open on
+    /// Static/Breath regardless of what was actually last applied - the
+    /// EC/WMI keeps whatever Dynamic effect was chosen running fine across
+    /// reboots on its own, but the app itself never remembered which one it
+    /// was, so reopening it looked like the setting had been lost.
+    #[serde(default = "default_true")]
+    pub rgb_is_static: bool,
+    /// Last-applied Dynamic effect (mode/speed/brightness/direction/color),
+    /// so the Lighting page can restore the exact effect on open instead of
+    /// defaulting to Breath.
+    #[serde(default)]
+    pub rgb_dynamic_last: Option<RgbConfig>,
     /// None means the user has never applied a cover-logo setting, so automatic
     /// restoration must leave the controller's firmware default untouched.
     #[serde(default)]
@@ -172,6 +185,8 @@ impl Default for AppConfig {
             debug_logging: false,
             rgb_static_zones: None,
             rgb_brightness: 100,
+            rgb_is_static: true,
+            rgb_dynamic_last: None,
             cover_logo: None,
             battery_limiter: false,
             battery_health_mode: false,
