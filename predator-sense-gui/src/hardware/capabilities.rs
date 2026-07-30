@@ -34,8 +34,10 @@ pub struct Capabilities {
     /// drives.
     pub battery_limit: bool,
     /// Battery "Health Mode": the 80% charge cap of the `acer-wmi-battery` WMI
-    /// driver. A separate mechanism from `battery_limit`, driven from the
-    /// Battery page; most machines expose one or the other, not both.
+    /// driver, and only when the firmware actually implements it — the driver
+    /// creates the attribute either way. A separate mechanism from
+    /// `battery_limit`, driven from the Battery page; most machines expose one
+    /// or the other, not both.
     pub battery_health: bool,
 }
 
@@ -64,7 +66,7 @@ impl Capabilities {
             ec: Path::new("/dev/ec").exists(),
             nvidia_gpu: crate::hardware::nvidia::is_available(),
             battery_limit: battery_limit_present(),
-            battery_health: sysfs(battery::WMI_HEALTH_MODE).exists(),
+            battery_health: wmi_battery_function_supported(battery::WMI_HEALTH_MODE),
         }
     }
 }
@@ -104,22 +106,37 @@ pub fn sysfs(relative: &str) -> PathBuf {
     Path::new(battery::SYSFS_ROOT).join(relative)
 }
 
-/// The battery device (`BAT0`, `BAT1`, ...), discovered once. Cached like the
+/// The battery devices (`BAT0`, `BAT1`, ...), discovered once. Cached like the
 /// capabilities themselves: scanning `class/power_supply` on every read would
 /// put a directory listing on the Battery page's refresh timer.
-pub fn battery_device() -> Option<&'static Path> {
+fn battery_devices() -> &'static [PathBuf] {
     use std::sync::OnceLock;
-    static DEVICE: OnceLock<Option<PathBuf>> = OnceLock::new();
-    DEVICE
-        .get_or_init(|| battery::device(Path::new(battery::SYSFS_ROOT)))
-        .as_deref()
+    static DEVICES: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    DEVICES.get_or_init(|| battery::devices(Path::new(battery::SYSFS_ROOT)))
 }
 
-/// The battery's charge ceiling, when it has one. Re-checked on each call (a
-/// single stat) because a driver can create the attribute after startup.
+/// The battery to report readings for.
+pub fn battery_device() -> Option<&'static Path> {
+    battery_devices().first().map(PathBuf::as_path)
+}
+
+/// The charge ceiling this machine can write, on whichever battery carries it.
+/// Re-checked on each call (a stat per battery, and machines have one) because
+/// a driver can create the attribute after startup.
 pub fn battery_charge_limit() -> Option<PathBuf> {
-    let attribute = battery_device()?.join(battery::CHARGE_LIMIT_ATTRIBUTE);
-    attribute.exists().then_some(attribute)
+    battery_devices()
+        .iter()
+        .map(|device| device.join(battery::CHARGE_LIMIT_ATTRIBUTE))
+        .find(|attribute| attribute.exists())
+}
+
+/// Whether an `acer-wmi-battery` control can actually do anything. The driver
+/// creates its attributes whether or not the firmware supports the function,
+/// so existence is not the question — see [`battery::function_supported`].
+pub fn wmi_battery_function_supported(relative: &str) -> bool {
+    fs::read_to_string(sysfs(relative))
+        .map(|value| battery::function_supported(&value))
+        .unwrap_or(false)
 }
 
 fn battery_limit_present() -> bool {
