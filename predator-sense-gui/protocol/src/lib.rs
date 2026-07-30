@@ -433,6 +433,96 @@ pub mod helper {
     }
 }
 
+/// Where the battery lives in sysfs.
+///
+/// The device name is not fixed: it is `BAT1` on some Acer models and `BAT0`
+/// on others, so it has to be discovered instead of hard-coded. The GUI and
+/// the privileged helper both resolve it through here so a write and the
+/// read-back that follows it can never land on different devices.
+pub mod battery {
+    use std::path::{Path, PathBuf};
+
+    /// Sysfs mount point. The helper takes its root as a parameter so tests
+    /// can point it at a fixture tree; the GUI always reads the real one.
+    pub const SYSFS_ROOT: &str = "/sys";
+
+    /// Paths below are relative to a sysfs root.
+    pub const POWER_SUPPLY_CLASS: &str = "class/power_supply";
+    /// Charge ceiling in percent, exposed by the generic power_supply class.
+    pub const CHARGE_LIMIT_ATTRIBUTE: &str = "charge_control_end_threshold";
+    /// 80% charge cap of the `acer-wmi-battery` WMI driver — an independent
+    /// mechanism from [`CHARGE_LIMIT_ATTRIBUTE`]; a machine may expose either,
+    /// both, or neither.
+    pub const WMI_HEALTH_MODE: &str = "bus/wmi/drivers/acer-wmi-battery/health_mode";
+    pub const WMI_CALIBRATION_MODE: &str = "bus/wmi/drivers/acer-wmi-battery/calibration_mode";
+    /// Charge cap of the out-of-tree `acer-wmi` predator_sense interface.
+    pub const PREDATOR_SENSE_LIMITER: &str =
+        "bus/platform/drivers/acer-wmi/acer-wmi/predator_sense/battery_limiter";
+
+    const TYPE_ATTRIBUTE: &str = "type";
+    const BATTERY_TYPE: &str = "Battery";
+
+    /// Every `power_supply` device reporting `type` = `Battery`. Mains
+    /// adapters and USB-C source ports live under the same class, hence the
+    /// type filter.
+    ///
+    /// Sorted by name, because `read_dir` yields entries in an arbitrary
+    /// order and a machine with more than one battery must not resolve
+    /// differently between a write and the read-back that follows it.
+    pub fn devices(sysfs: &Path) -> Vec<PathBuf> {
+        let mut batteries: Vec<PathBuf> = match std::fs::read_dir(sysfs.join(POWER_SUPPLY_CLASS)) {
+            Ok(entries) => entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    std::fs::read_to_string(path.join(TYPE_ATTRIBUTE))
+                        .map(|kind| kind.trim() == BATTERY_TYPE)
+                        .unwrap_or(false)
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        batteries.sort();
+        batteries
+    }
+
+    /// The battery to report readings for: the first one.
+    pub fn device(sysfs: &Path) -> Option<PathBuf> {
+        devices(sysfs).into_iter().next()
+    }
+
+    /// The `charge_control_end_threshold` this machine can actually write.
+    ///
+    /// Searched across every battery rather than only the first: on a
+    /// multi-battery machine the charge ceiling may sit on a later device,
+    /// and looking only at the first would report no charge limit at all.
+    ///
+    /// `None` means no charge limit through the generic power_supply
+    /// interface (the machine may still have [`WMI_HEALTH_MODE`]).
+    pub fn charge_limit(sysfs: &Path) -> Option<PathBuf> {
+        devices(sysfs)
+            .into_iter()
+            .map(|device| device.join(CHARGE_LIMIT_ATTRIBUTE))
+            .find(|attribute| attribute.exists())
+    }
+
+    /// Whether an `acer-wmi-battery` function is usable, given the contents of
+    /// its attribute.
+    ///
+    /// The driver creates `health_mode` and `calibration_mode` whether or not
+    /// the firmware supports them, and reports `-1` for a function its
+    /// function list omits — writes to an unsupported function are then
+    /// silently ignored. So the attribute existing proves nothing; only its
+    /// value says whether the control can do anything.
+    pub fn function_supported(value: &str) -> bool {
+        value
+            .trim()
+            .parse::<i32>()
+            .map(|value| value >= 0)
+            .unwrap_or(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::helper::{Action, CpuGovernor, EnergyPreference, Switch};
@@ -497,5 +587,131 @@ mod tests {
         for switch in [Switch::Disabled, Switch::Enabled] {
             assert_eq!(Switch::parse(switch.as_str()), Some(switch));
         }
+    }
+
+    fn power_supply(sysfs: &Path, name: &str, kind: &str, attributes: &[(&str, &str)]) {
+        let device = sysfs.join(super::battery::POWER_SUPPLY_CLASS).join(name);
+        std::fs::create_dir_all(&device).unwrap();
+        std::fs::write(device.join("type"), format!("{kind}\n")).unwrap();
+        for (attribute, value) in attributes {
+            std::fs::write(device.join(attribute), format!("{value}\n")).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_battery_is_found_whatever_its_device_number_is() {
+        for name in ["BAT0", "BAT1", "BAT2"] {
+            let sysfs = tempfile::tempdir().unwrap();
+            power_supply(sysfs.path(), name, "Battery", &[]);
+            assert_eq!(
+                super::battery::device(sysfs.path()),
+                Some(
+                    sysfs
+                        .path()
+                        .join(super::battery::POWER_SUPPLY_CLASS)
+                        .join(name)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn mains_and_usb_power_supplies_are_never_taken_for_the_battery() {
+        let sysfs = tempfile::tempdir().unwrap();
+        power_supply(sysfs.path(), "ACAD", "Mains", &[]);
+        power_supply(sysfs.path(), "ucsi-source-psy-USBC000:001", "USB", &[]);
+        assert_eq!(super::battery::device(sysfs.path()), None);
+        assert_eq!(super::battery::charge_limit(sysfs.path()), None);
+    }
+
+    #[test]
+    fn several_batteries_always_resolve_to_the_same_device() {
+        let sysfs = tempfile::tempdir().unwrap();
+        power_supply(sysfs.path(), "BAT1", "Battery", &[]);
+        power_supply(sysfs.path(), "BAT0", "Battery", &[]);
+        power_supply(sysfs.path(), "ACAD", "Mains", &[]);
+        for _ in 0..8 {
+            assert_eq!(
+                super::battery::device(sysfs.path()),
+                Some(
+                    sysfs
+                        .path()
+                        .join(super::battery::POWER_SUPPLY_CLASS)
+                        .join("BAT0")
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_battery_without_a_charge_ceiling_reports_no_charge_limit_path() {
+        let sysfs = tempfile::tempdir().unwrap();
+        power_supply(sysfs.path(), "BAT1", "Battery", &[("capacity", "80")]);
+        assert!(super::battery::device(sysfs.path()).is_some());
+        assert_eq!(super::battery::charge_limit(sysfs.path()), None);
+    }
+
+    #[test]
+    fn the_charge_ceiling_is_found_on_a_battery_that_is_not_the_first_one() {
+        let sysfs = tempfile::tempdir().unwrap();
+        power_supply(sysfs.path(), "BAT0", "Battery", &[("capacity", "80")]);
+        power_supply(
+            sysfs.path(),
+            "BAT1",
+            "Battery",
+            &[(super::battery::CHARGE_LIMIT_ATTRIBUTE, "100")],
+        );
+        assert_eq!(
+            super::battery::charge_limit(sysfs.path()),
+            Some(
+                sysfs
+                    .path()
+                    .join(super::battery::POWER_SUPPLY_CLASS)
+                    .join("BAT1")
+                    .join(super::battery::CHARGE_LIMIT_ATTRIBUTE)
+            )
+        );
+    }
+
+    #[test]
+    fn an_acer_wmi_battery_function_the_firmware_omits_is_not_supported() {
+        // The driver reports -1 for a function missing from the firmware's
+        // function list, and ignores writes to it.
+        assert!(!super::battery::function_supported("-1"));
+        assert!(!super::battery::function_supported("-1\n"));
+        // 0 and 1 are the off/on states of a function that does exist.
+        assert!(super::battery::function_supported("0"));
+        assert!(super::battery::function_supported("1\n"));
+        // An unreadable or nonsensical attribute proves nothing either.
+        assert!(!super::battery::function_supported(""));
+        assert!(!super::battery::function_supported("enabled"));
+    }
+
+    #[test]
+    fn the_charge_limit_is_resolved_on_the_battery_that_exposes_it() {
+        let sysfs = tempfile::tempdir().unwrap();
+        power_supply(
+            sysfs.path(),
+            "BAT0",
+            "Battery",
+            &[(super::battery::CHARGE_LIMIT_ATTRIBUTE, "100")],
+        );
+        assert_eq!(
+            super::battery::charge_limit(sysfs.path()),
+            Some(
+                sysfs
+                    .path()
+                    .join(super::battery::POWER_SUPPLY_CLASS)
+                    .join("BAT0")
+                    .join(super::battery::CHARGE_LIMIT_ATTRIBUTE)
+            )
+        );
+    }
+
+    #[test]
+    fn a_missing_power_supply_class_is_not_an_error() {
+        let sysfs = tempfile::tempdir().unwrap();
+        assert_eq!(super::battery::device(sysfs.path()), None);
+        assert_eq!(super::battery::charge_limit(sysfs.path()), None);
     }
 }

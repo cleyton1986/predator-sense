@@ -8,3 +8,6 @@ license = "GPL-3.0"
 
 [lib]
 path = "src/lib.rs"
+
+[dev-dependencies]
+tempfile = "3"

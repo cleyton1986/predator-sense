@@ -266,7 +266,7 @@ pub fn build_features_flow() -> gtk::FlowBox {
         (crate::i18n::t("feat_profiles"), caps.platform_profile),
         (crate::i18n::t("feat_ec"), caps.ec),
         (crate::i18n::t("feat_gpu"), caps.nvidia_gpu),
-        (crate::i18n::t("feat_battery"), caps.battery_limit),
+        (crate::i18n::t("feat_battery"), caps.battery_charge_cap()),
     ];
     for (name, ok) in features {
         feat_flow.insert(&make_feature_chip(name, ok), -1);
