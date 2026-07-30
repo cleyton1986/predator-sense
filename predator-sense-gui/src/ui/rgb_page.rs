@@ -175,14 +175,41 @@ fn build_keyboard_panel() -> gtk::Box {
     // time since hardware doesn't change while the app runs.
     let hid_only = hid_rgb::is_available() && !rgb::is_module_loaded();
 
+    // Restore whatever was last actually applied instead of always opening
+    // on Static/Breath - the EC/WMI keeps a Dynamic effect running fine
+    // across reboots on its own, but the app itself never remembered which
+    // one it was, so reopening it looked like the setting had been lost.
+    let saved_cfg = crate::config::load_app_config();
+    let is_static = saved_cfg.rgb_is_static;
+    let saved_dynamic = saved_cfg.rgb_dynamic_last.clone().unwrap_or_default();
+    let default_zone_colors = [(0u8, 200u8, 230u8); 4];
+    let zone_colors = saved_cfg
+        .rgb_static_zones
+        .as_ref()
+        .map(|zones| {
+            let mut colors = default_zone_colors;
+            for zone in zones {
+                if let Some(index) = zone.zone.checked_sub(1).filter(|&i| (i as usize) < 4) {
+                    colors[index as usize] = (zone.red, zone.green, zone.blue);
+                }
+            }
+            colors
+        })
+        .unwrap_or(default_zone_colors);
+    let brightness = if is_static {
+        saved_cfg.rgb_brightness
+    } else {
+        saved_dynamic.brightness
+    };
+
     let state = Rc::new(RefCell::new(RgbState {
-        mode: RgbMode::Breath,
-        speed: 4,
-        brightness: 100,
-        direction: Direction::RightToLeft,
-        zone_colors: [(0, 200, 230), (0, 200, 230), (0, 200, 230), (0, 200, 230)],
-        dyn_color: (0, 255, 255),
-        is_static: true,
+        mode: saved_dynamic.mode,
+        speed: saved_dynamic.speed,
+        brightness,
+        direction: saved_dynamic.direction,
+        zone_colors,
+        dyn_color: (saved_dynamic.red, saved_dynamic.green, saved_dynamic.blue),
+        is_static,
         status: status.clone(),
         keyboard_da: keyboard_da.clone(),
         anim_phase: 0.0,
@@ -191,11 +218,16 @@ fn build_keyboard_panel() -> gtk::Box {
     // Toggle: Estático / Dinâmico + brightness
     let toggle_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     let static_btn = gtk::ToggleButton::with_label(crate::i18n::t("static_mode"));
-    static_btn.set_active(true);
-    static_btn.add_css_class("mode-active");
     static_btn.add_css_class("mode-button");
     let dynamic_btn = gtk::ToggleButton::with_label(crate::i18n::t("dynamic_mode"));
     dynamic_btn.add_css_class("mode-button");
+    if is_static {
+        static_btn.set_active(true);
+        static_btn.add_css_class("mode-active");
+    } else {
+        dynamic_btn.set_active(true);
+        dynamic_btn.add_css_class("mode-active");
+    }
 
     let bright_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     bright_box.set_halign(gtk::Align::End);
@@ -203,7 +235,7 @@ fn build_keyboard_panel() -> gtk::Box {
     let bl = gtk::Label::new(Some(crate::i18n::t("brightness")));
     bl.add_css_class("rgb-channel-label");
     let bs = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
-    bs.set_value(100.0);
+    bs.set_value(brightness as f64);
     bs.set_size_request(120, -1);
     bs.add_css_class("accent-scale");
     {
@@ -279,7 +311,7 @@ fn build_keyboard_panel() -> gtk::Box {
     preview_note.add_css_class("warning-text");
     preview_note.set_margin_top(2);
     preview_note.set_wrap(true);
-    preview_note.set_visible(false);
+    preview_note.set_visible(!is_static && hid_only && !mode_is_hid_native(saved_dynamic.mode));
     page.append(&preview_note);
 
     // Animation timer for the on-screen keyboard visual: ticks whenever
@@ -365,7 +397,8 @@ fn build_keyboard_panel() -> gtk::Box {
 
         // R, G, B sliders
         let channels = ["R", "G", "B"];
-        let defaults = [0.0, 200.0, 230.0];
+        let (zr, zg, zb_) = zone_colors[zone];
+        let defaults = [zr as f64, zg as f64, zb_ as f64];
         let mut channel_sliders: Vec<gtk::Scale> = Vec::new();
         for (ch, (name, def)) in channels.iter().zip(defaults.iter()).enumerate() {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
@@ -405,10 +438,11 @@ fn build_keyboard_panel() -> gtk::Box {
         zones_row.append(&zb);
     }
     zone_controls.append(&zones_row);
+    zone_controls.set_visible(is_static);
     page.append(&zone_controls);
 
-    // === Dynamic effect controls (hidden initially) ===
-    dyn_controls.set_visible(false);
+    // === Dynamic effect controls ===
+    dyn_controls.set_visible(!is_static);
 
     let effects_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     effects_row.set_halign(gtk::Align::Center);
@@ -419,11 +453,19 @@ fn build_keyboard_panel() -> gtk::Box {
         crate::i18n::t("shift"),
         crate::i18n::t("zoom"),
     ];
+    // Effect order mirrors RgbMode's non-Static variants (Breath=1..Zoom=5).
+    let saved_effect_index = match saved_dynamic.mode {
+        RgbMode::Neon => 1,
+        RgbMode::Wave => 2,
+        RgbMode::Shifting => 3,
+        RgbMode::Zoom => 4,
+        RgbMode::Breath | RgbMode::Static => 0,
+    };
     let mut effect_buttons: Vec<gtk::ToggleButton> = Vec::new();
     for (i, name) in effects.iter().enumerate() {
         let btn = gtk::ToggleButton::with_label(name);
         btn.add_css_class("mode-button");
-        if i == 0 {
+        if i == saved_effect_index {
             btn.set_active(true);
             btn.add_css_class("mode-active");
         }
@@ -467,7 +509,7 @@ fn build_keyboard_panel() -> gtk::Box {
     let spl = gtk::Label::new(Some(crate::i18n::t("speed")));
     spl.add_css_class("rgb-channel-label");
     let sps = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 9.0, 1.0);
-    sps.set_value(4.0);
+    sps.set_value(saved_dynamic.speed as f64);
     sps.set_size_request(150, -1);
     sps.add_css_class("accent-scale");
     {
@@ -482,7 +524,16 @@ fn build_keyboard_panel() -> gtk::Box {
     cr_l.add_css_class("rgb-channel-label");
     sp_row.append(&cr_l);
     let mut dyn_color_sliders: Vec<gtk::Scale> = Vec::new();
-    for (ch, def) in [(0u8, 0.0f64), (1, 255.0), (2, 255.0)] {
+    let dyn_color_defaults = [
+        saved_dynamic.red as f64,
+        saved_dynamic.green as f64,
+        saved_dynamic.blue as f64,
+    ];
+    for (ch, def) in [
+        (0u8, dyn_color_defaults[0]),
+        (1, dyn_color_defaults[1]),
+        (2, dyn_color_defaults[2]),
+    ] {
         let sl = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 255.0, 1.0);
         sl.set_value(def);
         sl.set_size_request(60, -1);
@@ -634,6 +685,28 @@ fn build_keyboard_panel() -> gtk::Box {
                 })
             };
             let preview_applied = !st.is_static && hid_only && !mode_is_hid_native(st.mode);
+            // Remember which effect is actually running so the Lighting page
+            // opens back on it next time, instead of always defaulting to
+            // Static/Breath (the EC/WMI itself keeps a Dynamic effect looping
+            // fine across reboots on its own; only the app's own memory of
+            // "which one" was missing). Preview-only writes on module-free
+            // HID hardware never touch real hardware, so they don't count.
+            if result.is_ok() && !preview_applied {
+                let mut cfg = crate::config::load_app_config();
+                cfg.rgb_is_static = st.is_static;
+                if !st.is_static {
+                    cfg.rgb_dynamic_last = Some(RgbConfig {
+                        mode: st.mode,
+                        speed: st.speed,
+                        brightness: st.brightness,
+                        direction: st.direction,
+                        red: st.dyn_color.0,
+                        green: st.dyn_color.1,
+                        blue: st.dyn_color.2,
+                    });
+                }
+                let _ = crate::config::save_app_config(&cfg);
+            }
             match result {
                 Ok(()) if preview_applied => {
                     st.status.set_text(crate::i18n::t("rgb_preview_applied"));
