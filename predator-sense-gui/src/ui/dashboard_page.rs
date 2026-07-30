@@ -130,7 +130,15 @@ pub fn build() -> gtk::ScrolledWindow {
     let net_detail = if info.net_interface.is_empty() {
         crate::i18n::t("no_active_interface").to_string()
     } else {
-        format!("{} · {}\n{}", info.net_type, info.net_interface, info.net_mac)
+        let ip = crate::ui::network_page::local_ip();
+        format!(
+            "{} · {}\n{}\n{} {}",
+            info.net_type,
+            info.net_interface,
+            info.net_mac,
+            crate::i18n::t("local_ip"),
+            ip.as_deref().unwrap_or("--"),
+        )
     };
 
     let os_detail = format!("{}\nKernel {}", info.os_pretty, info.kernel);
