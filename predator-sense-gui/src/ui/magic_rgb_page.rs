@@ -30,14 +30,101 @@ pub fn build() -> gtk::ScrolledWindow {
     shell.set_margin_start(16);
     shell.set_margin_end(16);
 
+    // Every combination below is a real hardware possibility (issue #26):
+    // some boards have only a keyboard, some also have a lid logo, the older
+    // Chicony generation is keyboard-only. When more than one section is
+    // present, split them into tabs (same switcher/Stack pattern already
+    // used by rgb_page.rs for Keyboard/Cover-logo) instead of stacking every
+    // panel in one long scroll - that stacked layout was the whole page
+    // looking "off" in the #26 report once a board has both a keyboard and a
+    // lid logo. A single-section board keeps the plain layout, no switcher
+    // needed for one tab.
+    let mut sections: Vec<(&str, String, gtk::Widget)> = Vec::new();
     if magic_rgb::is_keyboard_available() {
-        shell.append(&build_keyboard_section());
+        sections.push((
+            "keyboard",
+            crate::i18n::t("magic_rgb_keyboard_section").to_string(),
+            build_keyboard_section().upcast(),
+        ));
     }
     if magic_rgb::is_logo_available() {
-        shell.append(&build_logo_section());
+        sections.push((
+            "logo",
+            // Same label/key as the WMI/ENEK5130 Lighting page's own
+            // Keyboard/Cover-logo switcher (rgb_page.rs) - same concept,
+            // same name, instead of the "Lid Logo" wording this page used
+            // to have before it got its own tab.
+            crate::i18n::t("cover_logo").to_string(),
+            build_logo_section().upcast(),
+        ));
     }
     if chicony_rgb::is_available() {
-        shell.append(&build_chicony_section());
+        sections.push((
+            "chicony",
+            crate::i18n::t("chicony_rgb_section").to_string(),
+            build_chicony_section().upcast(),
+        ));
+    }
+
+    if sections.len() <= 1 {
+        for (_, _, widget) in sections {
+            shell.append(&widget);
+        }
+    } else {
+        let switcher = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        switcher.set_halign(gtk::Align::Center);
+        switcher.add_css_class("lighting-device-switcher");
+
+        let stack = gtk::Stack::new();
+        stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+        stack.set_transition_duration(180);
+        // Let the visible panel determine the requested size, same reasoning
+        // as rgb_page.rs: homogeneous sizing would let the widest tab (the
+        // 16-effect keyboard grid) impose its width on every other tab.
+        stack.set_hhomogeneous(false);
+        stack.set_vhomogeneous(false);
+
+        let mut buttons = Vec::new();
+        for (index, (id, label, widget)) in sections.iter().enumerate() {
+            stack.add_named(widget, Some(id));
+            let btn = gtk::ToggleButton::with_label(label);
+            btn.add_css_class("mode-button");
+            if index == 0 {
+                btn.set_active(true);
+                btn.add_css_class("mode-active");
+            }
+            switcher.append(&btn);
+            buttons.push((id.to_string(), btn));
+        }
+        stack.set_visible_child_name(&buttons[0].0);
+
+        let buttons = Rc::new(buttons);
+        for (id, btn) in buttons.iter() {
+            let id = id.clone();
+            let stack = stack.clone();
+            let buttons = buttons.clone();
+            let this_btn = btn.clone();
+            btn.connect_toggled(move |b| {
+                if !b.is_active() {
+                    // Refuse to leave every tab button deselected.
+                    if buttons.iter().all(|(_, other)| !other.is_active()) {
+                        b.set_active(true);
+                    }
+                    return;
+                }
+                for (_, other) in buttons.iter() {
+                    if *other != this_btn {
+                        other.set_active(false);
+                        other.remove_css_class("mode-active");
+                    }
+                }
+                b.add_css_class("mode-active");
+                stack.set_visible_child_name(&id);
+            });
+        }
+
+        shell.append(&switcher);
+        shell.append(&stack);
     }
 
     scroll.set_child(Some(&shell));
@@ -105,6 +192,8 @@ struct KeyboardState {
     reverse: bool,
     color: (u8, u8, u8),
     status: gtk::Label,
+    keyboard_da: gtk::DrawingArea,
+    anim_phase: f64,
 }
 
 fn keyboard_effect_options() -> Vec<(KeyboardEffect, String)> {
@@ -161,6 +250,25 @@ fn build_keyboard_section() -> gtk::Box {
         .map(|s| (s.red, s.green, s.blue))
         .unwrap_or((0, 200, 230));
 
+    // Live preview card, same visual language as the WMI/ENEK5130 Lighting
+    // page's keyboard drawing (`rgb_page::draw_keyboard`, reused as-is here -
+    // this hardware has no independent zones, so every "zone" the shape
+    // renderer expects just gets the same single color). Purely cosmetic:
+    // reacts to the controls below as they move, hardware only changes on
+    // Apply, same as every other control on this page already did.
+    let preview_card = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    preview_card.add_css_class("cover-logo-preview-card");
+    let preview_title = gtk::Label::new(Some(crate::i18n::t("cover_logo_live_preview")));
+    preview_title.add_css_class("cover-logo-section-title");
+    preview_title.set_halign(gtk::Align::Start);
+    preview_card.append(&preview_title);
+    let keyboard_da = gtk::DrawingArea::new();
+    keyboard_da.set_size_request(-1, 200);
+    keyboard_da.set_hexpand(true);
+    keyboard_da.set_halign(gtk::Align::Fill);
+    keyboard_da.set_margin_top(6);
+    preview_card.append(&keyboard_da);
+
     let state = Rc::new(RefCell::new(KeyboardState {
         effect: initial_effect,
         brightness: initial_brightness,
@@ -168,7 +276,56 @@ fn build_keyboard_section() -> gtk::Box {
         reverse: initial_reverse,
         color: initial_color,
         status: status.clone(),
+        keyboard_da: keyboard_da.clone(),
+        anim_phase: 0.0,
     }));
+
+    {
+        let state = state.clone();
+        keyboard_da.set_draw_func(move |_a, cr, w, h| {
+            let st = state.borrow();
+            // Breathing is the one effect this preview animates for real -
+            // it's a well-understood "pulse the chosen color" LED behavior,
+            // sent with the same RGB the user picked (`set_keyboard_effect`
+            // always sends the color, never drops it). Every other effect
+            // here is a spatial animation (Snake/Star/Rainbow/Slash/...)
+            // this preview can't honestly reproduce, so it just shows the
+            // solid chosen color instead of guessing a fake motion for it.
+            let pulse = if st.effect == KeyboardEffect::Breathing {
+                0.22 + 0.78 * (0.5 + 0.5 * st.anim_phase.sin())
+            } else {
+                1.0
+            };
+            let level = pulse * (st.brightness as f64 / 100.0);
+            let (r, g, b) = st.color;
+            let dimmed = (
+                (r as f64 * level).round() as u8,
+                (g as f64 * level).round() as u8,
+                (b as f64 * level).round() as u8,
+            );
+            crate::ui::rgb_page::draw_keyboard(cr, w as f64, h as f64, &[dimmed; 4]);
+        });
+    }
+    page.append(&preview_card);
+
+    // Ticks only while Breathing is selected and the page is actually on
+    // screen; self-cancels once the widget is torn down, same pattern as
+    // the WMI/ENEK5130 Lighting page's own animation timer.
+    {
+        let state = state.clone();
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+            let da = { state.borrow().keyboard_da.clone() };
+            if da.root().is_none() {
+                return gtk::glib::ControlFlow::Break;
+            }
+            let mut st = state.borrow_mut();
+            if st.effect == KeyboardEffect::Breathing && da.is_mapped() {
+                st.anim_phase += 0.05 + (st.speed as f64) * 0.03;
+                da.queue_draw();
+            }
+            gtk::glib::ControlFlow::Continue
+        });
+    }
 
     let effects_row = gtk::FlowBox::new();
     effects_row.set_selection_mode(gtk::SelectionMode::None);
@@ -210,7 +367,9 @@ fn build_keyboard_section() -> gtk::Box {
                 }
             }
             b.add_css_class("mode-active");
-            state.borrow_mut().effect = effect;
+            let mut st = state.borrow_mut();
+            st.effect = effect;
+            st.keyboard_da.queue_draw();
         });
     }
     page.append(&effects_row);
@@ -219,7 +378,11 @@ fn build_keyboard_section() -> gtk::Box {
         labeled_scale(crate::i18n::t("brightness"), 0.0, 100.0, initial_brightness as f64);
     {
         let state = state.clone();
-        bright_scale.connect_value_changed(move |s| state.borrow_mut().brightness = s.value() as u8);
+        bright_scale.connect_value_changed(move |s| {
+            let mut st = state.borrow_mut();
+            st.brightness = s.value() as u8;
+            st.keyboard_da.queue_draw();
+        });
     }
     page.append(&bright_row);
 
@@ -352,13 +515,40 @@ struct LogoState {
     speed: u8,
     color: (u8, u8, u8),
     status: gtk::Label,
+    preview_provider: gtk::CssProvider,
+    preview_image: gtk::Image,
+    anim_phase: f64,
+}
+
+/// Same "tint a symbolic icon via a live CSS provider" trick as the
+/// WMI/ENEK5130 Lighting page's cover-logo preview (`rgb_page::
+/// update_cover_logo_preview`) - not reused directly since that one reasons
+/// about `RgbMode`/an enabled switch this hardware doesn't have, but the
+/// icon, widget name and CSS mechanism are deliberately identical so both
+/// pages' "lid logo" preview look and feel the same.
+fn update_logo_preview(state: &LogoState) {
+    let brightness = state.brightness as f64 / 100.0;
+    // Only Breathing pulses - same reasoning as the keyboard preview above:
+    // it's a plain "pulse the chosen color" LED behavior, Static is just the
+    // color as-is, no other logo effect exists on this hardware to guess at.
+    let pulse = match state.effect {
+        Some(LogoEffect::Breathing) => 0.22 + 0.78 * (0.5 + 0.5 * state.anim_phase.sin()),
+        _ => 1.0,
+    };
+    let opacity = (brightness * pulse).clamp(0.04, 1.0);
+    let (r, g, b) = state.color;
+    state.preview_provider.load_from_data(&format!(
+        "#magic-rgb-logo-emblem {{ color: rgb({r}, {g}, {b}); -gtk-icon-shadow: 0 0 16px rgba({r}, {g}, {b}, {:.3}); }}",
+        opacity * 0.72
+    ));
+    state.preview_image.set_opacity(opacity);
 }
 
 fn build_logo_section() -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
     page.set_margin_top(6);
 
-    page.append(&section_title(crate::i18n::t("magic_rgb_logo_section")));
+    page.append(&section_title(crate::i18n::t("cover_logo")));
 
     let status = gtk::Label::new(None);
     status.add_css_class("status-label");
@@ -372,13 +562,65 @@ fn build_logo_section() -> gtk::Box {
         .map(|s| (s.red, s.green, s.blue))
         .unwrap_or((0, 220, 255));
 
+    let preview_provider = gtk::CssProvider::new();
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &preview_provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1,
+        );
+    }
+    let preview_image = gtk::Image::from_icon_name("predator-cover-logo-symbolic");
+    preview_image.set_widget_name("magic-rgb-logo-emblem");
+    preview_image.set_pixel_size(150);
+
     let state = Rc::new(RefCell::new(LogoState {
         effect: Some(initial_effect),
         brightness: initial_brightness,
         speed: initial_speed,
         color: initial_color,
         status: status.clone(),
+        preview_provider,
+        preview_image: preview_image.clone(),
+        anim_phase: 0.0,
     }));
+
+    let preview_card = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    preview_card.add_css_class("cover-logo-preview-card");
+    let preview_title = gtk::Label::new(Some(crate::i18n::t("cover_logo_live_preview")));
+    preview_title.add_css_class("cover-logo-section-title");
+    preview_title.set_halign(gtk::Align::Start);
+    preview_card.append(&preview_title);
+    let lid = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    lid.add_css_class("cover-logo-lid");
+    lid.set_halign(gtk::Align::Fill);
+    lid.set_valign(gtk::Align::Center);
+    lid.set_margin_top(6);
+    preview_image.set_halign(gtk::Align::Center);
+    preview_image.set_valign(gtk::Align::Center);
+    preview_image.set_vexpand(true);
+    lid.append(&preview_image);
+    preview_card.append(&lid);
+    page.append(&preview_card);
+    update_logo_preview(&state.borrow());
+
+    // Ticks only while Breathing is selected and the page is on screen;
+    // self-cancels once torn down, same pattern used everywhere else on this
+    // page and on the WMI/ENEK5130 Lighting page's own preview timer.
+    {
+        let state = state.clone();
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+            if state.borrow().preview_image.root().is_none() {
+                return gtk::glib::ControlFlow::Break;
+            }
+            let mut st = state.borrow_mut();
+            if st.effect == Some(LogoEffect::Breathing) && st.preview_image.is_mapped() {
+                st.anim_phase += 0.05 + (st.speed as f64) * 0.03;
+                update_logo_preview(&st);
+            }
+            gtk::glib::ControlFlow::Continue
+        });
+    }
 
     let effects_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let mut buttons = Vec::new();
@@ -411,7 +653,9 @@ fn build_logo_section() -> gtk::Box {
                 }
             }
             b.add_css_class("mode-active");
-            state.borrow_mut().effect = Some(effect);
+            let mut st = state.borrow_mut();
+            st.effect = Some(effect);
+            update_logo_preview(&st);
         });
     }
     page.append(&effects_row);
@@ -420,7 +664,11 @@ fn build_logo_section() -> gtk::Box {
         labeled_scale(crate::i18n::t("brightness"), 0.0, 100.0, initial_brightness as f64);
     {
         let state = state.clone();
-        bright_scale.connect_value_changed(move |s| state.borrow_mut().brightness = s.value() as u8);
+        bright_scale.connect_value_changed(move |s| {
+            let mut st = state.borrow_mut();
+            st.brightness = s.value() as u8;
+            update_logo_preview(&st);
+        });
     }
     page.append(&bright_row);
 
@@ -447,6 +695,7 @@ fn build_logo_section() -> gtk::Box {
                 1 => st.color.1 = v,
                 _ => st.color.2 = v,
             }
+            update_logo_preview(&st);
         });
     }
     page.append(&color_row_widget);

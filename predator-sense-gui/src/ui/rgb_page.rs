@@ -1716,7 +1716,11 @@ fn fill_key_path(cr: &gtk4::cairo::Context, r: u8, g: u8, b: u8) {
     let _ = cr.stroke();
 }
 
-fn draw_keyboard(cr: &gtk4::cairo::Context, w: f64, h: f64, colors: &[(u8, u8, u8); 4]) {
+/// `pub(crate)` so `magic_rgb_page.rs` can reuse the same keyboard silhouette
+/// for its own live preview (issue #26 UI follow-up) instead of duplicating
+/// this rendering code - the shape renderer itself doesn't know or care which
+/// backend/protocol picked the colors, only where the keys are.
+pub(crate) fn draw_keyboard(cr: &gtk4::cairo::Context, w: f64, h: f64, colors: &[(u8, u8, u8); 4]) {
     cr.set_source_rgb(0.06, 0.06, 0.06);
     cr.rectangle(0.0, 0.0, w, h);
     let _ = cr.fill();
