@@ -1242,6 +1242,14 @@ impl Installer {
         const HID_RULE: &str = concat!(
             "SUBSYSTEM==\"hidraw\", ATTRS{name}==\"ENEK5130:*\", MODE=\"0660\", GROUP=\"input\"\n",
             "SUBSYSTEM==\"hidraw\", KERNELS==\"0018:0CF2:5130.*\", MODE=\"0660\", GROUP=\"input\"\n",
+            // 2024+ generation (issue #26): keyboard/cover-logo RGB moved off
+            // this I2C-HID chip entirely onto plain USB HID feature reports
+            // sent to a Sunrex keyboard controller and a Darfon logo
+            // controller (magic_rgb.rs). Neither ever got a udev rule, so
+            // /dev/hidrawN stayed root-only and every write failed with
+            // "Permission denied" even though the protocol itself was right.
+            "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"05af\", MODE=\"0660\", GROUP=\"input\"\n",
+            "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"0d62\", MODE=\"0660\", GROUP=\"input\"\n",
         );
         const EC_RULE: &str =
             "SUBSYSTEM==\"chardev\", KERNEL==\"ec\", MODE=\"0640\", GROUP=\"input\"\n";
