@@ -855,6 +855,28 @@ static const struct dmi_system_id acer_quirks[] __initconst = {
 		},
 		.driver_data = &quirk_acer_predator_phn16_72,
 	},
+	/*
+	 * PH16-72 (no "N"), issue #26: same 14th-gen predator_v4 chassis as
+	 * PHN16-72 above (mainline acer-wmi's own comment for this quirk
+	 * struct already names both SKUs), just a different DMI product_name
+	 * string reported by this board's firmware - same "N"-less/with-"N"
+	 * naming split already seen and fixed once for PH16-71/PHN16-71 and
+	 * PHN16-71/PHN16S-71. Without this entry dmi_check_system() never
+	 * matches, predator_v4 stays unset, and every feature gated on it
+	 * (platform_profile, PWM fan control, turbo) silently no-ops even
+	 * though the physical hardware button still works - exactly what was
+	 * reported. RGB is unaffected by this (issue #26's RGB failure is the
+	 * unrelated 2024+ HID chip, see magic_rgb.rs).
+	 */
+	{
+		.callback = dmi_matched,
+		.ident = "Acer Predator PH16-72",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR,"Acer"),
+			DMI_MATCH(DMI_PRODUCT_NAME,"Predator PH16-72"),
+		},
+		.driver_data = &quirk_acer_predator_phn16_72,
+	},
 	{
 		.callback = dmi_matched,
 		.ident = "Acer Predator PHN18-71",

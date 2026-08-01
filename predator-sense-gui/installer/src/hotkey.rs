@@ -66,6 +66,15 @@ struct Config {
     rgb_static_zones: Vec<RgbZone>,
     #[serde(default = "default_brightness")]
     rgb_brightness: i64,
+    /// Mirrors the GUI's `rgb_is_static`/`rgb_dynamic_last` (issue #29): which
+    /// of the two the keyboard should restore to. Previously this daemon only
+    /// ever knew about `rgb_static_zones` and reapplied it unconditionally,
+    /// so a keyboard last set to a real native effect (Breath/Neon) got
+    /// silently forced back to the old static color on every login/resume.
+    #[serde(default = "default_true")]
+    rgb_is_static: bool,
+    #[serde(default)]
+    rgb_dynamic_last: Option<SavedLightingConfig>,
     #[serde(default)]
     cover_logo: Option<CoverLogoConfig>,
 }
@@ -76,6 +85,8 @@ impl Default for Config {
             debug_logging: false,
             rgb_static_zones: Vec::new(),
             rgb_brightness: default_brightness(),
+            rgb_is_static: true,
+            rgb_dynamic_last: None,
             cover_logo: None,
         }
     }
@@ -632,6 +643,44 @@ fn keyboard_packets(config: &Config) -> Vec<[u8; hardware::HID_FEATURE_REPORT_LE
         .collect()
 }
 
+/// Builds the single feature report to restore a native Dynamic effect
+/// (Breath/Neon) on the keyboard target. Mirrors `cover_logo_packet` below,
+/// but there's no "off" branch here - keyboard Off is a momentary action in
+/// the GUI, not a persisted steady state like it is for the cover logo.
+/// Any mode this daemon doesn't recognize as HID-native (Static handled
+/// separately via `keyboard_packets`, everything else is preview-only on
+/// this hardware per issue #12) deserializes to `SavedRgbMode::Unsupported`
+/// and returns `None` here - same "nothing real to restore" outcome as the
+/// GUI's own `mode_is_hid_native` gate, so the keyboard is left untouched
+/// rather than guessing.
+fn keyboard_dynamic_packet(
+    saved: &SavedLightingConfig,
+    capabilities: TargetCapabilities,
+) -> Option<[u8; hardware::HID_FEATURE_REPORT_LEN]> {
+    let mode = match saved.mode {
+        SavedRgbMode::Breath => hardware::HID_MODE_BREATH,
+        SavedRgbMode::Neon => hardware::HID_MODE_NEON,
+        SavedRgbMode::Static | SavedRgbMode::Unsupported => return None,
+    };
+    if !capabilities.supports(mode) {
+        return None;
+    }
+    Some(
+        LightingCommand {
+            target: hardware::HID_TARGET_KEYBOARD,
+            mode,
+            brightness: saved.brightness.min(hardware::RGB_MAX_BRIGHTNESS as u8),
+            speed: saved.speed.min(hardware::RGB_MAX_SPEED),
+            flag: hardware::HID_EFFECT_FLAG,
+            red: saved.red,
+            green: saved.green,
+            blue: saved.blue,
+            zones: capabilities.zone_mask,
+        }
+        .into_bytes(),
+    )
+}
+
 fn cover_logo_packet(
     saved: &CoverLogoConfig,
     capabilities: TargetCapabilities,
@@ -706,7 +755,8 @@ fn reapply_lighting(config_path: &Path) -> AppResult<bool> {
             ))
         }
     };
-    if config.rgb_static_zones.is_empty() && config.cover_logo.is_none() {
+    let has_dynamic_keyboard = !config.rgb_is_static && config.rgb_dynamic_last.is_some();
+    if config.rgb_static_zones.is_empty() && config.cover_logo.is_none() && !has_dynamic_keyboard {
         return Ok(true);
     }
     let Some(device) = find_enek5130() else {
@@ -723,8 +773,15 @@ fn reapply_lighting(config_path: &Path) -> AppResult<bool> {
     };
 
     if targets.contains(&hardware::HID_TARGET_KEYBOARD) {
-        for mut packet in keyboard_packets(&config) {
-            set_feature(&file, &mut packet)?;
+        if config.rgb_is_static {
+            for mut packet in keyboard_packets(&config) {
+                set_feature(&file, &mut packet)?;
+            }
+        } else if let Some(saved) = &config.rgb_dynamic_last {
+            let capabilities = target_capabilities(&file, hardware::HID_TARGET_KEYBOARD)?;
+            if let Some(mut packet) = keyboard_dynamic_packet(saved, capabilities) {
+                set_feature(&file, &mut packet)?;
+            }
         }
     }
     if targets.contains(&hardware::HID_TARGET_COVER_LOGO) {
@@ -799,6 +856,8 @@ mod tests {
         assert!(!config.debug_logging);
         assert!(config.rgb_static_zones.is_empty());
         assert_eq!(config.rgb_brightness, hardware::RGB_MAX_BRIGHTNESS);
+        assert!(config.rgb_is_static);
+        assert!(config.rgb_dynamic_last.is_none());
         assert!(config.cover_logo.is_none());
     }
 
@@ -934,6 +993,57 @@ mod tests {
                 0,
             ]
         );
+    }
+
+    #[test]
+    fn keyboard_dynamic_packet_restores_native_effects_only() {
+        let capabilities = TargetCapabilities {
+            zone_mask: 0x0f,
+            mode_mask: 0x1a,
+        };
+        let breath = SavedLightingConfig {
+            mode: SavedRgbMode::Breath,
+            speed: 6,
+            brightness: 80,
+            red: 10,
+            green: 20,
+            blue: 30,
+        };
+        assert_eq!(
+            keyboard_dynamic_packet(&breath, capabilities).unwrap(),
+            [
+                hardware::HID_REPORT_LIGHTING,
+                hardware::HID_TARGET_KEYBOARD,
+                hardware::HID_MODE_BREATH,
+                80,
+                6,
+                hardware::HID_EFFECT_FLAG,
+                10,
+                20,
+                30,
+                0x0f,
+                0,
+            ]
+        );
+
+        // Static and any mode this daemon doesn't recognize as HID-native
+        // (Wave/Shifting/Zoom - preview-only on this hardware, issue #12)
+        // must not produce a packet: nothing real to restore, and forcing
+        // one would guess at a wire mode we never confirmed.
+        let static_mode = SavedLightingConfig {
+            mode: SavedRgbMode::Static,
+            speed: breath.speed,
+            brightness: breath.brightness,
+            red: breath.red,
+            green: breath.green,
+            blue: breath.blue,
+        };
+        assert!(keyboard_dynamic_packet(&static_mode, capabilities).is_none());
+        let unsupported = SavedLightingConfig {
+            mode: SavedRgbMode::Unsupported,
+            ..static_mode
+        };
+        assert!(keyboard_dynamic_packet(&unsupported, capabilities).is_none());
     }
 
     #[test]
