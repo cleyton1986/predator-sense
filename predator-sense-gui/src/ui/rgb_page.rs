@@ -165,15 +165,19 @@ fn build_keyboard_panel() -> gtk::Box {
     keyboard_da.set_hexpand(true);
     keyboard_da.set_halign(gtk::Align::Fill);
 
-    // Module-free HID-only hardware (e.g. PHN16S-71 without facer.ko, see
-    // issue #12) has no facer.ko dynamic-effect device, but some effects
-    // (Breath, Neon) are confirmed reachable natively through the same
-    // ENEK5130 feature report as static color - one write, the EC loops the
-    // pattern on its own (issue #12 follow-up). Others (Wave/Shifting/Zoom)
-    // were found to mean different things on different hardware generations
-    // and stay preview-only until confirmed per model. Decided once at build
-    // time since hardware doesn't change while the app runs.
-    let hid_only = hid_rgb::is_available() && !rgb::is_module_loaded();
+    // Hardware with the ENEK5130 HID chip (e.g. PHN16-73/PHN16S-71) has its
+    // WMI dynamic-effect path confirmed no-op regardless of whether facer.ko
+    // is loaded (issue #4/#12/#29 - facer.ko can be loaded and its device
+    // node can exist while writes through it never reach the keyboard). So
+    // presence of the HID chip alone, not module-loaded state, decides the
+    // path. Some effects (Breath, Neon) are confirmed reachable natively
+    // through the same ENEK5130 feature report as static color - one write,
+    // the EC loops the pattern on its own (issue #12 follow-up). Others
+    // (Wave/Shifting/Zoom) were found to mean different things on different
+    // hardware generations and stay preview-only until confirmed per model.
+    // Decided once at build time since hardware doesn't change while the app
+    // runs.
+    let hid_only = hid_rgb::is_available();
 
     // Restore whatever was last actually applied instead of always opening
     // on Static/Breath - the EC/WMI keeps a Dynamic effect running fine
@@ -728,20 +732,20 @@ fn build_keyboard_panel() -> gtk::Box {
     }
     btn_box.append(&apply_btn);
 
-    // Turn off backlight. On hardware with the facer.ko dynamic device,
-    // uses the brightness-only WMI call (method 20, minimal payload) -
+    // Turn off backlight. On hardware with the ENEK5130 HID chip, writes
+    // black (0,0,0) to every zone over HID directly - same path the static
+    // page already uses, since the WMI brightness-only call (method 20) is
+    // a confirmed no-op there even when facer.ko is loaded (issue #4/#12/
+    // #29). Only hardware without that chip falls back to the WMI call -
     // useful on models where static/dynamic color control doesn't apply
     // correctly but brightness does, e.g. as an accessibility mitigation for
-    // pulsing effects that can't otherwise be stopped. On module-free HID
-    // hardware (no facer.ko, see issue #12) that device doesn't exist, so
-    // fall back to the same ENEK5130 HID path the static page already uses,
-    // writing black (0,0,0) to every zone instead.
+    // pulsing effects that can't otherwise be stopped.
     let off_btn = gtk::Button::with_label(crate::i18n::t("kbd_backlight_off"));
     {
         let s = state.clone();
         off_btn.connect_clicked(move |_| {
             let st = s.borrow();
-            let result = if !rgb::is_module_loaded() && hid_rgb::is_available() {
+            let result = if hid_rgb::is_available() {
                 let mut last_err = None;
                 for &mask in hid_rgb::ZONE_MASKS.iter() {
                     if let Err(e) = hid_rgb::set_zone_color(mask, 0, 0, 0, 0) {
