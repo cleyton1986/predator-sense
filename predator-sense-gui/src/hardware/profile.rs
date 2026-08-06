@@ -439,6 +439,19 @@ pub fn get_current_profile() -> Option<PowerProfile> {
     // forever after - a hardware key press changed the real governor/EPP/
     // turbo/min-perf values but the UI kept reporting the old cached guess,
     // since the cache file always existed and always "matched" from then on.
+    // The firmware thermal profile outranks the CPU state when both exist.
+    // The physical mode key writes that index and touches no cpufreq control
+    // at all, so a press leaves governor/EPP/min_perf exactly as they were -
+    // meaning detect_from_hardware() below would keep reporting the old
+    // profile while the machine is running at a different power limit.
+    if let Some(index) = crate::hardware::thermal_profile::current() {
+        if let Some(tier) = crate::hardware::thermal_profile::load()
+            .and_then(|calibration| calibration.tier_for_index(index))
+        {
+            return Some(PowerProfile::from_index(tier as i8));
+        }
+    }
+
     if let Some(p) = detect_from_hardware_at(Path::new(SYSFS_ROOT)) {
         return Some(p);
     }

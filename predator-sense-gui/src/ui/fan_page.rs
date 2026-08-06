@@ -10,6 +10,175 @@ const PROFILES_ORDER: [PowerProfile; 4] = [
     PowerProfile::Performance, PowerProfile::Turbo,
 ];
 
+/// Power the firmware allows in a given tier, e.g. "95 W / 160 W".
+///
+/// The four cards above map onto however many profiles the firmware exposes,
+/// so a card alone does not tell the user what it will actually get. This does.
+fn tier_power_text(profile: PowerProfile) -> Option<String> {
+    let calibration = crate::hardware::thermal_profile::load()?;
+    let index = calibration.index_for_tier(profile.index() as u8)?;
+    let measured = calibration.profiles.iter().find(|p| p.index == index)?;
+    match (measured.pl1_uw, measured.pl2_uw) {
+        (Some(pl1), Some(pl2)) => Some(format!(
+            "{} W / {} W",
+            pl1 / 1_000_000,
+            pl2 / 1_000_000
+        )),
+        (Some(pl1), None) => Some(format!("{} W", pl1 / 1_000_000)),
+        _ => None,
+    }
+}
+
+/// Every firmware thermal profile, not just the four the cards map onto.
+///
+/// On a PHN16-73 the firmware has five (45/55/70/95/115 W sustained) while the
+/// app has four tiers, so one profile - 70 W here - is unreachable from the
+/// cards alone. It is also the only place that reflects the physical
+/// mode-switch key, which writes the firmware index directly without the app
+/// being involved.
+fn build_firmware_row(status: &gtk::Label) -> Option<(gtk::Box, gtk::Box)> {
+    use crate::hardware::thermal_profile;
+
+    if !thermal_profile::is_available() {
+        return None;
+    }
+
+    // Without this button there is no way to produce a calibration at all:
+    // nothing else calls calibrate(), so load() would return None forever and
+    // every profile switch would silently leave the firmware cTDP alone -
+    // Turbo included. Offer it whenever the machine supports the interface but
+    // has not been probed yet.
+    let Some(calibration) = thermal_profile::load() else {
+        let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        section.set_margin_top(28);
+        section.set_halign(gtk::Align::Center);
+
+        let heading = gtk::Label::new(Some(crate::i18n::t("firmware_profiles")));
+        heading.add_css_class("section-subtitle");
+        section.append(&heading);
+
+        let hint = gtk::Label::new(Some(crate::i18n::t("calibrate_hint")));
+        hint.add_css_class("info-text-dim");
+        hint.set_wrap(true);
+        hint.set_max_width_chars(60);
+        hint.set_justify(gtk::Justification::Center);
+        section.append(&hint);
+
+        let button = gtk::Button::with_label(crate::i18n::t("calibrate"));
+        button.add_css_class("secondary-button");
+        button.set_halign(gtk::Align::Center);
+        button.set_margin_top(12);
+
+        let status = status.clone();
+        button.connect_clicked(move |button| {
+            button.set_sensitive(false);
+            button.set_label(crate::i18n::t("calibrating"));
+            status.set_text(crate::i18n::t("calibrating"));
+            status.remove_css_class("status-error");
+            // Blocks the UI for a few seconds per profile. Acceptable for a
+            // one-off the user explicitly asked for, and safer than doing it
+            // on a thread that could race with a profile change.
+            match thermal_profile::calibrate() {
+                Ok(result) => {
+                    status.set_text(&format!(
+                        "{} ({})",
+                        crate::i18n::t("calibrate_done"),
+                        result.profiles.len()
+                    ));
+                    status.add_css_class("status-success");
+                    button.set_label(crate::i18n::t("calibrate_restart"));
+                }
+                Err(error) => {
+                    status.set_text(&format!("Erro: {error}"));
+                    status.add_css_class("status-error");
+                    button.set_sensitive(true);
+                    button.set_label(crate::i18n::t("calibrate"));
+                }
+            }
+        });
+        section.append(&button);
+        // Empty row: nothing to reconcile until a calibration exists.
+        return Some((section, gtk::Box::new(gtk::Orientation::Horizontal, 0)));
+    };
+
+    if calibration.profiles.len() <= 1 {
+        return None;
+    }
+
+    let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    section.set_margin_top(28);
+    section.set_halign(gtk::Align::Center);
+
+    let heading = gtk::Label::new(Some(crate::i18n::t("firmware_profiles")));
+    heading.add_css_class("section-subtitle");
+    section.append(&heading);
+
+    let hint = gtk::Label::new(Some(crate::i18n::t("firmware_profiles_hint")));
+    hint.add_css_class("info-text-dim");
+    section.append(&hint);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.set_halign(gtk::Align::Center);
+    row.set_margin_top(12);
+
+    for measured in &calibration.profiles {
+        let watts = match (measured.pl1_uw, measured.pl2_uw) {
+            (Some(pl1), Some(pl2)) => {
+                format!("{} W / {} W", pl1 / 1_000_000, pl2 / 1_000_000)
+            }
+            (Some(pl1), None) => format!("{} W", pl1 / 1_000_000),
+            _ => format!("#{}", measured.index),
+        };
+        let button = gtk::Button::with_label(&watts);
+        button.add_css_class("secondary-button");
+        // The index is what identifies the profile; the label is only power.
+        unsafe { button.set_data("fw-index", measured.index) };
+
+        let index = measured.index;
+        let status = status.clone();
+        button.connect_clicked(move |_| match thermal_profile::set(index) {
+            Ok(()) => {
+                status.set_text(&format!(
+                    "{} #{index}",
+                    crate::i18n::t("firmware_profile_applied")
+                ));
+                status.remove_css_class("status-error");
+                status.add_css_class("status-success");
+            }
+            Err(error) => {
+                status.set_text(&format!("Erro: {error}"));
+                status.remove_css_class("status-success");
+                status.add_css_class("status-error");
+            }
+        });
+        row.append(&button);
+    }
+
+    section.append(&row);
+    Some((section, row))
+}
+
+/// Highlights whichever firmware profile is active right now.
+///
+/// Called on a timer because the index changes behind the app's back: the
+/// physical key writes it, and the firmware resets it on boot.
+fn apply_firmware_visuals(row: &gtk::Box, active: Option<u8>) {
+    let mut child = row.first_child();
+    while let Some(widget) = child {
+        if let Some(button) = widget.downcast_ref::<gtk::Button>() {
+            let index: Option<u8> = unsafe { button.data("fw-index").map(|p| *p.as_ref()) };
+            let is_active = index.is_some() && index == active;
+            button.set_css_classes(if is_active {
+                &["accent-button"]
+            } else {
+                &["secondary-button"]
+            });
+            button.set_sensitive(!is_active);
+        }
+        child = widget.next_sibling();
+    }
+}
+
 fn cpu_policy_info_text() -> String {
     let Some(info) = profile::current_cpu_policy_info() else {
         return format!(
@@ -170,6 +339,14 @@ pub fn build() -> gtk::Box {
         desc_label.add_css_class("profile-description");
         card.append(&desc_label);
 
+        // What this tier actually gets from the firmware. Without it the cards
+        // only carry adjectives, and the user cannot tell them apart.
+        if let Some(power) = tier_power_text(*profile_val) {
+            let power_label = gtk::Label::new(Some(&power));
+            power_label.add_css_class("info-text-dim");
+            card.append(&power_label);
+        }
+
         let select_btn = if is_active {
             let btn = gtk::Button::with_label(crate::i18n::t("active"));
             btn.add_css_class("accent-button");
@@ -211,6 +388,14 @@ pub fn build() -> gtk::Box {
     page.append(&profiles_box);
     page.append(&status_label);
 
+    let firmware_row = build_firmware_row(&status_label).map(|(section, row)| {
+        page.append(&section);
+        row
+    });
+    if let Some(row) = firmware_row.as_ref() {
+        apply_firmware_visuals(row, crate::hardware::thermal_profile::current());
+    }
+
     // Current state info
     let info_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
     info_box.set_margin_top(16);
@@ -237,6 +422,11 @@ pub fn build() -> gtk::Box {
             apply_active_visuals(&profiles_box, now);
         }
         info_label.set_text(&cpu_policy_info_text());
+        // The firmware index also changes from outside the app - the physical
+        // mode key writes it directly - so reconcile it on the same tick.
+        if let Some(row) = firmware_row.as_ref() {
+            apply_firmware_visuals(row, crate::hardware::thermal_profile::current());
+        }
         glib::ControlFlow::Continue
     });
 

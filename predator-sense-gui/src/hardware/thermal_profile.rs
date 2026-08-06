@@ -199,6 +199,25 @@ fn sample_limits() -> (Option<u64>, Option<u64>) {
     (pl1, pl2)
 }
 
+/// Whether the samples actually distinguish the profiles.
+///
+/// The fallback to plain `intel-rapl` matters here: that interface reports the
+/// CPU's own ceiling and does not move when the firmware profile changes, so on
+/// a machine where only it is readable every profile samples identically. Left
+/// unchecked that would be saved as a measured ranking and the tiers would be
+/// assigned from raw index order while claiming to be measured - which is how
+/// Quiet and Turbo end up on the wrong firmware index.
+///
+/// Two distinct readings are enough to prove the samples track the profile.
+fn readings_are_meaningful(profiles: &[Measured]) -> bool {
+    let distinct: std::collections::HashSet<_> = profiles
+        .iter()
+        .filter(|p| p.pl1_uw.is_some() || p.pl2_uw.is_some())
+        .map(|p| (p.pl1_uw, p.pl2_uw))
+        .collect();
+    distinct.len() > 1
+}
+
 /// Probe every supported index and rank them by the power limit observed.
 ///
 /// Intrusive: it switches profiles one by one, so fans and clocks move while it
@@ -218,7 +237,7 @@ pub fn calibrate() -> Result<Calibration, String> {
 
     let original = current();
     let mut profiles = Vec::new();
-    let mut measured = false;
+    let measured;
 
     for index in indices {
         if set(index).is_err() {
@@ -230,12 +249,21 @@ pub fn calibrate() -> Result<Calibration, String> {
         }
         std::thread::sleep(std::time::Duration::from_millis(SETTLE_MS));
         let (pl1, pl2) = sample_limits();
-        measured |= pl1.is_some() || pl2.is_some();
         profiles.push(Measured {
             index,
             pl1_uw: pl1,
             pl2_uw: pl2,
         });
+    }
+
+    // Not "did we read anything" but "do the readings tell the profiles
+    // apart" - see readings_are_meaningful().
+    measured = readings_are_meaningful(&profiles);
+    if !measured && profiles.iter().any(|p| p.pl1_uw.is_some()) {
+        crate::hardware::applog::error(
+            "todos os perfis reportaram o mesmo limite de potência; \
+             ordenando por índice e não por medição",
+        );
     }
 
     if let Some(original) = original {
@@ -282,11 +310,14 @@ pub fn load() -> Option<Calibration> {
     let path = cache_path()?;
     let calibration: Calibration = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
 
-    let mut cached: Vec<u8> = calibration.profiles.iter().map(|p| p.index).collect();
-    cached.sort_unstable();
-    let mut live = supported();
-    live.sort_unstable();
-    if cached != live {
+    // Subset, not equality: calibrate() deliberately skips indices the bitmask
+    // advertises but the firmware then refuses, so an exact match would throw
+    // away every calibration produced by that recovery path. What must not
+    // happen is using an index the firmware no longer accepts - hence subset.
+    let live = supported();
+    if calibration.profiles.is_empty()
+        || !calibration.profiles.iter().all(|p| live.contains(&p.index))
+    {
         return None;
     }
     Some(calibration)
@@ -374,6 +405,32 @@ mod tests {
         ];
         profiles.sort_by_key(Measured::rank);
         assert_eq!(profiles.last().unwrap().index, 0);
+    }
+
+    #[test]
+    fn identical_readings_are_not_a_measured_ranking() {
+        // A machine where only plain intel-rapl is readable samples the same
+        // unchanged ceiling for every profile. Treating that as measured would
+        // rank by raw index while claiming otherwise.
+        let same = vec![
+            measured(0, 55_000_000, 160_000_000),
+            measured(1, 55_000_000, 160_000_000),
+            measured(4, 55_000_000, 160_000_000),
+        ];
+        assert!(!readings_are_meaningful(&same));
+
+        let mut mixed = same.clone();
+        mixed.push(measured(5, 115_000_000, 160_000_000));
+        assert!(readings_are_meaningful(&mixed));
+    }
+
+    #[test]
+    fn unreadable_rapl_is_not_meaningful() {
+        let none = vec![
+            Measured { index: 0, pl1_uw: None, pl2_uw: None },
+            Measured { index: 1, pl1_uw: None, pl2_uw: None },
+        ];
+        assert!(!readings_are_meaningful(&none));
     }
 
     #[test]

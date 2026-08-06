@@ -414,6 +414,34 @@ fn read_mode_key(file: &mut File) -> Result<bool, std::io::Error> {
         && buffer[..hardware::EC_HID_MODE_KEY_REPORT.len()] == hardware::EC_HID_MODE_KEY_REPORT)
 }
 
+/// Firmware indices in measured power order, as calibrated by the GUI.
+///
+/// Deliberately parsed by hand instead of pulling in the GUI's serde types:
+/// this daemon is a separate binary and the file is a stable two-field shape.
+/// Returns None when there is no calibration yet - the caller then falls back
+/// to bit order, which at least still reaches every profile.
+fn calibrated_order() -> Option<Vec<u8>> {
+    let home = std::env::var_os("HOME")?;
+    let path = PathBuf::from(home).join(".config/predator-sense/thermal_profiles.json");
+    let text = fs::read_to_string(path).ok()?;
+    let mut indices = Vec::new();
+    // The file is written ordered weakest-to-strongest, so document order is
+    // the ranking; we only need each "index" field in sequence.
+    for chunk in text.split("\"index\"").skip(1) {
+        let digits: String = chunk
+            .trim_start()
+            .trim_start_matches(':')
+            .trim_start()
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Ok(value) = digits.parse::<u8>() {
+            indices.push(value);
+        }
+    }
+    (!indices.is_empty()).then_some(indices)
+}
+
 /// Cycles to the next firmware thermal profile, weakest to strongest, wrapping.
 ///
 /// Mirrors the "Mode Cycle Switching" behaviour the Windows app offers for this
@@ -458,14 +486,16 @@ fn cycle_thermal_profile(logger: &mut Logger) {
         return;
     }
 
-    // Without a stored calibration the raw index order is all we have. It is
-    // not the power order on every firmware, but cycling still reaches every
-    // profile, which is what the key is for.
-    let next = match current.and_then(|c| supported.iter().position(|i| *i == c)) {
-        Some(position) => supported[(position + 1) % supported.len()],
+    // Prefer the measured order the GUI stored: raw index order is NOT the
+    // power order on this firmware (index 6 is the weakest, 5 the strongest),
+    // so cycling by bit position jumps between power levels instead of
+    // stepping weakest-to-strongest as the key is meant to.
+    let order = calibrated_order().unwrap_or(supported);
+    let next = match current.and_then(|c| order.iter().position(|i| *i == c)) {
+        Some(position) => order[(position + 1) % order.len()],
         // The firmware boots into an index it then refuses to accept back, so
         // "current" may not be in the list at all.
-        None => supported[0],
+        None => order[0],
     };
 
     logger.info(format!("Tecla de modo: perfil {current:?} -> {next}"));
