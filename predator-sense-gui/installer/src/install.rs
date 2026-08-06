@@ -1250,6 +1250,11 @@ impl Installer {
             // "Permission denied" even though the protocol itself was right.
             "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"05af\", MODE=\"0660\", GROUP=\"input\"\n",
             "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"0d62\", MODE=\"0660\", GROUP=\"input\"\n",
+            // Embedded controller (I2C-HID 1025:174B). The physical mode-switch
+            // key reports here and nowhere else - no input-subsystem event is
+            // generated - so without read access the hotkey daemon cannot see
+            // the key at all and it stays dead, which is how it shipped.
+            "SUBSYSTEM==\"hidraw\", KERNELS==\"*:1025:174B.*\", MODE=\"0660\", GROUP=\"input\"\n",
         );
         const EC_RULE: &str =
             "SUBSYSTEM==\"chardev\", KERNEL==\"ec\", MODE=\"0640\", GROUP=\"input\"\n";

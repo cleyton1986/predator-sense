@@ -260,6 +260,27 @@ pub(crate) fn run() -> AppResult {
         );
     }
 
+    // The mode-switch key reports only here, as a raw HID input report, and
+    // produces no input-subsystem event - so it is polled alongside the
+    // keyboards but parsed differently. Optional: older models have no such
+    // key, and without the udev rule the node stays root-only.
+    let ec_index = match find_ec_hid() {
+        Some(path) => match File::open(&path) {
+            Ok(file) => {
+                logger.info(format!("Tecla de modo: monitorando {}", path.display()));
+                devices.push((path, file));
+                Some(devices.len() - 1)
+            }
+            Err(error) => {
+                logger.info(format!(
+                    "Tecla de modo indisponível ({error}); confira o grupo input"
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+
     let mut last_activation =
         Instant::now() - Duration::from_secs(timing::HOTKEY_INITIAL_DEBOUNCE_SECS);
     let mut last_suspend_offset = suspend_offset();
@@ -308,6 +329,24 @@ pub(crate) fn run() -> AppResult {
             if events & libc::POLLIN == 0 {
                 continue;
             }
+            if Some(index) == ec_index {
+                match read_mode_key(&mut devices[index].1) {
+                    Ok(true) => {
+                        if last_activation.elapsed()
+                            > Duration::from_secs(timing::HOTKEY_DEBOUNCE_SECS)
+                        {
+                            last_activation = Instant::now();
+                            cycle_thermal_profile(&mut logger);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        logger.error(format!("Leitura do EC falhou: {error}"));
+                        devices.remove(index);
+                    }
+                }
+                continue;
+            }
             match read_input_event(&mut devices[index].1) {
                 Ok(event)
                     if event.type_ == hardware::INPUT_EVENT_KEY
@@ -337,6 +376,130 @@ pub(crate) fn run() -> AppResult {
         }
     }
     Err("predator-sense-hotkey: todos os dispositivos foram desconectados".into())
+}
+
+/// Locates the embedded controller's hidraw node by vendor/product.
+///
+/// Never hard-code /dev/hidrawN: the numbering changes between boots.
+fn find_ec_hid() -> Option<PathBuf> {
+    for entry in fs::read_dir("/sys/class/hidraw").ok()? {
+        let entry = entry.ok()?;
+        let uevent = fs::read_to_string(entry.path().join("device/uevent")).ok()?;
+        let matches = uevent.lines().any(|line| {
+            line.strip_prefix("HID_ID=")
+                .and_then(|id| {
+                    let mut parts = id.split(':');
+                    let (_, vendor, product) = (parts.next()?, parts.next()?, parts.next()?);
+                    Some(
+                        vendor.eq_ignore_ascii_case(hardware::EC_HID_VENDOR)
+                            && product.eq_ignore_ascii_case(hardware::EC_HID_PRODUCT),
+                    )
+                })
+                .unwrap_or(false)
+        });
+        if matches {
+            return Some(PathBuf::from("/dev").join(entry.file_name()));
+        }
+    }
+    None
+}
+
+/// Reads one input report and reports whether it is the mode-switch key.
+///
+/// The EC emits a short report (3 bytes) per press, with no release event, so
+/// there is nothing to debounce on the report itself - the caller still
+/// debounces to protect against key repeat.
+fn read_mode_key(file: &mut File) -> Result<bool, std::io::Error> {
+    let mut buffer = [0u8; 64];
+    let read = file.read(&mut buffer)?;
+    Ok(read >= hardware::EC_HID_MODE_KEY_REPORT.len()
+        && buffer[..hardware::EC_HID_MODE_KEY_REPORT.len()] == hardware::EC_HID_MODE_KEY_REPORT)
+}
+
+/// Cycles to the next firmware thermal profile, weakest to strongest, wrapping.
+///
+/// Mirrors the "Mode Cycle Switching" behaviour the Windows app offers for this
+/// key. The ordering comes from the calibration the GUI stores, so it follows
+/// measured power rather than raw index order.
+///
+/// The manual notes mode switching only works with the battery at 40% or above;
+/// when it is lower the firmware silently refuses, so say so instead of leaving
+/// the user wondering why the key did nothing.
+fn cycle_thermal_profile(logger: &mut Logger) {
+    const SUPPORTED: &str = "/sys/devices/platform/acer-wmi/thermal_profile_supported";
+    const CURRENT: &str = "/sys/devices/platform/acer-wmi/thermal_profile";
+
+    if !Path::new(CURRENT).exists() {
+        logger.debug("Tecla de modo: firmware não expõe thermal_profile");
+        return;
+    }
+
+    if let Some(percent) = fs::read_to_string("/sys/class/power_supply/BAT1/capacity")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+    {
+        if percent < 40 {
+            logger.info(format!(
+                "Tecla de modo ignorada: bateria em {percent}%, o firmware exige 40%"
+            ));
+            return;
+        }
+    }
+
+    let mask = fs::read_to_string(SUPPORTED)
+        .ok()
+        .and_then(|value| u32::from_str_radix(value.trim().trim_start_matches("0x"), 16).ok())
+        .unwrap_or(0);
+    let current = fs::read_to_string(CURRENT)
+        .ok()
+        .and_then(|value| value.trim().parse::<u8>().ok());
+
+    let supported: Vec<u8> = (0..8u8).filter(|bit| mask & (1 << bit) != 0).collect();
+    if supported.is_empty() {
+        logger.error("Tecla de modo: firmware não reportou perfis suportados");
+        return;
+    }
+
+    // Without a stored calibration the raw index order is all we have. It is
+    // not the power order on every firmware, but cycling still reaches every
+    // profile, which is what the key is for.
+    let next = match current.and_then(|c| supported.iter().position(|i| *i == c)) {
+        Some(position) => supported[(position + 1) % supported.len()],
+        // The firmware boots into an index it then refuses to accept back, so
+        // "current" may not be in the list at all.
+        None => supported[0],
+    };
+
+    logger.info(format!("Tecla de modo: perfil {current:?} -> {next}"));
+
+    // The helper writes to sysfs, so it needs privilege. This daemon runs as
+    // the user, so go through the same broker the GUI uses instead of exec'ing
+    // the helper directly - doing that just fails with EACCES.
+    //
+    // Caveat worth knowing: the shipped polkit policy is auth_admin_keep, so
+    // the first press after the credential expires pops an auth dialog. That is
+    // poor for a physical key. Making it seamless means either a polkit rule
+    // that allows this one action for active local sessions, or moving the
+    // daemon to a system service - both are policy calls, not something to
+    // decide here.
+    // SAFETY: geteuid has no preconditions.
+    let mut command = if unsafe { libc::geteuid() } == 0 {
+        Command::new(path::HELPER)
+    } else {
+        let mut command = Command::new("pkexec");
+        command.arg(path::HELPER);
+        command
+    };
+    let status = command
+        .args(["thermal-profile", &next.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => logger.error(format!("Tecla de modo: helper falhou ({status})")),
+        Err(error) => logger.error(format!("Tecla de modo: helper não executou: {error}")),
+    }
 }
 
 fn load_config(path: &Path) -> Config {
