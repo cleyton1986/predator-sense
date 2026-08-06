@@ -777,13 +777,26 @@ fn build_keyboard_panel() -> gtk::Box {
     }
     btn_box.append(&off_btn);
 
-    // Reset to default (issue #24): restores the same factory values the
-    // panel opens with the first time (Static, all 4 zones at (0,200,230),
-    // brightness 100, Breath/speed 4/color (0,255,255) for Dynamic) by
-    // driving the existing widgets, so every already-wired value-changed
-    // handler updates RgbState the same way manual input would - then
-    // reuses the Apply button's own logic (hardware write + persist) via
-    // emit_clicked() instead of duplicating it here.
+    // Reset to default (issue #24, redone per issue #30): the original
+    // version drove the widgets back to a hardcoded Static (0,200,230)
+    // preset and immediately applied+persisted it via the Apply button's
+    // own logic - which is a specific app-chosen color, not the keyboard's
+    // actual factory default. TongkyakHermit (#30) pointed out the EC's
+    // real out-of-the-box behavior (e.g. Wave on his hardware) only shows
+    // when nothing has ever been saved (see #29: reapply_lighting() only
+    // writes when rgb_static_zones/rgb_dynamic_last is Some - this is the
+    // exact same "None means leave firmware default alone" contract
+    // cover_logo already relies on). So this now clears the persisted RGB
+    // fields instead of writing a preset: no hardware write happens here,
+    // current on-screen lighting is left as-is, and the EC's own default
+    // takes over on the next login/resume/reboot, same as day one before
+    // the user ever touched this page. Only rgb_static_zones/rgb_is_static/
+    // rgb_dynamic_last are cleared - the rest of AppConfig (fan curves,
+    // power profiles, battery limiter, etc.) is untouched.
+    //
+    // The widgets are still reset to the same values the page opens with
+    // on a clean config, purely so the visible UI matches what "nothing
+    // saved" looks like - none of this drives a hardware write.
     let reset_btn = gtk::Button::with_label(crate::i18n::t("rgb_reset_default"));
     reset_btn.add_css_class("secondary-button");
     {
@@ -794,7 +807,6 @@ fn build_keyboard_panel() -> gtk::Box {
         let sps = sps.clone();
         let dyn_color_sliders = dyn_color_sliders.clone();
         let keyboard_da = keyboard_da.clone();
-        let apply_btn = apply_btn.clone();
         let s = state.clone();
         reset_btn.connect_clicked(move |_| {
             static_btn.set_active(true);
@@ -814,10 +826,26 @@ fn build_keyboard_panel() -> gtk::Box {
                 dyn_color_sliders[2].set_value(255.0);
             }
             keyboard_da.queue_draw();
-            apply_btn.emit_clicked();
+
+            let mut cfg = crate::config::load_app_config();
+            cfg.rgb_static_zones = None;
+            cfg.rgb_is_static = true;
+            cfg.rgb_dynamic_last = None;
+            cfg.rgb_brightness = 100;
+            let save_result = crate::config::save_app_config(&cfg);
+
             let st = s.borrow();
-            if st.status.has_css_class("status-success") {
-                st.status.set_text(crate::i18n::t("rgb_reset_applied"));
+            match save_result {
+                Ok(()) => {
+                    st.status.set_text(crate::i18n::t("rgb_reset_applied"));
+                    st.status.remove_css_class("status-error");
+                    st.status.add_css_class("status-success");
+                }
+                Err(e) => {
+                    st.status.set_text(&e);
+                    st.status.remove_css_class("status-success");
+                    st.status.add_css_class("status-error");
+                }
             }
         });
     }
