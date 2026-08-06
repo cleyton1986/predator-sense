@@ -108,6 +108,21 @@ pub(crate) mod hardware {
     pub const HID_NAME_MATCH: &str = "ENEK5130";
     pub const HID_VENDOR: &str = "00000CF2";
     pub const HID_PRODUCT: &str = "00005130";
+
+    /// Embedded controller exposed as an I2C-HID device, separate from the
+    /// ENEK5130 RGB controller above. The Windows service talks to it as
+    /// `acer::KYD100::EcHID`.
+    pub const EC_HID_VENDOR: &str = "00001025";
+    pub const EC_HID_PRODUCT: &str = "0000174B";
+
+    /// Input report the EC sends when the physical mode-switch key is pressed.
+    ///
+    /// Captured on a Predator PHN16-73: report id 0x04, payload 0x85 0xff, one
+    /// report per press with no separate release. The key produces **no**
+    /// input-subsystem event at all - `hid-generic` has nothing to map it to -
+    /// which is exactly why it appears dead on Linux while the PredatorSense
+    /// key (a WMI hotkey, already handled) works.
+    pub const EC_HID_MODE_KEY_REPORT: [u8; 3] = [0x04, 0x85, 0xff];
     pub const HID_REPORT_TARGET_LIST: u8 = 0xa1;
     pub const HID_REPORT_TARGET_SELECT: u8 = 0xa2;
     pub const HID_REPORT_TARGET_CAPABILITIES: u8 = 0xa3;
