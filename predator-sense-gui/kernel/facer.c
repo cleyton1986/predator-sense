@@ -2153,7 +2153,12 @@ WMI_gaming_execute_u64(u32 method_id, u64 in, u64 *out)
 
 	return status;
 }
-#if RTLNX_VER_MIN(6, 14, 0)
+/*
+ * Used to live behind RTLNX_VER_MIN(6, 14, 0) because its only caller was the
+ * PWM fan control, which does need that kernel. The helper itself only uses
+ * wmi_evaluate_method + acpi_buffer, available on every supported kernel, and
+ * the thermal-profile attributes below need it too - so it is unconditional now.
+ */
 static int WMI_gaming_execute_u32_u64(u32 method_id, u32 in, u64 *out)
 {
 	struct acpi_buffer result = { ACPI_ALLOCATE_BUFFER, NULL };
@@ -2192,7 +2197,6 @@ static int WMI_gaming_execute_u32_u64(u32 method_id, u32 in, u64 *out)
 
 	return ret;
 }
-#endif
 
 static acpi_status WMID_gaming_set_u64(u64 value, u32 cap)
 {
@@ -2416,7 +2420,7 @@ static int WMID_gaming_set_misc_setting(enum acer_wmi_gaming_misc_setting settin
 	return 0;
 }
 
-#if RTLNX_VER_MIN(6, 14, 0)
+/* Unconditional for the same reason as WMI_gaming_execute_u32_u64 above. */
 static int WMID_gaming_get_misc_setting(enum acer_wmi_gaming_misc_setting setting, u8 *value)
 {
 	u64 input = 0;
@@ -2438,7 +2442,7 @@ static int WMID_gaming_get_misc_setting(enum acer_wmi_gaming_misc_setting settin
 
 	return 0;
 }
-#endif
+
 /*
  * Generic Device (interface-independent)
  */
@@ -3170,6 +3174,88 @@ static ssize_t backlight_timeout_store(struct device *dev, struct device_attribu
 	return count;
 }
 static DEVICE_ATTR_RW(backlight_timeout);
+
+/*
+ * Raw thermal-profile access.
+ *
+ * platform_profile only exposes the subset of modes this driver knows how to
+ * name, and the mapping it uses (BALANCED=0, QUIET=1, PERFORMANCE=2, TURBO=3,
+ * ECO=4) does not hold on every firmware. Measured on a Predator PHN16-73
+ * (Arrow Lake, BIOS V1.26), writing each index and reading the package power
+ * limit back from intel-rapl-mmio:
+ *
+ *	index 6 ->  45 W PL1 /  50 W PL2
+ *	index 0 ->  55 W PL1 / 160 W PL2
+ *	index 1 ->  70 W PL1 / 160 W PL2
+ *	index 4 ->  95 W PL1 / 160 W PL2
+ *	index 5 -> 115 W PL1 / 160 W PL2
+ *
+ * A clean five-step ladder, matching the five modes the model's manual lists
+ * (Eco, Quiet, Balanced, Performance, Turbo). The supported-profiles bitmask
+ * for that machine is 0x73 - bits 0, 1, 4, 5, 6 - i.e. exactly the indices the
+ * firmware accepts: bit N means index N. Indices 2, 3 and 7 are rejected with a
+ * non-zero status and change nothing.
+ *
+ * Under the enum above, that firmware's strongest mode (index 5, 115 W) and its
+ * weakest (index 6) have no name at all, so platform_profile cannot reach
+ * either, and the three it does expose end up labelled in the wrong order.
+ *
+ * Rather than hard-code a second mapping - which would only move the problem to
+ * the next firmware - these attributes hand the raw index and the raw bitmask to
+ * userspace, which can probe each supported index and rank them by the power
+ * limit it observes. platform_profile keeps working exactly as before.
+ *
+ * Best-effort like turbo_state: on hardware without this WMI method both
+ * attributes just return an error.
+ */
+static ssize_t thermal_profile_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	u8 value;
+	int err;
+
+	err = WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, &value);
+	if (err)
+		return err;
+
+	return sysfs_emit(buf, "%u\n", value);
+}
+
+static ssize_t thermal_profile_store(struct device *dev, struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	u8 value;
+	int err;
+
+	if (kstrtou8(buf, 0, &value))
+		return -EINVAL;
+
+	/*
+	 * No range check against the bitmask on purpose: the firmware validates
+	 * the index itself and reports failure without side effects, and it is
+	 * the authority here. Userspace gets -EINVAL for anything it rejects.
+	 */
+	err = WMID_gaming_set_misc_setting(ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, value);
+	if (err)
+		return -EINVAL;
+
+	return count;
+}
+static DEVICE_ATTR_RW(thermal_profile);
+
+static ssize_t thermal_profile_supported_show(struct device *dev, struct device_attribute *attr,
+					      char *buf)
+{
+	u8 value;
+	int err;
+
+	err = WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES, &value);
+	if (err)
+		return err;
+
+	/* Bitmask: bit N set means index N is a valid thermal_profile value. */
+	return sysfs_emit(buf, "0x%02x\n", value);
+}
+static DEVICE_ATTR_RO(thermal_profile_supported);
 
 static void acer_toggle_turbo(void)
 {
@@ -4141,6 +4227,13 @@ static int acer_platform_probe(struct platform_device *device)
 	if (device_create_file(&device->dev, &dev_attr_backlight_timeout))
 		dev_warn(&device->dev, "failed to create backlight_timeout sysfs attribute\n");
 
+	/* Best-effort as well - see the comment above thermal_profile_show(). */
+	if (device_create_file(&device->dev, &dev_attr_thermal_profile))
+		dev_warn(&device->dev, "failed to create thermal_profile sysfs attribute\n");
+	if (device_create_file(&device->dev, &dev_attr_thermal_profile_supported))
+		dev_warn(&device->dev,
+			 "failed to create thermal_profile_supported sysfs attribute\n");
+
 	return 0;
 
 	error_hwmon:
@@ -4160,6 +4253,8 @@ static void acer_platform_remove(struct platform_device *device)
 {
 	device_remove_file(&device->dev, &dev_attr_turbo_state);
 	device_remove_file(&device->dev, &dev_attr_backlight_timeout);
+	device_remove_file(&device->dev, &dev_attr_thermal_profile);
+	device_remove_file(&device->dev, &dev_attr_thermal_profile_supported);
 
 	if (has_cap(ACER_CAP_MAILLED))
 		acer_led_exit();
