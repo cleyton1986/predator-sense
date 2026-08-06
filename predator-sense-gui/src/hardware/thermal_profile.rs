@@ -100,6 +100,46 @@ impl Calibration {
         self.profiles.get(position).map(|p| p.index)
     }
 
+    /// Which app tier a raw firmware index corresponds to — the inverse of
+    /// [`Self::index_for_tier`].
+    ///
+    /// Needed because the firmware index can change without the app doing it:
+    /// the physical mode-switch key writes it directly, and the firmware also
+    /// resets it on boot. Without this the UI would keep showing whatever
+    /// profile was last picked in the app while the hardware sat somewhere
+    /// else entirely.
+    pub fn tier_for_index(&self, index: u8) -> Option<u8> {
+        let position = self.profiles.iter().position(|p| p.index == index)?;
+        // Pick the tier whose mapped position is closest to this one, so the
+        // round-trip is stable even where tiers and profiles are not 1:1.
+        (0..=3u8).min_by_key(|tier| {
+            let mapped = self
+                .profiles
+                .iter()
+                .position(|p| Some(p.index) == self.index_for_tier(*tier))
+                .unwrap_or(0);
+            mapped.abs_diff(position)
+        })
+    }
+
+    /// Human-readable summary of a firmware index: where it sits in the
+    /// measured ranking and what power it allows. This is what the UI should
+    /// show instead of a bare number or an unexplained colour.
+    pub fn describe(&self, index: u8) -> Option<String> {
+        let position = self.profiles.iter().position(|p| p.index == index)?;
+        let profile = &self.profiles[position];
+        let rank = format!("{} de {}", position + 1, self.profiles.len());
+        Some(match (profile.pl1_uw, profile.pl2_uw) {
+            (Some(pl1), Some(pl2)) => format!(
+                "{rank} — {} W sustentado, {} W em burst",
+                pl1 / 1_000_000,
+                pl2 / 1_000_000
+            ),
+            (Some(pl1), None) => format!("{rank} — {} W sustentado", pl1 / 1_000_000),
+            _ => rank,
+        })
+    }
+
     /// Next profile up, wrapping at the top — what a "cycle modes" key does.
     pub fn next_after(&self, index: u8) -> Option<u8> {
         if self.profiles.is_empty() {
@@ -377,6 +417,34 @@ mod tests {
         for tier in 0..=3 {
             assert_eq!(one.index_for_tier(tier), Some(4));
         }
+    }
+
+    #[test]
+    fn tier_round_trips_through_the_firmware_index() {
+        let c = phn16_73();
+        for tier in 0..=3u8 {
+            let index = c.index_for_tier(tier).unwrap();
+            assert_eq!(
+                c.tier_for_index(index),
+                Some(tier),
+                "tier {tier} -> index {index} -> tier"
+            );
+        }
+    }
+
+    #[test]
+    fn describe_reports_rank_and_watts() {
+        let c = phn16_73();
+        assert_eq!(
+            c.describe(5).unwrap(),
+            "5 de 5 — 115 W sustentado, 160 W em burst"
+        );
+        assert_eq!(
+            c.describe(6).unwrap(),
+            "1 de 5 — 45 W sustentado, 50 W em burst"
+        );
+        // Index the firmware boots into but refuses to be set back to.
+        assert_eq!(c.describe(2), None);
     }
 
     #[test]
