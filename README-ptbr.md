@@ -111,7 +111,7 @@ Inspirado e baseado no projeto [acer-predator-turbo-and-rgb-keyboard-linux-modul
 | **Temperaturas** | Gauges em tempo real para CPU, GPU, sistema, NVMe, WiFi e RAM |
 | **Consumo** | Visão em 4 abas: CPU / GPU / Memória / Armazenamento, com top processos, detalhes ao clicar e animação de fogo CSS no gauge de temperatura |
 | **Rede** | Gráficos de download/upload em tempo real, com tracking de pico e detecção automática de interface |
-| **Controle RGB do Teclado** | Cores estáticas por zona (4 zonas) e efeitos dinâmicos (Respiração, Neon, Onda, Deslizar, Zoom). Em hardware sem o módulo kernel (só controlador I2C-HID), cor estática, brilho, desligar luz e os efeitos Respiração/Neon também funcionam nativamente via HID — veja [Compatibilidade](#compatibilidade) |
+| **Controle RGB do Teclado** | Cores estáticas por zona (4 zonas) e efeitos dinâmicos (Respiração, Neon, Onda, Deslizar, Zoom) via WMI. Em hardware sem o módulo kernel, RGB funciona nativamente via USB/I2C-HID — chip ENEK5130 (4 zonas estáticas, Respiração/Neon), chip Sunrex 2024+ (zona única, lista completa de efeitos) ou chip Chicony (paleta de 7 cores, Helios 300) — auto-detectado, veja [Compatibilidade](#compatibilidade) |
 | **Logo RGB da Tampa** | Controle independente de energia, cor estática, brilho, Respiração e Neon para o emblema atrás da tela, com prévia vetorial ao vivo. Só aparece após detecção de capacidades HID em tempo de execução |
 | **Perfis de Desempenho** | Silencioso / Balanceado / Performance / Turbo (CPU governor + Intel EPP + limite de potência da GPU) |
 | **Controle de Ventoinha** | RPM ao vivo com animação girando, toggle do CoolBoost, modos Auto/Max, e controle PWM por ventoinha + curva automática por temperatura (experimental, onde suportado) |
@@ -146,6 +146,7 @@ Legenda: ✅ testado e funcionando · 🟡 implementado, não testado (precisa d
 | AN515-58 | ✅ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🧪 |
 | AN517-41 | - | - | ✅ | ✅ | ❌ | - | ❌ |
 | PH16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
+| PH16-72 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 🧪 |
 | PH315-52 | ✅ | ✅ | ✅ | ✅ | 🟡 | - | ❌ |
 | PH315-53 | ✅ | ✅ | ✅ | ✅ | 🟡 | - | ❌ |
 | **PH315-54** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
@@ -153,6 +154,7 @@ Legenda: ✅ testado e funcionando · 🟡 implementado, não testado (precisa d
 | PH317-53 | ✅ | ✅ | ✅ | ✅ | 🟡 | - | ❌ |
 | PH317-54 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH317-55 | - | - | ✅ | 🟡 | ❌ | - | ❌ |
+| PH317-56 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-51 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-52 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-61 | ✅ | 🟡 | ✅ | ✅ | 🟡 | - | ❌ |
@@ -177,7 +179,7 @@ Legenda: ✅ testado e funcionando · 🟡 implementado, não testado (precisa d
 |---|---|---|
 | **Leitura de RPM** | Lê velocidade das ventoinhas CPU/GPU (`fan1_input`, `fan2_input`) | Maioria dos modelos gaming (auto-detectado) |
 | **Perfis de ventoinha** | Quiet / Balanced / Performance / Turbo via `platform_profile` | Modelos `predator_v4` |
-| **Fan PWM %** 🧪 | Controle de velocidade por ventoinha (`pwm1`/`pwm2` 0–100%) portado do `acer-wmi` mainline via WMI — **somente kernel ≥ 6.14** | Subconjunto de modelos com `ACER_CAP_PWM` (AN515-58, PHN16-72/73, …) |
+| **Fan PWM %** 🧪 | Controle de velocidade por ventoinha (`pwm1`/`pwm2` 0–100%) portado do `acer-wmi` mainline via WMI — **somente kernel ≥ 6.14** | Subconjunto de modelos com `ACER_CAP_PWM` (AN515-58, PHN16-72/73, PH16-72, …) |
 
 > **🧪 O controle PWM é experimental.** É portado do driver `acer-wmi` oficial do kernel Linux e usa métodos WMI seguros (sem escrita bruta no EC), mas **não foi verificado em hardware real** pelo mantenedor (que tem um PH315-54, sem PWM). Se você tem um modelo suportado, relatos de teste são muito bem-vindos. **Use por sua conta e risco** — veja o aviso no topo.
 
@@ -193,6 +195,19 @@ Alguns modelos (confirmado: PHN16S-71, PHN16-73) roteiam o controlador RGB do te
 | Logo RGB da tampa — desligar, cor estática, brilho, Respiração, Neon | ✅ confirmado funcionando (PHN16-73) |
 
 O suporte ao logo da tampa não é ativado por uma allow-list de modelos. O controlador precisa anunciar o alvo `0x83` no relatório A1 e retornar capacidades A3 correspondentes e não vazias antes que a interface apareça; o app repete essa verificação imediatamente antes de cada escrita. O daemon de hotkey restaura somente uma configuração que o app aplicou com sucesso após login e retorno do modo de suspensão, e ignora totalmente o logo quando não há configuração salva ou o alvo está ausente.
+
+### RGB em hardware 2024+ (USB HID Sunrex/Darfon)
+
+Uma geração mais nova (PH16-72 e outros modelos 2024-2026 que compartilham os mesmos chips USB HID, veja a issue #26) tirou o RGB do teclado e do logo tanto da WMI quanto do chip ENEK5130 acima, colocando num par de controladores diferente — Sunrex `05af:*` pro teclado, Darfon `0d62:*` pro logo. O app detecta e fala com eles direto também, escolhido automaticamente sobre os caminhos ENEK5130/WMI quando presente:
+
+| Recurso | Status |
+|---|---|
+| Teclado: Desligado, Estático, Respiração, Onda, Cobra, Neon, Ponto, Estrela, Arco-íris, 5× Corte, Zoom, Onda de linha, Deslizamento | 🟡 implementado, aguardando confirmação em hardware real |
+| Logo da tampa: desligar, cor sólida, brilho, Respiração | 🟡 implementado, aguardando confirmação em hardware real |
+
+Esse chip não tem zonas independentes — o teclado inteiro usa uma cor/efeito por vez, diferente do controlador ENEK5130 de 4 zonas acima. O protocolo foi reverso-engenheirado byte a byte a partir de duas versões decompiladas do app oficial Windows (toda sequência de bytes fixa e fórmula de checksum bateu exatamente entre as duas), não é chute — mas ninguém confirmou ainda em hardware físico, então trate como não testado até chegar um relato real.
+
+Um terceiro chip (Chicony, Helios 300/PH317-56) usa outro protocolo USB HID, documentado por engenharia reversa da comunidade ([NT411/Acer-Predator-Fan-RGB-Controller-Linux](https://github.com/NT411/Acer-Predator-Fan-RGB-Controller-Linux)) e reimplementado aqui a partir dessa especificação — paleta fixa de 7 cores (limitação de hardware/firmware, não é RGB arbitrário) em 12 efeitos. Também 🟡, aguardando confirmação.
 
 ### Já usa Linuwu-Sense ou DAMX?
 

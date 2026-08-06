@@ -111,7 +111,7 @@ Inspired by and based on the [acer-predator-turbo-and-rgb-keyboard-linux-module]
 | **Temperatures** | Live gauges for CPU, GPU, system, NVMe, WiFi and RAM |
 | **Usage** | 4-tab view: CPU / GPU / Memory / Storage with top processes, click-to-expand details and CSS-style fire animation on the temperature gauges |
 | **Network** | Real-time download/upload graphs with peak tracking and auto interface detection |
-| **RGB Keyboard Control** | Static per-zone (4 zones) and dynamic effects (Breathing, Neon, Wave, Shifting, Zoom). On hardware without the kernel module (I2C-HID controller only), static color, brightness, backlight-off and the Breathing/Neon effects work natively over HID too — see [Compatibility](#compatibility) |
+| **RGB Keyboard Control** | Static per-zone (4 zones) and dynamic effects (Breathing, Neon, Wave, Shifting, Zoom) over WMI. On hardware without the kernel module, RGB works natively over USB/I2C-HID instead — ENEK5130 chip (4-zone static, Breathing/Neon), 2024+ Sunrex chip (single-zone, full effect list) or Chicony chip (7-color palette, Helios 300) — auto-detected, see [Compatibility](#compatibility) |
 | **RGB Cover Logo** | Independent power, solid-color, brightness, Breathing and Neon controls for the emblem on the back of the display, with a live vector preview. Exposed only after runtime HID capability detection |
 | **Performance Profiles** | Quiet / Balanced / Performance / Turbo modes (CPU governor + Intel EPP + GPU power limit) |
 | **Fan Control** | Live RPM with animated spinning fans, CoolBoost toggle, Auto/Max modes, plus experimental per-fan PWM control & auto temperature curve (where supported) |
@@ -146,6 +146,7 @@ Legend: ✅ tested & working · 🟡 implemented, not tested (needs a tester) ·
 | AN515-58 | ✅ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🧪 |
 | AN517-41 | - | - | ✅ | ✅ | ❌ | - | ❌ |
 | PH16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
+| PH16-72 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 🧪 |
 | PH315-52 | ✅ | ✅ | ✅ | ✅ | 🟡 | - | ❌ |
 | PH315-53 | ✅ | ✅ | ✅ | ✅ | 🟡 | - | ❌ |
 | **PH315-54** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
@@ -153,6 +154,7 @@ Legend: ✅ tested & working · 🟡 implemented, not tested (needs a tester) ·
 | PH317-53 | ✅ | ✅ | ✅ | ✅ | 🟡 | - | ❌ |
 | PH317-54 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH317-55 | - | - | ✅ | 🟡 | ❌ | - | ❌ |
+| PH317-56 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-51 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-52 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-61 | ✅ | 🟡 | ✅ | ✅ | 🟡 | - | ❌ |
@@ -177,7 +179,7 @@ Legend: ✅ tested & working · 🟡 implemented, not tested (needs a tester) ·
 |---|---|---|
 | **Fan RPM read** | Read CPU/GPU fan speed (`fan1_input`, `fan2_input`) | Most gaming models (auto-detected) |
 | **Fan profiles** | Quiet / Balanced / Performance / Turbo via `platform_profile` | `predator_v4` models |
-| **Fan PWM %** 🧪 | Per-fan speed control (`pwm1`/`pwm2` 0–100%) ported from mainline `acer-wmi` via WMI — **kernel ≥ 6.14 only** | Subset of models with `ACER_CAP_PWM` (AN515-58, PHN16-72/73, …) |
+| **Fan PWM %** 🧪 | Per-fan speed control (`pwm1`/`pwm2` 0–100%) ported from mainline `acer-wmi` via WMI — **kernel ≥ 6.14 only** | Subset of models with `ACER_CAP_PWM` (AN515-58, PHN16-72/73, PH16-72, …) |
 
 > **🧪 PWM fan control is experimental.** It is ported from the upstream Linux kernel `acer-wmi` driver and uses safe WMI methods (no raw EC writes), but it has **not been verified on real hardware** by the maintainer (who owns a PH315-54, which has no PWM). If you have a supported model, testing reports are very welcome. **Use at your own risk** — see the disclaimer at the top.
 
@@ -193,6 +195,19 @@ Some models (confirmed: PHN16S-71, PHN16-73) route the keyboard's RGB controller
 | RGB cover logo — off, solid color, brightness, Breathing, Neon | ✅ confirmed working (PHN16-73) |
 
 Cover-logo support is not enabled from a model-name allow-list. The controller must advertise target `0x83` in its A1 target report and return matching, non-empty A3 capabilities before the UI is exposed; the app repeats that check immediately before every write. The hotkey daemon restores only a setting that the app previously applied successfully after login and resume, and skips the logo entirely when there is no saved setting or the target is absent.
+
+### RGB on 2024+ hardware (Sunrex/Darfon USB HID)
+
+A newer generation (PH16-72 and other 2024-2026 models sharing the same USB HID chips, see issue #26) moved keyboard and cover-logo RGB off WMI *and* off the ENEK5130 chip above, onto a different pair of controllers entirely — Sunrex `05af:*` for the keyboard, Darfon `0d62:*` for the logo. The app detects and drives these directly too, auto-selected over the ENEK5130/WMI paths whenever present:
+
+| Feature | Status |
+|---|---|
+| Keyboard: Off, Static, Breathing, Wave, Snake, Neon, Spot, Star, Rainbow, 5× Slash, Zoom, Row Wave, Swiping | 🟡 implemented, awaiting confirmation on real hardware |
+| Cover logo: off, solid color, brightness, Breathing | 🟡 implemented, awaiting confirmation on real hardware |
+
+This chip has no independent zones — the whole keyboard takes one color/effect at a time, unlike the 4-zone ENEK5130 controller above. The wire protocol was reverse-engineered byte-for-byte from two decompiled releases of the official Windows app (every fixed byte sequence and checksum formula matched exactly between them), not guessed — but nobody has confirmed it against physical hardware yet, so treat it as untested until a real report comes in.
+
+A third chip (Chicony, Helios 300/PH317-56) uses yet another USB HID protocol, documented by community reverse engineering ([NT411/Acer-Predator-Fan-RGB-Controller-Linux](https://github.com/NT411/Acer-Predator-Fan-RGB-Controller-Linux)) and reimplemented here from that spec — fixed 7-color palette (a hardware/firmware limitation, not arbitrary RGB) across 12 effects. Also 🟡, awaiting confirmation.
 
 ### Already running Linuwu-Sense or DAMX?
 
