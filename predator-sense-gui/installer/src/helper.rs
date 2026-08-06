@@ -39,6 +39,7 @@ const CPU_PROFILE_LOCK_RETRY: Duration = Duration::from_millis(50);
 const BATTERY_HEALTH: &str = battery::WMI_HEALTH_MODE;
 const BATTERY_CALIBRATION: &str = battery::WMI_CALIBRATION_MODE;
 const BACKLIGHT_TIMEOUT: &str = "devices/platform/acer-wmi/backlight_timeout";
+const THERMAL_PROFILE: &str = "devices/platform/acer-wmi/thermal_profile";
 // Root-only by kernel design (0400) unlike product_name/board_name (0444),
 // hence a dedicated privileged read instead of the unprivileged sysfs path
 // most other settings-page fields use.
@@ -389,6 +390,20 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
                 "backlight-timeout",
                 bool_str(enabled),
                 &sysfs.join(BACKLIGHT_TIMEOUT),
+            )
+        }
+        HelperAction::ThermalProfile => {
+            // Raw firmware index, not a platform_profile name. The valid set
+            // varies per machine and is published as a bitmask in
+            // thermal_profile_supported; the firmware itself rejects anything
+            // it does not implement, and the driver turns that into EINVAL.
+            let index: u8 = args[1]
+                .parse()
+                .map_err(|_| fail(format!("thermal-profile: invalid index '{}'", args[1])))?;
+            write_attr(
+                "thermal-profile",
+                &index.to_string(),
+                &sysfs.join(THERMAL_PROFILE),
             )
         }
         HelperAction::BacklightTimeoutRead => {

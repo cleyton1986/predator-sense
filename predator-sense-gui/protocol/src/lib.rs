@@ -222,10 +222,14 @@ pub mod helper {
         BootReapplyBattery,
         SerialNumberRead,
         ChiconyRgb,
+        /// Raw firmware thermal-profile index (facer's `thermal_profile`).
+        /// Write-only here: both that attribute and `thermal_profile_supported`
+        /// are world-readable, so the app reads them directly.
+        ThermalProfile,
     }
 
     impl Action {
-        pub const ALL: [Self; 36] = [
+        pub const ALL: [Self; 37] = [
             Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
@@ -262,6 +266,7 @@ pub mod helper {
             Self::BootReapplyBattery,
             Self::SerialNumberRead,
             Self::ChiconyRgb,
+            Self::ThermalProfile,
         ];
 
         pub fn parse(value: &str) -> Option<Self> {
@@ -302,6 +307,7 @@ pub mod helper {
                 "boot-reapply-battery" => Some(Self::BootReapplyBattery),
                 "serial-number-read" => Some(Self::SerialNumberRead),
                 "chicony-rgb" => Some(Self::ChiconyRgb),
+                "thermal-profile" => Some(Self::ThermalProfile),
                 _ => None,
             }
         }
@@ -344,6 +350,7 @@ pub mod helper {
                 Self::BootReapplyBattery => "boot-reapply-battery",
                 Self::SerialNumberRead => "serial-number-read",
                 Self::ChiconyRgb => "chicony-rgb",
+                Self::ThermalProfile => "thermal-profile",
             }
         }
 
@@ -385,6 +392,7 @@ pub mod helper {
                 | Self::PwmGpuEnableRead
                 | Self::SerialNumberRead => 0,
                 Self::ChiconyRgb => 4,
+                Self::ThermalProfile => 1,
             }
         }
 
@@ -428,6 +436,7 @@ pub mod helper {
                 Self::BootReapplyBattery => "boot-reapply-battery USER_HOME",
                 Self::SerialNumberRead => "serial-number-read",
                 Self::ChiconyRgb => "chicony-rgb EFFECT BRIGHTNESS COLOR SPEED",
+                Self::ThermalProfile => "thermal-profile INDEX",
             }
         }
     }
