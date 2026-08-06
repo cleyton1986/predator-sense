@@ -246,10 +246,13 @@ pub(crate) fn run() -> AppResult {
     }
     logger.info(format!("Monitorando: {:?}", paths));
 
-    let mut devices = Vec::new();
+    // O terceiro campo marca o EC HID. Guardar um indice separado seria um bug:
+    // devices sao removidos quando desconectam, e os indices dos seguintes
+    // deslizam - fazendo o "indice do EC" apontar para um teclado.
+    let mut devices: Vec<(PathBuf, File, bool)> = Vec::new();
     for path in paths {
         match File::open(&path) {
-            Ok(file) => devices.push((path, file)),
+            Ok(file) => devices.push((path, file, false)),
             Err(error) => logger.error(format!("Falha ao abrir {}: {error}", path.display())),
         }
     }
@@ -264,22 +267,17 @@ pub(crate) fn run() -> AppResult {
     // produces no input-subsystem event - so it is polled alongside the
     // keyboards but parsed differently. Optional: older models have no such
     // key, and without the udev rule the node stays root-only.
-    let ec_index = match find_ec_hid() {
-        Some(path) => match File::open(&path) {
+    if let Some(path) = find_ec_hid() {
+        match File::open(&path) {
             Ok(file) => {
                 logger.info(format!("Tecla de modo: monitorando {}", path.display()));
-                devices.push((path, file));
-                Some(devices.len() - 1)
+                devices.push((path, file, true));
             }
-            Err(error) => {
-                logger.info(format!(
-                    "Tecla de modo indisponível ({error}); confira o grupo input"
-                ));
-                None
-            }
-        },
-        None => None,
-    };
+            Err(error) => logger.info(format!(
+                "Tecla de modo indisponível ({error}); confira o grupo input"
+            )),
+        }
+    }
 
     let mut last_activation =
         Instant::now() - Duration::from_secs(timing::HOTKEY_INITIAL_DEBOUNCE_SECS);
@@ -287,7 +285,7 @@ pub(crate) fn run() -> AppResult {
     while !devices.is_empty() {
         let mut poll_fds = devices
             .iter()
-            .map(|(_, file)| libc::pollfd {
+            .map(|(_, file, _)| libc::pollfd {
                 fd: file.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
@@ -329,7 +327,7 @@ pub(crate) fn run() -> AppResult {
             if events & libc::POLLIN == 0 {
                 continue;
             }
-            if Some(index) == ec_index {
+            if devices[index].2 {
                 match read_mode_key(&mut devices[index].1) {
                     Ok(true) => {
                         if last_activation.elapsed()
