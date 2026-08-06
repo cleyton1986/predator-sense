@@ -165,6 +165,16 @@ fn settings_for(p: PowerProfile) -> ProfileSettings {
             governor: CpuGovernor::Performance,
             epp: EnergyPreference::Performance,
             gpu_watts: 110,
+            // NOTE: measured on a 24-core PHN16-73, this pins every core near
+            // its maximum clock even at idle (3361 MHz average, no load). Under
+            // a constrained package budget that makes the CPU win the power
+            // split against the GPU, which hurts GPU-bound games.
+            //
+            // Left at 100 on purpose for now: `governor: Performance` above
+            // already forces high clocks, so lowering only this would not fix
+            // the behaviour, and both values are what detect_from_hardware()
+            // uses to tell Turbo apart from Performance. Changing it is a
+            // design call - see docs in the RE notes.
             min_perf_pct: 100,
             no_turbo: false,
         },
@@ -555,6 +565,39 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
             "GPU power limit for profile {} not applied: {e}",
             profile.to_id()
         ));
+    }
+
+    // Firmware thermal profile - the only thing here that moves the package
+    // power limit at all. Everything above only redistributes the budget
+    // between CPU and GPU; on a PHN16-73 the firmware boots into its lowest
+    // cTDP (45 W sustained *and* burst) and no governor/EPP change lifts that.
+    //
+    // Which raw index corresponds to which tier is measured per machine rather
+    // than assumed: the kernel's platform_profile names do not follow the power
+    // order on every firmware. Requires a prior calibration; without one we
+    // leave the firmware alone instead of guessing.
+    //
+    // Best-effort like the GPU wattage above: a machine may not expose the
+    // attribute at all, and that must not fail the whole profile switch.
+    if crate::hardware::thermal_profile::is_available() {
+        match crate::hardware::thermal_profile::load() {
+            Some(calibration) => match calibration.index_for_tier(profile.index() as u8) {
+                Some(index) => {
+                    if let Err(e) = crate::hardware::thermal_profile::set(index) {
+                        crate::hardware::applog::error(&format!(
+                            "thermal profile {index} for {} not applied: {e}",
+                            profile.to_id()
+                        ));
+                    }
+                }
+                None => crate::hardware::applog::error(
+                    "thermal profile calibration is empty; firmware profile left unchanged",
+                ),
+            },
+            None => crate::hardware::applog::info(
+                "no thermal profile calibration for this machine; firmware profile left unchanged",
+            ),
+        }
     }
 
     // Fan mode used to only follow the physical Predator/Turbo key (see
