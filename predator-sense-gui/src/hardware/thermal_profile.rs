@@ -302,13 +302,16 @@ pub fn calibrate() -> Result<Calibration, String> {
 
 /// Writes one index, waits for the EC, and samples it.
 ///
-/// `Ok(None)` means the firmware refused the write - expected for indices the
-/// bitmask advertises but the machine does not implement. `Err` means the
-/// index would not stay put long enough to be measured, which is not something
-/// this function may paper over: see the caller.
+/// `Ok(None)` means the firmware refused the write, consistently - expected for
+/// indices the bitmask advertises but the machine does not implement. `Err`
+/// means the write never reached the hardware, or the index would not stay put
+/// long enough to be measured; neither is something this function may paper
+/// over by dropping the profile, see the caller.
 fn measure_one(index: u8, limits: Option<&(PathBuf, PathBuf)>) -> Result<Option<Measured>, String> {
-    if set(index).is_err() {
-        return Ok(None);
+    match apply_for_measurement(index) {
+        Ok(true) => {}
+        Ok(false) => return Ok(None),
+        Err(error) => return Err(error),
     }
 
     // The settle window is long enough for something else to move the index:
@@ -418,10 +421,17 @@ fn restore(original: Option<u8>, probed: &[Measured]) {
 }
 
 /// Which profile to leave active when the original cannot be restored.
+///
+/// Eligibility mirrors [`readings_are_meaningful`] rather than just checking
+/// PL1: `rank()` compares burst as well, so where two profiles share a
+/// sustained limit a sample that lost only its PL2 would score zero there and
+/// win this comparison while possibly being the stronger of the two. This runs
+/// before the readings are judged, so it has to apply the rule itself.
 fn restore_fallback(probed: &[Measured]) -> Option<u8> {
+    let any_burst = probed.iter().any(|profile| profile.pl2_uw.is_some());
     probed
         .iter()
-        .filter(|profile| profile.pl1_uw.is_some())
+        .filter(|profile| profile.pl1_uw.is_some() && (!any_burst || profile.pl2_uw.is_some()))
         .min_by_key(|profile| (profile.rank(), profile.index))
         .or_else(|| probed.iter().min_by_key(|profile| profile.index))
         .map(|profile| profile.index)
@@ -567,6 +577,23 @@ mod tests {
         let none_readable = vec![unreadable(5), unreadable(0)];
         assert_eq!(restore_fallback(&none_readable), Some(0));
         assert_eq!(restore_fallback(&[]), None);
+    }
+
+    /// The fallback compares with `rank()`, which scores a missing burst as
+    /// zero - so a sample that lost only its PL2 would beat a complete one
+    /// they tie with on sustained power, and be left active while actually
+    /// being the stronger profile.
+    #[test]
+    fn the_restore_fallback_also_rejects_partial_burst_samples() {
+        let probed = vec![
+            measured(0, 55_000_000, 90_000_000),
+            Measured {
+                index: 5,
+                pl1_uw: Some(55_000_000),
+                pl2_uw: None,
+            },
+        ];
+        assert_eq!(restore_fallback(&probed), Some(0));
     }
 
     /// PL2 is the tie-breaker in `rank`, so a missing one among real ones is

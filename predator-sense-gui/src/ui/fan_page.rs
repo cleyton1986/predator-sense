@@ -125,14 +125,19 @@ fn build_firmware_row(
         ));
     };
 
-    if calibration.profiles.len() <= 1 {
-        return None;
-    }
+    // A single accepted profile is not worth a switcher - there is nothing to
+    // switch to - but the section still has to exist, because it is the only
+    // place recalibration lives. Returning None here used to remove it
+    // entirely, and since `load()` keeps returning Some from then on, neither
+    // button was ever reachable again without deleting the cache by hand.
+    let single = calibration.profiles.len() <= 1;
 
     // An unranked calibration is still worth showing - the profiles are real
     // and switchable - but it must not be labelled as a power ranking, and it
     // drives nothing automatically (see Calibration::is_ranked).
-    let hint = if calibration.is_ranked() {
+    let hint = if single {
+        "firmware_profiles_single_hint"
+    } else if calibration.is_ranked() {
         "firmware_profiles_hint"
     } else {
         "firmware_profiles_unranked_hint"
@@ -144,7 +149,7 @@ fn build_firmware_row(
     row.set_margin_top(12);
 
     let mut buttons = Vec::new();
-    for measured in &calibration.profiles {
+    for measured in calibration.profiles.iter().filter(|_| !single) {
         // Falls back to the raw index: on a machine with no readable RAPL the
         // label is all the identity a profile has.
         let label = watts_text(measured).unwrap_or_else(|| format!("#{}", measured.index));
