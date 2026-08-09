@@ -1354,26 +1354,34 @@ impl Installer {
         }
 
         // Two ExecStart lines rather than two units: both restore a setting the
-        // hardware forgets across a power cycle, and neither should keep the
-        // other from running. The leading `-` on the thermal one makes it
-        // non-fatal - a machine without facer.ko, or one whose BIOS update
-        // dropped the recorded profile, must not leave the boot service failed.
+        // hardware forgets across a power cycle, and neither may keep the other
+        // from running.
+        //
+        // With Type=oneshot systemd runs them in order and stops at the first
+        // unprefixed command that fails, so the order here is load-bearing. The
+        // thermal restore goes first with a leading `-`, which makes it
+        // non-fatal: a machine without facer.ko, or one whose BIOS update
+        // dropped the recorded profile, must not fail the boot service. The
+        // battery restore stays last and unprefixed, so it still surfaces its
+        // own failure in `systemctl status` exactly as it did before this
+        // second command existed. Putting them the other way round would let a
+        // battery write error silently skip the thermal restore entirely.
         let boot_unit = format!(
             "[Unit]\n\
              Description={}\n\
              After=multi-user.target\n\n\
              [Service]\n\
              Type=oneshot\n\
-             ExecStart={} {} {}\n\
-             ExecStart=-{} {} {}\n\n\
+             ExecStart=-{} {} {}\n\
+             ExecStart={} {} {}\n\n\
              [Install]\n\
              WantedBy=multi-user.target\n",
             service::BOOT_DESCRIPTION,
             path::HELPER,
-            HelperAction::BootReapplyBattery.as_str(),
+            HelperAction::BootReapplyThermal.as_str(),
             self.user.home.display(),
             path::HELPER,
-            HelperAction::BootReapplyThermal.as_str(),
+            HelperAction::BootReapplyBattery.as_str(),
             self.user.home.display(),
         );
         write_text(Path::new(path::BOOT_UNIT), &boot_unit, mode::REGULAR_FILE)?;

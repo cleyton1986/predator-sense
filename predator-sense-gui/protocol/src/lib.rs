@@ -628,6 +628,21 @@ pub mod thermal_profile {
         /// The order is then just the index order and must never be presented
         /// or used as a power ranking.
         pub measured: bool,
+        /// Every index the firmware advertised when this was measured, which
+        /// is not the same as [`Self::profiles`]: probing skips indices the
+        /// bitmask claims but the firmware then refuses, and drops any whose
+        /// measurement was disturbed.
+        ///
+        /// Recorded so a BIOS update that *adds* a profile invalidates the
+        /// calibration. Comparing only `profiles` against the live set cannot
+        /// see that: the old profiles are all still supported, so a stale
+        /// ranking would keep being used and the new profile would stay
+        /// invisible with nothing prompting a recalibration.
+        ///
+        /// Empty on calibrations written before this field existed, which are
+        /// still accepted on the subset rule alone.
+        #[serde(default)]
+        pub advertised: Vec<u8>,
     }
 
     impl Calibration {
@@ -717,15 +732,38 @@ pub mod thermal_profile {
             })
         }
 
-        /// Whether every profile here is still one the firmware accepts.
+        /// Whether this calibration still describes what the firmware offers.
         ///
-        /// A BIOS update can change the supported set, and a stale ranking
-        /// would then pick an index the firmware rejects. Subset rather than
-        /// equality on purpose: calibration deliberately skips indices the
-        /// bitmask advertises but the firmware then refuses, so requiring an
-        /// exact match would throw away every calibration from that path.
+        /// Two separate ways a BIOS update can invalidate it:
+        ///
+        /// - a profile **disappeared**, so a stored index would now be
+        ///   rejected. Caught by the subset rule, which is a subset and not an
+        ///   equality on purpose: probing deliberately skips indices the
+        ///   bitmask advertises but the firmware refuses, and requiring an
+        ///   exact match would throw away every calibration from that path.
+        /// - a profile was **added**, which the subset rule cannot see - every
+        ///   old index is still supported, so a stale ranking would keep being
+        ///   used and the new profile would never appear. Caught by comparing
+        ///   the advertised set recorded at calibration time against the live
+        ///   one.
+        ///
+        /// A calibration written before `advertised` existed has none to
+        /// compare, and is judged on the subset rule alone.
         pub fn matches_firmware(&self, supported: &[u8]) -> bool {
-            !self.profiles.is_empty() && self.profiles.iter().all(|p| supported.contains(&p.index))
+            if self.profiles.is_empty() || !self.profiles.iter().all(|p| supported.contains(&p.index))
+            {
+                return false;
+            }
+            if self.advertised.is_empty() {
+                return true;
+            }
+            let sorted = |indices: &[u8]| {
+                let mut values = indices.to_vec();
+                values.sort_unstable();
+                values.dedup();
+                values
+            };
+            sorted(&self.advertised) == sorted(supported)
         }
     }
 
@@ -1008,9 +1046,14 @@ mod thermal_profile_tests {
 
     fn ranked(mut profiles: Vec<Measured>) -> Calibration {
         profiles.sort_by_key(Measured::rank);
+        // In bit order, which is how supported() reports it - not in the
+        // ranked order the profiles end up in.
+        let mut advertised: Vec<u8> = profiles.iter().map(|p| p.index).collect();
+        advertised.sort_unstable();
         Calibration {
             profiles,
             measured: true,
+            advertised,
         }
     }
 
@@ -1145,6 +1188,7 @@ mod thermal_profile_tests {
                 },
             ],
             measured: false,
+            advertised: vec![0, 6],
         };
         assert!(!unranked.is_ranked());
         for tier in 0..TIERS {
@@ -1166,6 +1210,7 @@ mod thermal_profile_tests {
         let one = Calibration {
             profiles: vec![measured(4, 95_000_000, 160_000_000)],
             measured: true,
+            advertised: vec![4],
         };
         assert!(!one.is_ranked());
         assert_eq!(one.index_for_tier(3), None);
@@ -1201,18 +1246,65 @@ mod thermal_profile_tests {
         assert_eq!(parse_mask("nonsense"), None);
     }
 
-    /// A BIOS update can change the supported set; reusing a stale ranking
-    /// would write an index the firmware now rejects.
+    /// A BIOS update can drop a profile; reusing a stale ranking would write an
+    /// index the firmware now rejects.
     #[test]
-    fn a_calibration_is_only_valid_against_the_live_supported_set() {
+    fn a_calibration_that_lost_a_profile_is_rejected() {
         let c = phn16_73();
         assert!(c.matches_firmware(&indices_from_mask(0x73)));
-        assert!(
-            c.matches_firmware(&indices_from_mask(0xff)),
-            "a superset is fine - calibration skips indices the firmware refuses"
-        );
         assert!(!c.matches_firmware(&indices_from_mask(0x03)));
         assert!(!Calibration::default().matches_firmware(&indices_from_mask(0x73)));
+    }
+
+    /// The other direction, which the subset rule alone cannot see: every old
+    /// index is still supported, so the stale ranking would keep being used
+    /// and the profile the update added would never appear anywhere.
+    #[test]
+    fn a_calibration_that_gained_a_profile_is_rejected_too() {
+        let c = phn16_73();
+        assert_eq!(c.advertised, vec![0, 1, 4, 5, 6]);
+        assert!(
+            !c.matches_firmware(&indices_from_mask(0xff)),
+            "a firmware advertising more profiles than were measured must force a recalibration"
+        );
+    }
+
+    /// Probing skips indices the bitmask advertises but the firmware then
+    /// refuses, so those calibrations must survive - it is the *advertised*
+    /// set that has to match, not the measured one.
+    #[test]
+    fn a_profile_the_firmware_refused_during_probing_does_not_invalidate_it() {
+        let mut c = phn16_73();
+        // Index 2 is advertised on this machine's firmware but rejected on
+        // every write, so it never became a measured profile.
+        c.advertised = vec![0, 1, 2, 4, 5, 6];
+        assert!(c.matches_firmware(&indices_from_mask(0x77)));
+        assert!(
+            !c.matches_firmware(&indices_from_mask(0x73)),
+            "0x77 -> 0x73 is a real change"
+        );
+    }
+
+    /// Calibrations written before the advertised set was recorded have
+    /// nothing to compare, and must not all be thrown away.
+    #[test]
+    fn a_calibration_without_an_advertised_set_falls_back_to_the_subset_rule() {
+        let mut legacy = phn16_73();
+        legacy.advertised.clear();
+        assert!(legacy.matches_firmware(&indices_from_mask(0x73)));
+        assert!(legacy.matches_firmware(&indices_from_mask(0xff)));
+        assert!(!legacy.matches_firmware(&indices_from_mask(0x03)));
+    }
+
+    #[test]
+    fn an_old_calibration_json_still_deserializes() {
+        // Exactly what earlier builds wrote: no advertised field at all.
+        let json = r#"{"profiles":[{"index":6,"pl1_uw":45000000,"pl2_uw":50000000},
+                        {"index":0,"pl1_uw":55000000,"pl2_uw":160000000}],"measured":true}"#;
+        let c: Calibration = serde_json::from_str(json).unwrap();
+        assert!(c.advertised.is_empty());
+        assert!(c.is_ranked());
+        assert_eq!(c.weakest(), Some(6));
     }
 
     #[test]
