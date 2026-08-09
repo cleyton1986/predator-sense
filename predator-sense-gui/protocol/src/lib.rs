@@ -750,7 +750,8 @@ pub mod thermal_profile {
         /// A calibration written before `advertised` existed has none to
         /// compare, and is judged on the subset rule alone.
         pub fn matches_firmware(&self, supported: &[u8]) -> bool {
-            if self.profiles.is_empty() || !self.profiles.iter().all(|p| supported.contains(&p.index))
+            if self.profiles.is_empty()
+                || !self.profiles.iter().all(|p| supported.contains(&p.index))
             {
                 return false;
             }
@@ -813,8 +814,25 @@ pub mod thermal_profile {
     }
 
     /// Last-applied index for the current user.
+    ///
+    /// Deliberately **not** XDG-aware, unlike [`calibration_path`]: this file
+    /// is a rendezvous with the privileged boot service, which runs as root and
+    /// only knows the user's home directory - it cannot consult that user's
+    /// `XDG_CONFIG_HOME`. Anchoring both ends to `$HOME/.config` is what makes
+    /// the boot restore actually happen for someone who moved their config
+    /// elsewhere; resolving it through `config_home()` here would leave the
+    /// writer and the boot reader looking at different files and silently drop
+    /// the reboot persistence this feature advertises.
+    ///
+    /// The calibration stays XDG-aware because only user processes read it.
     pub fn last_profile_path() -> Option<PathBuf> {
-        Some(config_home()?.join(LAST_PROFILE_FILE))
+        Some(home_config_home()?.join(LAST_PROFILE_FILE))
+    }
+
+    /// `$HOME/.config`, ignoring `XDG_CONFIG_HOME` - see
+    /// [`last_profile_path`] for why that is the point.
+    fn home_config_home() -> Option<PathBuf> {
+        Some(PathBuf::from(std::env::var_os("HOME")?).join(".config"))
     }
 
     /// Last-applied index under an explicit config directory.

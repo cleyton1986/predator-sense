@@ -51,6 +51,12 @@ const RAPL_DRIVERS: [&str; 2] = ["intel-rapl-mmio", "intel-rapl"];
 /// being read back.
 const SETTLE_MS: u64 = 1500;
 
+/// How many times one index is written and confirmed before calibration gives
+/// up on it. More than one because a single stray profile change - a key press,
+/// an AC transition - should not cost the user the whole calibration; bounded
+/// because retrying forever against someone holding the mode key would hang.
+const SETTLE_ATTEMPTS: u8 = 3;
+
 fn index_path() -> PathBuf {
     Path::new(SYSFS_ROOT).join(shared::SYSFS_INDEX)
 }
@@ -167,17 +173,26 @@ fn sample_limits(limits: Option<&(PathBuf, PathBuf)>) -> (Option<u64>, Option<u6
 /// then be assigned from raw index order while claiming to be measured - which
 /// is exactly how Quiet and Turbo end up on the wrong firmware index.
 ///
-/// Two conditions, both necessary:
+/// Three conditions, all necessary:
 ///
 /// 1. **Every** profile has a sustained reading. `Measured::rank` treats a
 ///    missing limit as zero watts, so one transient read failure among
 ///    otherwise good samples would sort that profile below every real reading
 ///    and hand the strongest firmware profile to Quiet. A partial sample set
 ///    is not a ranking, even though the readings it does have look fine.
-/// 2. At least two of the readings differ, which is what proves the samples
+/// 2. The burst readings are **all or nothing**. PL2 is the tie-breaker in
+///    `rank`, so where two profiles share a PL1 it is what separates them -
+///    and a machine that exposes no PL2 at all still ranks fine on PL1 alone.
+///    What must not happen is a mix: one missing PL2 among real ones is the
+///    same zero-watt problem as above, just one field over.
+/// 3. At least two of the readings differ, which is what proves the samples
 ///    track the profile rather than some fixed ceiling.
 fn readings_are_meaningful(profiles: &[Measured]) -> bool {
     if profiles.len() < 2 || !profiles.iter().all(|p| p.pl1_uw.is_some()) {
+        return false;
+    }
+    let with_burst = profiles.iter().filter(|p| p.pl2_uw.is_some()).count();
+    if with_burst != 0 && with_burst != profiles.len() {
         return false;
     }
     let distinct: std::collections::HashSet<_> =
@@ -189,10 +204,21 @@ fn readings_are_meaningful(profiles: &[Measured]) -> bool {
 ///
 /// Intrusive: it switches profiles one by one, so fans and clocks move while it
 /// runs and it takes `SETTLE_MS` per profile. Ask the user first, and call it
-/// off the UI thread. The profile active on entry is restored at the end - but
-/// note the firmware may boot into an index it then refuses to accept back, in
-/// which case the restore fails and the weakest profile just measured is left
-/// active instead.
+/// off the UI thread.
+///
+/// The profile active on entry is restored on every exit path, success or
+/// failure - but note the firmware may boot into an index it then refuses to
+/// accept back, in which case the restore fails and the weakest profile just
+/// measured is left active instead.
+///
+/// All or nothing on the profiles the firmware really has: an index that
+/// cannot be held still long enough to measure aborts the run rather than
+/// being left out. A calibration missing one of them would still validate
+/// against the firmware later (the advertised set records it), so the profile
+/// would quietly disappear from the UI and from the mode key's cycle order -
+/// and if it was the strongest, Turbo would map to the wrong index. Indices
+/// the firmware *refuses to set at all* are a different case and are simply
+/// skipped, since those are not profiles the machine has.
 pub fn calibrate() -> Result<Calibration, String> {
     if !is_available() {
         return Err("this machine does not expose thermal_profile".to_string());
@@ -215,39 +241,31 @@ pub fn calibrate() -> Result<Calibration, String> {
 
     for index in &indices {
         let index = *index;
-        if set(index).is_err() {
-            // Bitmask said yes, firmware said no. Not fatal: skip it.
-            crate::hardware::applog::error(&format!(
+        match measure_one(index, limits.as_ref()) {
+            Ok(Some(profile)) => profiles.push(profile),
+            // Bitmask said yes, firmware said no. Expected on this very
+            // firmware (index 2 is advertised and refused on every write), and
+            // recorded as such: `advertised` below keeps the full set, so this
+            // does not look like a profile that went missing.
+            Ok(None) => crate::hardware::applog::error(&format!(
                 "thermal profile {index} is in the supported bitmask but was refused"
-            ));
-            continue;
+            )),
+            // Something outside this app kept moving the index. Aborting beats
+            // saving a calibration that is missing a profile the firmware
+            // really does have: `advertised` would still list it, so the result
+            // would validate as current while the missing profile silently
+            // vanished from the UI and the key's cycle order - and if it was
+            // the strongest one, Turbo would land on the wrong index.
+            Err(error) => {
+                restore(original, &profiles);
+                return Err(error);
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(SETTLE_MS));
-
-        // The settle window is long enough for something else to move the
-        // index: the hotkey daemon acts on a key press without asking anyone,
-        // and the auto-profile switcher fires on AC changes. Attributing this
-        // reading to the wrong profile would bake a wrong ranking in
-        // permanently, so a profile that did not stay put is dropped rather
-        // than recorded - it simply will not appear in the calibration.
-        if current() != Some(index) {
-            crate::hardware::applog::error(&format!(
-                "thermal profile changed away from {index} while measuring it; \
-                 dropping that sample"
-            ));
-            continue;
-        }
-
-        let (pl1_uw, pl2_uw) = sample_limits(limits.as_ref());
-        profiles.push(Measured {
-            index,
-            pl1_uw,
-            pl2_uw,
-        });
     }
 
     if profiles.is_empty() {
-        return Err("no thermal profile could be measured".to_string());
+        restore(original, &profiles);
+        return Err("firmware refused every profile it advertised".to_string());
     }
 
     // Not "did we read anything" but "do the readings tell the profiles
@@ -281,6 +299,47 @@ pub fn calibrate() -> Result<Calibration, String> {
     // UI reported success.
     save(&calibration).map_err(|error| format!("measured, but could not be saved: {error}"))?;
     Ok(calibration)
+}
+
+/// Writes one index, waits for the EC, and samples it.
+///
+/// `Ok(None)` means the firmware refused the write - expected for indices the
+/// bitmask advertises but the machine does not implement. `Err` means the
+/// index would not stay put long enough to be measured, which is not something
+/// this function may paper over: see the caller.
+fn measure_one(index: u8, limits: Option<&(PathBuf, PathBuf)>) -> Result<Option<Measured>, String> {
+    if set(index).is_err() {
+        return Ok(None);
+    }
+
+    // The settle window is long enough for something else to move the index:
+    // the hotkey daemon acts on a key press without asking anyone, and the
+    // auto-profile switcher fires on AC changes. Attributing this reading to
+    // the wrong profile would bake a wrong ranking in permanently, so the
+    // index is confirmed after settling and the write is retried if it moved.
+    for attempt in 1..=SETTLE_ATTEMPTS {
+        std::thread::sleep(std::time::Duration::from_millis(SETTLE_MS));
+        if current() == Some(index) {
+            let (pl1_uw, pl2_uw) = sample_limits(limits);
+            return Ok(Some(Measured {
+                index,
+                pl1_uw,
+                pl2_uw,
+            }));
+        }
+        crate::hardware::applog::error(&format!(
+            "thermal profile moved away from {index} while measuring it \
+             (attempt {attempt}/{SETTLE_ATTEMPTS})"
+        ));
+        if attempt < SETTLE_ATTEMPTS && set(index).is_err() {
+            break;
+        }
+    }
+
+    Err(format!(
+        "thermal profile {index} would not stay set long enough to measure - \
+         something else is changing profiles; try again"
+    ))
 }
 
 /// Puts the machine back where calibration found it.
@@ -428,8 +487,48 @@ mod tests {
     /// A lone profile has nothing to be ranked against, whatever it reported.
     #[test]
     fn a_single_sample_is_never_a_ranking() {
-        assert!(!readings_are_meaningful(&[measured(4, 95_000_000, 160_000_000)]));
+        assert!(!readings_are_meaningful(&[measured(
+            4,
+            95_000_000,
+            160_000_000
+        )]));
         assert!(!readings_are_meaningful(&[]));
+    }
+
+    /// PL2 is the tie-breaker in `rank`, so a missing one among real ones is
+    /// the same zero-watt trap as a missing PL1, just one field over: where
+    /// two profiles share a sustained limit, the one whose burst failed to
+    /// read would be ranked the weaker of the two.
+    #[test]
+    fn a_missing_burst_reading_among_real_ones_disqualifies_the_ranking() {
+        let mixed = vec![
+            measured(0, 55_000_000, 160_000_000),
+            Measured {
+                index: 5,
+                pl1_uw: Some(55_000_000),
+                pl2_uw: None,
+            },
+        ];
+        assert!(!readings_are_meaningful(&mixed));
+    }
+
+    /// But a machine that exposes no burst limit at all still ranks fine on
+    /// sustained power alone - the rule is all-or-nothing, not mandatory.
+    #[test]
+    fn sustained_only_readings_are_still_a_ranking() {
+        let sustained_only = vec![
+            Measured {
+                index: 0,
+                pl1_uw: Some(55_000_000),
+                pl2_uw: None,
+            },
+            Measured {
+                index: 5,
+                pl1_uw: Some(115_000_000),
+                pl2_uw: None,
+            },
+        ];
+        assert!(readings_are_meaningful(&sustained_only));
     }
 
     #[test]
