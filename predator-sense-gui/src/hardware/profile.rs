@@ -478,19 +478,54 @@ fn apply_firmware_profile(profile: PowerProfile) {
 /// The calibration is consulted before the index on purpose: it is cached in
 /// memory, whereas reading the index is a WMI call, and callers run on UI
 /// timers. Machines without a ranked calibration never pay for it.
-fn firmware_profile(cpu: Option<PowerProfile>) -> Option<PowerProfile> {
-    let calibration = crate::hardware::thermal_profile::load()?;
+/// What the firmware thermal profile says, keeping "this machine has no such
+/// control" apart from "it has one and it could not be read".
+///
+/// They are not the same fact for the policy: the first means the CPU state is
+/// the whole profile, the second means part of the machine is unaccounted for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirmwareReading {
+    Tier(PowerProfile),
+    /// No interface, no calibration, or one that was never ranked - nothing
+    /// here drives anything, so there is nothing to reconcile against.
+    NotApplicable,
+    /// The interface exists and is calibrated, but the index did not read back
+    /// or maps to no tier.
+    Unreadable,
+}
+
+fn read_firmware_profile(cpu: Option<PowerProfile>) -> FirmwareReading {
+    firmware_reading_for(crate::hardware::thermal_profile::current(), cpu)
+}
+
+/// Split from the read so a caller that already has the index does not pay for
+/// a second WMI call to get it.
+fn firmware_reading_for(index: Option<u8>, cpu: Option<PowerProfile>) -> FirmwareReading {
+    let Some(calibration) = crate::hardware::thermal_profile::load() else {
+        return FirmwareReading::NotApplicable;
+    };
     if !calibration.is_ranked() {
-        return None;
+        return FirmwareReading::NotApplicable;
     }
-    let index = crate::hardware::thermal_profile::current()?;
+    let Some(index) = index else {
+        return FirmwareReading::Unreadable;
+    };
     // The CPU state goes in as a tie-breaker, not as an override. Where a
     // machine has fewer firmware profiles than the app has tiers, one index
     // stands for two tiers and cannot be inverted on its own; without this a
     // Balanced selection reads back as Quiet, and the policy then chases a
     // mismatch that never resolves.
-    let tier = calibration.tier_for_index(index, cpu.map(|profile| profile.index() as u8))?;
-    Some(PowerProfile::from_index(tier as i8))
+    match calibration.tier_for_index(index, cpu.map(|profile| profile.index() as u8)) {
+        Some(tier) => FirmwareReading::Tier(PowerProfile::from_index(tier as i8)),
+        None => FirmwareReading::Unreadable,
+    }
+}
+
+fn firmware_profile(cpu: Option<PowerProfile>) -> Option<PowerProfile> {
+    match read_firmware_profile(cpu) {
+        FirmwareReading::Tier(profile) => Some(profile),
+        _ => None,
+    }
 }
 
 /// The profile the machine is *coherently* in: every control that makes up a
@@ -508,8 +543,30 @@ fn firmware_profile(cpu: Option<PowerProfile>) -> Option<PowerProfile> {
 /// exactly what a policy should act on: reapplying its target reconciles the
 /// firmware and the CPU in one go.
 pub fn coherent_profile() -> Option<PowerProfile> {
+    policy_view().profile
+}
+
+/// What the AC/battery policy needs to decide, read once.
+pub struct PolicyView {
+    /// The profile the machine is coherently in - see [`coherent_profile`].
+    pub profile: Option<PowerProfile>,
+    /// The raw firmware index behind it, when this machine has one.
+    ///
+    /// Part of the identity of "the state the user is currently sitting in",
+    /// which `profile` alone cannot express: every mode-key press that leaves
+    /// the firmware disagreeing with the CPU produces the same `None`, so
+    /// without this two distinct presses look identical and the second one
+    /// inherits the first one's grace window instead of getting its own.
+    pub firmware_index: Option<u8>,
+}
+
+pub fn policy_view() -> PolicyView {
     let cpu = cpu_belief();
-    reconcile(firmware_profile(cpu), cpu)
+    let firmware_index = crate::hardware::thermal_profile::current();
+    PolicyView {
+        profile: reconcile(firmware_reading_for(firmware_index, cpu), cpu),
+        firmware_index,
+    }
 }
 
 /// The best available answer for "which tier are the CPU controls in".
@@ -534,9 +591,9 @@ fn cpu_belief() -> Option<PowerProfile> {
 
 /// The agreement rule behind [`coherent_profile`], split out to be testable
 /// without a machine that has both controls.
-fn reconcile(firmware: Option<PowerProfile>, cpu: Option<PowerProfile>) -> Option<PowerProfile> {
+fn reconcile(firmware: FirmwareReading, cpu: Option<PowerProfile>) -> Option<PowerProfile> {
     match (firmware, cpu) {
-        (Some(firmware), Some(cpu)) => (firmware == cpu).then_some(cpu),
+        (FirmwareReading::Tier(firmware), Some(cpu)) => (firmware == cpu).then_some(cpu),
         // A firmware tier with nothing to check it against certifies nothing.
         // `None` on the CPU side does not mean "no CPU settings", it means
         // this backend cannot tell its presets apart and no cached selection
@@ -544,8 +601,14 @@ fn reconcile(firmware: Option<PowerProfile>, cpu: Option<PowerProfile>) -> Optio
         // only that. Accepting the firmware answer alone would let a key press
         // report Turbo on AC, or Quiet on battery, and the policy would call
         // that compliant while the CPU stayed exactly where it was.
-        (Some(_), None) => None,
-        (None, cpu) => cpu,
+        (FirmwareReading::Tier(_), None) => None,
+        // Nothing to reconcile: this machine's profile is its CPU state.
+        (FirmwareReading::NotApplicable, cpu) => cpu,
+        // The control exists and is calibrated, and we cannot see where it is.
+        // The mode key may have left it on a tier that contradicts the CPU, so
+        // certifying the CPU alone would let the policy call the machine
+        // compliant while half of it is unaccounted for.
+        (FirmwareReading::Unreadable, _) => None,
     }
 }
 
@@ -970,12 +1033,18 @@ mod tests {
     #[test]
     fn disagreeing_controls_are_not_a_profile() {
         assert_eq!(
-            reconcile(Some(PowerProfile::Turbo), Some(PowerProfile::Quiet)),
+            reconcile(
+                FirmwareReading::Tier(PowerProfile::Turbo),
+                Some(PowerProfile::Quiet)
+            ),
             None,
             "a firmware-only change must not report as an enforced profile"
         );
         assert_eq!(
-            reconcile(Some(PowerProfile::Quiet), Some(PowerProfile::Performance)),
+            reconcile(
+                FirmwareReading::Tier(PowerProfile::Quiet),
+                Some(PowerProfile::Performance)
+            ),
             None,
             "and not in the other direction either"
         );
@@ -984,7 +1053,10 @@ mod tests {
     #[test]
     fn agreeing_controls_report_that_profile() {
         assert_eq!(
-            reconcile(Some(PowerProfile::Turbo), Some(PowerProfile::Turbo)),
+            reconcile(
+                FirmwareReading::Tier(PowerProfile::Turbo),
+                Some(PowerProfile::Turbo)
+            ),
             Some(PowerProfile::Turbo)
         );
     }
@@ -996,8 +1068,35 @@ mod tests {
     /// changes that index and nothing else.
     #[test]
     fn a_firmware_tier_alone_certifies_nothing() {
-        assert_eq!(reconcile(Some(PowerProfile::Turbo), None), None);
-        assert_eq!(reconcile(Some(PowerProfile::Quiet), None), None);
+        assert_eq!(
+            reconcile(FirmwareReading::Tier(PowerProfile::Turbo), None),
+            None
+        );
+        assert_eq!(
+            reconcile(FirmwareReading::Tier(PowerProfile::Quiet), None),
+            None
+        );
+    }
+
+    /// "This machine has no firmware control" and "it has one and I cannot see
+    /// it" both used to arrive as `None`. Only the first means the CPU state is
+    /// the whole profile: with a calibrated control that will not read back,
+    /// the mode key may have left it on a tier that contradicts the CPU, and
+    /// certifying the CPU alone lets the policy call that compliant.
+    #[test]
+    fn an_unreadable_firmware_control_is_not_an_absent_one() {
+        assert_eq!(
+            reconcile(FirmwareReading::Unreadable, Some(PowerProfile::Performance)),
+            None
+        );
+        assert_eq!(
+            reconcile(
+                FirmwareReading::NotApplicable,
+                Some(PowerProfile::Performance)
+            ),
+            Some(PowerProfile::Performance),
+            "no such control is a different fact"
+        );
     }
 
     /// The other direction is fine: with no firmware ranking to consult, the
@@ -1005,10 +1104,10 @@ mod tests {
     #[test]
     fn the_cpu_state_alone_is_a_profile() {
         assert_eq!(
-            reconcile(None, Some(PowerProfile::Balanced)),
+            reconcile(FirmwareReading::NotApplicable, Some(PowerProfile::Balanced)),
             Some(PowerProfile::Balanced)
         );
-        assert_eq!(reconcile(None, None), None);
+        assert_eq!(reconcile(FirmwareReading::NotApplicable, None), None);
     }
 
     #[test]

@@ -2192,7 +2192,21 @@ static int WMI_gaming_execute_u32_u64(u32 method_id, u32 in, u64 *out)
 		return -EIO;
 
 	obj = result.pointer;
-	if (obj && out) {
+	/*
+	 * A success status with no result object must not read as success: the
+	 * caller's output variable is left untouched, and callers declare it
+	 * uninitialized (WMID_gaming_get_misc_setting). That used to surface
+	 * only through the PWM fan path; it now backs the world-readable
+	 * thermal_profile attributes, where it would publish a stack byte as the
+	 * active profile - and fabricate the supported bitmask at probe.
+	 *
+	 * WMI_gaming_execute_u64() above avoids this by writing a zeroed local
+	 * unconditionally; reporting the failure is better still, since a caller
+	 * can tell the difference.
+	 */
+	if (!obj || !out) {
+		ret = -ENOMSG;
+	} else {
 		switch (obj->type) {
 		case ACPI_TYPE_INTEGER:
 			*out = obj->integer.value;

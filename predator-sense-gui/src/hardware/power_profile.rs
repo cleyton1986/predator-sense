@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicI8, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use super::profile::{coherent_profile, set_profile, PowerProfile};
+use super::profile::{policy_view, set_profile, PowerProfile};
 
 const CRITICAL_BATTERY_PCT: u32 = 15;
 
@@ -41,12 +41,12 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static AC_PROFILE: AtomicI8 = AtomicI8::new(2); // PowerProfile::Performance
 static BATTERY_PROFILE: AtomicI8 = AtomicI8::new(1); // PowerProfile::Balanced
 
-/// `(profile index seen out of policy, when first seen)` - `None` once the
-/// machine is compliant again. Guarded by a mutex rather than a pair of
+/// `((profile index, firmware index) seen out of policy, when first seen)` -
+/// `None` once the machine is compliant again. Guarded by a mutex rather than a pair of
 /// atomics since the two fields must always be read/written together (a torn
 /// update could pair a stale timestamp with a fresh profile index and let a
 /// change slip through the grace window instantly).
-static PENDING_OVERRIDE: Mutex<Option<(i8, Instant)>> = Mutex::new(None);
+static PENDING_OVERRIDE: Mutex<Option<((i8, Option<u8>), Instant)>> = Mutex::new(None);
 
 pub fn set_auto(v: bool) {
     ENABLED.store(v, Ordering::Relaxed);
@@ -136,7 +136,8 @@ pub fn check() {
     // leaves the machine underclocked with nothing to correct it. A machine
     // whose controls disagree reports None here, which enforces the target and
     // reconciles them.
-    let current = coherent_profile();
+    let view = policy_view();
+    let current = view.profile;
     let Some(target) = desired_profile(ac, current, battery_capacity_pct()) else {
         clear_pending_override();
         return;
@@ -145,16 +146,26 @@ pub fn check() {
     // -1 has no matching PowerProfile variant, so an unreadable current state
     // (`current == None`) never accidentally matches a genuine previous
     // profile index and skips its own grace window.
-    let current_index = current.map(|p| p.index()).unwrap_or(-1);
+    //
+    // The firmware index is part of the identity for the same reason: a
+    // mode-key press that leaves firmware and CPU disagreeing always yields
+    // `current == None`, so two presses in a row would look like the same
+    // state and the second would inherit whatever was left of the first one's
+    // window - a fresh choice made at 55s could be overridden five seconds
+    // later. Including the index makes each distinct choice its own state.
+    let state = (
+        current.map(|p| p.index()).unwrap_or(-1),
+        view.firmware_index,
+    );
     {
         let mut pending = PENDING_OVERRIDE.lock().unwrap();
         match *pending {
-            Some((idx, since)) if idx == current_index && since.elapsed() < OVERRIDE_GRACE => {
+            Some((seen, since)) if seen == state && since.elapsed() < OVERRIDE_GRACE => {
                 return;
             }
-            Some((idx, _)) if idx == current_index => {} // Grace window elapsed; enforce below.
+            Some((seen, _)) if seen == state => {} // Grace window elapsed; enforce below.
             _ => {
-                *pending = Some((current_index, Instant::now()));
+                *pending = Some((state, Instant::now()));
                 return; // Freshly out of policy; start the grace window.
             }
         }
