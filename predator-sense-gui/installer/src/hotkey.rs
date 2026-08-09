@@ -1,6 +1,9 @@
 use crate::constants::{app, command, hardware, logging, path, timing};
 use crate::process::process_running;
 use crate::AppResult;
+use predator_sense_protocol::battery;
+use predator_sense_protocol::helper::Action as HelperAction;
+use predator_sense_protocol::thermal_profile;
 use serde::{Deserialize, Deserializer};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -267,8 +270,10 @@ pub(crate) fn run() -> AppResult {
     // produces no input-subsystem event - so it is polled alongside the
     // keyboards but parsed differently. Optional: older models have no such
     // key, and without the udev rule the node stays root-only.
-    if let Some(path) = find_ec_hid() {
-        match File::open(&path) {
+    let mode_key = ModeKey::load(&home);
+    let (ec_hid, ec_candidates) = find_ec_hid(&mode_key);
+    match ec_hid {
+        Some(path) => match File::open(&path) {
             Ok(file) => {
                 logger.info(format!("Tecla de modo: monitorando {}", path.display()));
                 devices.push((path, file, true));
@@ -276,7 +281,19 @@ pub(crate) fn run() -> AppResult {
             Err(error) => logger.info(format!(
                 "Tecla de modo indisponível ({error}); confira o grupo input"
             )),
+        },
+        // Logged rather than silent: on a model whose EC reports a different
+        // product id this list is what lets the user point mode_key.json at
+        // the right device instead of concluding the key is unsupported.
+        None if ec_candidates.is_empty() => {
+            logger.debug("Tecla de modo: nenhum dispositivo HID Acer encontrado")
         }
+        None => logger.info(format!(
+            "Tecla de modo: nenhum dispositivo casou com {}:{}; candidatos Acer: {}",
+            mode_key.vendor,
+            mode_key.product,
+            ec_candidates.join(", ")
+        )),
     }
 
     let mut last_activation =
@@ -311,6 +328,10 @@ pub(crate) fn run() -> AppResult {
         if resumed_since(last_suspend_offset, current_suspend_offset) {
             logger.info("Retorno de suspensão detectado; restaurando iluminação salva");
             restore_lighting_with_retries(&config_path, &mut logger);
+            // The firmware does not always keep its thermal profile across a
+            // suspend cycle either, and unlike the lighting nothing else would
+            // notice: the index changes with no event anywhere.
+            reapply_thermal_profile(&mut logger);
         }
         last_suspend_offset = current_suspend_offset;
 
@@ -328,7 +349,7 @@ pub(crate) fn run() -> AppResult {
                 continue;
             }
             if devices[index].2 {
-                match read_mode_key(&mut devices[index].1) {
+                match read_mode_key(&mut devices[index].1, &mode_key) {
                     Ok(true) => {
                         if last_activation.elapsed()
                             > Duration::from_secs(timing::HOTKEY_DEBOUNCE_SECS)
@@ -376,140 +397,314 @@ pub(crate) fn run() -> AppResult {
     Err("predator-sense-hotkey: todos os dispositivos foram desconectados".into())
 }
 
-/// Locates the embedded controller's hidraw node by vendor/product.
+/// Which HID device the physical mode-switch key reports on, and what it
+/// sends.
 ///
-/// Never hard-code /dev/hidrawN: the numbering changes between boots.
-fn find_ec_hid() -> Option<PathBuf> {
-    for entry in fs::read_dir("/sys/class/hidraw").ok()? {
-        let entry = entry.ok()?;
-        let uevent = fs::read_to_string(entry.path().join("device/uevent")).ok()?;
-        let matches = uevent.lines().any(|line| {
-            line.strip_prefix("HID_ID=")
-                .and_then(|id| {
-                    let mut parts = id.split(':');
-                    let (_, vendor, product) = (parts.next()?, parts.next()?, parts.next()?);
-                    Some(
-                        vendor.eq_ignore_ascii_case(hardware::EC_HID_VENDOR)
-                            && product.eq_ignore_ascii_case(hardware::EC_HID_PRODUCT),
-                    )
-                })
-                .unwrap_or(false)
-        });
-        if matches {
-            return Some(PathBuf::from("/dev").join(entry.file_name()));
+/// The defaults are what was captured on a Predator PHN16-73. The vendor is
+/// Acer's and holds everywhere; the product id and the report bytes are the
+/// parts expected to differ across models, and there is no way to derive them
+/// without the hardware in hand - so they are overridable through
+/// `~/.config/predator-sense/mode_key.json`:
+///
+/// ```json
+/// { "product": "0000174B", "report": [4, 133, 255] }
+/// ```
+///
+/// A file of its own rather than a key in `config.json`, because the GUI
+/// reserializes that file wholesale and would drop a field it does not know.
+/// Anyone whose key does not work can find the right values from the candidate
+/// list this daemon logs at startup plus `sudo hexdump -C /dev/hidrawN`, and
+/// report them so the defaults can grow a per-model table.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+struct ModeKey {
+    #[serde(default = "default_ec_vendor")]
+    vendor: String,
+    #[serde(default = "default_ec_product")]
+    product: String,
+    #[serde(default = "default_mode_key_report")]
+    report: Vec<u8>,
+}
+
+fn default_ec_vendor() -> String {
+    hardware::EC_HID_VENDOR.to_string()
+}
+
+fn default_ec_product() -> String {
+    hardware::EC_HID_PRODUCT.to_string()
+}
+
+fn default_mode_key_report() -> Vec<u8> {
+    hardware::EC_HID_MODE_KEY_REPORT.to_vec()
+}
+
+impl Default for ModeKey {
+    fn default() -> Self {
+        Self {
+            vendor: default_ec_vendor(),
+            product: default_ec_product(),
+            report: default_mode_key_report(),
         }
     }
-    None
+}
+
+impl ModeKey {
+    const CONFIG: &'static str = ".config/predator-sense/mode_key.json";
+
+    fn load(home: &Path) -> Self {
+        let path = home.join(Self::CONFIG);
+        let Ok(data) = fs::read(&path) else {
+            return Self::default();
+        };
+        serde_json::from_slice(&data).unwrap_or_default()
+    }
+
+    /// Whether a `HID_ID=` line names this device.
+    ///
+    /// `HID_ID` is `BUS:VENDOR:PRODUCT` with the ids zero-padded to 8 hex
+    /// digits; the comparison ignores case and any leading zeroes so a
+    /// hand-written override may say `1025` or `00001025`.
+    fn matches(&self, hid_id: &str) -> bool {
+        let mut parts = hid_id.split(':');
+        let (Some(_bus), Some(vendor), Some(product)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        fn same(a: &str, b: &str) -> bool {
+            a.trim_start_matches('0')
+                .eq_ignore_ascii_case(b.trim_start_matches('0'))
+        }
+        same(vendor, &self.vendor) && same(product, &self.product)
+    }
+
+    /// Whether a report just read from the device is a mode-key press.
+    ///
+    /// The EC sends one short report per press with no separate release, so
+    /// there is nothing to debounce on the report itself - the caller still
+    /// debounces to protect against key repeat.
+    fn is_press(&self, report: &[u8]) -> bool {
+        !self.report.is_empty()
+            && report.len() >= self.report.len()
+            && report.starts_with(&self.report)
+    }
+}
+
+/// Locates the embedded controller's hidraw node.
+///
+/// Never hard-code /dev/hidrawN: the numbering changes between boots.
+///
+/// Returns the matching node plus every Acer HID device seen along the way.
+/// The candidate list is what makes this diagnosable on a model whose EC
+/// reports a different product id: the daemon logs it, and the user can point
+/// `mode_key.json` at the right one instead of the key simply staying dead.
+fn find_ec_hid(mode_key: &ModeKey) -> (Option<PathBuf>, Vec<String>) {
+    let mut candidates = Vec::new();
+    let mut found = None;
+    let Ok(entries) = fs::read_dir("/sys/class/hidraw") else {
+        return (None, candidates);
+    };
+    for entry in entries.flatten() {
+        // Skip, never abort: one unreadable node among a dozen must not hide
+        // the EC behind it. An earlier revision used `?` here and gave up on
+        // the whole scan at the first hidraw without a readable uevent.
+        let Ok(uevent) = fs::read_to_string(entry.path().join("device/uevent")) else {
+            continue;
+        };
+        let Some(hid_id) = uevent
+            .lines()
+            .find_map(|line| line.strip_prefix("HID_ID="))
+            .map(str::trim)
+        else {
+            continue;
+        };
+        let node = PathBuf::from("/dev").join(entry.file_name());
+        if hid_id
+            .split(':')
+            .nth(1)
+            .is_some_and(|vendor| vendor.trim_start_matches('0').eq_ignore_ascii_case("1025"))
+        {
+            let name = uevent
+                .lines()
+                .find_map(|line| line.strip_prefix("HID_NAME="))
+                .unwrap_or("?");
+            candidates.push(format!("{} [{hid_id}] {name}", node.display()));
+        }
+        if found.is_none() && mode_key.matches(hid_id) {
+            found = Some(node);
+        }
+    }
+    (found, candidates)
 }
 
 /// Reads one input report and reports whether it is the mode-switch key.
-///
-/// The EC emits a short report (3 bytes) per press, with no release event, so
-/// there is nothing to debounce on the report itself - the caller still
-/// debounces to protect against key repeat.
-fn read_mode_key(file: &mut File) -> Result<bool, std::io::Error> {
+fn read_mode_key(file: &mut File, mode_key: &ModeKey) -> Result<bool, std::io::Error> {
     let mut buffer = [0u8; 64];
     let read = file.read(&mut buffer)?;
-    Ok(read >= hardware::EC_HID_MODE_KEY_REPORT.len()
-        && buffer[..hardware::EC_HID_MODE_KEY_REPORT.len()] == hardware::EC_HID_MODE_KEY_REPORT)
+    Ok(mode_key.is_press(&buffer[..read]))
 }
 
-/// Firmware indices in measured power order, as calibrated by the GUI.
-///
-/// Deliberately parsed by hand instead of pulling in the GUI's serde types:
-/// this daemon is a separate binary and the file is a stable two-field shape.
-/// Returns None when there is no calibration yet - the caller then falls back
-/// to bit order, which at least still reaches every profile.
-fn calibrated_order() -> Option<Vec<u8>> {
-    let home = std::env::var_os("HOME")?;
-    let path = PathBuf::from(home).join(".config/predator-sense/thermal_profiles.json");
-    let text = fs::read_to_string(path).ok()?;
-    let mut indices = Vec::new();
-    // The file is written ordered weakest-to-strongest, so document order is
-    // the ranking; we only need each "index" field in sequence.
-    for chunk in text.split("\"index\"").skip(1) {
-        let digits: String = chunk
-            .trim_start()
-            .trim_start_matches(':')
-            .trim_start()
-            .chars()
-            .take_while(char::is_ascii_digit)
-            .collect();
-        if let Ok(value) = digits.parse::<u8>() {
-            indices.push(value);
-        }
+/// Everything the firmware currently says about its thermal profiles.
+struct FirmwareProfiles {
+    current: Option<u8>,
+    supported: Vec<u8>,
+}
+
+fn read_firmware_profiles() -> Option<FirmwareProfiles> {
+    let sysfs = Path::new(thermal_profile::SYSFS_ROOT);
+    let index = sysfs.join(thermal_profile::SYSFS_INDEX);
+    if !index.exists() {
+        return None;
     }
-    (!indices.is_empty()).then_some(indices)
+    let supported = fs::read_to_string(sysfs.join(thermal_profile::SYSFS_SUPPORTED))
+        .ok()
+        .as_deref()
+        .and_then(thermal_profile::parse_mask)
+        .map(thermal_profile::indices_from_mask)
+        .unwrap_or_default();
+    Some(FirmwareProfiles {
+        current: fs::read_to_string(&index)
+            .ok()
+            .and_then(|value| value.trim().parse().ok()),
+        supported,
+    })
 }
 
-/// Cycles to the next firmware thermal profile, weakest to strongest, wrapping.
+/// The order the key steps through, weakest to strongest where that is known.
+///
+/// The GUI's calibration is preferred because raw index order is NOT power
+/// order on this firmware - index 6 is the weakest and 5 the strongest - so
+/// cycling by bit position jumps around instead of stepping up as the key is
+/// meant to. A calibration that no longer matches what the firmware accepts
+/// (BIOS update) is discarded rather than used to write a rejected index.
+fn cycle_order(supported: &[u8]) -> Vec<u8> {
+    let calibration = thermal_profile::calibration_path()
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|data| serde_json::from_slice::<thermal_profile::Calibration>(&data).ok());
+    cycle_order_from(calibration, supported)
+}
+
+fn cycle_order_from(
+    calibration: Option<thermal_profile::Calibration>,
+    supported: &[u8],
+) -> Vec<u8> {
+    calibration
+        .filter(|calibration| calibration.matches_firmware(supported))
+        .map(|calibration| {
+            calibration
+                .profiles
+                .iter()
+                .map(|profile| profile.index)
+                .collect::<Vec<u8>>()
+        })
+        .unwrap_or_else(|| supported.to_vec())
+}
+
+/// Cycles to the next firmware thermal profile, wrapping at the top.
 ///
 /// Mirrors the "Mode Cycle Switching" behaviour the Windows app offers for this
-/// key. The ordering comes from the calibration the GUI stores, so it follows
-/// measured power rather than raw index order.
+/// key.
 ///
 /// The manual notes mode switching only works with the battery at 40% or above;
-/// when it is lower the firmware silently refuses, so say so instead of leaving
-/// the user wondering why the key did nothing.
+/// below that the firmware silently refuses, so say so instead of leaving the
+/// user wondering why the key did nothing.
 fn cycle_thermal_profile(logger: &mut Logger) {
-    const SUPPORTED: &str = "/sys/devices/platform/acer-wmi/thermal_profile_supported";
-    const CURRENT: &str = "/sys/devices/platform/acer-wmi/thermal_profile";
-
-    if !Path::new(CURRENT).exists() {
+    let Some(firmware) = read_firmware_profiles() else {
         logger.debug("Tecla de modo: firmware não expõe thermal_profile");
+        return;
+    };
+    if firmware.supported.is_empty() {
+        logger.error("Tecla de modo: firmware não reportou perfis suportados");
         return;
     }
 
-    if let Some(percent) = fs::read_to_string("/sys/class/power_supply/BAT1/capacity")
-        .ok()
+    // Resolved, not assumed: the battery is BAT0 on some Acer models and BAT1
+    // on others (issue #28). Unreadable capacity is not a reason to refuse the
+    // key - the firmware is the one enforcing the rule, this only explains it.
+    if let Some(percent) = battery::device(Path::new(battery::SYSFS_ROOT))
+        .and_then(|device| fs::read_to_string(device.join("capacity")).ok())
         .and_then(|value| value.trim().parse::<u32>().ok())
     {
-        if percent < 40 {
+        if percent < hardware::MODE_KEY_MIN_BATTERY_PERCENT {
             logger.info(format!(
-                "Tecla de modo ignorada: bateria em {percent}%, o firmware exige 40%"
+                "Tecla de modo ignorada: bateria em {percent}%, o firmware exige {}%",
+                hardware::MODE_KEY_MIN_BATTERY_PERCENT
             ));
             return;
         }
     }
 
-    let mask = fs::read_to_string(SUPPORTED)
-        .ok()
-        .and_then(|value| u32::from_str_radix(value.trim().trim_start_matches("0x"), 16).ok())
-        .unwrap_or(0);
-    let current = fs::read_to_string(CURRENT)
-        .ok()
-        .and_then(|value| value.trim().parse::<u8>().ok());
-
-    let supported: Vec<u8> = (0..8u8).filter(|bit| mask & (1 << bit) != 0).collect();
-    if supported.is_empty() {
-        logger.error("Tecla de modo: firmware não reportou perfis suportados");
-        return;
-    }
-
-    // Prefer the measured order the GUI stored: raw index order is NOT the
-    // power order on this firmware (index 6 is the weakest, 5 the strongest),
-    // so cycling by bit position jumps between power levels instead of
-    // stepping weakest-to-strongest as the key is meant to.
-    let order = calibrated_order().unwrap_or(supported);
-    let next = match current.and_then(|c| order.iter().position(|i| *i == c)) {
+    let order = cycle_order(&firmware.supported);
+    let next = match firmware
+        .current
+        .and_then(|current| order.iter().position(|index| *index == current))
+    {
         Some(position) => order[(position + 1) % order.len()],
         // The firmware boots into an index it then refuses to accept back, so
-        // "current" may not be in the list at all.
+        // the current one may not be in the list at all.
         None => order[0],
     };
 
-    logger.info(format!("Tecla de modo: perfil {current:?} -> {next}"));
+    logger.info(format!(
+        "Tecla de modo: perfil {:?} -> {next}",
+        firmware.current
+    ));
+    if write_thermal_profile(next, logger) {
+        remember_thermal_profile(next, logger);
+    }
+}
 
-    // The helper writes to sysfs, so it needs privilege. This daemon runs as
-    // the user, so go through the same broker the GUI uses instead of exec'ing
-    // the helper directly - doing that just fails with EACCES.
-    //
-    // Caveat worth knowing: the shipped polkit policy is auth_admin_keep, so
-    // the first press after the credential expires pops an auth dialog. That is
-    // poor for a physical key. Making it seamless means either a polkit rule
-    // that allows this one action for active local sessions, or moving the
-    // daemon to a system service - both are policy calls, not something to
-    // decide here.
+/// Puts the firmware back on the recorded profile after a resume.
+///
+/// Only writes when the index actually drifted: going through the helper means
+/// a possible polkit prompt, and a prompt on every lid open would be worse than
+/// the drift it fixes.
+fn reapply_thermal_profile(logger: &mut Logger) {
+    let Some(firmware) = read_firmware_profiles() else {
+        return;
+    };
+    let Some(recorded) =
+        thermal_profile::last_profile_path().and_then(|path| thermal_profile::remembered(&path))
+    else {
+        return;
+    };
+    if firmware.current == Some(recorded) {
+        return;
+    }
+    if !firmware.supported.is_empty() && !firmware.supported.contains(&recorded) {
+        logger.error(format!(
+            "Perfil salvo {recorded} não é suportado por este firmware; ignorando"
+        ));
+        return;
+    }
+    logger.info(format!(
+        "Retorno de suspensão: restaurando perfil de firmware {:?} -> {recorded}",
+        firmware.current
+    ));
+    write_thermal_profile(recorded, logger);
+}
+
+fn remember_thermal_profile(index: u8, logger: &mut Logger) {
+    let Some(path) = thermal_profile::last_profile_path() else {
+        return;
+    };
+    if let Err(error) = thermal_profile::remember(&path, index) {
+        logger.error(format!(
+            "Não foi possível registrar o perfil {index}: {error}"
+        ));
+    }
+}
+
+/// Writes the index through the privileged helper. Returns whether it stuck.
+///
+/// The helper writes to sysfs, so it needs privilege. This daemon runs as the
+/// user, so it goes through the same broker the GUI uses instead of exec'ing
+/// the helper directly - doing that just fails with EACCES.
+///
+/// Caveat worth knowing: the shipped polkit policy is `auth_admin_keep`, so the
+/// first press after the credential expires pops an auth dialog. That is poor
+/// for a physical key. Making it seamless means either a polkit rule allowing
+/// this one action for active local sessions, or moving the daemon to a system
+/// service - both are policy calls, not something to decide here.
+fn write_thermal_profile(index: u8, logger: &mut Logger) -> bool {
     // SAFETY: geteuid has no preconditions.
     let mut command = if unsafe { libc::geteuid() } == 0 {
         Command::new(path::HELPER)
@@ -519,14 +714,20 @@ fn cycle_thermal_profile(logger: &mut Logger) {
         command
     };
     let status = command
-        .args(["thermal-profile", &next.to_string()])
+        .args([HelperAction::ThermalProfile.as_str(), &index.to_string()])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
     match status {
-        Ok(status) if status.success() => {}
-        Ok(status) => logger.error(format!("Tecla de modo: helper falhou ({status})")),
-        Err(error) => logger.error(format!("Tecla de modo: helper não executou: {error}")),
+        Ok(status) if status.success() => true,
+        Ok(status) => {
+            logger.error(format!("Tecla de modo: helper falhou ({status})"));
+            false
+        }
+        Err(error) => {
+            logger.error(format!("Tecla de modo: helper não executou: {error}"));
+            false
+        }
     }
 }
 
@@ -1033,6 +1234,105 @@ fn resumed_since(previous: f64, current: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `HID_ID` zero-pads to 8 hex digits, but a hand-written override is not
+    /// going to, and neither format should be the one that silently fails.
+    #[test]
+    fn the_mode_key_device_matches_whatever_the_id_is_padded_to() {
+        let key = ModeKey::default();
+        assert!(key.matches("0018:00001025:0000174B"));
+        assert!(key.matches("0018:00001025:0000174b"), "case-insensitive");
+        assert!(key.matches("0003:1025:174B"), "unpadded");
+
+        let overridden = ModeKey {
+            product: "0xdead".to_string(),
+            ..ModeKey::default()
+        };
+        assert!(!overridden.matches("0018:00001025:0000174B"));
+        assert!(!key.matches("0018:00000CF2:00005130"), "the RGB controller");
+        assert!(!key.matches("garbage"));
+    }
+
+    #[test]
+    fn only_the_captured_report_counts_as_a_mode_key_press() {
+        let key = ModeKey::default();
+        assert!(key.is_press(&[0x04, 0x85, 0xff]));
+        assert!(
+            key.is_press(&[0x04, 0x85, 0xff, 0x00, 0x00]),
+            "the EC pads shorter reports out"
+        );
+        assert!(!key.is_press(&[0x04, 0x85]), "truncated read");
+        assert!(!key.is_press(&[0x04, 0x86, 0xff]), "a different key");
+        assert!(!key.is_press(&[]));
+
+        // A model whose EC uses another report can be pointed at it without a
+        // rebuild - the whole reason this is configurable.
+        let other = ModeKey {
+            report: vec![0x05, 0x01],
+            ..ModeKey::default()
+        };
+        assert!(other.is_press(&[0x05, 0x01, 0x99]));
+        assert!(!other.is_press(&[0x04, 0x85, 0xff]));
+    }
+
+    #[test]
+    fn a_missing_or_broken_override_falls_back_to_the_measured_defaults() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(ModeKey::load(home.path()), ModeKey::default());
+
+        let path = home.path().join(ModeKey::CONFIG);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{ not json").unwrap();
+        assert_eq!(ModeKey::load(home.path()), ModeKey::default());
+
+        // A partial override keeps the defaults for everything it omits.
+        fs::write(&path, r#"{"product":"0000ABCD"}"#).unwrap();
+        let loaded = ModeKey::load(home.path());
+        assert_eq!(loaded.product, "0000ABCD");
+        assert_eq!(loaded.vendor, hardware::EC_HID_VENDOR);
+        assert_eq!(loaded.report, hardware::EC_HID_MODE_KEY_REPORT);
+    }
+
+    fn calibration(indices: &[u8]) -> thermal_profile::Calibration {
+        thermal_profile::Calibration {
+            profiles: indices
+                .iter()
+                .map(|index| thermal_profile::Measured {
+                    index: *index,
+                    pl1_uw: Some(u64::from(*index) * 1_000_000),
+                    pl2_uw: Some(160_000_000),
+                })
+                .collect(),
+            measured: true,
+        }
+    }
+
+    /// The key must step weakest-to-strongest, and on this firmware that is
+    /// *not* index order: index 6 is the weakest and 5 the strongest.
+    #[test]
+    fn the_key_follows_the_measured_order_when_there_is_one() {
+        let supported = [0, 1, 4, 5, 6];
+        let measured = calibration(&[6, 0, 1, 4, 5]);
+        assert_eq!(
+            cycle_order_from(Some(measured), &supported),
+            vec![6, 0, 1, 4, 5]
+        );
+    }
+
+    #[test]
+    fn without_a_calibration_the_key_still_reaches_every_profile() {
+        let supported = [0, 1, 4, 5, 6];
+        assert_eq!(cycle_order_from(None, &supported), supported.to_vec());
+    }
+
+    /// A BIOS update can drop a profile. Cycling through an index the firmware
+    /// now rejects would make the key look broken on one press out of five.
+    #[test]
+    fn a_stale_calibration_is_discarded_rather_than_written() {
+        let supported = [0, 1];
+        let stale = calibration(&[6, 0, 1, 4, 5]);
+        assert_eq!(cycle_order_from(Some(stale), &supported), vec![0, 1]);
+    }
 
     #[test]
     fn finds_all_matching_input_handlers_without_duplicates() {
