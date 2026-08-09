@@ -250,8 +250,8 @@ fn parse_target_capabilities(
     if report.len() < REPORT_TARGET_CAPS_MIN_LEN
         || report[0] != REPORT_TARGET_CAPS
         || report[1] != expected_target
-        || report[3] == 0
-        || report[3] > 16
+        || report[4] == 0
+        || report[4] > 16
     {
         return Err(t("hid_rgb_err_invalid_caps").to_string());
     }
@@ -261,7 +261,17 @@ fn parse_target_capabilities(
     let mode_mask = u32::from_le_bytes([raw[5], raw[6], raw[7], raw[8]]);
     Ok(TargetCapabilities {
         target: report[1],
-        zone_count: report[3],
+        // byte[3] and byte[4] are two separate vendor usages per the ENEK5130
+        // report descriptor (0x32 and 0x35), not two readings of the same
+        // field. byte[4] is the real per-target zone count (confirmed against
+        // AN16S-61 hardware, issue #31): it matches the physical LED count on
+        // all three targets (keyboard=4, cover logo=1, mode key=1), while
+        // byte[3] is a fixed per-target-class constant (9 for the keyboard
+        // class, 5 for single-LED targets). byte[3]-as-zone_count was never
+        // validated against real hardware; it happened to fail safe because
+        // its over-inclusive mask is a superset of the correct one, so this
+        // switch changes no wire bytes on hardware already confirmed working.
+        zone_count: report[4],
         mode_mask,
         raw,
         raw_len,
@@ -470,10 +480,12 @@ mod tests {
 
     #[test]
     fn parses_cover_logo_capabilities_and_mask() {
+        // Real AN16S-61 dump (issue #31): byte[3]=5 is the single-LED class
+        // constant, byte[4]=1 is the real zone count for this 1-LED target.
         let report = [0xa3, 0x83, 0x01, 0x05, 0x01, 0x3b];
         let caps = parse_target_capabilities(0x83, &report).unwrap();
-        assert_eq!(caps.zone_count, 5);
-        assert_eq!(caps.all_zones_mask(), 0x1f);
+        assert_eq!(caps.zone_count, 1);
+        assert_eq!(caps.all_zones_mask(), 0x01);
         assert_eq!(caps.mode_mask, 0x3b);
         assert!(caps.supports_rgb_mode(RgbMode::Static));
         assert!(caps.supports_rgb_mode(RgbMode::Breath));
@@ -483,8 +495,18 @@ mod tests {
     }
 
     #[test]
+    fn parses_keyboard_capabilities_with_four_physical_zones() {
+        // Real AN16S-61 dump (issue #31): byte[3]=9 is the keyboard class
+        // constant, byte[4]=4 is the real zone count (4 physical zones).
+        let report = [0xa3, 0x21, 0x01, 0x09, 0x04, 0xfb, 0x07, 0x00, 0x00];
+        let caps = parse_target_capabilities(0x21, &report).unwrap();
+        assert_eq!(caps.zone_count, 4);
+        assert_eq!(caps.all_zones_mask(), 0x0f);
+    }
+
+    #[test]
     fn rejects_capabilities_that_exceed_the_a4_zone_mask() {
-        let report = [0xa3, 0x83, 0x01, 17, 0x01, 0x3b];
+        let report = [0xa3, 0x83, 0x01, 0x05, 17, 0x3b];
         assert!(parse_target_capabilities(0x83, &report).is_err());
     }
 
@@ -533,7 +555,7 @@ mod tests {
         };
         assert_eq!(
             cover_logo_packet(caps, true, &config).unwrap(),
-            [0xa4, 0x83, MODE_BREATH, 100, 9, 2, 12, 34, 56, 0x1f, 0]
+            [0xa4, 0x83, MODE_BREATH, 100, 9, 2, 12, 34, 56, 0x01, 0]
         );
     }
 
@@ -546,7 +568,7 @@ mod tests {
         };
         assert_eq!(
             cover_logo_packet(caps, false, &config).unwrap(),
-            [0xa4, 0x83, MODE_STATIC, 0, 0, STATIC_FLAG, 0, 0, 0, 0x1f, 0]
+            [0xa4, 0x83, MODE_STATIC, 0, 0, STATIC_FLAG, 0, 0, 0, 0x01, 0]
         );
         assert!(cover_logo_packet(caps, true, &config).is_err());
     }
