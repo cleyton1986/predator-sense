@@ -371,6 +371,79 @@ this app - or any Linux software - can change; raising it means flashing a
 different vBIOS with a Windows-only tool like `nvflash`, a real risk of
 bricking the GPU and squarely the owner's own call.
 
+### Firmware power profiles (measured, not guessed)
+
+Everything in the table above only redistributes an existing power budget
+between CPU and GPU. The **package power limit itself** is set by the firmware's
+own thermal profile, and on some models the firmware boots into its lowest one —
+so no governor, EPP or `min_perf` change lifts the ceiling by a single watt.
+
+`platform_profile` cannot always reach those modes. The kernel driver names them
+from a fixed table (`BALANCED=0, QUIET=1, PERFORMANCE=2, TURBO=3, ECO=4`) that
+does not hold on every firmware. Measured on a Predator PHN16-73 (Arrow Lake,
+BIOS V1.26), writing each raw index and reading the package limit back:
+
+| Firmware index | Sustained (PL1) | Burst (PL2) | Name via `platform_profile` |
+|---:|---:|---:|---|
+| 6 | 45 W | 50 W | *(none — unreachable)* |
+| 0 | 55 W | 160 W | `balanced` |
+| 1 | 70 W | 160 W | `quiet` |
+| 4 | 95 W | 160 W | `low-power` |
+| 5 | **115 W** | 160 W | *(none — unreachable)* |
+
+The strongest and the weakest modes have no name at all, and the three that do
+are labelled in the wrong order. Hard-coding a corrected table would just move
+the problem to the next firmware, so Predator Sense **measures instead**:
+
+1. The kernel module exposes the raw index and the firmware's own
+   supported-index bitmask as `/sys/devices/platform/acer-wmi/thermal_profile`
+   and `thermal_profile_supported`.
+2. **Mode → Calibrate profiles** writes each supported index and reads the
+   resulting package limit from `intel-rapl-mmio`, then ranks them by sustained
+   power. Takes a few seconds and audibly moves the fans while it runs.
+3. From then on the four tiers above also drive the firmware profile, anchored
+   so Quiet lands on the real weakest and Turbo on the real strongest.
+
+Notes:
+
+- **Machines with no readable RAPL** (AMD models, older Intel) cannot be ranked.
+  The profiles are still listed and switchable by hand, but the four tiers
+  deliberately leave the firmware alone rather than guess an order — on the
+  firmware above, guessing by index would put Turbo on the 45 W profile.
+- The firmware **forgets** the profile on every power cycle, so the boot service
+  reapplies the last one you chose.
+- On models where the firmware ties keyboard lighting to the power mode, every
+  switch — including each step of a calibration — repaints the keyboard. That
+  is the firmware doing it, not this app; reapply your colors from the Lighting
+  page afterwards if it bothers you.
+- The physical **mode-switch key** cycles through the same measured order; see
+  below.
+
+### Physical mode-switch key
+
+Some models have a dedicated key that cycles power modes. It reports **only** as
+a raw HID input report on the embedded controller and generates no
+input-subsystem event whatsoever, which is why it appears dead on Linux while
+the PredatorSense key (a WMI hotkey) works.
+
+The daemon watches the Acer EC HID device for it. The defaults were captured on
+a PHN16-73 (`1025:174B`, report `04 85 ff`); other models are expected to differ,
+so both are overridable without a rebuild:
+
+```jsonc
+// ~/.config/predator-sense/mode_key.json
+{ "product": "0000ABCD", "report": [4, 133, 255] }
+```
+
+If your key does nothing, the daemon logs every Acer HID device it found at
+startup (enable `debug_logging` in Settings). Find the right one with
+`sudo hexdump -C /dev/hidrawN` while pressing the key, then point the file at
+it — and please open an issue with the values so they can ship as defaults for
+your model.
+
+The firmware also refuses to switch modes below 40% battery; the daemon reports
+that instead of letting the key look broken.
+
 ### Perfil automático por energia / Power-source auto-profile
 
 When enabled in Settings (on by default for new installs), this isn't just a
