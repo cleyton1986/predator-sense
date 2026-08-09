@@ -46,7 +46,11 @@ static BATTERY_PROFILE: AtomicI8 = AtomicI8::new(1); // PowerProfile::Balanced
 /// atomics since the two fields must always be read/written together (a torn
 /// update could pair a stale timestamp with a fresh profile index and let a
 /// change slip through the grace window instantly).
-static PENDING_OVERRIDE: Mutex<Option<((i8, Option<u8>), Instant)>> = Mutex::new(None);
+/// The identity of a state the machine was seen sitting in: the app tier plus
+/// the raw firmware index. Both are needed - see the comment in `check()`.
+type OutOfPolicyState = (i8, Option<u8>);
+
+static PENDING_OVERRIDE: Mutex<Option<(OutOfPolicyState, Instant)>> = Mutex::new(None);
 
 pub fn set_auto(v: bool) {
     ENABLED.store(v, Ordering::Relaxed);
