@@ -239,6 +239,20 @@ pub(crate) fn run() -> AppResult {
     let config = load_config(&config_path);
     let mut logger = Logger::from_config(&config, &home);
     logger.info(format!("Daemon Rust iniciado, PID {}", std::process::id()));
+
+    // Before the lighting, and before any device is opened.
+    //
+    // Before the lighting because on models where the firmware ties keyboard
+    // colour to the power mode, writing the profile repaints the keyboard -
+    // restoring the user's colours first would just have them overwritten a
+    // moment later.
+    //
+    // Before the devices because this is the fallback for a home that was not
+    // mounted when the boot service ran (systemd-homed, eCryptfs, NFS), and a
+    // machine with no recognised input device would otherwise return below and
+    // never reach it - leaving the firmware on its boot default all session.
+    reapply_thermal_profile(&mut logger);
+
     restore_lighting_with_retries(&config_path, &mut logger);
 
     // Not an error on its own: the mode key below is an independent report
@@ -303,14 +317,6 @@ pub(crate) fn run() -> AppResult {
         );
     }
 
-    // The boot service restores this as root, but it runs at multi-user.target
-    // and cannot read a home that is only mounted at login (systemd-homed,
-    // eCryptfs, NFS). In that case it found nothing to restore and said so
-    // quietly, leaving the firmware on its boot default for the whole session -
-    // so try again here, where the home is definitely available. A no-op when
-    // the profile is already the recorded one, which is the normal case.
-    reapply_thermal_profile(&mut logger);
-
     let mut last_activation =
         Instant::now() - Duration::from_secs(timing::HOTKEY_INITIAL_DEBOUNCE_SECS);
     // A debounce of its own: the mode key and the PredatorSense key are
@@ -347,12 +353,15 @@ pub(crate) fn run() -> AppResult {
 
         let current_suspend_offset = suspend_offset();
         if resumed_since(last_suspend_offset, current_suspend_offset) {
-            logger.info("Retorno de suspensão detectado; restaurando iluminação salva");
-            restore_lighting_with_retries(&config_path, &mut logger);
-            // The firmware does not always keep its thermal profile across a
-            // suspend cycle either, and unlike the lighting nothing else would
-            // notice: the index changes with no event anywhere.
+            logger.info("Retorno de suspensão detectado; restaurando perfil e iluminação");
+            // Thermal first, for the same reason as at startup: writing the
+            // firmware profile repaints the keyboard on models that tie the
+            // two together, so restoring the lighting first would lose it.
+            // The firmware does not always keep its profile across a suspend
+            // cycle, and unlike the lighting nothing else would notice - the
+            // index changes with no event anywhere.
             reapply_thermal_profile(&mut logger);
+            restore_lighting_with_retries(&config_path, &mut logger);
         }
         last_suspend_offset = current_suspend_offset;
 

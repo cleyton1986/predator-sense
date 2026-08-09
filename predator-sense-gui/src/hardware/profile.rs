@@ -508,7 +508,21 @@ fn firmware_profile(cpu: Option<PowerProfile>) -> Option<PowerProfile> {
 /// exactly what a policy should act on: reapplying its target reconciles the
 /// firmware and the CPU in one go.
 pub fn coherent_profile() -> Option<PowerProfile> {
-    let cpu = detect_from_hardware_at(Path::new(SYSFS_ROOT)).or_else(cached_selection);
+    let cpu = match read_cpu_reading_at(Path::new(SYSFS_ROOT)) {
+        CpuReading::Matched(profile) => Some(profile),
+        // The one case where the cache is evidence: the settings are readable
+        // and real, this backend just cannot name them. Even then it only
+        // counts if it names one of the presets that actually fit the live
+        // state - a cache left over from before another tool changed things is
+        // not a reading, and treating it as one would let the policy call a
+        // machine compliant while the CPU sits somewhere else entirely.
+        CpuReading::Ambiguous(candidates) => {
+            cached_selection().filter(|cached| candidates.contains(cached))
+        }
+        // Unreadable, or readable and matching no preset. Either way there is
+        // nothing here to check the firmware tier against.
+        CpuReading::NoMatch | CpuReading::Unreadable => None,
+    };
     reconcile(firmware_profile(cpu), cpu)
 }
 
@@ -589,10 +603,33 @@ fn cached_selection() -> Option<PowerProfile> {
 /// no profile matches or when the backend exposes too little state to
 /// distinguish two presets, allowing the caller's cache to resolve only that
 /// genuinely ambiguous case.
-fn detect_from_hardware_at(sysfs_root: &Path) -> Option<PowerProfile> {
+/// What the live CPU controls say, keeping apart the three different reasons
+/// they may not name a single profile.
+///
+/// `Option<PowerProfile>` collapses all three into `None`, which is fine for a
+/// display but not for deciding whether the machine is in a known state: only
+/// [`Self::Ambiguous`] means "the settings are real and readable, this backend
+/// just cannot tell two presets apart", which is the one case where the app's
+/// cached selection is evidence of anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CpuReading {
+    Matched(PowerProfile),
+    /// Several presets produce this exact observable state - some backends
+    /// expose neither EPP nor Intel's global min_perf control.
+    Ambiguous(Vec<PowerProfile>),
+    /// Read fine and matches no preset: another tool, or a half-applied
+    /// change, left the CPU somewhere none of the four describe.
+    NoMatch,
+    /// No usable cpufreq state at all.
+    Unreadable,
+}
+
+fn read_cpu_reading_at(sysfs_root: &Path) -> CpuReading {
     let capabilities = detect_cpu_capabilities_at(sysfs_root);
-    let state = read_cpu_state_at(sysfs_root, &capabilities)?;
-    let mut matches = [
+    let Some(state) = read_cpu_state_at(sysfs_root, &capabilities) else {
+        return CpuReading::Unreadable;
+    };
+    let matches: Vec<PowerProfile> = [
         PowerProfile::Quiet,
         PowerProfile::Balanced,
         PowerProfile::Performance,
@@ -602,15 +639,23 @@ fn detect_from_hardware_at(sysfs_root: &Path) -> Option<PowerProfile> {
     .filter(|profile| {
         let plan = plan_for(*profile, &capabilities);
         state_matches_plan(&state, &plan, &capabilities)
-    });
+    })
+    .collect();
 
-    let first = matches.next()?;
-    // Some backends do not expose EPP or Intel's global min_perf control, so
-    // two presets may intentionally resolve to the same observable CPU state.
-    // Returning a made-up first match would always turn Turbo into Performance
-    // (or Balanced into Quiet); let get_current_profile() use its cache only
-    // for this genuinely ambiguous case.
-    matches.next().is_none().then_some(first)
+    match matches.len() {
+        0 => CpuReading::NoMatch,
+        // Returning a made-up first match would always turn Turbo into
+        // Performance (or Balanced into Quiet).
+        1 => CpuReading::Matched(matches[0]),
+        _ => CpuReading::Ambiguous(matches),
+    }
+}
+
+fn detect_from_hardware_at(sysfs_root: &Path) -> Option<PowerProfile> {
+    match read_cpu_reading_at(sysfs_root) {
+        CpuReading::Matched(profile) => Some(profile),
+        _ => None,
+    }
 }
 
 pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
@@ -962,6 +1007,39 @@ mod tests {
         // Quiet and Balanced both resolve to powersave when this generic
         // backend exposes neither EPP nor Intel-specific limits.
         assert_eq!(detect_from_hardware_at(&fixture.root), None);
+    }
+
+    /// Both collapse to `None` for a display, but they are not the same fact:
+    /// only the ambiguous one means the settings were read and are real, which
+    /// is what makes the cached selection admissible there and nowhere else.
+    #[test]
+    fn an_ambiguous_reading_is_not_an_unreadable_one() {
+        let fixture = SysfsFixture::new("acpi-cpufreq", "off", 2, 0);
+        let CpuReading::Ambiguous(candidates) = read_cpu_reading_at(&fixture.root) else {
+            panic!("expected an ambiguous reading on a backend with no EPP");
+        };
+        assert!(candidates.len() > 1);
+        assert!(candidates.contains(&PowerProfile::Quiet));
+
+        // No cpufreq at all is a different answer.
+        assert_eq!(
+            read_cpu_reading_at(Path::new("/definitely/not/a/sysfs/root")),
+            CpuReading::Unreadable,
+            "no policies is unreadable, not ambiguous"
+        );
+    }
+
+    #[test]
+    fn a_state_matching_no_preset_is_reported_as_such() {
+        let fixture = SysfsFixture::new("intel_pstate", "active", 2, 2);
+        fixture.add_intel_limits(false, 33);
+        fixture.set_policy_value("scaling_governor", "powersave", 2);
+        fixture.set_policy_value("energy_performance_preference", "balance_power", 2);
+
+        // balance_power at 33% is none of the four tiers - the shape a third
+        // party tool leaves behind, and the case where trusting the app's
+        // cache would certify a machine nobody is actually managing.
+        assert_eq!(read_cpu_reading_at(&fixture.root), CpuReading::NoMatch);
     }
 
     #[test]
