@@ -112,6 +112,11 @@ pub(crate) mod hardware {
     /// Embedded controller exposed as an I2C-HID device, separate from the
     /// ENEK5130 RGB controller above. The Windows service talks to it as
     /// `acer::KYD100::EcHID`.
+    ///
+    /// The vendor is Acer's and is stable; the product is what was measured on
+    /// a Predator PHN16-73 and is expected to vary across models, so both -
+    /// and the report below - can be overridden per machine through
+    /// `~/.config/predator-sense/mode_key.json` (see `hotkey::ModeKey`).
     pub const EC_HID_VENDOR: &str = "00001025";
     pub const EC_HID_PRODUCT: &str = "0000174B";
 
@@ -123,6 +128,10 @@ pub(crate) mod hardware {
     /// which is exactly why it appears dead on Linux while the PredatorSense
     /// key (a WMI hotkey, already handled) works.
     pub const EC_HID_MODE_KEY_REPORT: [u8; 3] = [0x04, 0x85, 0xff];
+
+    /// Below this the firmware silently refuses to switch modes, per the
+    /// model's manual. Reported so the key does not just look broken.
+    pub const MODE_KEY_MIN_BATTERY_PERCENT: u32 = 40;
     pub const HID_REPORT_TARGET_LIST: u8 = 0xa1;
     pub const HID_REPORT_TARGET_SELECT: u8 = 0xa2;
     pub const HID_REPORT_TARGET_CAPABILITIES: u8 = 0xa3;
