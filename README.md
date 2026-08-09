@@ -430,10 +430,14 @@ The daemon watches the Acer EC HID device for it. The defaults were captured on
 a PHN16-73 (`1025:174B`, report `04 85 ff`); other models are expected to differ,
 so both are overridable without a rebuild:
 
-```jsonc
-// ~/.config/predator-sense/mode_key.json
+`~/.config/predator-sense/mode_key.json`:
+
+```json
 { "product": "0000ABCD", "report": [4, 133, 255] }
 ```
+
+(strict JSON — a `//` comment in that file makes it unparseable, and the daemon
+falls back to the defaults with a note in its log.)
 
 If your key does nothing, the daemon logs every Acer HID device it found at
 startup (enable `debug_logging` in Settings). Find the right one with

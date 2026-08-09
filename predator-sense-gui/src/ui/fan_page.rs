@@ -109,24 +109,13 @@ fn build_firmware_row(
     // Turbo included.
     let Some(calibration) = thermal_profile::load() else {
         let section = section_box("firmware_profiles", "calibrate_hint");
-        let button = gtk::Button::with_label(crate::i18n::t("calibrate"));
-        button.add_css_class("secondary-button");
-        button.set_halign(gtk::Align::Center);
-        button.set_margin_top(12);
-        button.connect_clicked(glib::clone!(
-            #[weak]
+        section.append(&calibrate_button(
+            "calibrate",
             status,
-            #[weak]
             page,
-            #[strong]
             section_cell,
-            #[strong]
             row_cell,
-            move |button| {
-                start_calibration(button, &status, &page, &section_cell, &row_cell);
-            }
         ));
-        section.append(&button);
         // No buttons to reconcile until a calibration exists.
         return Some((
             section,
@@ -188,7 +177,52 @@ fn build_firmware_row(
     }
 
     section.append(&row);
+
+    // Recalibration has to stay reachable from here. A run that produced
+    // unusable readings still saves a `measured: false` result, so `load()`
+    // returns Some from then on and this branch is the only one ever built -
+    // without this the Calibrate button would be gone for good and the user
+    // would have to delete the JSON by hand to try again after fixing whatever
+    // made the readings unusable. It is also the way back after a BIOS update
+    // changes the profile set.
+    section.append(&calibrate_button(
+        "recalibrate",
+        status,
+        page,
+        section_cell,
+        row_cell,
+    ));
+
     Some((section, FirmwareRow { buttons }))
+}
+
+/// The control that starts a calibration, wired to replace this whole section
+/// with the result when it finishes.
+fn calibrate_button(
+    label_key: &str,
+    status: &gtk::Label,
+    page: &gtk::Box,
+    section_cell: &Rc<RefCell<Option<gtk::Box>>>,
+    row_cell: &Rc<RefCell<Option<FirmwareRow>>>,
+) -> gtk::Button {
+    let button = gtk::Button::with_label(crate::i18n::t(label_key));
+    button.add_css_class("secondary-button");
+    button.set_halign(gtk::Align::Center);
+    button.set_margin_top(12);
+    button.connect_clicked(glib::clone!(
+        #[weak]
+        status,
+        #[weak]
+        page,
+        #[strong]
+        section_cell,
+        #[strong]
+        row_cell,
+        move |button| {
+            start_calibration(button, &status, &page, &section_cell, &row_cell);
+        }
+    ));
+    button
 }
 
 /// Puts the firmware section on the page, replacing whatever was there.
@@ -231,6 +265,9 @@ fn start_calibration(
     section_cell: &Rc<RefCell<Option<gtk::Box>>>,
     row_cell: &Rc<RefCell<Option<FirmwareRow>>>,
 ) {
+    // Restored verbatim if the run fails, so a Recalibrate button does not come
+    // back labelled Calibrate.
+    let original_label = button.label().unwrap_or_default();
     button.set_sensitive(false);
     button.set_label(crate::i18n::t("calibrating"));
     status.set_text(crate::i18n::t("calibrating"));
@@ -272,7 +309,7 @@ fn start_calibration(
                 status.set_text(&format!("{}: {error}", crate::i18n::t("error")));
                 status.add_css_class("status-error");
                 button.set_sensitive(true);
-                button.set_label(crate::i18n::t("calibrate"));
+                button.set_label(&original_label);
             }
         }
         glib::ControlFlow::Break

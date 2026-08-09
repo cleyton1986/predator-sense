@@ -432,10 +432,14 @@ O daemon observa o dispositivo HID do EC da Acer. Os padrões foram capturados
 num PHN16-73 (`1025:174B`, report `04 85 ff`); espera-se que outros modelos
 sejam diferentes, então ambos são sobrescrevíveis sem recompilar:
 
-```jsonc
-// ~/.config/predator-sense/mode_key.json
+`~/.config/predator-sense/mode_key.json`:
+
+```json
 { "product": "0000ABCD", "report": [4, 133, 255] }
 ```
+
+(JSON estrito — um comentário `//` nesse arquivo o torna inválido, e o daemon
+volta aos padrões registrando um aviso no log.)
 
 Se sua tecla não faz nada, o daemon registra no log todo dispositivo HID Acer
 que encontrou na inicialização (ative `debug_logging` em Configurações).

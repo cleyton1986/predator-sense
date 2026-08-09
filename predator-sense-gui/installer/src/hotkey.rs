@@ -241,13 +241,20 @@ pub(crate) fn run() -> AppResult {
     logger.info(format!("Daemon Rust iniciado, PID {}", std::process::id()));
     restore_lighting_with_retries(&config_path, &mut logger);
 
-    let paths = find_keyboards(Path::new(path::INPUT_DEVICES))?;
+    // Not an error on its own: the mode key below is an independent report
+    // source on an entirely different device, and a model whose keyboard is
+    // named something this does not recognise would otherwise lose the mode key
+    // too - the very hardware mode_key.json exists to support. Only the absence
+    // of *both* ends the daemon, which is checked once they have all been
+    // opened.
+    let paths = find_keyboards(Path::new(path::INPUT_DEVICES)).unwrap_or_default();
     if paths.is_empty() {
-        return Err(
-            "predator-sense-hotkey: nenhum dispositivo de hotkey compatível encontrado".into(),
+        logger.info(
+            "Nenhum teclado de hotkey compatível encontrado; seguindo só com a tecla de modo",
         );
+    } else {
+        logger.info(format!("Monitorando: {:?}", paths));
     }
-    logger.info(format!("Monitorando: {:?}", paths));
 
     // O terceiro campo marca o EC HID. Guardar um indice separado seria um bug:
     // devices sao removidos quando desconectam, e os indices dos seguintes
@@ -259,13 +266,6 @@ pub(crate) fn run() -> AppResult {
             Err(error) => logger.error(format!("Falha ao abrir {}: {error}", path.display())),
         }
     }
-    if devices.is_empty() {
-        return Err(
-            "predator-sense-hotkey: nenhum dispositivo pôde ser aberto; verifique o grupo input"
-                .into(),
-        );
-    }
-
     // The mode-switch key reports only here, as a raw HID input report, and
     // produces no input-subsystem event - so it is polled alongside the
     // keyboards but parsed differently. Optional: older models have no such
@@ -295,6 +295,21 @@ pub(crate) fn run() -> AppResult {
             ec_candidates.join(", ")
         )),
     }
+
+    if devices.is_empty() {
+        return Err(
+            "predator-sense-hotkey: nenhum dispositivo pôde ser aberto; verifique o grupo input"
+                .into(),
+        );
+    }
+
+    // The boot service restores this as root, but it runs at multi-user.target
+    // and cannot read a home that is only mounted at login (systemd-homed,
+    // eCryptfs, NFS). In that case it found nothing to restore and said so
+    // quietly, leaving the firmware on its boot default for the whole session -
+    // so try again here, where the home is definitely available. A no-op when
+    // the profile is already the recorded one, which is the normal case.
+    reapply_thermal_profile(&mut logger);
 
     let mut last_activation =
         Instant::now() - Duration::from_secs(timing::HOTKEY_INITIAL_DEBOUNCE_SECS);
@@ -461,7 +476,19 @@ impl ModeKey {
         let Ok(data) = fs::read(&path) else {
             return Self::default();
         };
-        serde_json::from_slice(&data).unwrap_or_default()
+        // Reported rather than silently defaulted: someone who wrote this file
+        // is trying to make a dead key work, and falling back without a word
+        // looks exactly like the key still being unsupported.
+        match serde_json::from_slice(&data) {
+            Ok(mode_key) => mode_key,
+            Err(error) => {
+                eprintln!(
+                    "predator-sense-hotkey: {} é inválido ({error}); usando os valores padrão",
+                    path.display()
+                );
+                Self::default()
+            }
+        }
     }
 
     /// Whether a `HID_ID=` line names this device.
@@ -1339,6 +1366,16 @@ mod tests {
         let supported = [0, 1];
         let stale = calibration(&[6, 0, 1, 4, 5]);
         assert_eq!(cycle_order_from(Some(stale), &supported), vec![0, 1]);
+    }
+
+    /// The mode key is an independent report source on a different device, so
+    /// a model whose keyboard this does not recognise must still get it - that
+    /// is exactly the hardware `mode_key.json` exists for. An empty keyboard
+    /// list is a fact to log, not a reason to exit.
+    #[test]
+    fn an_unrecognised_keyboard_does_not_rule_out_the_mode_key() {
+        let devices = "N: Name=\"Some OEM keyboard\"\nH: Handlers=kbd event3 \n";
+        assert!(parse_keyboard_devices(devices).is_empty());
     }
 
     #[test]

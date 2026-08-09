@@ -508,7 +508,7 @@ fn firmware_profile(cpu: Option<PowerProfile>) -> Option<PowerProfile> {
 /// exactly what a policy should act on: reapplying its target reconciles the
 /// firmware and the CPU in one go.
 pub fn coherent_profile() -> Option<PowerProfile> {
-    let cpu = detect_from_hardware_at(Path::new(SYSFS_ROOT));
+    let cpu = detect_from_hardware_at(Path::new(SYSFS_ROOT)).or_else(cached_selection);
     reconcile(firmware_profile(cpu), cpu)
 }
 
@@ -517,9 +517,14 @@ pub fn coherent_profile() -> Option<PowerProfile> {
 fn reconcile(firmware: Option<PowerProfile>, cpu: Option<PowerProfile>) -> Option<PowerProfile> {
     match (firmware, cpu) {
         (Some(firmware), Some(cpu)) => (firmware == cpu).then_some(cpu),
-        // Only one of the two is readable: it is the whole of what this
-        // machine can report, so there is nothing for it to disagree with.
-        (Some(firmware), None) => Some(firmware),
+        // A firmware tier with nothing to check it against certifies nothing.
+        // `None` on the CPU side does not mean "no CPU settings", it means
+        // this backend cannot tell its presets apart and no cached selection
+        // filled the gap - while the mode key changes the firmware index and
+        // only that. Accepting the firmware answer alone would let a key press
+        // report Turbo on AC, or Quiet on battery, and the policy would call
+        // that compliant while the CPU stayed exactly where it was.
+        (Some(_), None) => None,
         (None, cpu) => cpu,
     }
 }
@@ -556,6 +561,16 @@ pub fn get_current_profile() -> Option<PowerProfile> {
     // Fallback only when live hardware doesn't cleanly match one of the 4
     // known profile signatures (e.g. read failed, or some third party left
     // the machine in a custom/intermediate state).
+    cached_selection()
+}
+
+/// The last profile this app applied, as recorded on disk.
+///
+/// Only ever a fallback for a CPU state that cannot be read back: several
+/// cpufreq backends expose no way to tell two presets apart (see
+/// `indistinguishable_profiles_defer_to_the_cached_selection`), and on those
+/// this is the only record of which one is in effect.
+fn cached_selection() -> Option<PowerProfile> {
     if let Some(config_dir) = dirs::config_dir() {
         let user_file = config_dir.join("predator-sense/current_profile");
         if let Ok(saved) = fs::read_to_string(&user_file) {
@@ -564,12 +579,9 @@ pub fn get_current_profile() -> Option<PowerProfile> {
             }
         }
     }
-    if let Ok(saved) = fs::read_to_string(PROFILE_STATE_FILE) {
-        if let Some(profile) = PowerProfile::from_id(&saved) {
-            return Some(profile);
-        }
-    }
-    None
+    fs::read_to_string(PROFILE_STATE_FILE)
+        .ok()
+        .and_then(|saved| PowerProfile::from_id(&saved))
 }
 
 /// Matches the uniform state of every CPU policy and every supported optional
@@ -921,15 +933,21 @@ mod tests {
         );
     }
 
-    /// Most machines have only one of the two: no facer.ko, no calibration, or
-    /// a CPU backend whose state does not map to a tier. Whichever one answers
-    /// has nothing to disagree with and stands on its own.
+    /// A CPU side of `None` is not "this machine has no CPU settings" - several
+    /// cpufreq backends simply cannot tell their presets apart, and no cached
+    /// selection filled the gap. Certifying the firmware tier on its own there
+    /// would re-open the bug this function exists to close, since the mode key
+    /// changes that index and nothing else.
     #[test]
-    fn a_single_readable_control_stands_on_its_own() {
-        assert_eq!(
-            reconcile(Some(PowerProfile::Balanced), None),
-            Some(PowerProfile::Balanced)
-        );
+    fn a_firmware_tier_alone_certifies_nothing() {
+        assert_eq!(reconcile(Some(PowerProfile::Turbo), None), None);
+        assert_eq!(reconcile(Some(PowerProfile::Quiet), None), None);
+    }
+
+    /// The other direction is fine: with no firmware ranking to consult, the
+    /// CPU state is the whole of what a profile means on that machine.
+    #[test]
+    fn the_cpu_state_alone_is_a_profile() {
         assert_eq!(
             reconcile(None, Some(PowerProfile::Balanced)),
             Some(PowerProfile::Balanced)

@@ -7,7 +7,10 @@ use std::sync::OnceLock;
 static LANG: OnceLock<Lang> = OnceLock::new();
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum Lang { Pt, En }
+pub enum Lang {
+    Pt,
+    En,
+}
 
 pub fn lang() -> Lang {
     *LANG.get_or_init(|| Lang::En)
@@ -25,11 +28,17 @@ pub fn init(saved_override: Option<&str>) {
     let _ = LANG.set(lang);
 }
 
-pub fn is_pt() -> bool { lang() == Lang::Pt }
+pub fn is_pt() -> bool {
+    lang() == Lang::Pt
+}
 
 /// Get translated string by key
 pub fn t(key: &str) -> &str {
-    if is_pt() { t_pt(key) } else { t_en(key) }
+    if is_pt() {
+        t_pt(key)
+    } else {
+        t_en(key)
+    }
 }
 
 fn t_pt(key: &str) -> &str {
@@ -204,6 +213,7 @@ fn t_pt(key: &str) -> &str {
         "error" => "Erro",
         "firmware_profiles" => "Perfil de energia do firmware",
         "calibrate" => "Calibrar perfis",
+        "recalibrate" => "Medir novamente",
         "calibrating" => "Calibrando… ventiladores e iluminação vão variar",
         "calibrate_done" => "Calibração concluída — perfis medidos:",
         "calibrate_failed" => "a calibração foi interrompida",
@@ -665,6 +675,7 @@ fn t_en(key: &str) -> &str {
         "error" => "Error",
         "firmware_profiles" => "Firmware power profile",
         "calibrate" => "Calibrate profiles",
+        "recalibrate" => "Measure again",
         "calibrating" => "Calibrating… fans and lighting will vary",
         "calibrate_done" => "Calibration finished — profiles measured:",
         "calibrate_failed" => "calibration was interrupted",
