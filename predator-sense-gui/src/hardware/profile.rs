@@ -508,22 +508,28 @@ fn firmware_profile(cpu: Option<PowerProfile>) -> Option<PowerProfile> {
 /// exactly what a policy should act on: reapplying its target reconciles the
 /// firmware and the CPU in one go.
 pub fn coherent_profile() -> Option<PowerProfile> {
-    let cpu = match read_cpu_reading_at(Path::new(SYSFS_ROOT)) {
+    let cpu = cpu_belief();
+    reconcile(firmware_profile(cpu), cpu)
+}
+
+/// The best available answer for "which tier are the CPU controls in".
+///
+/// The cache is admitted in exactly one case: the settings are readable and
+/// real, and this backend simply cannot name them. Even then it only counts if
+/// it names one of the presets that actually fit the live state - a cache left
+/// over from before another tool changed things is not a reading, and treating
+/// it as one would let the policy call a machine compliant while the CPU sits
+/// somewhere else entirely.
+fn cpu_belief() -> Option<PowerProfile> {
+    match read_cpu_reading_at(Path::new(SYSFS_ROOT)) {
         CpuReading::Matched(profile) => Some(profile),
-        // The one case where the cache is evidence: the settings are readable
-        // and real, this backend just cannot name them. Even then it only
-        // counts if it names one of the presets that actually fit the live
-        // state - a cache left over from before another tool changed things is
-        // not a reading, and treating it as one would let the policy call a
-        // machine compliant while the CPU sits somewhere else entirely.
         CpuReading::Ambiguous(candidates) => {
             cached_selection().filter(|cached| candidates.contains(cached))
         }
         // Unreadable, or readable and matching no preset. Either way there is
         // nothing here to check the firmware tier against.
         CpuReading::NoMatch | CpuReading::Unreadable => None,
-    };
-    reconcile(firmware_profile(cpu), cpu)
+    }
 }
 
 /// The agreement rule behind [`coherent_profile`], split out to be testable
@@ -563,7 +569,12 @@ pub fn get_current_profile() -> Option<PowerProfile> {
     // The calibration is consulted before the index on purpose: it is cached in
     // memory, whereas reading the index is a WMI call, and this runs on a UI
     // timer. Machines without a ranked calibration never pay for it.
-    let cpu = detect_from_hardware_at(Path::new(SYSFS_ROOT));
+    // The same belief the policy uses, not the bare hardware match: it is what
+    // disambiguates a firmware index shared by two tiers. On a backend that
+    // cannot tell Quiet from Balanced *and* a firmware with only two profiles,
+    // passing the bare match would hand tier_for_index() no preference and a
+    // Balanced selection would display as Quiet.
+    let cpu = cpu_belief();
     if let Some(tier) = firmware_profile(cpu) {
         return Some(tier);
     }

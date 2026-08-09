@@ -261,14 +261,26 @@ pub(crate) fn run() -> AppResult {
     // too - the very hardware mode_key.json exists to support. Only the absence
     // of *both* ends the daemon, which is checked once they have all been
     // opened.
-    let paths = find_keyboards(Path::new(path::INPUT_DEVICES)).unwrap_or_default();
-    if paths.is_empty() {
-        logger.info(
-            "Nenhum teclado de hotkey compatível encontrado; seguindo só com a tecla de modo",
-        );
-    } else {
-        logger.info(format!("Monitorando: {:?}", paths));
-    }
+    let paths = match find_keyboards(Path::new(path::INPUT_DEVICES)) {
+        Ok(paths) if paths.is_empty() => {
+            logger.info(
+                "Nenhum teclado de hotkey compatível encontrado; seguindo só com a tecla de modo",
+            );
+            paths
+        }
+        Ok(paths) => {
+            logger.info(format!("Monitorando: {:?}", paths));
+            paths
+        }
+        // Kept loud even though it is no longer fatal: this used to exit with
+        // the real reason, and "permission denied" or "/proc not mounted"
+        // points somewhere completely different from the generic input-group
+        // advice the daemon would otherwise end on.
+        Err(error) => {
+            logger.error(format!("Falha ao ler {}: {error}", path::INPUT_DEVICES));
+            Vec::new()
+        }
+    };
 
     // O terceiro campo marca o EC HID. Guardar um indice separado seria um bug:
     // devices sao removidos quando desconectam, e os indices dos seguintes
@@ -559,11 +571,11 @@ fn find_ec_hid(mode_key: &ModeKey) -> (Option<PathBuf>, Vec<String>) {
             continue;
         };
         let node = PathBuf::from("/dev").join(entry.file_name());
-        if hid_id
-            .split(':')
-            .nth(1)
-            .is_some_and(|vendor| vendor.trim_start_matches('0').eq_ignore_ascii_case("1025"))
-        {
+        if hid_id.split(':').nth(1).is_some_and(|vendor| {
+            vendor
+                .trim_start_matches('0')
+                .eq_ignore_ascii_case(hardware::EC_HID_VENDOR.trim_start_matches('0'))
+        }) {
             let name = uevent
                 .lines()
                 .find_map(|line| line.strip_prefix("HID_NAME="))
