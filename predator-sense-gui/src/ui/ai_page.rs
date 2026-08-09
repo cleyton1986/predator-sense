@@ -72,7 +72,7 @@ fn ensure_chat_tags(buffer: &gtk::TextBuffer) {
     );
     buffer.create_tag(
         Some("chat-ai"),
-        &[("foreground", &"#00cce6"), ("weight", &700i32)],
+        &[("foreground", &crate::ui::brand_theme::accent_hex()), ("weight", &700i32)],
     );
     buffer.create_tag(
         Some("chat-system"),

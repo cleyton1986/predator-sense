@@ -525,7 +525,8 @@ fn draw_animated_fan(cr: &gtk4::cairo::Context, w: f64, h: f64, rotation: f64, r
 
     // Temperature below
     cr.set_font_size(11.0);
-    cr.set_source_rgba(0.0, 0.8, 0.9, 0.9);
+    let (r, g, b) = crate::ui::brand_theme::accent().bright;
+    cr.set_source_rgba(r, g, b, 0.9);
     let t = format!("{}°C", temp as i32);
     let ext3 = cr.text_extents(&t).unwrap();
     cr.move_to(cx - ext3.width() / 2.0, cy + outer_r + 16.0);

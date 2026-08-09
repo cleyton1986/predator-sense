@@ -970,7 +970,7 @@ fn build_process_row(
             ProcMetric::Mem => 100.0,
         };
         let color = match metric {
-            ProcMetric::Cpu => (0.0, 0.8, 0.9),
+            ProcMetric::Cpu => crate::ui::brand_theme::accent().bright,
             ProcMetric::Mem => (0.35, 0.75, 1.0),
         };
         draw_proc_bar(cr, w as f64, h as f64, val / scale, color, st.pulse_phase);
@@ -1074,7 +1074,7 @@ fn draw_big_gauge(cr: &gtk4::cairo::Context, w: f64, h: f64, value: f64, phase: 
     if fraction > 0.001 {
         // Cor baseada em uso
         let (cr0, cg0, cb0) = if fraction < 0.6 {
-            (0.0, 0.8, 0.9)
+            crate::ui::brand_theme::accent().bright
         } else if fraction < 0.85 {
             (0.95, 0.75, 0.15)
         } else {
@@ -1140,7 +1140,7 @@ fn draw_per_core(cr: &gtk4::cairo::Context, w: f64, h: f64, cores: &[f64], phase
 
         // Cor por intensidade
         let (rc, gc, bc) = if fill < 0.5 {
-            (0.0, 0.8, 0.9)
+            crate::ui::brand_theme::accent().bright
         } else if fill < 0.8 {
             (0.9, 0.7, 0.15)
         } else {
@@ -1249,7 +1249,7 @@ fn draw_donut(cr: &gtk4::cairo::Context, w: f64, h: f64, pct: f64, phase: f64) {
     // Arco usado
     if fraction > 0.001 {
         let (rc, gc, bc) = if fraction < 0.7 {
-            (0.0, 0.8, 0.9)
+            crate::ui::brand_theme::accent().bright
         } else if fraction < 0.88 {
             (0.95, 0.7, 0.1)
         } else {

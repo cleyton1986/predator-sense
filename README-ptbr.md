@@ -127,7 +127,7 @@ Inspirado e baseado no projeto [acer-predator-turbo-and-rgb-keyboard-linux-modul
 | **Tecla PredatorSense** | Mapeamento da tecla física — a tecla ao lado do NumLock abre a aplicação |
 | **DKMS** | Módulos do kernel recompilam automaticamente em atualizações do kernel |
 | **Internacionalização** | Inglês / Português automático baseado no idioma do sistema |
-| **Interface Gaming** | Tema escuro com barras neon pulsantes, gauges circulares tracejados, bordas poligonais |
+| **Interface Gaming** | Tema escuro com barras neon pulsantes, gauges circulares tracejados, bordas poligonais. Cor de destaque segue a marca detectada automaticamente — ciano em Predator/Helios/Triton, laranja/vermelho em Nitro (igual ao NitroSense) — sem opção pra alternar manualmente |
 
 ---
 

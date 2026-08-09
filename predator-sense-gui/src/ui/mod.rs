@@ -13,6 +13,7 @@ pub mod setup_page;
 pub mod monitor_page;
 pub mod battery_page;
 pub mod font_scale;
+pub mod brand_theme;
 pub mod ai_page;
 pub mod drivers_page;
 pub mod game_sync_page;
