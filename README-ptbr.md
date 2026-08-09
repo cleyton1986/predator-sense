@@ -378,6 +378,83 @@ aumentar isso exige flashear uma vBIOS diferente com ferramenta Windows-only
 como `nvflash`, risco real de brickar a GPU, decisão exclusivamente do dono do
 hardware.
 
+### Perfis de energia do firmware (medidos, não chutados)
+
+Tudo na tabela acima apenas redistribui um orçamento de energia já existente
+entre CPU e GPU. O **limite de potência do pacote** quem define é o perfil
+térmico do próprio firmware, e em alguns modelos o firmware inicia no mais
+fraco deles — então nenhuma mudança de governor, EPP ou `min_perf` levanta esse
+teto em um único watt.
+
+O `platform_profile` nem sempre alcança esses modos. O driver do kernel os
+nomeia a partir de uma tabela fixa (`BALANCED=0, QUIET=1, PERFORMANCE=2,
+TURBO=3, ECO=4`) que não vale em todo firmware. Medido num Predator PHN16-73
+(Arrow Lake, BIOS V1.26), escrevendo cada índice cru e lendo o limite de volta:
+
+| Índice do firmware | Sustentado (PL1) | Burst (PL2) | Nome via `platform_profile` |
+|---:|---:|---:|---|
+| 6 | 45 W | 50 W | *(nenhum — inalcançável)* |
+| 0 | 55 W | 160 W | `balanced` |
+| 1 | 70 W | 160 W | `quiet` |
+| 4 | 95 W | 160 W | `low-power` |
+| 5 | **115 W** | 160 W | *(nenhum — inalcançável)* |
+
+O modo mais forte e o mais fraco não têm nome nenhum, e os três que têm estão
+rotulados na ordem errada. Fixar uma tabela corrigida no código só empurraria o
+problema para o próximo firmware, então o Predator Sense **mede**:
+
+1. O módulo de kernel expõe o índice cru e o bitmask de índices suportados do
+   firmware em `/sys/devices/platform/acer-wmi/thermal_profile` e
+   `thermal_profile_supported`.
+2. **Modo → Calibrar perfis** escreve cada índice suportado e lê o limite de
+   potência resultante do `intel-rapl-mmio`, ordenando por potência sustentada.
+   Leva alguns segundos e mexe audivelmente nos ventiladores.
+3. A partir daí os quatro modos acima também controlam o perfil do firmware,
+   ancorados para que Quiet caia no mais fraco real e Turbo no mais forte real.
+
+Observações:
+
+- **Máquinas sem leitura de RAPL** (modelos AMD, Intel antigo) não podem ser
+  ordenadas. Os perfis continuam listados e trocáveis na mão, mas os quatro
+  modos deliberadamente não mexem no firmware em vez de chutar uma ordem — no
+  firmware acima, chutar pelo índice colocaria o Turbo no perfil de 45 W.
+- O firmware **esquece** o perfil a cada ciclo de energia, então o serviço de
+  boot reaplica o último escolhido.
+- Em modelos onde o firmware amarra a iluminação do teclado ao modo de energia,
+  cada troca — inclusive cada passo da calibração — repinta o teclado. Quem faz
+  isso é o firmware, não este app; se incomodar, reaplique suas cores pela
+  página de Iluminação depois.
+- A **tecla física de modo** percorre a mesma ordem medida; veja abaixo.
+
+### Tecla física de troca de modo
+
+Alguns modelos têm uma tecla dedicada que alterna os modos de energia. Ela
+reporta **apenas** como input report HID cru no embedded controller e não gera
+evento nenhum no subsistema de input — que é justamente por que ela parece
+morta no Linux enquanto a tecla PredatorSense (um hotkey WMI) funciona.
+
+O daemon observa o dispositivo HID do EC da Acer. Os padrões foram capturados
+num PHN16-73 (`1025:174B`, report `04 85 ff`); espera-se que outros modelos
+sejam diferentes, então ambos são sobrescrevíveis sem recompilar:
+
+`~/.config/predator-sense/mode_key.json`:
+
+```json
+{ "product": "0000ABCD", "report": [4, 133, 255] }
+```
+
+(JSON estrito — um comentário `//` nesse arquivo o torna inválido, e o daemon
+volta aos padrões registrando um aviso no log.)
+
+Se sua tecla não faz nada, o daemon registra no log todo dispositivo HID Acer
+que encontrou na inicialização (ative `debug_logging` em Configurações).
+Descubra o certo com `sudo hexdump -C /dev/hidrawN` enquanto pressiona a tecla,
+aponte o arquivo para ele — e por favor abra uma issue com os valores para que
+virem padrão do seu modelo.
+
+O firmware também recusa trocar de modo abaixo de 40% de bateria; o daemon
+avisa isso em vez de deixar a tecla parecer quebrada.
+
 ### Perfil automático por energia
 
 Quando ativado em Configurações (ligado por padrão em instalações novas), não

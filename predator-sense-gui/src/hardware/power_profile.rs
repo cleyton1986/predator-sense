@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicI8, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use super::profile::{get_current_profile, set_profile, PowerProfile};
+use super::profile::{policy_view, set_profile, PowerProfile};
 
 const CRITICAL_BATTERY_PCT: u32 = 15;
 
@@ -41,12 +41,16 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static AC_PROFILE: AtomicI8 = AtomicI8::new(2); // PowerProfile::Performance
 static BATTERY_PROFILE: AtomicI8 = AtomicI8::new(1); // PowerProfile::Balanced
 
-/// `(profile index seen out of policy, when first seen)` - `None` once the
-/// machine is compliant again. Guarded by a mutex rather than a pair of
+/// `((profile index, firmware index) seen out of policy, when first seen)` -
+/// `None` once the machine is compliant again. Guarded by a mutex rather than a pair of
 /// atomics since the two fields must always be read/written together (a torn
 /// update could pair a stale timestamp with a fresh profile index and let a
 /// change slip through the grace window instantly).
-static PENDING_OVERRIDE: Mutex<Option<(i8, Instant)>> = Mutex::new(None);
+/// The identity of a state the machine was seen sitting in: the app tier plus
+/// the raw firmware index. Both are needed - see the comment in `check()`.
+type OutOfPolicyState = (i8, Option<u8>);
+
+static PENDING_OVERRIDE: Mutex<Option<(OutOfPolicyState, Instant)>> = Mutex::new(None);
 
 pub fn set_auto(v: bool) {
     ENABLED.store(v, Ordering::Relaxed);
@@ -120,6 +124,21 @@ fn desired_profile(
     }
 }
 
+/// Whether two observations describe the same state the user is sitting in.
+///
+/// The firmware index only counts when both readings have one. It is a WMI
+/// call and can fail transiently, and a read that failed says nothing about
+/// whether the user made another choice - treating `None` as a distinct state
+/// would restart the grace window on every flicker, and a read failing once
+/// per window would mean enforcement never happens at all.
+fn same_state(seen: OutOfPolicyState, now: OutOfPolicyState) -> bool {
+    seen.0 == now.0
+        && match (seen.1, now.1) {
+            (Some(seen), Some(now)) => seen == now,
+            _ => true,
+        }
+}
+
 /// Call periodically. Enforces the profile matching the current power
 /// source/battery level; a no-op whenever the machine is already compliant
 /// or a mismatch is still within its grace window (see `OVERRIDE_GRACE`).
@@ -129,7 +148,15 @@ pub fn check() {
         return;
     }
     let Some(ac) = ac_online() else { return };
-    let current = get_current_profile();
+    // Not get_current_profile(): that one lets the firmware thermal index win
+    // so the UI follows the physical mode key, and the key changes *only* that
+    // index. Treating it as the whole profile would let a key press report
+    // Turbo while the CPU sat in Quiet, which reads as compliant on AC and
+    // leaves the machine underclocked with nothing to correct it. A machine
+    // whose controls disagree reports None here, which enforces the target and
+    // reconciles them.
+    let view = policy_view();
+    let current = view.profile;
     let Some(target) = desired_profile(ac, current, battery_capacity_pct()) else {
         clear_pending_override();
         return;
@@ -138,16 +165,26 @@ pub fn check() {
     // -1 has no matching PowerProfile variant, so an unreadable current state
     // (`current == None`) never accidentally matches a genuine previous
     // profile index and skips its own grace window.
-    let current_index = current.map(|p| p.index()).unwrap_or(-1);
+    //
+    // The firmware index is part of the identity for the same reason: a
+    // mode-key press that leaves firmware and CPU disagreeing always yields
+    // `current == None`, so two presses in a row would look like the same
+    // state and the second would inherit whatever was left of the first one's
+    // window - a fresh choice made at 55s could be overridden five seconds
+    // later. Including the index makes each distinct choice its own state.
+    let state = (
+        current.map(|p| p.index()).unwrap_or(-1),
+        view.firmware_index,
+    );
     {
         let mut pending = PENDING_OVERRIDE.lock().unwrap();
         match *pending {
-            Some((idx, since)) if idx == current_index && since.elapsed() < OVERRIDE_GRACE => {
+            Some((seen, since)) if same_state(seen, state) && since.elapsed() < OVERRIDE_GRACE => {
                 return;
             }
-            Some((idx, _)) if idx == current_index => {} // Grace window elapsed; enforce below.
+            Some((seen, _)) if same_state(seen, state) => {} // Grace elapsed; enforce below.
             _ => {
-                *pending = Some((current_index, Instant::now()));
+                *pending = Some((state, Instant::now()));
                 return; // Freshly out of policy; start the grace window.
             }
         }
@@ -175,6 +212,51 @@ fn clear_pending_override() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `None` is what `coherent_profile()` reports when the firmware index and
+    /// the CPU state disagree - after a mode-key press, for instance. The
+    /// policy has to treat that as non-compliant and reapply its target, which
+    /// is what puts the two back in step; treating it as "leave it alone"
+    /// would strand the machine in the mixed state.
+    /// The firmware index is a WMI read that can fail. Treating a failed read
+    /// as a new state restarts the grace window, and a read that fails once
+    /// per window would postpone enforcement forever without the user ever
+    /// choosing anything.
+    #[test]
+    fn a_flickering_firmware_read_is_not_a_new_selection() {
+        assert!(same_state((-1, Some(4)), (-1, None)));
+        assert!(same_state((-1, None), (-1, Some(4))));
+        assert!(same_state((-1, None), (-1, None)));
+    }
+
+    /// A real change on either side is still a new state, which is the whole
+    /// point of tracking the index.
+    #[test]
+    fn a_confirmed_change_starts_a_fresh_window() {
+        assert!(!same_state((-1, Some(4)), (-1, Some(5))));
+        assert!(!same_state((0, Some(4)), (2, Some(4))));
+    }
+
+    #[test]
+    fn an_incoherent_machine_is_never_compliant() {
+        assert_eq!(
+            desired_profile(true, None, None),
+            Some(PowerProfile::from_index(AC_PROFILE.load(Ordering::Relaxed))),
+            "AC must enforce rather than accept a machine with no single profile"
+        );
+        assert_eq!(
+            desired_profile(false, None, Some(80)),
+            Some(PowerProfile::from_index(
+                BATTERY_PROFILE.load(Ordering::Relaxed)
+            )),
+            "and so must battery"
+        );
+        assert_eq!(
+            desired_profile(false, None, Some(5)),
+            Some(PowerProfile::Quiet),
+            "and a critical battery still forces Quiet"
+        );
+    }
 
     #[test]
     fn ac_leaves_performance_and_turbo_alone() {

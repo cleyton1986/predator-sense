@@ -165,6 +165,16 @@ fn settings_for(p: PowerProfile) -> ProfileSettings {
             governor: CpuGovernor::Performance,
             epp: EnergyPreference::Performance,
             gpu_watts: 110,
+            // NOTE: measured on a 24-core PHN16-73, this pins every core near
+            // its maximum clock even at idle (3361 MHz average, no load). Under
+            // a constrained package budget that makes the CPU win the power
+            // split against the GPU, which hurts GPU-bound games.
+            //
+            // Left at 100 on purpose for now: `governor: Performance` above
+            // already forces high clocks, so lowering only this would not fix
+            // the behaviour, and both values are what detect_from_hardware()
+            // uses to tell Turbo apart from Performance. Changing it is a
+            // design call - see docs in the RE notes.
             min_perf_pct: 100,
             no_turbo: false,
         },
@@ -418,6 +428,190 @@ fn write_took_effect(
     state_satisfies_plan(state, plan, capabilities, MinPerfMatch::AtLeast)
 }
 
+/// Moves the firmware thermal profile to match one of the app's four tiers.
+///
+/// This is the only thing in a profile switch that moves the package power
+/// limit at all - everything else only redistributes the existing budget
+/// between CPU and GPU. On a PHN16-73 the firmware boots into its lowest cTDP
+/// (45 W sustained *and* burst) and no governor, EPP or min_perf change lifts
+/// that ceiling by a single watt.
+///
+/// Which raw index corresponds to which tier is measured per machine rather
+/// than assumed, because the kernel's `platform_profile` names do not follow
+/// the power order on every firmware. Without a *measured* calibration the
+/// firmware is left alone: on this very firmware the raw index order runs
+/// backwards at both ends, so guessing would put Turbo on the weakest profile
+/// and Quiet on one of the strongest - worse than doing nothing.
+///
+/// Best-effort like the GPU wattage: a machine may not expose the attribute at
+/// all, and that must never fail the whole profile switch.
+fn apply_firmware_profile(profile: PowerProfile) {
+    if !crate::hardware::thermal_profile::is_available() {
+        return;
+    }
+    let Some(calibration) = crate::hardware::thermal_profile::load() else {
+        crate::hardware::applog::info(
+            "no thermal profile calibration for this machine; firmware profile left unchanged",
+        );
+        return;
+    };
+    let Some(index) = calibration.index_for_tier(profile.index() as u8) else {
+        crate::hardware::applog::info(
+            "thermal profiles were never ranked by measured power; \
+             firmware profile left unchanged - calibrate from the Mode page",
+        );
+        return;
+    };
+    if let Err(e) = crate::hardware::thermal_profile::set(index) {
+        crate::hardware::applog::error(&format!(
+            "thermal profile {index} for {} not applied: {e}",
+            profile.to_id()
+        ));
+        return;
+    }
+    crate::hardware::thermal_profile::remember(index);
+}
+
+/// The tier the firmware's own thermal profile currently sits on, if this
+/// machine has a measured ranking to read it against.
+///
+/// The calibration is consulted before the index on purpose: it is cached in
+/// memory, whereas reading the index is a WMI call, and callers run on UI
+/// timers. Machines without a ranked calibration never pay for it.
+/// What the firmware thermal profile says, keeping "this machine has no such
+/// control" apart from "it has one and it could not be read".
+///
+/// They are not the same fact for the policy: the first means the CPU state is
+/// the whole profile, the second means part of the machine is unaccounted for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FirmwareReading {
+    Tier(PowerProfile),
+    /// No interface, no calibration, or one that was never ranked - nothing
+    /// here drives anything, so there is nothing to reconcile against.
+    NotApplicable,
+    /// The interface exists and is calibrated, but the index did not read back
+    /// or maps to no tier.
+    Unreadable,
+}
+
+fn read_firmware_profile(cpu: Option<PowerProfile>) -> FirmwareReading {
+    firmware_reading_for(crate::hardware::thermal_profile::current(), cpu)
+}
+
+/// Split from the read so a caller that already has the index does not pay for
+/// a second WMI call to get it.
+fn firmware_reading_for(index: Option<u8>, cpu: Option<PowerProfile>) -> FirmwareReading {
+    let Some(calibration) = crate::hardware::thermal_profile::load() else {
+        return FirmwareReading::NotApplicable;
+    };
+    if !calibration.is_ranked() {
+        return FirmwareReading::NotApplicable;
+    }
+    let Some(index) = index else {
+        return FirmwareReading::Unreadable;
+    };
+    // The CPU state goes in as a tie-breaker, not as an override. Where a
+    // machine has fewer firmware profiles than the app has tiers, one index
+    // stands for two tiers and cannot be inverted on its own; without this a
+    // Balanced selection reads back as Quiet, and the policy then chases a
+    // mismatch that never resolves.
+    match calibration.tier_for_index(index, cpu.map(|profile| profile.index() as u8)) {
+        Some(tier) => FirmwareReading::Tier(PowerProfile::from_index(tier as i8)),
+        None => FirmwareReading::Unreadable,
+    }
+}
+
+fn firmware_profile(cpu: Option<PowerProfile>) -> Option<PowerProfile> {
+    match read_firmware_profile(cpu) {
+        FirmwareReading::Tier(profile) => Some(profile),
+        _ => None,
+    }
+}
+
+/// The profile the machine is *coherently* in: every control that makes up a
+/// profile agrees on it.
+///
+/// [`get_current_profile`] deliberately lets the firmware index win, so the UI
+/// follows the physical mode key - which writes that index and nothing else.
+/// That is the right answer for a display and the wrong one for enforcement:
+/// the automatic AC/battery policy treats "already Performance or Turbo" as
+/// compliant and does nothing, so a mode key press could report Turbo from the
+/// firmware alone while the CPU sat in Quiet, and the policy would leave an AC
+/// machine underclocked indefinitely.
+///
+/// `None` here means "no single profile describes this machine", which is
+/// exactly what a policy should act on: reapplying its target reconciles the
+/// firmware and the CPU in one go.
+pub fn coherent_profile() -> Option<PowerProfile> {
+    policy_view().profile
+}
+
+/// What the AC/battery policy needs to decide, read once.
+pub struct PolicyView {
+    /// The profile the machine is coherently in - see [`coherent_profile`].
+    pub profile: Option<PowerProfile>,
+    /// The raw firmware index behind it, when this machine has one.
+    ///
+    /// Part of the identity of "the state the user is currently sitting in",
+    /// which `profile` alone cannot express: every mode-key press that leaves
+    /// the firmware disagreeing with the CPU produces the same `None`, so
+    /// without this two distinct presses look identical and the second one
+    /// inherits the first one's grace window instead of getting its own.
+    pub firmware_index: Option<u8>,
+}
+
+pub fn policy_view() -> PolicyView {
+    let cpu = cpu_belief();
+    let firmware_index = crate::hardware::thermal_profile::current();
+    PolicyView {
+        profile: reconcile(firmware_reading_for(firmware_index, cpu), cpu),
+        firmware_index,
+    }
+}
+
+/// The best available answer for "which tier are the CPU controls in".
+///
+/// The cache is admitted in exactly one case: the settings are readable and
+/// real, and this backend simply cannot name them. Even then it only counts if
+/// it names one of the presets that actually fit the live state - a cache left
+/// over from before another tool changed things is not a reading, and treating
+/// it as one would let the policy call a machine compliant while the CPU sits
+/// somewhere else entirely.
+fn cpu_belief() -> Option<PowerProfile> {
+    match read_cpu_reading_at(Path::new(SYSFS_ROOT)) {
+        CpuReading::Matched(profile) => Some(profile),
+        CpuReading::Ambiguous(candidates) => {
+            cached_selection().filter(|cached| candidates.contains(cached))
+        }
+        // Unreadable, or readable and matching no preset. Either way there is
+        // nothing here to check the firmware tier against.
+        CpuReading::NoMatch | CpuReading::Unreadable => None,
+    }
+}
+
+/// The agreement rule behind [`coherent_profile`], split out to be testable
+/// without a machine that has both controls.
+fn reconcile(firmware: FirmwareReading, cpu: Option<PowerProfile>) -> Option<PowerProfile> {
+    match (firmware, cpu) {
+        (FirmwareReading::Tier(firmware), Some(cpu)) => (firmware == cpu).then_some(cpu),
+        // A firmware tier with nothing to check it against certifies nothing.
+        // `None` on the CPU side does not mean "no CPU settings", it means
+        // this backend cannot tell its presets apart and no cached selection
+        // filled the gap - while the mode key changes the firmware index and
+        // only that. Accepting the firmware answer alone would let a key press
+        // report Turbo on AC, or Quiet on battery, and the policy would call
+        // that compliant while the CPU stayed exactly where it was.
+        (FirmwareReading::Tier(_), None) => None,
+        // Nothing to reconcile: this machine's profile is its CPU state.
+        (FirmwareReading::NotApplicable, cpu) => cpu,
+        // The control exists and is calibrated, and we cannot see where it is.
+        // The mode key may have left it on a tier that contradicts the CPU, so
+        // certifying the CPU alone would let the policy call the machine
+        // compliant while half of it is unaccounted for.
+        (FirmwareReading::Unreadable, _) => None,
+    }
+}
+
 pub fn get_current_profile() -> Option<PowerProfile> {
     // Live hardware state is checked FIRST and is the source of truth. The
     // cached files below only remember what THIS app itself last wrote via
@@ -429,13 +623,42 @@ pub fn get_current_profile() -> Option<PowerProfile> {
     // forever after - a hardware key press changed the real governor/EPP/
     // turbo/min-perf values but the UI kept reporting the old cached guess,
     // since the cache file always existed and always "matched" from then on.
-    if let Some(p) = detect_from_hardware_at(Path::new(SYSFS_ROOT)) {
+    // A measured firmware thermal profile outranks the CPU state when both
+    // exist. The physical mode key writes that index and touches no cpufreq
+    // control at all, so a press leaves governor/EPP/min_perf exactly as they
+    // were - meaning detect_from_hardware() below would keep reporting the old
+    // profile while the machine already runs at a different power limit.
+    //
+    // The calibration is consulted before the index on purpose: it is cached in
+    // memory, whereas reading the index is a WMI call, and this runs on a UI
+    // timer. Machines without a ranked calibration never pay for it.
+    // The same belief the policy uses, not the bare hardware match: it is what
+    // disambiguates a firmware index shared by two tiers. On a backend that
+    // cannot tell Quiet from Balanced *and* a firmware with only two profiles,
+    // passing the bare match would hand tier_for_index() no preference and a
+    // Balanced selection would display as Quiet.
+    let cpu = cpu_belief();
+    if let Some(tier) = firmware_profile(cpu) {
+        return Some(tier);
+    }
+
+    if let Some(p) = cpu {
         return Some(p);
     }
 
     // Fallback only when live hardware doesn't cleanly match one of the 4
     // known profile signatures (e.g. read failed, or some third party left
     // the machine in a custom/intermediate state).
+    cached_selection()
+}
+
+/// The last profile this app applied, as recorded on disk.
+///
+/// Only ever a fallback for a CPU state that cannot be read back: several
+/// cpufreq backends expose no way to tell two presets apart (see
+/// `indistinguishable_profiles_defer_to_the_cached_selection`), and on those
+/// this is the only record of which one is in effect.
+fn cached_selection() -> Option<PowerProfile> {
     if let Some(config_dir) = dirs::config_dir() {
         let user_file = config_dir.join("predator-sense/current_profile");
         if let Ok(saved) = fs::read_to_string(&user_file) {
@@ -444,12 +667,9 @@ pub fn get_current_profile() -> Option<PowerProfile> {
             }
         }
     }
-    if let Ok(saved) = fs::read_to_string(PROFILE_STATE_FILE) {
-        if let Some(profile) = PowerProfile::from_id(&saved) {
-            return Some(profile);
-        }
-    }
-    None
+    fs::read_to_string(PROFILE_STATE_FILE)
+        .ok()
+        .and_then(|saved| PowerProfile::from_id(&saved))
 }
 
 /// Matches the uniform state of every CPU policy and every supported optional
@@ -457,10 +677,33 @@ pub fn get_current_profile() -> Option<PowerProfile> {
 /// no profile matches or when the backend exposes too little state to
 /// distinguish two presets, allowing the caller's cache to resolve only that
 /// genuinely ambiguous case.
-fn detect_from_hardware_at(sysfs_root: &Path) -> Option<PowerProfile> {
+/// What the live CPU controls say, keeping apart the three different reasons
+/// they may not name a single profile.
+///
+/// `Option<PowerProfile>` collapses all three into `None`, which is fine for a
+/// display but not for deciding whether the machine is in a known state: only
+/// [`Self::Ambiguous`] means "the settings are real and readable, this backend
+/// just cannot tell two presets apart", which is the one case where the app's
+/// cached selection is evidence of anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CpuReading {
+    Matched(PowerProfile),
+    /// Several presets produce this exact observable state - some backends
+    /// expose neither EPP nor Intel's global min_perf control.
+    Ambiguous(Vec<PowerProfile>),
+    /// Read fine and matches no preset: another tool, or a half-applied
+    /// change, left the CPU somewhere none of the four describe.
+    NoMatch,
+    /// No usable cpufreq state at all.
+    Unreadable,
+}
+
+fn read_cpu_reading_at(sysfs_root: &Path) -> CpuReading {
     let capabilities = detect_cpu_capabilities_at(sysfs_root);
-    let state = read_cpu_state_at(sysfs_root, &capabilities)?;
-    let mut matches = [
+    let Some(state) = read_cpu_state_at(sysfs_root, &capabilities) else {
+        return CpuReading::Unreadable;
+    };
+    let matches: Vec<PowerProfile> = [
         PowerProfile::Quiet,
         PowerProfile::Balanced,
         PowerProfile::Performance,
@@ -470,15 +713,16 @@ fn detect_from_hardware_at(sysfs_root: &Path) -> Option<PowerProfile> {
     .filter(|profile| {
         let plan = plan_for(*profile, &capabilities);
         state_matches_plan(&state, &plan, &capabilities)
-    });
+    })
+    .collect();
 
-    let first = matches.next()?;
-    // Some backends do not expose EPP or Intel's global min_perf control, so
-    // two presets may intentionally resolve to the same observable CPU state.
-    // Returning a made-up first match would always turn Turbo into Performance
-    // (or Balanced into Quiet); let get_current_profile() use its cache only
-    // for this genuinely ambiguous case.
-    matches.next().is_none().then_some(first)
+    match matches.len() {
+        0 => CpuReading::NoMatch,
+        // Returning a made-up first match would always turn Turbo into
+        // Performance (or Balanced into Quiet).
+        1 => CpuReading::Matched(matches[0]),
+        _ => CpuReading::Ambiguous(matches),
+    }
 }
 
 pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
@@ -557,6 +801,8 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
         ));
     }
 
+    apply_firmware_profile(profile);
+
     // Fan mode used to only follow the physical Predator/Turbo key (see
     // window.rs's turbo-key handler); picking a profile from the "Modo" page
     // or via the AI assistant left whatever fan mode was previously set
@@ -587,6 +833,16 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact-match answer, which is all most of these fixtures care about.
+    /// Production code goes through `cpu_belief()` instead, which also decides
+    /// what an ambiguous reading is worth.
+    fn detect_from_hardware_at(sysfs_root: &Path) -> Option<PowerProfile> {
+        match read_cpu_reading_at(sysfs_root) {
+            CpuReading::Matched(profile) => Some(profile),
+            _ => None,
+        }
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
@@ -772,6 +1028,91 @@ mod tests {
         assert_eq!(plan.min_perf_pct, None);
     }
 
+    /// The mode key writes the firmware index and touches no cpufreq control,
+    /// so after a press the two disagree. Reporting the firmware's answer as
+    /// the whole profile is right for the UI and wrong for the AC/battery
+    /// policy: "already Turbo" reads as compliant, and the machine would sit
+    /// on AC with Quiet CPU settings forever with nothing to correct it.
+    #[test]
+    fn disagreeing_controls_are_not_a_profile() {
+        assert_eq!(
+            reconcile(
+                FirmwareReading::Tier(PowerProfile::Turbo),
+                Some(PowerProfile::Quiet)
+            ),
+            None,
+            "a firmware-only change must not report as an enforced profile"
+        );
+        assert_eq!(
+            reconcile(
+                FirmwareReading::Tier(PowerProfile::Quiet),
+                Some(PowerProfile::Performance)
+            ),
+            None,
+            "and not in the other direction either"
+        );
+    }
+
+    #[test]
+    fn agreeing_controls_report_that_profile() {
+        assert_eq!(
+            reconcile(
+                FirmwareReading::Tier(PowerProfile::Turbo),
+                Some(PowerProfile::Turbo)
+            ),
+            Some(PowerProfile::Turbo)
+        );
+    }
+
+    /// A CPU side of `None` is not "this machine has no CPU settings" - several
+    /// cpufreq backends simply cannot tell their presets apart, and no cached
+    /// selection filled the gap. Certifying the firmware tier on its own there
+    /// would re-open the bug this function exists to close, since the mode key
+    /// changes that index and nothing else.
+    #[test]
+    fn a_firmware_tier_alone_certifies_nothing() {
+        assert_eq!(
+            reconcile(FirmwareReading::Tier(PowerProfile::Turbo), None),
+            None
+        );
+        assert_eq!(
+            reconcile(FirmwareReading::Tier(PowerProfile::Quiet), None),
+            None
+        );
+    }
+
+    /// "This machine has no firmware control" and "it has one and I cannot see
+    /// it" both used to arrive as `None`. Only the first means the CPU state is
+    /// the whole profile: with a calibrated control that will not read back,
+    /// the mode key may have left it on a tier that contradicts the CPU, and
+    /// certifying the CPU alone lets the policy call that compliant.
+    #[test]
+    fn an_unreadable_firmware_control_is_not_an_absent_one() {
+        assert_eq!(
+            reconcile(FirmwareReading::Unreadable, Some(PowerProfile::Performance)),
+            None
+        );
+        assert_eq!(
+            reconcile(
+                FirmwareReading::NotApplicable,
+                Some(PowerProfile::Performance)
+            ),
+            Some(PowerProfile::Performance),
+            "no such control is a different fact"
+        );
+    }
+
+    /// The other direction is fine: with no firmware ranking to consult, the
+    /// CPU state is the whole of what a profile means on that machine.
+    #[test]
+    fn the_cpu_state_alone_is_a_profile() {
+        assert_eq!(
+            reconcile(FirmwareReading::NotApplicable, Some(PowerProfile::Balanced)),
+            Some(PowerProfile::Balanced)
+        );
+        assert_eq!(reconcile(FirmwareReading::NotApplicable, None), None);
+    }
+
     #[test]
     fn indistinguishable_profiles_defer_to_the_cached_selection() {
         let fixture = SysfsFixture::new("acpi-cpufreq", "off", 2, 0);
@@ -779,6 +1120,39 @@ mod tests {
         // Quiet and Balanced both resolve to powersave when this generic
         // backend exposes neither EPP nor Intel-specific limits.
         assert_eq!(detect_from_hardware_at(&fixture.root), None);
+    }
+
+    /// Both collapse to `None` for a display, but they are not the same fact:
+    /// only the ambiguous one means the settings were read and are real, which
+    /// is what makes the cached selection admissible there and nowhere else.
+    #[test]
+    fn an_ambiguous_reading_is_not_an_unreadable_one() {
+        let fixture = SysfsFixture::new("acpi-cpufreq", "off", 2, 0);
+        let CpuReading::Ambiguous(candidates) = read_cpu_reading_at(&fixture.root) else {
+            panic!("expected an ambiguous reading on a backend with no EPP");
+        };
+        assert!(candidates.len() > 1);
+        assert!(candidates.contains(&PowerProfile::Quiet));
+
+        // No cpufreq at all is a different answer.
+        assert_eq!(
+            read_cpu_reading_at(Path::new("/definitely/not/a/sysfs/root")),
+            CpuReading::Unreadable,
+            "no policies is unreadable, not ambiguous"
+        );
+    }
+
+    #[test]
+    fn a_state_matching_no_preset_is_reported_as_such() {
+        let fixture = SysfsFixture::new("intel_pstate", "active", 2, 2);
+        fixture.add_intel_limits(false, 33);
+        fixture.set_policy_value("scaling_governor", "powersave", 2);
+        fixture.set_policy_value("energy_performance_preference", "balance_power", 2);
+
+        // balance_power at 33% is none of the four tiers - the shape a third
+        // party tool leaves behind, and the case where trusting the app's
+        // cache would certify a machine nobody is actually managing.
+        assert_eq!(read_cpu_reading_at(&fixture.root), CpuReading::NoMatch);
     }
 
     #[test]
