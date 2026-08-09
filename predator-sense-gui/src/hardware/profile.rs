@@ -478,15 +478,19 @@ fn apply_firmware_profile(profile: PowerProfile) {
 /// The calibration is consulted before the index on purpose: it is cached in
 /// memory, whereas reading the index is a WMI call, and callers run on UI
 /// timers. Machines without a ranked calibration never pay for it.
-fn firmware_profile() -> Option<PowerProfile> {
+fn firmware_profile(cpu: Option<PowerProfile>) -> Option<PowerProfile> {
     let calibration = crate::hardware::thermal_profile::load()?;
     if !calibration.is_ranked() {
         return None;
     }
     let index = crate::hardware::thermal_profile::current()?;
-    Some(PowerProfile::from_index(
-        calibration.tier_for_index(index)? as i8
-    ))
+    // The CPU state goes in as a tie-breaker, not as an override. Where a
+    // machine has fewer firmware profiles than the app has tiers, one index
+    // stands for two tiers and cannot be inverted on its own; without this a
+    // Balanced selection reads back as Quiet, and the policy then chases a
+    // mismatch that never resolves.
+    let tier = calibration.tier_for_index(index, cpu.map(|profile| profile.index() as u8))?;
+    Some(PowerProfile::from_index(tier as i8))
 }
 
 /// The profile the machine is *coherently* in: every control that makes up a
@@ -504,10 +508,8 @@ fn firmware_profile() -> Option<PowerProfile> {
 /// exactly what a policy should act on: reapplying its target reconciles the
 /// firmware and the CPU in one go.
 pub fn coherent_profile() -> Option<PowerProfile> {
-    reconcile(
-        firmware_profile(),
-        detect_from_hardware_at(Path::new(SYSFS_ROOT)),
-    )
+    let cpu = detect_from_hardware_at(Path::new(SYSFS_ROOT));
+    reconcile(firmware_profile(cpu), cpu)
 }
 
 /// The agreement rule behind [`coherent_profile`], split out to be testable
@@ -542,11 +544,12 @@ pub fn get_current_profile() -> Option<PowerProfile> {
     // The calibration is consulted before the index on purpose: it is cached in
     // memory, whereas reading the index is a WMI call, and this runs on a UI
     // timer. Machines without a ranked calibration never pay for it.
-    if let Some(tier) = firmware_profile() {
+    let cpu = detect_from_hardware_at(Path::new(SYSFS_ROOT));
+    if let Some(tier) = firmware_profile(cpu) {
         return Some(tier);
     }
 
-    if let Some(p) = detect_from_hardware_at(Path::new(SYSFS_ROOT)) {
+    if let Some(p) = cpu {
         return Some(p);
     }
 

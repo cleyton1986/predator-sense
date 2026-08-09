@@ -243,13 +243,12 @@ pub fn calibrate() -> Result<Calibration, String> {
         let index = *index;
         match measure_one(index, limits.as_ref()) {
             Ok(Some(profile)) => profiles.push(profile),
-            // Bitmask said yes, firmware said no. Expected on this very
-            // firmware (index 2 is advertised and refused on every write), and
-            // recorded as such: `advertised` below keeps the full set, so this
-            // does not look like a profile that went missing.
-            Ok(None) => crate::hardware::applog::error(&format!(
-                "thermal profile {index} is in the supported bitmask but was refused"
-            )),
+            // Bitmask said yes, firmware said no - consistently, across
+            // retries. Expected on this very firmware (index 2 is advertised
+            // and refused on every write) and recorded as such: `advertised`
+            // below keeps the full set, so this does not look like a profile
+            // that went missing. Already logged by apply_for_measurement.
+            Ok(None) => {}
             // Something outside this app kept moving the index. Aborting beats
             // saving a calibration that is missing a profile the firmware
             // really does have: `advertised` would still list it, so the result
@@ -331,7 +330,7 @@ fn measure_one(index: u8, limits: Option<&(PathBuf, PathBuf)>) -> Result<Option<
             "thermal profile moved away from {index} while measuring it \
              (attempt {attempt}/{SETTLE_ATTEMPTS})"
         ));
-        if attempt < SETTLE_ATTEMPTS && set(index).is_err() {
+        if attempt < SETTLE_ATTEMPTS && !matches!(apply_for_measurement(index), Ok(true)) {
             break;
         }
     }
@@ -340,6 +339,46 @@ fn measure_one(index: u8, limits: Option<&(PathBuf, PathBuf)>) -> Result<Option<
         "thermal profile {index} would not stay set long enough to measure - \
          something else is changing profiles; try again"
     ))
+}
+
+/// Writes an index during calibration, separating the three outcomes that
+/// matter here.
+///
+/// `Ok(true)` applied, `Ok(false)` the machine does not really have this
+/// profile, `Err` the write never reached the hardware.
+///
+/// That last distinction is the point. Treating every failure as "the firmware
+/// refused" - which is what a bare `set()` cannot tell apart - lets a dismissed
+/// pkexec dialog or a helper that could not launch quietly delete a profile
+/// from the calibration, while `advertised` keeps listing it so the result
+/// still validates as current. The profile then disappears from the UI and the
+/// key's cycle order, and if it was the strongest one Turbo lands on the wrong
+/// index.
+///
+/// A rejection is retried before being believed, because one transient helper
+/// failure should not be read as a permanent statement about the hardware.
+/// Only a rejection that repeats is taken as one - which is what the firmware
+/// does on an index the bitmask advertises but the machine does not implement.
+fn apply_for_measurement(index: u8) -> Result<bool, String> {
+    let mut last = String::new();
+    for _ in 0..SETTLE_ATTEMPTS {
+        match crate::hardware::helper::execute_checked(
+            HelperAction::ThermalProfile,
+            &[&index.to_string()],
+        ) {
+            Ok(()) => return Ok(true),
+            Err(crate::hardware::helper::Failure::NotAuthorized(error)) => {
+                return Err(format!(
+                    "thermal profile {index} could not be applied: {error}"
+                ))
+            }
+            Err(crate::hardware::helper::Failure::Rejected(error)) => last = error,
+        }
+    }
+    crate::hardware::applog::error(&format!(
+        "thermal profile {index} is in the supported bitmask but was refused: {last}"
+    ));
+    Ok(false)
 }
 
 /// Puts the machine back where calibration found it.
@@ -360,18 +399,32 @@ fn restore(original: Option<u8>, probed: &[Measured]) {
     // Falls back to the *weakest measured* profile, not the lowest index: on
     // this firmware index 6 is the weakest and index 0 is mid-range, so
     // picking by index could silently leave the machine on a high power limit
-    // the user never asked for. With no usable readings every rank ties at
-    // zero and min_by_key keeps the first probed one.
-    let fallback = probed
-        .iter()
-        .min_by_key(|profile| (profile.rank(), profile.index))
-        .map(|profile| profile.index);
+    // the user never asked for.
+    //
+    // Only profiles with a complete reading are eligible, because `rank()`
+    // scores a missing limit as zero watts: an incomplete sample would win
+    // this comparison outright while possibly being the strongest profile
+    // there is - the exact outcome this fallback exists to avoid. This runs
+    // before the readings are judged as a ranking, so it cannot lean on that
+    // check having rejected them. With nothing complete to choose from, the
+    // lowest index is a neutral guess rather than a wrong claim about power.
+    let fallback = restore_fallback(probed);
     crate::hardware::applog::error(&format!(
         "could not restore thermal profile {original}; leaving {fallback:?} active"
     ));
     if let Some(fallback) = fallback {
         let _ = set(fallback);
     }
+}
+
+/// Which profile to leave active when the original cannot be restored.
+fn restore_fallback(probed: &[Measured]) -> Option<u8> {
+    probed
+        .iter()
+        .filter(|profile| profile.pl1_uw.is_some())
+        .min_by_key(|profile| (profile.rank(), profile.index))
+        .or_else(|| probed.iter().min_by_key(|profile| profile.index))
+        .map(|profile| profile.index)
 }
 
 fn cache_path() -> Option<PathBuf> {
@@ -493,6 +546,27 @@ mod tests {
             160_000_000
         )]));
         assert!(!readings_are_meaningful(&[]));
+    }
+
+    /// `restore()` runs before the readings are judged, so it cannot lean on
+    /// an incomplete set having been rejected. `rank()` scores a missing limit
+    /// as zero watts, which would make the unreadable profile look like the
+    /// weakest one available - and it may in fact be the strongest, leaving
+    /// the machine at a high power limit nobody asked for.
+    #[test]
+    fn the_restore_fallback_ignores_profiles_it_could_not_read() {
+        let probed = vec![
+            measured(0, 55_000_000, 160_000_000),
+            unreadable(5),
+            measured(6, 45_000_000, 50_000_000),
+        ];
+        assert_eq!(restore_fallback(&probed), Some(6), "the weakest *read* one");
+
+        // Nothing complete to compare: the lowest index is a neutral guess
+        // rather than a wrong claim about which profile is weakest.
+        let none_readable = vec![unreadable(5), unreadable(0)];
+        assert_eq!(restore_fallback(&none_readable), Some(0));
+        assert_eq!(restore_fallback(&[]), None);
     }
 
     /// PL2 is the tie-breaker in `rank`, so a missing one among real ones is

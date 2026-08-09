@@ -697,21 +697,41 @@ pub mod thermal_profile {
         /// also resets it on boot. Without this the UI would keep showing
         /// whatever profile was last picked in the app while the hardware sat
         /// somewhere else entirely.
-        pub fn tier_for_index(&self, index: u8) -> Option<u8> {
+        pub fn tier_for_index(&self, index: u8, preferred: Option<u8>) -> Option<u8> {
             if !self.is_ranked() {
                 return None;
             }
             let position = self.profiles.iter().position(|p| p.index == index)?;
-            // Pick the tier whose mapped position is closest to this one, so
-            // the round-trip is stable even where tiers and profiles are not
-            // 1:1.
-            (0..TIERS).min_by_key(|tier| {
-                let mapped = self
-                    .index_for_tier(*tier)
+            let distance = |tier: u8| {
+                self.index_for_tier(tier)
                     .and_then(|i| self.profiles.iter().position(|p| p.index == i))
-                    .unwrap_or(0);
-                mapped.abs_diff(position)
-            })
+                    .unwrap_or(0)
+                    .abs_diff(position)
+            };
+            // The tier whose mapped position is closest to this one, so the
+            // answer stays sensible for an index no tier maps to exactly -
+            // the 70 W profile on a PHN16-73, reachable by the mode key and
+            // the manual buttons but skipped by the four cards.
+            let closest = (0..TIERS).map(distance).min()?;
+            let mut candidates = (0..TIERS).filter(|tier| distance(*tier) == closest);
+
+            // With fewer firmware profiles than tiers, several tiers map onto
+            // one index and it cannot be inverted uniquely - on a two-profile
+            // machine, Quiet and Balanced both write the weaker index. Always
+            // answering with the lowest of them would report a Balanced
+            // selection back as Quiet, which the UI would show wrongly and the
+            // AC/battery policy would read as a mismatch it then tries to
+            // reconcile on every tick, forever.
+            //
+            // `preferred` is what the caller already believes is applied,
+            // taken from the CPU state. When the index is consistent with that
+            // belief, keep it; only genuine disagreement changes the answer.
+            match preferred {
+                Some(preferred) if candidates.clone().any(|tier| tier == preferred) => {
+                    Some(preferred)
+                }
+                _ => candidates.next(),
+            }
         }
 
         /// Next profile up, wrapping at the top - what a "cycle modes" key does.
@@ -1172,11 +1192,56 @@ mod thermal_profile_tests {
         for tier in 0..TIERS {
             let index = c.index_for_tier(tier).unwrap();
             assert_eq!(
-                c.tier_for_index(index),
+                c.tier_for_index(index, None),
                 Some(tier),
                 "tier {tier} -> index {index} -> tier"
             );
         }
+    }
+
+    /// With fewer firmware profiles than tiers, one index stands for two tiers
+    /// and cannot be inverted on its own. Answering with the lower tier every
+    /// time reports a Balanced selection back as Quiet: the UI shows the wrong
+    /// card, and the AC/battery policy sees a mismatch it re-enforces on every
+    /// tick without ever resolving it.
+    #[test]
+    fn a_shared_index_keeps_the_tier_the_caller_already_believes() {
+        let two = ranked(vec![
+            measured(0, 45_000_000, 45_000_000),
+            measured(1, 95_000_000, 160_000_000),
+        ]);
+        // Both weak tiers write index 0; both strong tiers write index 1.
+        assert_eq!(two.index_for_tier(0), Some(0));
+        assert_eq!(two.index_for_tier(1), Some(0));
+        assert_eq!(two.index_for_tier(2), Some(1));
+        assert_eq!(two.index_for_tier(3), Some(1));
+
+        // Every tier must survive the round trip when the caller says which
+        // one it applied.
+        for tier in 0..TIERS {
+            let index = two.index_for_tier(tier).unwrap();
+            assert_eq!(
+                two.tier_for_index(index, Some(tier)),
+                Some(tier),
+                "tier {tier} -> index {index} -> tier"
+            );
+        }
+
+        // A belief the index cannot support is not honoured - the firmware
+        // really did move, and the answer has to reflect that.
+        assert_eq!(two.tier_for_index(1, Some(0)), Some(2));
+        // With no belief to go on, the lowest matching tier is the answer.
+        assert_eq!(two.tier_for_index(0, None), Some(0));
+    }
+
+    /// The preference only ever breaks ties: an index that unambiguously
+    /// belongs to one tier must not be reported as another just because the
+    /// caller expected it.
+    #[test]
+    fn a_preference_never_overrides_an_unambiguous_index() {
+        let c = phn16_73();
+        let turbo_index = c.index_for_tier(3).unwrap();
+        assert_eq!(c.tier_for_index(turbo_index, Some(0)), Some(3));
     }
 
     #[test]
@@ -1212,7 +1277,7 @@ mod thermal_profile_tests {
         for tier in 0..TIERS {
             assert_eq!(unranked.index_for_tier(tier), None);
         }
-        assert_eq!(unranked.tier_for_index(0), None);
+        assert_eq!(unranked.tier_for_index(0, None), None);
         assert_eq!(unranked.strongest(), None);
         assert_eq!(unranked.weakest(), None);
         // Cycling still works: it reaches every profile, it just does not
