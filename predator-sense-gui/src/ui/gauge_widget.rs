@@ -54,12 +54,13 @@ pub fn create_gauge_with_icon(
         let _ = cr.stroke();
 
         if has_value {
-            // Progress ring - cyan dashes
+            // Progress ring - accent-colored dashes (cyan on Predator, orange on Nitro)
             let fraction = (val / max_value).clamp(0.0, 1.0);
             let start = -PI / 2.0; // Start from top
             let end = start + fraction * 2.0 * PI;
 
-            cr.set_source_rgba(0.0, 0.8, 0.9, 1.0); // #00cce6
+            let (r, g, b) = crate::ui::brand_theme::accent().bright;
+            cr.set_source_rgba(r, g, b, 1.0);
             cr.set_line_width(line_width);
             cr.set_dash(&[dash_len, gap_len], 0.0);
             cr.arc(cx, cy, radius, start, end);

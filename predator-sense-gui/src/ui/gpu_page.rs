@@ -225,7 +225,7 @@ pub fn build() -> gtk::Box {
     {
         let s = state.clone();
         temp_graph.set_draw_func(move |_a, cr, w, h| {
-            draw_graph(cr, w as f64, h as f64, &s.borrow().temp_history, 20.0, 100.0, (0.0, 0.8, 0.9), "°C");
+            draw_graph(cr, w as f64, h as f64, &s.borrow().temp_history, 20.0, 100.0, crate::ui::brand_theme::accent().bright, "°C");
         });
     }
     {
@@ -460,7 +460,7 @@ fn draw_gauge_arc(cr: &gtk4::cairo::Context, w: f64, h: f64, fraction: f64) {
 
     // Progress arc
     if fraction > 0.001 {
-        let (rv, gv, bv) = if fraction < 0.6 { (0.0, 0.8, 0.9) }
+        let (rv, gv, bv) = if fraction < 0.6 { crate::ui::brand_theme::accent().bright }
             else if fraction < 0.8 { (0.9, 0.7, 0.0) }
             else { (0.9, 0.2, 0.1) };
         cr.set_source_rgba(rv, gv, bv, 1.0);

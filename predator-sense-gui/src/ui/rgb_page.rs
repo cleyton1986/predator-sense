@@ -392,7 +392,8 @@ fn build_keyboard_panel() -> gtk::Box {
             cr.set_source_rgb(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
             cr.rectangle(0.0, 0.0, w as f64, h as f64);
             let _ = cr.fill();
-            cr.set_source_rgba(0.0, 0.8, 0.9, 0.4);
+            let (ar, ag, ab) = crate::ui::brand_theme::accent().bright;
+            cr.set_source_rgba(ar, ag, ab, 0.4);
             cr.set_line_width(1.0);
             cr.rectangle(0.5, 0.5, w as f64 - 1.0, h as f64 - 1.0);
             let _ = cr.stroke();

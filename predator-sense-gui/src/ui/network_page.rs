@@ -97,7 +97,7 @@ pub fn build() -> gtk::Box {
     big_row.set_margin_top(4);
 
     let (dl_card, dl_value_label, dl_anim_da) =
-        create_speed_card(crate::i18n::t("download"), "↓", (0.0, 0.8, 0.9));
+        create_speed_card(crate::i18n::t("download"), "↓", crate::ui::brand_theme::accent().bright);
     let (ul_card, ul_value_label, ul_anim_da) =
         create_speed_card(crate::i18n::t("upload"), "↑", (0.0, 0.9, 0.5));
 
@@ -157,7 +157,7 @@ pub fn build() -> gtk::Box {
         let s = state.clone();
         dl_graph.set_draw_func(move |_a, cr, w, h| {
             let st = s.borrow();
-            draw_net_graph(cr, w as f64, h as f64, &st.dl_history, (0.0, 0.8, 0.9));
+            draw_net_graph(cr, w as f64, h as f64, &st.dl_history, crate::ui::brand_theme::accent().bright);
         });
     }
     {
@@ -176,7 +176,7 @@ pub fn build() -> gtk::Box {
                 w as f64,
                 h as f64,
                 st.current.rx_kbps,
-                (0.0, 0.8, 0.9),
+                crate::ui::brand_theme::accent().bright,
                 st.anim_phase,
                 true,
             );

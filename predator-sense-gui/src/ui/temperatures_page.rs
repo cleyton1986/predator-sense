@@ -37,7 +37,8 @@ pub fn build(sensor_data: &SensorData) -> gtk::Box {
                 let x = 10.0 + i as f64 * 22.0;
                 cr.arc(x, 9.0, 6.0, 0.0, 2.0 * PI);
                 if i < lit {
-                    cr.set_source_rgba(0.0, 0.8, 0.9, 1.0); // on (cyan)
+                    let (r, g, b) = crate::ui::brand_theme::accent().bright;
+                    cr.set_source_rgba(r, g, b, 1.0); // on (accent)
                 } else {
                     cr.set_source_rgba(0.33, 0.33, 0.33, 1.0); // off (gray)
                 }
@@ -179,32 +180,35 @@ fn create_setting_block(label: &str, value: &str, is_diamond: bool) -> gtk::Box 
         let cx = w as f64 / 2.0;
         let cy = h as f64 / 2.0;
         let s = 10.0;
+        let accent = crate::ui::brand_theme::accent();
+        let (br, bg, bb) = accent.bright;
+        let (dr, dg, db) = accent.dark;
         if d {
             cr.move_to(cx, cy - s);
             cr.line_to(cx + s, cy);
             cr.line_to(cx, cy + s);
             cr.line_to(cx - s, cy);
             cr.close_path();
-            cr.set_source_rgba(0.0, 0.8, 0.9, 1.0);
+            cr.set_source_rgba(br, bg, bb, 1.0);
             let _ = cr.fill();
             cr.move_to(cx - s * 0.5, cy);
             cr.line_to(cx, cy + s * 0.5);
             cr.line_to(cx + s * 0.5, cy);
             cr.close_path();
-            cr.set_source_rgba(0.0, 0.53, 0.6, 1.0);
+            cr.set_source_rgba(dr, dg, db, 1.0);
             let _ = cr.fill();
         } else {
             cr.move_to(cx - s, cy - s * 0.4);
             cr.line_to(cx, cy + s * 0.3);
             cr.line_to(cx + s, cy - s * 0.4);
             cr.close_path();
-            cr.set_source_rgba(0.0, 0.8, 0.9, 1.0);
+            cr.set_source_rgba(br, bg, bb, 1.0);
             let _ = cr.fill();
             cr.move_to(cx - s, cy + s * 0.1);
             cr.line_to(cx, cy + s * 0.8);
             cr.line_to(cx + s, cy + s * 0.1);
             cr.close_path();
-            cr.set_source_rgba(0.0, 0.53, 0.6, 1.0);
+            cr.set_source_rgba(dr, dg, db, 1.0);
             let _ = cr.fill();
         }
     });

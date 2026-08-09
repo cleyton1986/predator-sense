@@ -39,7 +39,7 @@ thread_local! {
 /// Re-applies the base stylesheet scaled by `scale` (see `ui::font_scale`).
 /// Safe to call at any time after startup - takes effect immediately.
 pub fn apply_font_scale(scale: f64) {
-    let scaled_css = ui::font_scale::scale_css(CSS_THEME, scale);
+    let scaled_css = ui::font_scale::scale_css(&ui::brand_theme::brand_css(CSS_THEME), scale);
     CSS_PROVIDER.with(|p| {
         if let Some(provider) = p.borrow().as_ref() {
             provider.load_from_data(&scaled_css);
@@ -84,7 +84,10 @@ fn main() {
             .set_color_scheme(adw::ColorScheme::ForceDark);
         let provider = gtk::CssProvider::new();
         let scale = config::load_app_config().font_scale;
-        provider.load_from_data(&ui::font_scale::scale_css(CSS_THEME, scale));
+        provider.load_from_data(&ui::font_scale::scale_css(
+            &ui::brand_theme::brand_css(CSS_THEME),
+            scale,
+        ));
         gtk::style_context_add_provider_for_display(
             &gdk::Display::default().expect("Could not get default display"),
             &provider,

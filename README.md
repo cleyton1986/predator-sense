@@ -127,7 +127,7 @@ Inspired by and based on the [acer-predator-turbo-and-rgb-keyboard-linux-module]
 | **PredatorSense Key** | Hardware key mapping — the key next to NumLock opens the app |
 | **DKMS** | Kernel modules rebuild automatically across kernel upgrades |
 | **Internationalization** | Automatic English / Portuguese based on system locale |
-| **Gaming UI** | Dark theme with pulsing cyan neon bars, dashed circular gauges, polygon panel borders |
+| **Gaming UI** | Dark theme with pulsing neon bars, dashed circular gauges, polygon panel borders. Accent color follows the detected brand automatically — cyan on Predator/Helios/Triton, orange/red on Nitro (matching NitroSense) — no setting to toggle |
 
 ---
 

@@ -750,6 +750,7 @@ fn find_resource_path(name: &str) -> Option<std::path::PathBuf> {
 fn draw_neon_bar(cr: &gtk4::cairo::Context, w: f64, h: f64, phase: f64, left: bool) {
     // Smooth sine pulse: oscillates between 0.4 and 1.0
     let pulse = 0.4 + 0.6 * ((phase * 2.0 * PI).sin() * 0.5 + 0.5);
+    let (r, g, b) = crate::ui::brand_theme::accent().bright;
 
     let bar_width = 4.0;
     let top = h * 0.10;
@@ -762,19 +763,19 @@ fn draw_neon_bar(cr: &gtk4::cairo::Context, w: f64, h: f64, phase: f64, left: bo
     for i in 0..5 {
         let spread = (i as f64 + 1.0) * 4.0;
         let alpha = (0.15 / (i as f64 + 1.0)) * pulse;
-        cr.set_source_rgba(0.0, 0.8, 0.9, alpha);
+        cr.set_source_rgba(r, g, b, alpha);
         rounded_rect(cr, x0 - spread / 2.0, top - spread / 2.0,
                      bar_width + spread, bar_h + spread, radius + spread / 2.0);
         let _ = cr.fill();
     }
     // Core bar
-    cr.set_source_rgba(0.0, 0.8, 0.9, 0.5 + 0.4 * pulse);
+    cr.set_source_rgba(r, g, b, 0.5 + 0.4 * pulse);
     rounded_rect(cr, x0, top, bar_width, bar_h, radius);
     let _ = cr.fill();
 
     // Subtle edge border (also pulses slightly)
     let ex = if left { 1.0 } else { w - 1.0 };
-    cr.set_source_rgba(0.0, 0.8, 0.9, 0.15 + 0.2 * pulse);
+    cr.set_source_rgba(r, g, b, 0.15 + 0.2 * pulse);
     cr.set_line_width(2.0);
     cr.move_to(ex, 0.0);
     cr.line_to(ex, h);
@@ -802,11 +803,14 @@ fn draw_menu_item(cr: &gtk4::cairo::Context, w: f64, h: f64, is_active: bool) {
     cr.line_to(0.0, cut);
     cr.close_path();
 
+    let accent = crate::ui::brand_theme::accent();
     if is_active {
-        // Gradient #00cce6 -> #008899 + glow
+        // Gradient bright accent -> dark accent + glow
+        let (br, bg, bb) = accent.bright;
+        let (dr, dg, db) = accent.dark;
         let grad = gtk4::cairo::LinearGradient::new(0.0, 0.0, w, 0.0);
-        grad.add_color_stop_rgb(0.0, 0.0, 0.8, 0.9);
-        grad.add_color_stop_rgb(1.0, 0.0, 0.53, 0.6);
+        grad.add_color_stop_rgb(0.0, br, bg, bb);
+        grad.add_color_stop_rgb(1.0, dr, dg, db);
         cr.set_source(&grad).unwrap();
         let _ = cr.fill();
     } else {
@@ -819,8 +823,9 @@ fn draw_menu_item(cr: &gtk4::cairo::Context, w: f64, h: f64, is_active: bool) {
         cr.set_line_width(1.0);
         let _ = cr.stroke();
 
-        // Left border 2px #008899
-        cr.set_source_rgb(0.0, 0.533, 0.6);
+        // Left border 2px, dark accent
+        let (dr, dg, db) = accent.dark;
+        cr.set_source_rgb(dr, dg, db);
         cr.set_line_width(2.0);
         cr.move_to(1.0, cut);
         cr.line_to(1.0, h);
@@ -841,9 +846,10 @@ fn draw_panel_border(cr: &gtk4::cairo::Context, w: f64, h: f64) {
     cr.line_to(0.0, cut);
     cr.close_path();
 
+    let (r, g, b) = crate::ui::brand_theme::accent().bright;
     let grad = gtk4::cairo::LinearGradient::new(0.0, 0.0, w, h);
-    grad.add_color_stop_rgba(0.0, 0.0, 0.8, 0.9, 0.5);
-    grad.add_color_stop_rgba(0.5, 0.0, 0.8, 0.9, 0.1);
+    grad.add_color_stop_rgba(0.0, r, g, b, 0.5);
+    grad.add_color_stop_rgba(0.5, r, g, b, 0.1);
     grad.add_color_stop_rgba(1.0, 0.067, 0.067, 0.067, 1.0);
     cr.set_source(&grad).unwrap();
     let _ = cr.fill();

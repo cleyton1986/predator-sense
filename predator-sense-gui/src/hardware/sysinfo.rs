@@ -81,6 +81,23 @@ impl SystemInfo {
     }
 }
 
+/// Whether this machine's DMI `product_name` identifies it as an Acer Nitro
+/// (as opposed to Predator/Helios/Triton) - drives the app's Nitro orange/red
+/// accent theme (`main.rs`). A cheap standalone check, independent of the
+/// full `read_system_info()` scan, so it can run before the rest of hardware
+/// detection at startup. DMI strings observed so far are always prefixed
+/// with the brand name itself (e.g. "Nitro AN515-58", "Predator PHN16-73").
+///
+/// `PREDATOR_SENSE_FORCE_BRAND=nitro|predator` overrides the DMI read, so the
+/// theme can be previewed on hardware that doesn't match either brand.
+pub fn is_nitro_brand() -> bool {
+    if let Ok(forced) = std::env::var("PREDATOR_SENSE_FORCE_BRAND") {
+        return forced.eq_ignore_ascii_case("nitro");
+    }
+    read_trim("/sys/class/dmi/id/product_name")
+        .is_some_and(|name| name.to_lowercase().contains("nitro"))
+}
+
 fn read_trim(path: &str) -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }

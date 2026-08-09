@@ -430,7 +430,8 @@ fn draw_battery_gauge(cr: &gtk4::cairo::Context, w: f64, h: f64, pct: u32, charg
     // Charging indicator
     if charging {
         cr.set_font_size(12.0);
-        cr.set_source_rgba(0.0, 0.8, 0.9, 0.9);
+        let (r, g, b) = crate::ui::brand_theme::accent().bright;
+        cr.set_source_rgba(r, g, b, 0.9);
         let ct = "⚡";
         let ext2 = cr.text_extents(ct).unwrap();
         cr.move_to(cx - ext2.width() / 2.0, cy + 22.0);
