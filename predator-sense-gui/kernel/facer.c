@@ -54,8 +54,25 @@
 #include <linux/version.h>
 #include <linux/delay.h>
 
-#if RTLNX_VER_MIN(6, 14, 0)
-#include <linux/unaligned.h>
+/*
+ * get_unaligned_le64() used to be reachable only from code this file compiled
+ * on 6.14+, which is why this include was version-guarded at all. It is now
+ * called unconditionally (see WMI_gaming_execute_u32_u64), so every supported
+ * kernel needs it - and older ones spell it <asm/unaligned.h>, before the
+ * header moved in v6.12.
+ *
+ * Probed rather than version-gated on purpose: distributions backport, and
+ * getting the cutoff off by one release here is a build failure on every
+ * kernel in between rather than something that degrades gracefully.
+ */
+#if defined(__has_include)
+#  if __has_include(<linux/unaligned.h>)
+#    include <linux/unaligned.h>
+#  else
+#    include <asm/unaligned.h>
+#  endif
+#else
+#  include <asm/unaligned.h>
 #endif
 
 MODULE_AUTHOR("Carlos Corbacho");
