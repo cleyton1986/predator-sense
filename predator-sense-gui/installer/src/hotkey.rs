@@ -298,6 +298,12 @@ pub(crate) fn run() -> AppResult {
 
     let mut last_activation =
         Instant::now() - Duration::from_secs(timing::HOTKEY_INITIAL_DEBOUNCE_SECS);
+    // A debounce of its own: the mode key and the PredatorSense key are
+    // different keys on different report sources doing different things, so
+    // sharing one timestamp would make pressing one swallow the other for
+    // HOTKEY_DEBOUNCE_SECS. This only ever suppresses key repeat on the mode
+    // key itself.
+    let mut last_mode_activation = last_activation;
     let mut last_suspend_offset = suspend_offset();
     while !devices.is_empty() {
         let mut poll_fds = devices
@@ -351,10 +357,10 @@ pub(crate) fn run() -> AppResult {
             if devices[index].2 {
                 match read_mode_key(&mut devices[index].1, &mode_key) {
                     Ok(true) => {
-                        if last_activation.elapsed()
+                        if last_mode_activation.elapsed()
                             > Duration::from_secs(timing::HOTKEY_DEBOUNCE_SECS)
                         {
-                            last_activation = Instant::now();
+                            last_mode_activation = Instant::now();
                             cycle_thermal_profile(&mut logger);
                         }
                     }
@@ -1304,6 +1310,7 @@ mod tests {
                 })
                 .collect(),
             measured: true,
+            advertised: indices.to_vec(),
         }
     }
 

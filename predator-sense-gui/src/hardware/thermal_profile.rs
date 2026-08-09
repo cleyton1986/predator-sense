@@ -167,13 +167,21 @@ fn sample_limits(limits: Option<&(PathBuf, PathBuf)>) -> (Option<u64>, Option<u6
 /// then be assigned from raw index order while claiming to be measured - which
 /// is exactly how Quiet and Turbo end up on the wrong firmware index.
 ///
-/// Two distinct readings are enough to prove the samples track the profile.
+/// Two conditions, both necessary:
+///
+/// 1. **Every** profile has a sustained reading. `Measured::rank` treats a
+///    missing limit as zero watts, so one transient read failure among
+///    otherwise good samples would sort that profile below every real reading
+///    and hand the strongest firmware profile to Quiet. A partial sample set
+///    is not a ranking, even though the readings it does have look fine.
+/// 2. At least two of the readings differ, which is what proves the samples
+///    track the profile rather than some fixed ceiling.
 fn readings_are_meaningful(profiles: &[Measured]) -> bool {
-    let distinct: std::collections::HashSet<_> = profiles
-        .iter()
-        .filter(|p| p.pl1_uw.is_some() || p.pl2_uw.is_some())
-        .map(|p| (p.pl1_uw, p.pl2_uw))
-        .collect();
+    if profiles.len() < 2 || !profiles.iter().all(|p| p.pl1_uw.is_some()) {
+        return false;
+    }
+    let distinct: std::collections::HashSet<_> =
+        profiles.iter().map(|p| (p.pl1_uw, p.pl2_uw)).collect();
     distinct.len() > 1
 }
 
@@ -205,7 +213,8 @@ pub fn calibrate() -> Result<Calibration, String> {
     let original = current();
     let mut profiles = Vec::new();
 
-    for index in indices {
+    for index in &indices {
+        let index = *index;
         if set(index).is_err() {
             // Bitmask said yes, firmware said no. Not fatal: skip it.
             crate::hardware::applog::error(&format!(
@@ -214,6 +223,21 @@ pub fn calibrate() -> Result<Calibration, String> {
             continue;
         }
         std::thread::sleep(std::time::Duration::from_millis(SETTLE_MS));
+
+        // The settle window is long enough for something else to move the
+        // index: the hotkey daemon acts on a key press without asking anyone,
+        // and the auto-profile switcher fires on AC changes. Attributing this
+        // reading to the wrong profile would bake a wrong ranking in
+        // permanently, so a profile that did not stay put is dropped rather
+        // than recorded - it simply will not appear in the calibration.
+        if current() != Some(index) {
+            crate::hardware::applog::error(&format!(
+                "thermal profile changed away from {index} while measuring it; \
+                 dropping that sample"
+            ));
+            continue;
+        }
+
         let (pl1_uw, pl2_uw) = sample_limits(limits.as_ref());
         profiles.push(Measured {
             index,
@@ -223,7 +247,7 @@ pub fn calibrate() -> Result<Calibration, String> {
     }
 
     if profiles.is_empty() {
-        return Err("firmware refused every profile it advertised".to_string());
+        return Err("no thermal profile could be measured".to_string());
     }
 
     // Not "did we read anything" but "do the readings tell the profiles
@@ -231,7 +255,7 @@ pub fn calibrate() -> Result<Calibration, String> {
     let measured = readings_are_meaningful(&profiles);
     if !measured && profiles.iter().any(|p| p.pl1_uw.is_some()) {
         crate::hardware::applog::error(
-            "every thermal profile reported the same power limit; \
+            "thermal profiles did not produce a usable set of power readings; \
              listing them in index order and not as a ranking",
         );
     }
@@ -244,10 +268,18 @@ pub fn calibrate() -> Result<Calibration, String> {
         profiles.sort_by_key(|p| p.index);
     }
 
-    let calibration = Calibration { profiles, measured };
-    if let Err(error) = save(&calibration) {
-        crate::hardware::applog::error(&format!("could not store the calibration: {error}"));
-    }
+    let calibration = Calibration {
+        profiles,
+        measured,
+        // What the firmware advertised at this moment, not what was probed
+        // successfully - see Calibration::matches_firmware.
+        advertised: indices,
+    };
+    // A calibration that cannot be stored is a failed calibration, not a
+    // successful one with a warning: the boot service and the hotkey daemon
+    // read it from disk, so half the feature would silently not work while the
+    // UI reported success.
+    save(&calibration).map_err(|error| format!("measured, but could not be saved: {error}"))?;
     Ok(calibration)
 }
 
@@ -374,6 +406,30 @@ mod tests {
     #[test]
     fn unreadable_rapl_is_not_meaningful() {
         assert!(!readings_are_meaningful(&[unreadable(0), unreadable(1)]));
+    }
+
+    /// The failure this guards against: one transient RAPL read failure among
+    /// otherwise good samples. `rank()` reads a missing limit as zero watts,
+    /// so that profile would sort below every real reading and Quiet would
+    /// inherit whatever the firmware's strongest profile happens to be.
+    #[test]
+    fn one_unreadable_sample_disqualifies_the_whole_ranking() {
+        let partial = vec![
+            measured(0, 55_000_000, 160_000_000),
+            measured(5, 115_000_000, 160_000_000),
+            unreadable(4),
+        ];
+        assert!(!readings_are_meaningful(&partial));
+
+        // Without the incomplete one, the same samples are a valid ranking.
+        assert!(readings_are_meaningful(&partial[..2]));
+    }
+
+    /// A lone profile has nothing to be ranked against, whatever it reported.
+    #[test]
+    fn a_single_sample_is_never_a_ranking() {
+        assert!(!readings_are_meaningful(&[measured(4, 95_000_000, 160_000_000)]));
+        assert!(!readings_are_meaningful(&[]));
     }
 
     #[test]
