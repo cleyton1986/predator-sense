@@ -1250,11 +1250,19 @@ impl Installer {
             // "Permission denied" even though the protocol itself was right.
             "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"05af\", MODE=\"0660\", GROUP=\"input\"\n",
             "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"0d62\", MODE=\"0660\", GROUP=\"input\"\n",
-            // Embedded controller (I2C-HID 1025:174B). The physical mode-switch
-            // key reports here and nowhere else - no input-subsystem event is
-            // generated - so without read access the hotkey daemon cannot see
-            // the key at all and it stays dead, which is how it shipped.
-            "SUBSYSTEM==\"hidraw\", KERNELS==\"*:1025:174B.*\", MODE=\"0660\", GROUP=\"input\"\n",
+            // Acer embedded controller, exposed as an I2C-HID device. The
+            // physical mode-switch key reports here and nowhere else - it
+            // generates no input-subsystem event at all - so without read
+            // access the hotkey daemon cannot see the key and it stays dead,
+            // which is how it shipped.
+            //
+            // Matched on the Acer vendor id rather than one product id, so the
+            // key works on models whose EC reports a different product; the
+            // daemon still only opens the device it recognises (hotkey.rs).
+            // Read-only for the group on purpose - unlike the RGB controllers
+            // above nothing here ever writes to the EC, and this is the one
+            // device on the list that can change machine state.
+            "SUBSYSTEM==\"hidraw\", KERNELS==\"*:1025:*\", MODE=\"0640\", GROUP=\"input\"\n",
         );
         const EC_RULE: &str =
             "SUBSYSTEM==\"chardev\", KERNEL==\"ec\", MODE=\"0640\", GROUP=\"input\"\n";
@@ -1345,18 +1353,27 @@ impl Installer {
             );
         }
 
+        // Two ExecStart lines rather than two units: both restore a setting the
+        // hardware forgets across a power cycle, and neither should keep the
+        // other from running. The leading `-` on the thermal one makes it
+        // non-fatal - a machine without facer.ko, or one whose BIOS update
+        // dropped the recorded profile, must not leave the boot service failed.
         let boot_unit = format!(
             "[Unit]\n\
              Description={}\n\
              After=multi-user.target\n\n\
              [Service]\n\
              Type=oneshot\n\
-             ExecStart={} {} {}\n\n\
+             ExecStart={} {} {}\n\
+             ExecStart=-{} {} {}\n\n\
              [Install]\n\
              WantedBy=multi-user.target\n",
             service::BOOT_DESCRIPTION,
             path::HELPER,
             HelperAction::BootReapplyBattery.as_str(),
+            self.user.home.display(),
+            path::HELPER,
+            HelperAction::BootReapplyThermal.as_str(),
             self.user.home.display(),
         );
         write_text(Path::new(path::BOOT_UNIT), &boot_unit, mode::REGULAR_FILE)?;

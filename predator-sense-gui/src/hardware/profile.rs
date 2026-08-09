@@ -428,6 +428,50 @@ fn write_took_effect(
     state_satisfies_plan(state, plan, capabilities, MinPerfMatch::AtLeast)
 }
 
+/// Moves the firmware thermal profile to match one of the app's four tiers.
+///
+/// This is the only thing in a profile switch that moves the package power
+/// limit at all - everything else only redistributes the existing budget
+/// between CPU and GPU. On a PHN16-73 the firmware boots into its lowest cTDP
+/// (45 W sustained *and* burst) and no governor, EPP or min_perf change lifts
+/// that ceiling by a single watt.
+///
+/// Which raw index corresponds to which tier is measured per machine rather
+/// than assumed, because the kernel's `platform_profile` names do not follow
+/// the power order on every firmware. Without a *measured* calibration the
+/// firmware is left alone: on this very firmware the raw index order runs
+/// backwards at both ends, so guessing would put Turbo on the weakest profile
+/// and Quiet on one of the strongest - worse than doing nothing.
+///
+/// Best-effort like the GPU wattage: a machine may not expose the attribute at
+/// all, and that must never fail the whole profile switch.
+fn apply_firmware_profile(profile: PowerProfile) {
+    if !crate::hardware::thermal_profile::is_available() {
+        return;
+    }
+    let Some(calibration) = crate::hardware::thermal_profile::load() else {
+        crate::hardware::applog::info(
+            "no thermal profile calibration for this machine; firmware profile left unchanged",
+        );
+        return;
+    };
+    let Some(index) = calibration.index_for_tier(profile.index() as u8) else {
+        crate::hardware::applog::info(
+            "thermal profiles were never ranked by measured power; \
+             firmware profile left unchanged - calibrate from the Mode page",
+        );
+        return;
+    };
+    if let Err(e) = crate::hardware::thermal_profile::set(index) {
+        crate::hardware::applog::error(&format!(
+            "thermal profile {index} for {} not applied: {e}",
+            profile.to_id()
+        ));
+        return;
+    }
+    crate::hardware::thermal_profile::remember(index);
+}
+
 pub fn get_current_profile() -> Option<PowerProfile> {
     // Live hardware state is checked FIRST and is the source of truth. The
     // cached files below only remember what THIS app itself last wrote via
@@ -439,16 +483,22 @@ pub fn get_current_profile() -> Option<PowerProfile> {
     // forever after - a hardware key press changed the real governor/EPP/
     // turbo/min-perf values but the UI kept reporting the old cached guess,
     // since the cache file always existed and always "matched" from then on.
-    // The firmware thermal profile outranks the CPU state when both exist.
-    // The physical mode key writes that index and touches no cpufreq control
-    // at all, so a press leaves governor/EPP/min_perf exactly as they were -
-    // meaning detect_from_hardware() below would keep reporting the old
-    // profile while the machine is running at a different power limit.
-    if let Some(index) = crate::hardware::thermal_profile::current() {
-        if let Some(tier) = crate::hardware::thermal_profile::load()
-            .and_then(|calibration| calibration.tier_for_index(index))
-        {
-            return Some(PowerProfile::from_index(tier as i8));
+    // A measured firmware thermal profile outranks the CPU state when both
+    // exist. The physical mode key writes that index and touches no cpufreq
+    // control at all, so a press leaves governor/EPP/min_perf exactly as they
+    // were - meaning detect_from_hardware() below would keep reporting the old
+    // profile while the machine already runs at a different power limit.
+    //
+    // The calibration is consulted before the index on purpose: it is cached in
+    // memory, whereas reading the index is a WMI call, and this runs on a UI
+    // timer. Machines without a ranked calibration never pay for it.
+    if let Some(calibration) = crate::hardware::thermal_profile::load() {
+        if calibration.is_ranked() {
+            if let Some(tier) = crate::hardware::thermal_profile::current()
+                .and_then(|index| calibration.tier_for_index(index))
+            {
+                return Some(PowerProfile::from_index(tier as i8));
+            }
         }
     }
 
@@ -580,38 +630,7 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
         ));
     }
 
-    // Firmware thermal profile - the only thing here that moves the package
-    // power limit at all. Everything above only redistributes the budget
-    // between CPU and GPU; on a PHN16-73 the firmware boots into its lowest
-    // cTDP (45 W sustained *and* burst) and no governor/EPP change lifts that.
-    //
-    // Which raw index corresponds to which tier is measured per machine rather
-    // than assumed: the kernel's platform_profile names do not follow the power
-    // order on every firmware. Requires a prior calibration; without one we
-    // leave the firmware alone instead of guessing.
-    //
-    // Best-effort like the GPU wattage above: a machine may not expose the
-    // attribute at all, and that must not fail the whole profile switch.
-    if crate::hardware::thermal_profile::is_available() {
-        match crate::hardware::thermal_profile::load() {
-            Some(calibration) => match calibration.index_for_tier(profile.index() as u8) {
-                Some(index) => {
-                    if let Err(e) = crate::hardware::thermal_profile::set(index) {
-                        crate::hardware::applog::error(&format!(
-                            "thermal profile {index} for {} not applied: {e}",
-                            profile.to_id()
-                        ));
-                    }
-                }
-                None => crate::hardware::applog::error(
-                    "thermal profile calibration is empty; firmware profile left unchanged",
-                ),
-            },
-            None => crate::hardware::applog::info(
-                "no thermal profile calibration for this machine; firmware profile left unchanged",
-            ),
-        }
-    }
+    apply_firmware_profile(profile);
 
     // Fan mode used to only follow the physical Predator/Turbo key (see
     // window.rs's turbo-key handler); picking a profile from the "Modo" page
