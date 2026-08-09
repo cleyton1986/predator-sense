@@ -725,13 +725,6 @@ fn read_cpu_reading_at(sysfs_root: &Path) -> CpuReading {
     }
 }
 
-fn detect_from_hardware_at(sysfs_root: &Path) -> Option<PowerProfile> {
-    match read_cpu_reading_at(sysfs_root) {
-        CpuReading::Matched(profile) => Some(profile),
-        _ => None,
-    }
-}
-
 pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     let s = settings_for(profile);
     let sysfs_root = Path::new(SYSFS_ROOT);
@@ -840,6 +833,16 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact-match answer, which is all most of these fixtures care about.
+    /// Production code goes through `cpu_belief()` instead, which also decides
+    /// what an ambiguous reading is worth.
+    fn detect_from_hardware_at(sysfs_root: &Path) -> Option<PowerProfile> {
+        match read_cpu_reading_at(sysfs_root) {
+            CpuReading::Matched(profile) => Some(profile),
+            _ => None,
+        }
+    }
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static FIXTURE_ID: AtomicU64 = AtomicU64::new(0);
