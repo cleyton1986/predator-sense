@@ -641,7 +641,12 @@ fn cycle_order_from(
     supported: &[u8],
 ) -> Vec<u8> {
     calibration
-        .filter(|calibration| calibration.matches_firmware(supported))
+        .filter(|calibration| {
+            calibration.matches_firmware(
+                supported,
+                &thermal_profile::firmware_identity(Path::new(thermal_profile::SYSFS_ROOT)),
+            )
+        })
         .map(|calibration| {
             calibration
                 .profiles
@@ -1359,6 +1364,7 @@ mod tests {
                 .collect(),
             measured: true,
             advertised: indices.to_vec(),
+            firmware: String::new(),
         }
     }
 

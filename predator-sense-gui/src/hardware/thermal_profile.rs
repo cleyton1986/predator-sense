@@ -84,6 +84,11 @@ pub fn current() -> Option<u8> {
     read_trimmed(&index_path())?.parse().ok()
 }
 
+/// Identity of the firmware currently installed, empty when unreadable.
+fn firmware_identity() -> String {
+    shared::firmware_identity(Path::new(SYSFS_ROOT))
+}
+
 /// Indices the firmware says it accepts.
 pub fn supported() -> Vec<u8> {
     read_trimmed(&supported_path())
@@ -291,6 +296,9 @@ pub fn calibrate() -> Result<Calibration, String> {
         // What the firmware advertised at this moment, not what was probed
         // successfully - see Calibration::matches_firmware.
         advertised: indices,
+        // What it was measured against, so a BIOS update that reuses the same
+        // indices for different power limits retires these numbers.
+        firmware: firmware_identity(),
     };
     // A calibration that cannot be stored is a failed calibration, not a
     // successful one with a warning: the boot service and the hotkey daemon
@@ -434,11 +442,26 @@ fn restore(original: Option<u8>, probed: &[Measured]) {
     // check having rejected them. With nothing complete to choose from, the
     // lowest index is a neutral guess rather than a wrong claim about power.
     let fallback = restore_fallback(probed);
-    crate::hardware::applog::error(&format!(
-        "could not restore thermal profile {original:?}; leaving {fallback:?} active"
-    ));
-    if let Some(fallback) = fallback {
-        let _ = set(fallback);
+    let Some(fallback) = fallback else {
+        crate::hardware::applog::error(&format!(
+            "could not restore thermal profile {original:?} and had nothing to fall back to; \
+             the machine is on whichever profile was probed last"
+        ));
+        return;
+    };
+    // Reported after the write, not before it: the fallback is itself a helper
+    // call that can fail, and claiming a profile is active without confirming
+    // it is how a machine ends up somewhere nobody expects with the log saying
+    // otherwise. The active index is read back rather than assumed.
+    match set(fallback) {
+        Ok(()) => crate::hardware::applog::error(&format!(
+            "could not restore thermal profile {original:?}; left {fallback} active instead"
+        )),
+        Err(error) => crate::hardware::applog::error(&format!(
+            "could not restore thermal profile {original:?}, and the fallback to {fallback} \
+             also failed ({error}); the machine is now on {:?}",
+            current()
+        )),
     }
 }
 
@@ -495,19 +518,44 @@ pub fn load() -> Option<Calibration> {
             return value.clone();
         }
     }
-    let value = load_uncached();
-    if let Ok(mut cached) = cache().lock() {
-        *cached = Some(value.clone());
+    let (value, conclusive) = load_uncached();
+    // A verdict reached without being able to read the firmware is not a
+    // verdict. Caching it would make one transient WMI failure at the wrong
+    // moment permanent for the life of the process: the tiers would stop
+    // driving the firmware and the UI would keep asking for a calibration that
+    // is sitting right there on disk, until the app restarts.
+    if conclusive {
+        if let Ok(mut cached) = cache().lock() {
+            *cached = Some(value.clone());
+        }
     }
     value
 }
 
-fn load_uncached() -> Option<Calibration> {
-    let path = cache_path()?;
-    let calibration: Calibration = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
-    calibration
-        .matches_firmware(&supported())
-        .then_some(calibration)
+/// The calibration on disk, plus whether that answer is worth remembering.
+///
+/// `false` means the file could not be judged - the firmware's supported set
+/// was unreadable - rather than judged and rejected.
+fn load_uncached() -> (Option<Calibration>, bool) {
+    let Some(path) = cache_path() else {
+        return (None, true);
+    };
+    let Ok(text) = fs::read_to_string(path) else {
+        return (None, true); // No calibration yet. Settled until one is saved.
+    };
+    let Ok(calibration) = serde_json::from_str::<Calibration>(&text) else {
+        return (None, true); // Corrupt; recalibrating is the only way out.
+    };
+    let supported = supported();
+    if supported.is_empty() {
+        return (None, false);
+    }
+    (
+        calibration
+            .matches_firmware(&supported, &firmware_identity())
+            .then_some(calibration),
+        true,
+    )
 }
 
 #[cfg(test)]

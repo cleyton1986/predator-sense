@@ -266,6 +266,15 @@ fn start_calibration(button: &gtk::Button, ui: &FirmwareUi) {
     status.remove_css_class("status-error");
     status.remove_css_class("status-success");
 
+    // Calibration walks the firmware through every supported index and only
+    // puts the original back at the end. If the process exits before that -
+    // the user closes the window with minimize-to-tray off, and the worker is
+    // detached - the machine is left on whichever profile was being sampled,
+    // possibly the strongest. Holding the application keeps it alive until the
+    // restore has run; the window still closes, the exit just waits the few
+    // seconds this takes.
+    let hold = gtk::gio::Application::default().map(|app| app.hold());
+
     let button = button.clone();
     let status = status.clone();
     let ui = ui.clone();
@@ -273,6 +282,7 @@ fn start_calibration(button: &gtk::Button, ui: &FirmwareUi) {
     std::thread::spawn(move || {
         let _ = sender.send(crate::hardware::thermal_profile::calibrate());
     });
+    let mut hold = hold;
     glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
         let result = match receiver.try_recv() {
             Ok(result) => result,
@@ -302,6 +312,9 @@ fn start_calibration(button: &gtk::Button, ui: &FirmwareUi) {
                 button.set_label(&original_label);
             }
         }
+        // Releases the application: dropped here rather than at the end of
+        // start_calibration, so it covers the whole run.
+        drop(hold.take());
         glib::ControlFlow::Break
     });
 }

@@ -572,6 +572,10 @@ pub mod thermal_profile {
     /// Bitmask of indices the firmware accepts: bit N means index N is valid.
     pub const SYSFS_SUPPORTED: &str = "devices/platform/acer-wmi/thermal_profile_supported";
 
+    /// BIOS version, relative to a sysfs root. World-readable, unlike the
+    /// serial number next to it.
+    pub const DMI_BIOS_VERSION: &str = "class/dmi/id/bios_version";
+
     /// Calibration file, relative to the user's config directory.
     pub const CALIBRATION_FILE: &str = "predator-sense/thermal_profiles.json";
 
@@ -643,6 +647,20 @@ pub mod thermal_profile {
         /// still accepted on the subset rule alone.
         #[serde(default)]
         pub advertised: Vec<u8>,
+        /// The firmware this was measured against, from DMI.
+        ///
+        /// The advertised set catches a BIOS update that adds or removes a
+        /// profile, but not one that keeps the same indices and changes what
+        /// they *do* - and the whole point of this file is the power those
+        /// indices deliver. Nothing in the bitmask would reveal that, so the
+        /// firmware's own identity is recorded and any change to it retires
+        /// the measurements.
+        ///
+        /// Empty when unknown (unreadable DMI, or a calibration written before
+        /// this field existed), which is treated as "cannot tell" rather than
+        /// as a mismatch.
+        #[serde(default)]
+        pub firmware: String,
     }
 
     impl Calibration {
@@ -769,7 +787,7 @@ pub mod thermal_profile {
         ///
         /// A calibration written before `advertised` existed has none to
         /// compare, and is judged on the subset rule alone.
-        pub fn matches_firmware(&self, supported: &[u8]) -> bool {
+        pub fn matches_firmware(&self, supported: &[u8], firmware: &str) -> bool {
             if self.profiles.is_empty()
                 || !self.profiles.iter().all(|p| supported.contains(&p.index))
             {
@@ -777,6 +795,12 @@ pub mod thermal_profile {
             }
             if self.advertised.is_empty() {
                 return true;
+            }
+            // Checked before the set comparison because it is the stronger
+            // statement: same indices, different firmware, is exactly the case
+            // the advertised set cannot see.
+            if !firmware.is_empty() && !self.firmware.is_empty() && self.firmware != firmware {
+                return false;
             }
             let sorted = |indices: &[u8]| {
                 let mut values = indices.to_vec();
@@ -793,6 +817,17 @@ pub mod thermal_profile {
         (0..MAX_INDICES)
             .filter(|bit| mask & (1 << bit) != 0)
             .collect()
+    }
+
+    /// Identity of the firmware a calibration was measured against.
+    ///
+    /// The BIOS version from DMI, which is world-readable and stable. Empty
+    /// when it cannot be read - callers treat that as "cannot tell", never as
+    /// a mismatch, so an unreadable DMI never throws a calibration away.
+    pub fn firmware_identity(sysfs: &Path) -> String {
+        std::fs::read_to_string(sysfs.join(DMI_BIOS_VERSION))
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default()
     }
 
     /// Parses the bitmask as the kernel prints it (`0x73\n`).
@@ -1083,6 +1118,7 @@ mod thermal_profile_tests {
             profiles,
             measured: true,
             advertised,
+            firmware: "V1.26".to_string(),
         }
     }
 
@@ -1263,6 +1299,7 @@ mod thermal_profile_tests {
             ],
             measured: false,
             advertised: vec![0, 6],
+            firmware: String::new(),
         };
         assert!(!unranked.is_ranked());
         for tier in 0..TIERS {
@@ -1285,6 +1322,7 @@ mod thermal_profile_tests {
             profiles: vec![measured(4, 95_000_000, 160_000_000)],
             measured: true,
             advertised: vec![4],
+            firmware: String::new(),
         };
         assert!(!one.is_ranked());
         assert_eq!(one.index_for_tier(3), None);
@@ -1325,9 +1363,9 @@ mod thermal_profile_tests {
     #[test]
     fn a_calibration_that_lost_a_profile_is_rejected() {
         let c = phn16_73();
-        assert!(c.matches_firmware(&indices_from_mask(0x73)));
-        assert!(!c.matches_firmware(&indices_from_mask(0x03)));
-        assert!(!Calibration::default().matches_firmware(&indices_from_mask(0x73)));
+        assert!(c.matches_firmware(&indices_from_mask(0x73), "V1.26"));
+        assert!(!c.matches_firmware(&indices_from_mask(0x03), "V1.26"));
+        assert!(!Calibration::default().matches_firmware(&indices_from_mask(0x73), "V1.26"));
     }
 
     /// The other direction, which the subset rule alone cannot see: every old
@@ -1338,7 +1376,7 @@ mod thermal_profile_tests {
         let c = phn16_73();
         assert_eq!(c.advertised, vec![0, 1, 4, 5, 6]);
         assert!(
-            !c.matches_firmware(&indices_from_mask(0xff)),
+            !c.matches_firmware(&indices_from_mask(0xff), "V1.26"),
             "a firmware advertising more profiles than were measured must force a recalibration"
         );
     }
@@ -1352,11 +1390,33 @@ mod thermal_profile_tests {
         // Index 2 is advertised on this machine's firmware but rejected on
         // every write, so it never became a measured profile.
         c.advertised = vec![0, 1, 2, 4, 5, 6];
-        assert!(c.matches_firmware(&indices_from_mask(0x77)));
+        assert!(c.matches_firmware(&indices_from_mask(0x77), "V1.26"));
         assert!(
-            !c.matches_firmware(&indices_from_mask(0x73)),
+            !c.matches_firmware(&indices_from_mask(0x73), "V1.26"),
             "0x77 -> 0x73 is a real change"
         );
+    }
+
+    /// The advertised set cannot see a BIOS update that keeps the same indices
+    /// and changes what they deliver - and the power those indices deliver is
+    /// the entire content of this file.
+    #[test]
+    fn a_calibration_from_another_firmware_revision_is_rejected() {
+        let c = phn16_73();
+        assert!(c.matches_firmware(&indices_from_mask(0x73), "V1.26"));
+        assert!(!c.matches_firmware(&indices_from_mask(0x73), "V1.30"));
+    }
+
+    /// Unknown on either side is "cannot tell", never a mismatch: DMI may be
+    /// unreadable, and calibrations written before the field existed have none.
+    #[test]
+    fn an_unknown_firmware_identity_never_throws_a_calibration_away() {
+        let c = phn16_73();
+        assert!(c.matches_firmware(&indices_from_mask(0x73), ""));
+
+        let mut older = phn16_73();
+        older.firmware.clear();
+        assert!(older.matches_firmware(&indices_from_mask(0x73), "V1.30"));
     }
 
     /// Calibrations written before the advertised set was recorded have
@@ -1365,9 +1425,9 @@ mod thermal_profile_tests {
     fn a_calibration_without_an_advertised_set_falls_back_to_the_subset_rule() {
         let mut legacy = phn16_73();
         legacy.advertised.clear();
-        assert!(legacy.matches_firmware(&indices_from_mask(0x73)));
-        assert!(legacy.matches_firmware(&indices_from_mask(0xff)));
-        assert!(!legacy.matches_firmware(&indices_from_mask(0x03)));
+        assert!(legacy.matches_firmware(&indices_from_mask(0x73), "V1.26"));
+        assert!(legacy.matches_firmware(&indices_from_mask(0xff), "V1.26"));
+        assert!(!legacy.matches_firmware(&indices_from_mask(0x03), "V1.26"));
     }
 
     #[test]

@@ -124,6 +124,21 @@ fn desired_profile(
     }
 }
 
+/// Whether two observations describe the same state the user is sitting in.
+///
+/// The firmware index only counts when both readings have one. It is a WMI
+/// call and can fail transiently, and a read that failed says nothing about
+/// whether the user made another choice - treating `None` as a distinct state
+/// would restart the grace window on every flicker, and a read failing once
+/// per window would mean enforcement never happens at all.
+fn same_state(seen: OutOfPolicyState, now: OutOfPolicyState) -> bool {
+    seen.0 == now.0
+        && match (seen.1, now.1) {
+            (Some(seen), Some(now)) => seen == now,
+            _ => true,
+        }
+}
+
 /// Call periodically. Enforces the profile matching the current power
 /// source/battery level; a no-op whenever the machine is already compliant
 /// or a mismatch is still within its grace window (see `OVERRIDE_GRACE`).
@@ -164,10 +179,10 @@ pub fn check() {
     {
         let mut pending = PENDING_OVERRIDE.lock().unwrap();
         match *pending {
-            Some((seen, since)) if seen == state && since.elapsed() < OVERRIDE_GRACE => {
+            Some((seen, since)) if same_state(seen, state) && since.elapsed() < OVERRIDE_GRACE => {
                 return;
             }
-            Some((seen, _)) if seen == state => {} // Grace window elapsed; enforce below.
+            Some((seen, _)) if same_state(seen, state) => {} // Grace elapsed; enforce below.
             _ => {
                 *pending = Some((state, Instant::now()));
                 return; // Freshly out of policy; start the grace window.
@@ -203,6 +218,25 @@ mod tests {
     /// policy has to treat that as non-compliant and reapply its target, which
     /// is what puts the two back in step; treating it as "leave it alone"
     /// would strand the machine in the mixed state.
+    /// The firmware index is a WMI read that can fail. Treating a failed read
+    /// as a new state restarts the grace window, and a read that fails once
+    /// per window would postpone enforcement forever without the user ever
+    /// choosing anything.
+    #[test]
+    fn a_flickering_firmware_read_is_not_a_new_selection() {
+        assert!(same_state((-1, Some(4)), (-1, None)));
+        assert!(same_state((-1, None), (-1, Some(4))));
+        assert!(same_state((-1, None), (-1, None)));
+    }
+
+    /// A real change on either side is still a new state, which is the whole
+    /// point of tracking the index.
+    #[test]
+    fn a_confirmed_change_starts_a_fresh_window() {
+        assert!(!same_state((-1, Some(4)), (-1, Some(5))));
+        assert!(!same_state((0, Some(4)), (2, Some(4))));
+    }
+
     #[test]
     fn an_incoherent_machine_is_never_compliant() {
         assert_eq!(
