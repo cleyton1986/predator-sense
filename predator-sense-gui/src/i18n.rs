@@ -7,7 +7,10 @@ use std::sync::OnceLock;
 static LANG: OnceLock<Lang> = OnceLock::new();
 
 #[derive(Clone, Copy, PartialEq)]
-pub enum Lang { Pt, En }
+pub enum Lang {
+    Pt,
+    En,
+}
 
 pub fn lang() -> Lang {
     *LANG.get_or_init(|| Lang::En)
@@ -25,11 +28,17 @@ pub fn init(saved_override: Option<&str>) {
     let _ = LANG.set(lang);
 }
 
-pub fn is_pt() -> bool { lang() == Lang::Pt }
+pub fn is_pt() -> bool {
+    lang() == Lang::Pt
+}
 
 /// Get translated string by key
 pub fn t(key: &str) -> &str {
-    if is_pt() { t_pt(key) } else { t_en(key) }
+    if is_pt() {
+        t_pt(key)
+    } else {
+        t_en(key)
+    }
 }
 
 fn t_pt(key: &str) -> &str {
@@ -201,6 +210,18 @@ fn t_pt(key: &str) -> &str {
         "turbo_desc" => "CPU e GPU no máximo.\nMáxima performance.",
         "cpu_governor" => "Governor da CPU",
         "intel_hwp_policy" => "Política Intel HWP",
+        "error" => "Erro",
+        "firmware_profiles" => "Perfil de energia do firmware",
+        "calibrate" => "Calibrar perfis",
+        "recalibrate" => "Medir novamente",
+        "calibrating" => "Calibrando… ventiladores e iluminação vão variar",
+        "calibrate_done" => "Calibração concluída — perfis medidos:",
+        "calibrate_failed" => "a calibração foi interrompida",
+        "calibrate_hint" => "Este modelo expõe perfis de energia do firmware, mas eles ainda não foram medidos. A calibração testa cada um e lê o limite de potência resultante; leva alguns segundos, e o firmware muda a iluminação do teclado a cada troca de modo.",
+        "firmware_profiles_hint" => "Limite sustentado / burst do pacote. Também muda pela tecla física.",
+        "firmware_profiles_unranked_hint" => "Esta máquina não expõe leitura de potência, então os perfis aparecem na ordem do firmware, não por potência. Escolha manualmente; os modos acima não os controlam.",
+        "firmware_profiles_single_hint" => "Só um perfil de firmware foi aceito nesta máquina, então não há o que alternar. Meça novamente se isso mudar.",
+        "firmware_profile_applied" => "Perfil de firmware aplicado:",
         "hwp_dynamic" => "dinâmica",
         "hwp_maximum" => "máxima",
         "kernel_forced" => "forçado pelo kernel",
@@ -652,6 +673,18 @@ fn t_en(key: &str) -> &str {
         "turbo_desc" => "CPU and GPU at maximum.\nMaximum performance.",
         "cpu_governor" => "CPU Governor",
         "intel_hwp_policy" => "Intel HWP Policy",
+        "error" => "Error",
+        "firmware_profiles" => "Firmware power profile",
+        "calibrate" => "Calibrate profiles",
+        "recalibrate" => "Measure again",
+        "calibrating" => "Calibrating… fans and lighting will vary",
+        "calibrate_done" => "Calibration finished — profiles measured:",
+        "calibrate_failed" => "calibration was interrupted",
+        "calibrate_hint" => "This model exposes firmware power profiles, but they have not been measured yet. Calibration tries each one and reads the resulting power limit; it takes a few seconds, and the firmware changes the keyboard lighting on every mode switch.",
+        "firmware_profiles_hint" => "Sustained / burst package limit. Also changed by the physical key.",
+        "firmware_profiles_unranked_hint" => "This machine exposes no power readings, so profiles are listed in firmware order, not by power. Pick one manually; the modes above do not drive them.",
+        "firmware_profiles_single_hint" => "Only one firmware profile was accepted on this machine, so there is nothing to switch between. Measure again if that changes.",
+        "firmware_profile_applied" => "Firmware profile applied:",
         "hwp_dynamic" => "dynamic",
         "hwp_maximum" => "maximum",
         "kernel_forced" => "kernel-forced",

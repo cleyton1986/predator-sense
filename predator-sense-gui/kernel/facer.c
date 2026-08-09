@@ -54,8 +54,25 @@
 #include <linux/version.h>
 #include <linux/delay.h>
 
-#if RTLNX_VER_MIN(6, 14, 0)
-#include <linux/unaligned.h>
+/*
+ * get_unaligned_le64() used to be reachable only from code this file compiled
+ * on 6.14+, which is why this include was version-guarded at all. It is now
+ * called unconditionally (see WMI_gaming_execute_u32_u64), so every supported
+ * kernel needs it - and older ones spell it <asm/unaligned.h>, before the
+ * header moved in v6.12.
+ *
+ * Probed rather than version-gated on purpose: distributions backport, and
+ * getting the cutoff off by one release here is a build failure on every
+ * kernel in between rather than something that degrades gracefully.
+ */
+#if defined(__has_include)
+#  if __has_include(<linux/unaligned.h>)
+#    include <linux/unaligned.h>
+#  else
+#    include <asm/unaligned.h>
+#  endif
+#else
+#  include <asm/unaligned.h>
 #endif
 
 MODULE_AUTHOR("Carlos Corbacho");
@@ -2153,7 +2170,12 @@ WMI_gaming_execute_u64(u32 method_id, u64 in, u64 *out)
 
 	return status;
 }
-#if RTLNX_VER_MIN(6, 14, 0)
+/*
+ * Used to live behind RTLNX_VER_MIN(6, 14, 0) because its only caller was the
+ * PWM fan control, which does need that kernel. The helper itself only uses
+ * wmi_evaluate_method + acpi_buffer, available on every supported kernel, and
+ * the thermal-profile attributes below need it too - so it is unconditional now.
+ */
 static int WMI_gaming_execute_u32_u64(u32 method_id, u32 in, u64 *out)
 {
 	struct acpi_buffer result = { ACPI_ALLOCATE_BUFFER, NULL };
@@ -2170,13 +2192,37 @@ static int WMI_gaming_execute_u32_u64(u32 method_id, u32 in, u64 *out)
 		return -EIO;
 
 	obj = result.pointer;
-	if (obj && out) {
+	/*
+	 * A success status with no result object must not read as success: the
+	 * caller's output variable is left untouched, and callers declare it
+	 * uninitialized (WMID_gaming_get_misc_setting). That used to surface
+	 * only through the PWM fan path; it now backs the world-readable
+	 * thermal_profile attributes, where it would publish a stack byte as the
+	 * active profile - and fabricate the supported bitmask at probe.
+	 *
+	 * WMI_gaming_execute_u64() above avoids this by writing a zeroed local
+	 * unconditionally; reporting the failure is better still, since a caller
+	 * can tell the difference.
+	 */
+	if (!obj || !out) {
+		ret = -ENOMSG;
+	} else {
 		switch (obj->type) {
 		case ACPI_TYPE_INTEGER:
 			*out = obj->integer.value;
 			break;
 		case ACPI_TYPE_BUFFER:
-			if (obj->buffer.length < sizeof(*out))
+			/*
+			 * The NULL check is defensive: a buffer object with a
+			 * length but no pointer would be a malformed DSDT
+			 * response, not anything a user can arrange. It is here
+			 * because the reach of this function changed - it used
+			 * to compile in only on 6.14+ and serve the PWM fan
+			 * path, and now backs the world-readable thermal_profile
+			 * attributes on every supported kernel, so a bad
+			 * response would turn a plain sysfs read into an oops.
+			 */
+			if (obj->buffer.length < sizeof(*out) || !obj->buffer.pointer)
 				ret = -ENOMSG;
 			else
 				*out = get_unaligned_le64(obj->buffer.pointer);
@@ -2192,7 +2238,6 @@ static int WMI_gaming_execute_u32_u64(u32 method_id, u32 in, u64 *out)
 
 	return ret;
 }
-#endif
 
 static acpi_status WMID_gaming_set_u64(u64 value, u32 cap)
 {
@@ -2416,7 +2461,7 @@ static int WMID_gaming_set_misc_setting(enum acer_wmi_gaming_misc_setting settin
 	return 0;
 }
 
-#if RTLNX_VER_MIN(6, 14, 0)
+/* Unconditional for the same reason as WMI_gaming_execute_u32_u64 above. */
 static int WMID_gaming_get_misc_setting(enum acer_wmi_gaming_misc_setting setting, u8 *value)
 {
 	u64 input = 0;
@@ -2438,7 +2483,7 @@ static int WMID_gaming_get_misc_setting(enum acer_wmi_gaming_misc_setting settin
 
 	return 0;
 }
-#endif
+
 /*
  * Generic Device (interface-independent)
  */
@@ -3170,6 +3215,100 @@ static ssize_t backlight_timeout_store(struct device *dev, struct device_attribu
 	return count;
 }
 static DEVICE_ATTR_RW(backlight_timeout);
+
+/*
+ * Raw thermal-profile access.
+ *
+ * platform_profile only exposes the subset of modes this driver knows how to
+ * name, and the mapping it uses (BALANCED=0, QUIET=1, PERFORMANCE=2, TURBO=3,
+ * ECO=4) does not hold on every firmware. Measured on a Predator PHN16-73
+ * (Arrow Lake, BIOS V1.26), writing each index and reading the package power
+ * limit back from intel-rapl-mmio:
+ *
+ *	index 6 ->  45 W PL1 /  50 W PL2
+ *	index 0 ->  55 W PL1 / 160 W PL2
+ *	index 1 ->  70 W PL1 / 160 W PL2
+ *	index 4 ->  95 W PL1 / 160 W PL2
+ *	index 5 -> 115 W PL1 / 160 W PL2
+ *
+ * A clean five-step ladder, matching the five modes the model's manual lists
+ * (Eco, Quiet, Balanced, Performance, Turbo). The supported-profiles bitmask
+ * for that machine is 0x73 - bits 0, 1, 4, 5, 6 - i.e. exactly the indices the
+ * firmware accepts: bit N means index N. Indices 2, 3 and 7 are rejected with a
+ * non-zero status and change nothing.
+ *
+ * Under the enum above, that firmware's strongest mode (index 5, 115 W) and its
+ * weakest (index 6) have no name at all, so platform_profile cannot reach
+ * either, and the three it does expose end up labelled in the wrong order.
+ *
+ * Rather than hard-code a second mapping - which would only move the problem to
+ * the next firmware - these attributes hand the raw index and the raw bitmask to
+ * userspace, which can probe each supported index and rank them by the power
+ * limit it observes. platform_profile keeps working exactly as before.
+ *
+ * Best-effort like turbo_state: on hardware without this WMI method both
+ * attributes just return an error.
+ */
+static ssize_t thermal_profile_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	u8 value;
+	int err;
+
+	err = WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, &value);
+	if (err)
+		return err;
+
+	return sysfs_emit(buf, "%u\n", value);
+}
+
+static ssize_t thermal_profile_store(struct device *dev, struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	u8 supported;
+	u8 value;
+	int err;
+
+	if (kstrtou8(buf, 0, &value))
+		return -EINVAL;
+
+	/*
+	 * The firmware is the authority and validates the index itself, without
+	 * side effects on a refusal - but it reports that refusal the same way
+	 * it reports a broken WMI call, so both would reach userspace as -EIO
+	 * and an unsupported index would look like a hardware fault.
+	 *
+	 * Checking the advertised bitmask first separates the two: -EINVAL for
+	 * an index this machine does not have, -EIO only when the interface
+	 * itself failed. The check is skipped when the bitmask cannot be read,
+	 * so a firmware that under-reports its own set never becomes
+	 * unreachable through this attribute.
+	 */
+	if (!WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES, &supported) &&
+	    (value >= BITS_PER_BYTE || !(supported & BIT(value))))
+		return -EINVAL;
+
+	err = WMID_gaming_set_misc_setting(ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, value);
+	if (err)
+		return err;
+
+	return count;
+}
+static DEVICE_ATTR_RW(thermal_profile);
+
+static ssize_t thermal_profile_supported_show(struct device *dev, struct device_attribute *attr,
+					      char *buf)
+{
+	u8 value;
+	int err;
+
+	err = WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES, &value);
+	if (err)
+		return err;
+
+	/* Bitmask: bit N set means index N is a valid thermal_profile value. */
+	return sysfs_emit(buf, "0x%02x\n", value);
+}
+static DEVICE_ATTR_RO(thermal_profile_supported);
 
 static void acer_toggle_turbo(void)
 {
@@ -4097,6 +4236,7 @@ static int acer_wmi_hwmon_init(void);
  */
 static int acer_platform_probe(struct platform_device *device)
 {
+	u8 supported_profiles;
 	int err;
 
 	if (has_cap(ACER_CAP_MAILLED)) {
@@ -4141,6 +4281,24 @@ static int acer_platform_probe(struct platform_device *device)
 	if (device_create_file(&device->dev, &dev_attr_backlight_timeout))
 		dev_warn(&device->dev, "failed to create backlight_timeout sysfs attribute\n");
 
+	/*
+	 * Gated on the machine actually answering the WMI call, unlike the two
+	 * above: creating these unconditionally puts two attributes on every
+	 * Acer laptop the driver binds to - Aspire and Swift included - that can
+	 * only ever return an error, and userspace has no way to tell "this
+	 * machine has no thermal profiles" from "the read failed this time".
+	 * One probe answers that once, at bind.
+	 */
+	if (!WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES,
+					  &supported_profiles)) {
+		if (device_create_file(&device->dev, &dev_attr_thermal_profile))
+			dev_warn(&device->dev,
+				 "failed to create thermal_profile sysfs attribute\n");
+		if (device_create_file(&device->dev, &dev_attr_thermal_profile_supported))
+			dev_warn(&device->dev,
+				 "failed to create thermal_profile_supported sysfs attribute\n");
+	}
+
 	return 0;
 
 	error_hwmon:
@@ -4160,6 +4318,8 @@ static void acer_platform_remove(struct platform_device *device)
 {
 	device_remove_file(&device->dev, &dev_attr_turbo_state);
 	device_remove_file(&device->dev, &dev_attr_backlight_timeout);
+	device_remove_file(&device->dev, &dev_attr_thermal_profile);
+	device_remove_file(&device->dev, &dev_attr_thermal_profile_supported);
 
 	if (has_cap(ACER_CAP_MAILLED))
 		acer_led_exit();

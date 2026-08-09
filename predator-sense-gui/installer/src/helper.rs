@@ -8,6 +8,7 @@ use predator_sense_protocol::battery;
 use predator_sense_protocol::helper::{
     Action as HelperAction, CpuGovernor, EnergyPreference, Switch, OPTIONAL_VALUE_SKIP,
 };
+use predator_sense_protocol::thermal_profile;
 use serde::Deserialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -391,6 +392,21 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
                 &sysfs.join(BACKLIGHT_TIMEOUT),
             )
         }
+        HelperAction::ThermalProfile => {
+            // Raw firmware index, not a platform_profile name. The valid set
+            // varies per machine and is published as a bitmask in
+            // thermal_profile_supported; the driver rejects anything outside
+            // it with EINVAL, and the firmware itself refuses anything it does
+            // not implement, without side effects.
+            let index: u8 = args[1]
+                .parse()
+                .map_err(|_| fail(format!("thermal-profile: invalid index '{}'", args[1])))?;
+            write_attr(
+                "thermal-profile",
+                &index.to_string(),
+                &sysfs.join(thermal_profile::SYSFS_INDEX),
+            )
+        }
         HelperAction::BacklightTimeoutRead => {
             let value = read_attr("backlight-timeout", &sysfs.join(BACKLIGHT_TIMEOUT))
                 .unwrap_or_else(|_| bool_str(false).into());
@@ -410,6 +426,7 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
         HelperAction::PwmCpuEnableRead => pwm_read(sysfs, PwmAttribute::CpuEnable),
         HelperAction::PwmGpuEnableRead => pwm_read(sysfs, PwmAttribute::GpuEnable),
         HelperAction::BootReapplyBattery => reapply_battery(sysfs, Path::new(&args[1])),
+        HelperAction::BootReapplyThermal => reapply_thermal(sysfs, Path::new(&args[1])),
         HelperAction::SerialNumberRead => {
             println!("{}", read_attr("serial-number", &sysfs.join(DMI_SERIAL))?);
             Ok(())
@@ -930,8 +947,16 @@ fn set_fan_preset(ec: &Path, sysfs: &Path, preset: FanPreset) -> AppResult {
             FanPreset::Automatic => "2",
             FanPreset::Maximum => "0",
         };
-        write_attr("pwm1_enable", value, &hwmon.join(PwmAttribute::CpuEnable.file_name()))?;
-        write_attr("pwm2_enable", value, &hwmon.join(PwmAttribute::GpuEnable.file_name()))?;
+        write_attr(
+            "pwm1_enable",
+            value,
+            &hwmon.join(PwmAttribute::CpuEnable.file_name()),
+        )?;
+        write_attr(
+            "pwm2_enable",
+            value,
+            &hwmon.join(PwmAttribute::GpuEnable.file_name()),
+        )?;
         return Ok(());
     }
     ec_write_fan_preset(ec, preset)
@@ -942,14 +967,20 @@ fn set_fan_preset(ec: &Path, sysfs: &Path, preset: FanPreset) -> AppResult {
 /// a raw EC register that path may not update the same way.
 fn read_fan_preset(ec: &Path, sysfs: &Path) -> AppResult<Option<FanPreset>> {
     if let Some(hwmon) = hwmon_fan_enable_dir(sysfs) {
-        let value = read_attr("pwm-enable", &hwmon.join(PwmAttribute::CpuEnable.file_name()))?;
+        let value = read_attr(
+            "pwm-enable",
+            &hwmon.join(PwmAttribute::CpuEnable.file_name()),
+        )?;
         return Ok(match value.trim() {
             "2" => Some(FanPreset::Automatic),
             "0" => Some(FanPreset::Maximum),
             _ => None, // "1" = Custom (per-fan %), not a preset FanPreset models
         });
     }
-    Ok(FanPreset::from_cpu_register(ec_read(ec, EcRegister::CpuFanMode)?))
+    Ok(FanPreset::from_cpu_register(ec_read(
+        ec,
+        EcRegister::CpuFanMode,
+    )?))
 }
 
 fn ec_bool_write(value: &str, ec: &Path, register: EcRegister) -> AppResult {
@@ -1094,6 +1125,59 @@ fn reapply_battery_with(
     } else {
         Err(errors.join("; "))
     }
+}
+
+/// Puts the firmware back on the thermal profile the user last chose.
+///
+/// The firmware does not keep it: on a PHN16-73 every power cycle lands on
+/// index 2, its weakest setting (45 W sustained *and* burst), which it then
+/// refuses to be set back to. Without this the machine quietly boots slower
+/// than the user left it, every time.
+fn reapply_thermal(sysfs: &Path, home: &Path) -> AppResult {
+    reapply_thermal_with(sysfs, home, &mut write_attr)
+}
+
+fn reapply_thermal_with(
+    sysfs: &Path,
+    home: &Path,
+    write: &mut impl FnMut(&str, &str, &Path) -> AppResult,
+) -> AppResult {
+    if !home.is_absolute() {
+        return Err(fail("USER_HOME must be an absolute path"));
+    }
+    // `$HOME/.config` and not the user's XDG_CONFIG_HOME, because root at boot
+    // cannot read that user's environment to find out where it points. This is
+    // why the writers deliberately anchor this one file here too - see
+    // thermal_profile::last_profile_path - so a user who moved their config
+    // still gets the profile restored instead of silently losing it.
+    let recorded = thermal_profile::last_profile_path_under(&home.join(".config"));
+    let Some(index) = thermal_profile::remembered(&recorded) else {
+        return Ok(());
+    };
+
+    let attribute = sysfs.join(thermal_profile::SYSFS_INDEX);
+    if !attribute.exists() {
+        // facer.ko absent or a machine without the interface. Not a failure:
+        // the recorded index simply has nowhere to go.
+        return Ok(());
+    }
+
+    // The firmware validates the index itself, but checking the live bitmask
+    // first turns "BIOS update dropped this profile" into a clear message
+    // rather than an EINVAL from a boot service nobody is watching.
+    let supported = fs::read_to_string(sysfs.join(thermal_profile::SYSFS_SUPPORTED))
+        .ok()
+        .as_deref()
+        .and_then(thermal_profile::parse_mask)
+        .map(thermal_profile::indices_from_mask)
+        .unwrap_or_default();
+    if !supported.is_empty() && !supported.contains(&index) {
+        return Err(fail(format!(
+            "recorded thermal profile {index} is not supported by this firmware ({supported:?})"
+        )));
+    }
+
+    write("thermal-profile", &index.to_string(), &attribute)
 }
 
 fn command(name: &str, args: &[&str]) -> AppResult {
@@ -1588,6 +1672,69 @@ mod tests {
         assert_eq!(attempted, [limiter, health]);
         assert!(error.contains("injected battery-limit write failure"));
         assert_eq!(read(&sysfs, BATTERY_HEALTH), bool_str(true));
+    }
+
+    /// The whole point of the boot service: the firmware forgets the profile
+    /// on every power cycle, landing on an index that is not even in its own
+    /// supported set.
+    #[test]
+    fn boot_thermal_restore_puts_the_recorded_profile_back() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        let home = fixture.path().join("home/user");
+        write(&home, ".config/predator-sense/thermal_profile", "5\n");
+        write(&sysfs, thermal_profile::SYSFS_INDEX, "2");
+        write(&sysfs, thermal_profile::SYSFS_SUPPORTED, "0x73\n");
+
+        reapply_thermal(&sysfs, &home).unwrap();
+
+        assert_eq!(read(&sysfs, thermal_profile::SYSFS_INDEX), "5");
+    }
+
+    #[test]
+    fn boot_thermal_restore_is_a_no_op_without_something_to_restore() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        let home = fixture.path().join("home/user");
+
+        // Nothing recorded yet: a machine the user never switched profiles on.
+        write(&sysfs, thermal_profile::SYSFS_INDEX, "2");
+        reapply_thermal(&sysfs, &home).unwrap();
+        assert_eq!(read(&sysfs, thermal_profile::SYSFS_INDEX), "2");
+
+        // Recorded, but this kernel has no facer.ko - not a boot failure.
+        let bare = TempDir::new().unwrap();
+        write(&home, ".config/predator-sense/thermal_profile", "5\n");
+        reapply_thermal(&bare.path().join("sys"), &home).unwrap();
+    }
+
+    /// A BIOS update can drop a profile. Writing the stale index would fail
+    /// with a bare EINVAL from a boot service nobody is watching.
+    #[test]
+    fn boot_thermal_restore_refuses_an_index_the_firmware_dropped() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        let home = fixture.path().join("home/user");
+        write(&home, ".config/predator-sense/thermal_profile", "5\n");
+        write(&sysfs, thermal_profile::SYSFS_INDEX, "0");
+        write(&sysfs, thermal_profile::SYSFS_SUPPORTED, "0x03\n");
+
+        let error = reapply_thermal(&sysfs, &home).unwrap_err();
+
+        assert!(error.contains('5'), "{error}");
+        assert_eq!(
+            read(&sysfs, thermal_profile::SYSFS_INDEX),
+            "0",
+            "nothing written"
+        );
+    }
+
+    #[test]
+    fn boot_thermal_restore_requires_an_absolute_home() {
+        let fixture = TempDir::new().unwrap();
+        let error =
+            reapply_thermal(&fixture.path().join("sys"), Path::new("relative/home")).unwrap_err();
+        assert!(error.contains("absolute"), "{error}");
     }
 
     #[test]

@@ -14,6 +14,57 @@ pub fn execute(action: Action, arguments: &[&str]) -> Result<(), String> {
     }
 }
 
+/// Why a helper call failed, when the caller has to react differently to each.
+///
+/// Most callers only need the message. Calibration is the exception: it writes
+/// every supported profile in turn and has to tell "this machine does not
+/// really have that profile" (skip it) from "the call never reached the
+/// hardware" (abort, or the calibration silently loses a profile the firmware
+/// does have).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    /// pkexec could not run or the user dismissed the authentication dialog.
+    /// Nothing was attempted, so no conclusion about the hardware follows.
+    NotAuthorized(String),
+    /// The helper ran and reported the operation itself as failed.
+    Rejected(String),
+}
+
+impl Failure {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::NotAuthorized(message) | Self::Rejected(message) => message,
+        }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+/// pkexec's own exit codes: 127 when it could not launch the program, 126 when
+/// authorization failed or the dialog was dismissed. Anything else is the
+/// helper's own exit status.
+const PKEXEC_LAUNCH_FAILED: i32 = 127;
+const PKEXEC_NOT_AUTHORIZED: i32 = 126;
+
+/// Like [`execute`], but says whether the hardware was ever reached.
+pub fn execute_checked(action: Action, arguments: &[&str]) -> Result<(), Failure> {
+    let output = invoke(action, arguments).map_err(Failure::NotAuthorized)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let message = output_error(action, &output);
+    match output.status.code() {
+        Some(PKEXEC_LAUNCH_FAILED) | Some(PKEXEC_NOT_AUTHORIZED) => {
+            Err(Failure::NotAuthorized(message))
+        }
+        _ => Err(Failure::Rejected(message)),
+    }
+}
+
 pub fn read(action: Action) -> Option<String> {
     if action.argument_count() != 0 {
         return None;

@@ -9,5 +9,12 @@ license = "GPL-3.0"
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+# The thermal-profile calibration is written by the GUI and read back by both
+# the privileged helper (boot reapply) and the hotkey daemon, so its shape has
+# to be one type here rather than three hand-rolled parsers.
+serde = { version = "1", features = ["derive"] }
+
 [dev-dependencies]
+serde_json = "1"
 tempfile = "3"
