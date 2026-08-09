@@ -824,15 +824,6 @@ pub mod thermal_profile {
         Some(config_home()?.join(CALIBRATION_FILE))
     }
 
-    /// Calibration file under an explicit config directory.
-    ///
-    /// The privileged helper runs as root at boot and only knows the user's
-    /// home, so it cannot consult that user's `XDG_CONFIG_HOME` - same
-    /// limitation the battery reapply already has with `config.json`.
-    pub fn calibration_path_under(config_home: &Path) -> PathBuf {
-        config_home.join(CALIBRATION_FILE)
-    }
-
     /// Last-applied index for the current user.
     ///
     /// Deliberately **not** XDG-aware, unlike [`calibration_path`]: this file

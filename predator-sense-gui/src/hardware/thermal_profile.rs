@@ -333,8 +333,17 @@ fn measure_one(index: u8, limits: Option<&(PathBuf, PathBuf)>) -> Result<Option<
             "thermal profile moved away from {index} while measuring it \
              (attempt {attempt}/{SETTLE_ATTEMPTS})"
         ));
-        if attempt < SETTLE_ATTEMPTS && !matches!(apply_for_measurement(index), Ok(true)) {
-            break;
+        if attempt < SETTLE_ATTEMPTS {
+            match apply_for_measurement(index) {
+                Ok(true) => {}
+                // Whatever went wrong on the rewrite is the real answer, and
+                // it is more specific than the generic message below: a
+                // dismissed pkexec dialog sends someone who just clicked
+                // Cancel looking for a profile-switching culprit that does not
+                // exist.
+                Ok(false) => return Ok(None),
+                Err(error) => return Err(error),
+            }
         }
     }
 
@@ -390,10 +399,23 @@ fn apply_for_measurement(index: u8) -> Result<bool, String> {
 /// usable: leaving the user on whichever profile happened to be probed last is
 /// the one outcome calibration must never have.
 fn restore(original: Option<u8>, probed: &[Measured]) {
-    let Some(original) = original else {
-        return;
+    // `None` means the index could not be read when calibration started - a
+    // transient WMI failure. That is not a reason to skip restoring: probing
+    // has since walked the firmware through every supported index, so
+    // returning here leaves the machine on whichever one happened to be last,
+    // possibly the hottest, with nothing said about it. It takes the same
+    // fallback as a refused write.
+    let restored = match original {
+        Some(original) => set(original).is_ok(),
+        None => {
+            crate::hardware::applog::error(
+                "thermal profile before calibration was unreadable; \
+                 falling back to the weakest one measured",
+            );
+            false
+        }
     };
-    if set(original).is_ok() {
+    if restored {
         return;
     }
     // The firmware boots into an index it then refuses to be set back to, so
@@ -413,7 +435,7 @@ fn restore(original: Option<u8>, probed: &[Measured]) {
     // lowest index is a neutral guess rather than a wrong claim about power.
     let fallback = restore_fallback(probed);
     crate::hardware::applog::error(&format!(
-        "could not restore thermal profile {original}; leaving {fallback:?} active"
+        "could not restore thermal profile {original:?}; leaving {fallback:?} active"
     ));
     if let Some(fallback) = fallback {
         let _ = set(fallback);
@@ -556,6 +578,19 @@ mod tests {
             160_000_000
         )]));
         assert!(!readings_are_meaningful(&[]));
+    }
+
+    /// The safety net has to cover the case where the *original* index was
+    /// never readable, not just the one where writing it back fails: probing
+    /// has walked the firmware through every index by then, so returning early
+    /// leaves the machine on whichever was last - possibly the hottest.
+    #[test]
+    fn an_unreadable_original_still_picks_a_fallback() {
+        let probed = vec![
+            measured(5, 115_000_000, 160_000_000),
+            measured(6, 45_000_000, 50_000_000),
+        ];
+        assert_eq!(restore_fallback(&probed), Some(6));
     }
 
     /// `restore()` runs before the readings are judged, so it cannot lean on

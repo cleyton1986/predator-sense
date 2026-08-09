@@ -2198,7 +2198,17 @@ static int WMI_gaming_execute_u32_u64(u32 method_id, u32 in, u64 *out)
 			*out = obj->integer.value;
 			break;
 		case ACPI_TYPE_BUFFER:
-			if (obj->buffer.length < sizeof(*out))
+			/*
+			 * The NULL check is defensive: a buffer object with a
+			 * length but no pointer would be a malformed DSDT
+			 * response, not anything a user can arrange. It is here
+			 * because the reach of this function changed - it used
+			 * to compile in only on 6.14+ and serve the PWM fan
+			 * path, and now backs the world-readable thermal_profile
+			 * attributes on every supported kernel, so a bad
+			 * response would turn a plain sysfs read into an oops.
+			 */
+			if (obj->buffer.length < sizeof(*out) || !obj->buffer.pointer)
 				ret = -ENOMSG;
 			else
 				*out = get_unaligned_le64(obj->buffer.pointer);

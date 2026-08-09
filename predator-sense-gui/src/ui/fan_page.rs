@@ -91,12 +91,8 @@ fn section_box(title_key: &str, hint_key: &str) -> gtk::Box {
 ///
 /// Returns the section to append plus the buttons to keep in sync, or `None`
 /// on machines with no such interface.
-fn build_firmware_row(
-    status: &gtk::Label,
-    page: &gtk::Box,
-    section_cell: &Rc<RefCell<Option<gtk::Box>>>,
-    row_cell: &Rc<RefCell<Option<FirmwareRow>>>,
-) -> Option<(gtk::Box, FirmwareRow)> {
+fn build_firmware_row(ui: &FirmwareUi) -> Option<(gtk::Box, FirmwareRow)> {
+    let status = &ui.status;
     use crate::hardware::thermal_profile;
 
     if !thermal_profile::is_available() {
@@ -109,13 +105,7 @@ fn build_firmware_row(
     // Turbo included.
     let Some(calibration) = thermal_profile::load() else {
         let section = section_box("firmware_profiles", "calibrate_hint");
-        section.append(&calibrate_button(
-            "calibrate",
-            status,
-            page,
-            section_cell,
-            row_cell,
-        ));
+        section.append(&calibrate_button("calibrate", ui));
         // No buttons to reconcile until a calibration exists.
         return Some((
             section,
@@ -190,43 +180,20 @@ fn build_firmware_row(
     // would have to delete the JSON by hand to try again after fixing whatever
     // made the readings unusable. It is also the way back after a BIOS update
     // changes the profile set.
-    section.append(&calibrate_button(
-        "recalibrate",
-        status,
-        page,
-        section_cell,
-        row_cell,
-    ));
+    section.append(&calibrate_button("recalibrate", ui));
 
     Some((section, FirmwareRow { buttons }))
 }
 
 /// The control that starts a calibration, wired to replace this whole section
 /// with the result when it finishes.
-fn calibrate_button(
-    label_key: &str,
-    status: &gtk::Label,
-    page: &gtk::Box,
-    section_cell: &Rc<RefCell<Option<gtk::Box>>>,
-    row_cell: &Rc<RefCell<Option<FirmwareRow>>>,
-) -> gtk::Button {
+fn calibrate_button(label_key: &str, ui: &FirmwareUi) -> gtk::Button {
     let button = gtk::Button::with_label(crate::i18n::t(label_key));
     button.add_css_class("secondary-button");
     button.set_halign(gtk::Align::Center);
     button.set_margin_top(12);
-    button.connect_clicked(glib::clone!(
-        #[weak]
-        status,
-        #[weak]
-        page,
-        #[strong]
-        section_cell,
-        #[strong]
-        row_cell,
-        move |button| {
-            start_calibration(button, &status, &page, &section_cell, &row_cell);
-        }
-    ));
+    let ui = ui.clone();
+    button.connect_clicked(move |button| start_calibration(button, &ui));
     button
 }
 
@@ -236,24 +203,49 @@ fn calibrate_button(
 /// the section that offers the Calibrate button and the one that lists the
 /// measured profiles are different widgets, and swapping them is what keeps
 /// the result visible without reopening the page.
-fn install_firmware_section(
-    page: &gtk::Box,
-    status: &gtk::Label,
-    section_cell: &Rc<RefCell<Option<gtk::Box>>>,
-    row_cell: &Rc<RefCell<Option<FirmwareRow>>>,
-) {
-    if let Some(previous) = section_cell.borrow_mut().take() {
-        page.remove(&previous);
+fn install_firmware_section(ui: &FirmwareUi) {
+    if let Some(previous) = ui.section.borrow_mut().take() {
+        ui.page.remove(&previous);
     }
-    *row_cell.borrow_mut() = None;
+    *ui.row.borrow_mut() = None;
 
-    let Some((section, row)) = build_firmware_row(status, page, section_cell, row_cell) else {
+    // The four tier cards read the same calibration, so they go stale for the
+    // same reasons this section does - a fresh calibration from an
+    // already-open page would otherwise leave them blank until a restart.
+    refresh_tier_power(&ui.tier_labels);
+
+    let Some((section, row)) = build_firmware_row(ui) else {
         return;
     };
-    page.append(&section);
+    ui.page.append(&section);
     row.show_active(crate::hardware::thermal_profile::current());
-    *section_cell.borrow_mut() = Some(section);
-    *row_cell.borrow_mut() = Some(row);
+    *ui.section.borrow_mut() = Some(section);
+    *ui.row.borrow_mut() = Some(row);
+}
+
+/// Everything the firmware section needs to rebuild itself in place.
+#[derive(Clone)]
+struct FirmwareUi {
+    page: gtk::Box,
+    status: gtk::Label,
+    section: Rc<RefCell<Option<gtk::Box>>>,
+    row: Rc<RefCell<Option<FirmwareRow>>>,
+    tier_labels: Rc<Vec<(PowerProfile, gtk::Label)>>,
+}
+
+/// Fills in (or clears) the per-tier wattage under each of the four cards.
+fn refresh_tier_power(tier_labels: &[(PowerProfile, gtk::Label)]) {
+    for (profile, label) in tier_labels {
+        match tier_power_text(*profile) {
+            Some(power) => {
+                label.set_text(&power);
+                label.set_visible(true);
+            }
+            // No measured ranking: the cards carry adjectives only, rather
+            // than a number that would not be true.
+            None => label.set_visible(false),
+        }
+    }
 }
 
 /// Runs a calibration without freezing the window.
@@ -263,13 +255,8 @@ fn install_firmware_section(
 /// long enough for the compositor to mark a blocked window as not responding.
 /// It runs on its own thread and hops back through `idle_add_local_once`, the
 /// same pattern the GPU and usage pages already use for slow probes.
-fn start_calibration(
-    button: &gtk::Button,
-    status: &gtk::Label,
-    page: &gtk::Box,
-    section_cell: &Rc<RefCell<Option<gtk::Box>>>,
-    row_cell: &Rc<RefCell<Option<FirmwareRow>>>,
-) {
+fn start_calibration(button: &gtk::Button, ui: &FirmwareUi) {
+    let status = &ui.status;
     // Restored verbatim if the run fails, so a Recalibrate button does not come
     // back labelled Calibrate.
     let original_label = button.label().unwrap_or_default();
@@ -281,9 +268,7 @@ fn start_calibration(
 
     let button = button.clone();
     let status = status.clone();
-    let page = page.clone();
-    let section_cell = section_cell.clone();
-    let row_cell = row_cell.clone();
+    let ui = ui.clone();
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = sender.send(crate::hardware::thermal_profile::calibrate());
@@ -308,7 +293,7 @@ fn start_calibration(
                 status.add_css_class("status-success");
                 // Swaps this very button's section out for the measured
                 // profiles, so the result is on screen immediately.
-                install_firmware_section(&page, &status, &section_cell, &row_cell);
+                install_firmware_section(&ui);
             }
             Err(error) => {
                 status.set_text(&format!("{}: {error}", crate::i18n::t("error")));
@@ -451,6 +436,7 @@ pub fn build() -> gtk::Box {
     let profiles_box = gtk::Box::new(gtk::Orientation::Horizontal, 16);
     profiles_box.set_halign(gtk::Align::Center);
     profiles_box.set_margin_top(24);
+    let mut tier_labels: Vec<(PowerProfile, gtk::Label)> = Vec::new();
 
     for (profile_val, name, description, badge) in &profile_info {
         let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -480,11 +466,14 @@ pub fn build() -> gtk::Box {
 
         // What this tier actually gets from the firmware. Without it the cards
         // only carry adjectives, and the user cannot tell them apart.
-        if let Some(power) = tier_power_text(*profile_val) {
-            let power_label = gtk::Label::new(Some(&power));
-            power_label.add_css_class("info-text-dim");
-            card.append(&power_label);
-        }
+        //
+        // Always created, even with nothing to show yet: calibrating from an
+        // already-open page has to be able to fill these in, and a label that
+        // does not exist cannot be filled.
+        let power_label = gtk::Label::new(None);
+        power_label.add_css_class("info-text-dim");
+        card.append(&power_label);
+        tier_labels.push((*profile_val, power_label));
 
         let select_btn = if is_active {
             let btn = gtk::Button::with_label(crate::i18n::t("active"));
@@ -529,9 +518,15 @@ pub fn build() -> gtk::Box {
     // profiles appear right where the Calibrate button was instead of the page
     // asking to be reopened. The cells are what let the periodic refresh below
     // keep tracking whichever row is currently installed.
-    let firmware_section: Rc<RefCell<Option<gtk::Box>>> = Rc::new(RefCell::new(None));
     let firmware_row: Rc<RefCell<Option<FirmwareRow>>> = Rc::new(RefCell::new(None));
-    install_firmware_section(&page, &status_label, &firmware_section, &firmware_row);
+    let firmware_ui = FirmwareUi {
+        page: page.clone(),
+        status: status_label.clone(),
+        section: Rc::new(RefCell::new(None)),
+        row: firmware_row.clone(),
+        tier_labels: Rc::new(tier_labels),
+    };
+    install_firmware_section(&firmware_ui);
 
     // Current state info
     let info_box = gtk::Box::new(gtk::Orientation::Vertical, 4);

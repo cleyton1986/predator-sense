@@ -25,7 +25,11 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// running. Restoring the "previous" profile on exit means GameSync only
 /// ever *suspends* a manual choice while playing, never overrides it for
 /// good.
-static ACTIVE: Mutex<Option<(usize, PowerProfile)>> = Mutex::new(None);
+///
+/// The profile is itself optional: the machine may have had no single profile
+/// to snapshot (see the `coherent_profile()` call in `check()`), and inventing
+/// one to restore would switch the user to something they never chose.
+static ACTIVE: Mutex<Option<(usize, Option<PowerProfile>)>> = Mutex::new(None);
 
 pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::Relaxed);
@@ -88,12 +92,16 @@ enum Transition {
     /// A different registered game replaced the one that was active,
     /// without an in-between tick where none matched. Carries the
     /// already-known "previous" profile forward unchanged.
-    Switch(usize, PowerProfile),
-    /// No registered game matches anymore; restore this profile.
-    Restore(PowerProfile),
+    Switch(usize, Option<PowerProfile>),
+    /// No registered game matches anymore; restore this profile, if there was
+    /// a coherent one to go back to.
+    Restore(Option<PowerProfile>),
 }
 
-fn resolve_transition(matched_index: Option<usize>, active: Option<(usize, PowerProfile)>) -> Transition {
+fn resolve_transition(
+    matched_index: Option<usize>,
+    active: Option<(usize, Option<PowerProfile>)>,
+) -> Transition {
     match (matched_index, active) {
         (Some(index), None) => Transition::Start(index),
         (Some(index), Some((active_index, previous))) if index != active_index => {
@@ -112,15 +120,33 @@ pub fn check(games: &[GameProfile]) {
         return;
     }
     let running = running_executables();
-    let matched_index = games.iter().position(|game| matches(&game.executable, &running));
+    let matched_index = games
+        .iter()
+        .position(|game| matches(&game.executable, &running));
 
     let mut active = ACTIVE.lock().unwrap();
     match resolve_transition(matched_index, *active) {
         Transition::Nothing => {}
         Transition::Start(index) => {
-            let Some(previous) = profile::get_current_profile() else {
-                return; // Unreadable current state - safer to do nothing than guess.
-            };
+            // Deliberately not get_current_profile(): that one lets a measured
+            // firmware tier speak for the whole machine so the UI can follow
+            // the physical mode key, and the key moves only the firmware index.
+            // Snapshotting that value means a press shortly before a game
+            // launches would have the machine "restored" on exit to a profile
+            // whose CPU settings were never active - a switch the user never
+            // asked for.
+            //
+            // `None` means there was no single profile to go back to. The game
+            // still gets its profile, because that is the feature working; what
+            // is skipped is the restore, since there is nothing truthful to
+            // restore to.
+            let previous = profile::coherent_profile();
+            if previous.is_none() {
+                crate::hardware::applog::info(
+                    "GameSync: no coherent profile to snapshot; the profile in effect \
+                     before this game will not be restored on exit",
+                );
+            }
             if profile::set_profile(games[index].profile).is_ok() {
                 *active = Some((index, previous));
             }
@@ -131,7 +157,9 @@ pub fn check(games: &[GameProfile]) {
             }
         }
         Transition::Restore(previous) => {
-            let _ = profile::set_profile(previous);
+            if let Some(previous) = previous {
+                let _ = profile::set_profile(previous);
+            }
             *active = None;
         }
     }
@@ -151,7 +179,9 @@ mod tests {
 
     #[test]
     fn matches_full_path_or_basename() {
-        let running = vec![PathBuf::from("/home/user/.steam/steamapps/common/Game/game.bin")];
+        let running = vec![PathBuf::from(
+            "/home/user/.steam/steamapps/common/Game/game.bin",
+        )];
         assert!(matches("game.bin", &running));
         assert!(matches(
             "/home/user/.steam/steamapps/common/Game/game.bin",
@@ -179,7 +209,7 @@ mod tests {
     #[test]
     fn does_nothing_while_the_same_game_stays_active() {
         assert_eq!(
-            resolve_transition(Some(1), Some((1, PowerProfile::Balanced))),
+            resolve_transition(Some(1), Some((1, Some(PowerProfile::Balanced)))),
             Transition::Nothing
         );
     }
@@ -187,16 +217,32 @@ mod tests {
     #[test]
     fn switches_when_a_different_game_takes_over_without_a_gap() {
         assert_eq!(
-            resolve_transition(Some(2), Some((1, PowerProfile::Balanced))),
-            Transition::Switch(2, PowerProfile::Balanced)
+            resolve_transition(Some(2), Some((1, Some(PowerProfile::Balanced)))),
+            Transition::Switch(2, Some(PowerProfile::Balanced))
+        );
+    }
+
+    /// A machine whose firmware tier and CPU state disagree has no single
+    /// profile to snapshot. The game still gets its profile; what must not
+    /// happen is the exit "restoring" an invented one.
+    #[test]
+    fn a_game_that_started_without_a_snapshot_restores_nothing() {
+        assert_eq!(
+            resolve_transition(None, Some((0, None))),
+            Transition::Restore(None)
+        );
+        assert_eq!(
+            resolve_transition(Some(3), Some((1, None))),
+            Transition::Switch(3, None),
+            "and the missing snapshot is carried forward, not filled in"
         );
     }
 
     #[test]
     fn restores_when_no_game_matches_anymore() {
         assert_eq!(
-            resolve_transition(None, Some((0, PowerProfile::Quiet))),
-            Transition::Restore(PowerProfile::Quiet)
+            resolve_transition(None, Some((0, Some(PowerProfile::Quiet)))),
+            Transition::Restore(Some(PowerProfile::Quiet))
         );
     }
 
