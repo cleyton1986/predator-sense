@@ -139,6 +139,7 @@ Legenda: ✅ testado e funcionando · 🟡 implementado, não testado (precisa d
 
 | Modelo | Turbo (Impl.) | Turbo (Test.) | RGB (Impl.) | RGB (Test.) | Leitura RPM | Perfis de fan | Fan PWM % |
 |--------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| AN16S-61 | - | - | ✅ | ✅ | ❌ | - | ❌ |
 | AN515-45 | - | - | ✅ | ✅ | ❌ | - | ❌ |
 | AN515-55 | - | - | ✅ | ✅ | ❌ | - | ❌ |
 | AN515-56 | - | - | ✅ | ✅ | ❌ | - | ❌ |
@@ -185,16 +186,18 @@ Legenda: ✅ testado e funcionando · 🟡 implementado, não testado (precisa d
 
 ### RGB sem o módulo kernel (só hardware I2C-HID)
 
-Alguns modelos (confirmado: PHN16S-71, PHN16-73) roteiam o controlador RGB do teclado por um chip I2C-HID separado (ENEK5130) em vez da interface WMI do `facer.ko` — o app fala direto com ele via `/dev/hidrawN`, então funciona mesmo sem o módulo kernel carregado:
+Alguns modelos (confirmado: PHN16S-71, PHN16-73, AN16S-61) roteiam o controlador RGB do teclado por um chip I2C-HID separado (ENEK5130) em vez da interface WMI do `facer.ko` — o app fala direto com ele via `/dev/hidrawN`, então funciona mesmo sem o módulo kernel carregado:
 
 | Recurso | Status |
 |---|---|
-| Cor estática por zona, brilho, desligar luz | ✅ confirmado funcionando (PHN16S-71) |
-| Efeitos dinâmicos — Respiração, Neon | ✅ confirmado funcionando (PHN16S-71) — nativo, um único write HID, hardware faz o loop do padrão sozinho. Nesta unidade, Respiração ignora a cor escolhida e cicla o arco-íris sozinho; pode variar em outro hardware |
+| Cor estática por zona, brilho, desligar luz | ✅ confirmado funcionando (PHN16S-71, AN16S-61) |
+| Efeitos dinâmicos — Respiração, Neon | ✅ confirmado funcionando (PHN16S-71, AN16S-61) — nativo, um único write HID, hardware faz o loop do padrão sozinho. Na unidade PHN16S-71, Respiração ignora a cor escolhida e cicla o arco-íris sozinho; pode variar em outro hardware |
 | Efeitos dinâmicos — Onda, Deslizar, Zoom | Só prévia visual na tela (sem escrita em hardware) — os códigos desses efeitos variam de significado entre gerações de hardware, então ainda não foram ativados |
 | Logo RGB da tampa — desligar, cor estática, brilho, Respiração, Neon | ✅ confirmado funcionando (PHN16-73) |
 
 O suporte ao logo da tampa não é ativado por uma allow-list de modelos. O controlador precisa anunciar o alvo `0x83` no relatório A1 e retornar capacidades A3 correspondentes e não vazias antes que a interface apareça; o app repete essa verificação imediatamente antes de cada escrita. O daemon de hotkey restaura somente uma configuração que o app aplicou com sucesso após login e retorno do modo de suspensão, e ignora totalmente o logo quando não há configuração salva ou o alvo está ausente.
+
+Um [relato independente sobre o AN16S-61](https://github.com/cleyton1986/predator-sense/issues/31) (veja também a [ferramenta de protocolo standalone](https://github.com/ArnarValur/Nitro16S-AI-RGB-Keyboard) do próprio autor) mapeou mais seis modos nativos além de estático/Respiração/Neon/Onda (um modo de desligar via hardware, um modo de pisca de boot que o próprio EC dispara, e mais quatro animações nativas), além de um alvo de LED da tecla de modo/turbo e uma possível divergência no byte de contagem de zonas do relatório de capacidades A3 nessa unidade. Nada disso está ligado no app ainda — precisa de confirmação em mais unidades ENEK5130 antes de mexer no parser de capacidades compartilhado do qual outros modelos já confirmados dependem, então fica registrado como melhoria futura em vez de aplicado de imediato.
 
 ### RGB em hardware 2024+ (USB HID Sunrex/Darfon)
 

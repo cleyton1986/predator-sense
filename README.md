@@ -139,6 +139,7 @@ Legend: ✅ tested & working · 🟡 implemented, not tested (needs a tester) ·
 
 | Product Name | Turbo (Impl.) | Turbo (Tested) | RGB (Impl.) | RGB (Tested) | Fan RPM read | Fan profiles | Fan PWM % |
 |--------------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| AN16S-61 | - | - | ✅ | ✅ | ❌ | - | ❌ |
 | AN515-45 | - | - | ✅ | ✅ | ❌ | - | ❌ |
 | AN515-55 | - | - | ✅ | ✅ | ❌ | - | ❌ |
 | AN515-56 | - | - | ✅ | ✅ | ❌ | - | ❌ |
@@ -185,16 +186,18 @@ Legend: ✅ tested & working · 🟡 implemented, not tested (needs a tester) ·
 
 ### RGB without the kernel module (I2C-HID hardware only)
 
-Some models (confirmed: PHN16S-71, PHN16-73) route the keyboard's RGB controller through a separate I2C-HID chip (ENEK5130) instead of the `facer.ko` WMI interface — the app talks to it directly via `/dev/hidrawN`, so these work even if the kernel module isn't loaded at all:
+Some models (confirmed: PHN16S-71, PHN16-73, AN16S-61) route the keyboard's RGB controller through a separate I2C-HID chip (ENEK5130) instead of the `facer.ko` WMI interface — the app talks to it directly via `/dev/hidrawN`, so these work even if the kernel module isn't loaded at all:
 
 | Feature | Status |
 |---|---|
-| Static per-zone color, brightness, backlight-off | ✅ confirmed working (PHN16S-71) |
-| Dynamic effects — Breathing, Neon | ✅ confirmed working (PHN16S-71) — native, single HID write, hardware loops the pattern on its own. On this unit Breathing ignores the picked color and rainbow-cycles instead; may vary on other hardware |
+| Static per-zone color, brightness, backlight-off | ✅ confirmed working (PHN16S-71, AN16S-61) |
+| Dynamic effects — Breathing, Neon | ✅ confirmed working (PHN16S-71, AN16S-61) — native, single HID write, hardware loops the pattern on its own. On the PHN16S-71 unit Breathing ignores the picked color and rainbow-cycles instead; may vary on other hardware |
 | Dynamic effects — Wave, Shifting, Zoom | On-screen preview only (no hardware writes) — the effect codes for these were found to mean different things across hardware generations, so they're not wired up yet |
 | RGB cover logo — off, solid color, brightness, Breathing, Neon | ✅ confirmed working (PHN16-73) |
 
 Cover-logo support is not enabled from a model-name allow-list. The controller must advertise target `0x83` in its A1 target report and return matching, non-empty A3 capabilities before the UI is exposed; the app repeats that check immediately before every write. The hotkey daemon restores only a setting that the app previously applied successfully after login and resume, and skips the logo entirely when there is no saved setting or the target is absent.
+
+An [independent report on the AN16S-61](https://github.com/cleyton1986/predator-sense/issues/31) (see also the reporter's own [standalone protocol tool](https://github.com/ArnarValur/Nitro16S-AI-RGB-Keyboard)) mapped six more native wire modes beyond static/Breathing/Neon/Wave (a hardware off mode, a boot-blink mode the EC itself fires, and four more built-in animations), plus a mode/turbo-key LED target and a possible zone-count byte discrepancy in the A3 capability report on that unit. None of this is wired into the app yet — it needs corroboration across more ENEK5130 units before touching the shared capability parser other confirmed models already depend on, so it is tracked as a future improvement rather than applied immediately.
 
 ### RGB on 2024+ hardware (Sunrex/Darfon USB HID)
 
