@@ -572,7 +572,14 @@ fn parse_target_capabilities(target: u8, report: &[u8]) -> AppResult<TargetCapab
     {
         return Err(format!("relatório A3 inválido para o alvo 0x{target:02x}"));
     }
-    let zone_count = report[3];
+    // byte[3] and byte[4] are two separate vendor usages per the ENEK5130
+    // report descriptor (0x32 and 0x35), not two readings of the same field.
+    // byte[4] is the real per-target zone count (confirmed against AN16S-61
+    // hardware, issue #31): it matches the physical LED count on all three
+    // targets, while byte[3] is a fixed per-target-class constant. This
+    // mirrors the GUI's `hid_rgb.rs::parse_target_capabilities`, which reads
+    // the same field.
+    let zone_count = report[4];
     if !(1..=hardware::HID_TARGET_MAX_ZONES).contains(&zone_count) {
         return Err(format!(
             "quantidade de zonas inválida {zone_count} para o alvo 0x{target:02x}"
@@ -936,10 +943,34 @@ mod tests {
             ],
         )
         .unwrap();
-        assert_eq!(capabilities.zone_mask, 0x1f);
+        // byte[3]=5 is the single-LED class constant, byte[4]=1 is the real
+        // zone count for this 1-LED target (real AN16S-61 dump, issue #31).
+        assert_eq!(capabilities.zone_mask, 0x01);
         assert!(capabilities.supports(hardware::HID_MODE_STATIC));
         assert!(capabilities.supports(hardware::HID_MODE_BREATH));
         assert!(capabilities.supports(hardware::HID_MODE_NEON));
+    }
+
+    #[test]
+    fn parses_keyboard_capabilities_with_four_physical_zones() {
+        // Real AN16S-61 dump (issue #31): byte[3]=9 is the keyboard class
+        // constant, byte[4]=4 is the real zone count (4 physical zones).
+        let capabilities = parse_target_capabilities(
+            hardware::HID_TARGET_KEYBOARD,
+            &[
+                hardware::HID_REPORT_TARGET_CAPABILITIES,
+                hardware::HID_TARGET_KEYBOARD,
+                1,
+                9,
+                4,
+                0xfb,
+                0x07,
+                0,
+                0,
+            ],
+        )
+        .unwrap();
+        assert_eq!(capabilities.zone_mask, 0x0f);
     }
 
     #[test]
