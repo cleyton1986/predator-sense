@@ -3223,6 +3223,7 @@ static ssize_t thermal_profile_show(struct device *dev, struct device_attribute 
 static ssize_t thermal_profile_store(struct device *dev, struct device_attribute *attr,
 				     const char *buf, size_t count)
 {
+	u8 supported;
 	u8 value;
 	int err;
 
@@ -3230,13 +3231,24 @@ static ssize_t thermal_profile_store(struct device *dev, struct device_attribute
 		return -EINVAL;
 
 	/*
-	 * No range check against the bitmask on purpose: the firmware validates
-	 * the index itself and reports failure without side effects, and it is
-	 * the authority here. Userspace gets -EINVAL for anything it rejects.
+	 * The firmware is the authority and validates the index itself, without
+	 * side effects on a refusal - but it reports that refusal the same way
+	 * it reports a broken WMI call, so both would reach userspace as -EIO
+	 * and an unsupported index would look like a hardware fault.
+	 *
+	 * Checking the advertised bitmask first separates the two: -EINVAL for
+	 * an index this machine does not have, -EIO only when the interface
+	 * itself failed. The check is skipped when the bitmask cannot be read,
+	 * so a firmware that under-reports its own set never becomes
+	 * unreachable through this attribute.
 	 */
+	if (!WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES, &supported) &&
+	    (value >= BITS_PER_BYTE || !(supported & BIT(value))))
+		return -EINVAL;
+
 	err = WMID_gaming_set_misc_setting(ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, value);
 	if (err)
-		return -EINVAL;
+		return err;
 
 	return count;
 }
@@ -4183,6 +4195,7 @@ static int acer_wmi_hwmon_init(void);
  */
 static int acer_platform_probe(struct platform_device *device)
 {
+	u8 supported_profiles;
 	int err;
 
 	if (has_cap(ACER_CAP_MAILLED)) {
@@ -4227,12 +4240,23 @@ static int acer_platform_probe(struct platform_device *device)
 	if (device_create_file(&device->dev, &dev_attr_backlight_timeout))
 		dev_warn(&device->dev, "failed to create backlight_timeout sysfs attribute\n");
 
-	/* Best-effort as well - see the comment above thermal_profile_show(). */
-	if (device_create_file(&device->dev, &dev_attr_thermal_profile))
-		dev_warn(&device->dev, "failed to create thermal_profile sysfs attribute\n");
-	if (device_create_file(&device->dev, &dev_attr_thermal_profile_supported))
-		dev_warn(&device->dev,
-			 "failed to create thermal_profile_supported sysfs attribute\n");
+	/*
+	 * Gated on the machine actually answering the WMI call, unlike the two
+	 * above: creating these unconditionally puts two attributes on every
+	 * Acer laptop the driver binds to - Aspire and Swift included - that can
+	 * only ever return an error, and userspace has no way to tell "this
+	 * machine has no thermal profiles" from "the read failed this time".
+	 * One probe answers that once, at bind.
+	 */
+	if (!WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES,
+					  &supported_profiles)) {
+		if (device_create_file(&device->dev, &dev_attr_thermal_profile))
+			dev_warn(&device->dev,
+				 "failed to create thermal_profile sysfs attribute\n");
+		if (device_create_file(&device->dev, &dev_attr_thermal_profile_supported))
+			dev_warn(&device->dev,
+				 "failed to create thermal_profile_supported sysfs attribute\n");
+	}
 
 	return 0;
 
