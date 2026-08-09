@@ -1145,8 +1145,11 @@ fn reapply_thermal_with(
     if !home.is_absolute() {
         return Err(fail("USER_HOME must be an absolute path"));
     }
-    // Root at boot cannot consult the user's XDG_CONFIG_HOME, same limitation
-    // the battery reapply above already has with config.json.
+    // `$HOME/.config` and not the user's XDG_CONFIG_HOME, because root at boot
+    // cannot read that user's environment to find out where it points. This is
+    // why the writers deliberately anchor this one file here too - see
+    // thermal_profile::last_profile_path - so a user who moved their config
+    // still gets the profile restored instead of silently losing it.
     let recorded = thermal_profile::last_profile_path_under(&home.join(".config"));
     let Some(index) = thermal_profile::remembered(&recorded) else {
         return Ok(());

@@ -472,6 +472,56 @@ fn apply_firmware_profile(profile: PowerProfile) {
     crate::hardware::thermal_profile::remember(index);
 }
 
+/// The tier the firmware's own thermal profile currently sits on, if this
+/// machine has a measured ranking to read it against.
+///
+/// The calibration is consulted before the index on purpose: it is cached in
+/// memory, whereas reading the index is a WMI call, and callers run on UI
+/// timers. Machines without a ranked calibration never pay for it.
+fn firmware_profile() -> Option<PowerProfile> {
+    let calibration = crate::hardware::thermal_profile::load()?;
+    if !calibration.is_ranked() {
+        return None;
+    }
+    let index = crate::hardware::thermal_profile::current()?;
+    Some(PowerProfile::from_index(
+        calibration.tier_for_index(index)? as i8
+    ))
+}
+
+/// The profile the machine is *coherently* in: every control that makes up a
+/// profile agrees on it.
+///
+/// [`get_current_profile`] deliberately lets the firmware index win, so the UI
+/// follows the physical mode key - which writes that index and nothing else.
+/// That is the right answer for a display and the wrong one for enforcement:
+/// the automatic AC/battery policy treats "already Performance or Turbo" as
+/// compliant and does nothing, so a mode key press could report Turbo from the
+/// firmware alone while the CPU sat in Quiet, and the policy would leave an AC
+/// machine underclocked indefinitely.
+///
+/// `None` here means "no single profile describes this machine", which is
+/// exactly what a policy should act on: reapplying its target reconciles the
+/// firmware and the CPU in one go.
+pub fn coherent_profile() -> Option<PowerProfile> {
+    reconcile(
+        firmware_profile(),
+        detect_from_hardware_at(Path::new(SYSFS_ROOT)),
+    )
+}
+
+/// The agreement rule behind [`coherent_profile`], split out to be testable
+/// without a machine that has both controls.
+fn reconcile(firmware: Option<PowerProfile>, cpu: Option<PowerProfile>) -> Option<PowerProfile> {
+    match (firmware, cpu) {
+        (Some(firmware), Some(cpu)) => (firmware == cpu).then_some(cpu),
+        // Only one of the two is readable: it is the whole of what this
+        // machine can report, so there is nothing for it to disagree with.
+        (Some(firmware), None) => Some(firmware),
+        (None, cpu) => cpu,
+    }
+}
+
 pub fn get_current_profile() -> Option<PowerProfile> {
     // Live hardware state is checked FIRST and is the source of truth. The
     // cached files below only remember what THIS app itself last wrote via
@@ -492,14 +542,8 @@ pub fn get_current_profile() -> Option<PowerProfile> {
     // The calibration is consulted before the index on purpose: it is cached in
     // memory, whereas reading the index is a WMI call, and this runs on a UI
     // timer. Machines without a ranked calibration never pay for it.
-    if let Some(calibration) = crate::hardware::thermal_profile::load() {
-        if calibration.is_ranked() {
-            if let Some(tier) = crate::hardware::thermal_profile::current()
-                .and_then(|index| calibration.tier_for_index(index))
-            {
-                return Some(PowerProfile::from_index(tier as i8));
-            }
-        }
+    if let Some(tier) = firmware_profile() {
+        return Some(tier);
     }
 
     if let Some(p) = detect_from_hardware_at(Path::new(SYSFS_ROOT)) {
@@ -845,6 +889,49 @@ mod tests {
         assert_eq!(plan.epp, None);
         assert_eq!(plan.no_turbo, None);
         assert_eq!(plan.min_perf_pct, None);
+    }
+
+    /// The mode key writes the firmware index and touches no cpufreq control,
+    /// so after a press the two disagree. Reporting the firmware's answer as
+    /// the whole profile is right for the UI and wrong for the AC/battery
+    /// policy: "already Turbo" reads as compliant, and the machine would sit
+    /// on AC with Quiet CPU settings forever with nothing to correct it.
+    #[test]
+    fn disagreeing_controls_are_not_a_profile() {
+        assert_eq!(
+            reconcile(Some(PowerProfile::Turbo), Some(PowerProfile::Quiet)),
+            None,
+            "a firmware-only change must not report as an enforced profile"
+        );
+        assert_eq!(
+            reconcile(Some(PowerProfile::Quiet), Some(PowerProfile::Performance)),
+            None,
+            "and not in the other direction either"
+        );
+    }
+
+    #[test]
+    fn agreeing_controls_report_that_profile() {
+        assert_eq!(
+            reconcile(Some(PowerProfile::Turbo), Some(PowerProfile::Turbo)),
+            Some(PowerProfile::Turbo)
+        );
+    }
+
+    /// Most machines have only one of the two: no facer.ko, no calibration, or
+    /// a CPU backend whose state does not map to a tier. Whichever one answers
+    /// has nothing to disagree with and stands on its own.
+    #[test]
+    fn a_single_readable_control_stands_on_its_own() {
+        assert_eq!(
+            reconcile(Some(PowerProfile::Balanced), None),
+            Some(PowerProfile::Balanced)
+        );
+        assert_eq!(
+            reconcile(None, Some(PowerProfile::Balanced)),
+            Some(PowerProfile::Balanced)
+        );
+        assert_eq!(reconcile(None, None), None);
     }
 
     #[test]

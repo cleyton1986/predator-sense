@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicI8, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use super::profile::{get_current_profile, set_profile, PowerProfile};
+use super::profile::{coherent_profile, set_profile, PowerProfile};
 
 const CRITICAL_BATTERY_PCT: u32 = 15;
 
@@ -129,7 +129,14 @@ pub fn check() {
         return;
     }
     let Some(ac) = ac_online() else { return };
-    let current = get_current_profile();
+    // Not get_current_profile(): that one lets the firmware thermal index win
+    // so the UI follows the physical mode key, and the key changes *only* that
+    // index. Treating it as the whole profile would let a key press report
+    // Turbo while the CPU sat in Quiet, which reads as compliant on AC and
+    // leaves the machine underclocked with nothing to correct it. A machine
+    // whose controls disagree reports None here, which enforces the target and
+    // reconciles them.
+    let current = coherent_profile();
     let Some(target) = desired_profile(ac, current, battery_capacity_pct()) else {
         clear_pending_override();
         return;
@@ -175,6 +182,32 @@ fn clear_pending_override() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `None` is what `coherent_profile()` reports when the firmware index and
+    /// the CPU state disagree - after a mode-key press, for instance. The
+    /// policy has to treat that as non-compliant and reapply its target, which
+    /// is what puts the two back in step; treating it as "leave it alone"
+    /// would strand the machine in the mixed state.
+    #[test]
+    fn an_incoherent_machine_is_never_compliant() {
+        assert_eq!(
+            desired_profile(true, None, None),
+            Some(PowerProfile::from_index(AC_PROFILE.load(Ordering::Relaxed))),
+            "AC must enforce rather than accept a machine with no single profile"
+        );
+        assert_eq!(
+            desired_profile(false, None, Some(80)),
+            Some(PowerProfile::from_index(
+                BATTERY_PROFILE.load(Ordering::Relaxed)
+            )),
+            "and so must battery"
+        );
+        assert_eq!(
+            desired_profile(false, None, Some(5)),
+            Some(PowerProfile::Quiet),
+            "and a critical battery still forces Quiet"
+        );
+    }
 
     #[test]
     fn ac_leaves_performance_and_turbo_alone() {
