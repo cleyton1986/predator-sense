@@ -8,6 +8,11 @@ use std::process::Command;
 pub enum ModuleStatus {
     /// facer module loaded and devices available
     Ready,
+    /// facer not loaded, but a community-maintained alternative (e.g. linuwu_sense)
+    /// is: it exposes the same generic sysfs interfaces (platform_profile,
+    /// intel_pstate, acer-wmi-battery) this app already reads directly, just not
+    /// the facer-specific RGB device node.
+    AlternativeDriver,
     /// Stock acer_wmi loaded, facer not installed
     NeedsFacerInstall,
     /// facer compiled but not loaded
@@ -29,6 +34,15 @@ pub fn check_status() -> ModuleStatus {
     // If facer devices exist, we're good
     if Path::new("/dev/acer-gkbbl-0").exists() {
         return ModuleStatus::Ready;
+    }
+
+    // facer not loaded, but linuwu_sense (a separate community project) might be.
+    // It exposes the same generic platform_profile/intel_pstate/acer-wmi-battery
+    // sysfs paths this app reads directly (see hardware/capabilities.rs), so
+    // everything except facer-specific RGB already works. Don't nag the user
+    // into installing facer on top of a driver that already covers their hardware.
+    if Path::new("/sys/module/linuwu_sense").exists() {
+        return ModuleStatus::AlternativeDriver;
     }
 
     // Check if facer.ko exists compiled

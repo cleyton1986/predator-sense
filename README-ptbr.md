@@ -184,6 +184,12 @@ Legenda: ✅ testado e funcionando · 🟡 implementado, não testado (precisa d
 
 > **🧪 O controle PWM é experimental.** É portado do driver `acer-wmi` oficial do kernel Linux e usa métodos WMI seguros (sem escrita bruta no EC), mas **não foi verificado em hardware real** pelo mantenedor (que tem um PH315-54, sem PWM). Se você tem um modelo suportado, relatos de teste são muito bem-vindos. **Use por sua conta e risco** — veja o aviso no topo.
 
+### Alternativa: linuwu_sense (hardware sem quirk, sem Turbo funcional)
+
+O fallback `enable_all=1` do `facer` reconhece qualquer placa com WMI da Acer, mas o conjunto completo de perfis `predator_v4` (5 perfis incluindo `balanced-performance`/`performance`, `turbo_state` gravável) só se aplica a placas presentes na tabela de quirks DMI dele. Numa placa sem quirk, `platform_profile_choices` fica limitado a `low-power quiet balanced` e `turbo_state` continua somente-leitura mesmo o firmware suportando mais — relatado numa unidade PHN16-73 (Macan_ARX, BIOS V1.26) na [#33](https://github.com/cleyton1986/predator-sense/issues/33).
+
+Se for esse o seu caso, o módulo comunitário [Linuwu-Sense](https://github.com/0x7375646F/Linuwu-Sense) (carregado com `predator_v4=1`) expõe o conjunto completo de perfis pelas mesmas interfaces genéricas `platform_profile`/`intel_pstate`/`acer-wmi-battery` que este app já lê diretamente — nenhum caminho de código específico do `facer` envolvido. Desde a `v0.2.71-preview` o app detecta o `linuwu_sense` e pula o aviso de "instalar facer" quando é ele o driver de fato fornecendo essas interfaces. RGB e a calibração de perfil térmico (ambos exclusivos do `facer`, ver acima e abaixo) continuam indisponíveis com linuwu_sense.
+
 ### RGB sem o módulo kernel (só hardware I2C-HID)
 
 Alguns modelos (confirmado: PHN16S-71, PHN16-73, AN16S-61) roteiam o controlador RGB do teclado por um chip I2C-HID separado (ENEK5130) em vez da interface WMI do `facer.ko` — o app fala direto com ele via `/dev/hidrawN`, então funciona mesmo sem o módulo kernel carregado:
