@@ -24,6 +24,9 @@ pub fn build(on_complete: Rc<dyn Fn()>) -> gtk::Box {
     let status = setup::check_status();
     let status_text = match &status {
         setup::ModuleStatus::Ready => t("setup_status_ready"),
+        // Unreachable in practice: window.rs routes AlternativeDriver straight to
+        // the main UI, skipping this page. Kept for exhaustiveness.
+        setup::ModuleStatus::AlternativeDriver => t("setup_status_ready"),
         setup::ModuleStatus::NeedsFacerInstall => t("setup_status_needs_install"),
         setup::ModuleStatus::NeedsFacerLoad => t("setup_status_needs_load"),
         setup::ModuleStatus::MissingDependencies(_) => t("setup_status_missing_deps"),

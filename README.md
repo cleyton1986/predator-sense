@@ -184,6 +184,12 @@ Legend: ✅ tested & working · 🟡 implemented, not tested (needs a tester) ·
 
 > **🧪 PWM fan control is experimental.** It is ported from the upstream Linux kernel `acer-wmi` driver and uses safe WMI methods (no raw EC writes), but it has **not been verified on real hardware** by the maintainer (who owns a PH315-54, which has no PWM). If you have a supported model, testing reports are very welcome. **Use at your own risk** — see the disclaimer at the top.
 
+### Alternative: linuwu_sense (unquirked hardware with no working Turbo)
+
+`facer`'s `enable_all=1` fallback recognizes any Acer WMI-capable board, but the full `predator_v4` profile set (5 profiles including `balanced-performance`/`performance`, writable `turbo_state`) only applies to boards present in its DMI quirk table. On an unquirked board, `platform_profile_choices` is limited to `low-power quiet balanced` and `turbo_state` stays read-only even though the firmware supports more — reported on a PHN16-73 unit (Macan_ARX, BIOS V1.26) in [#33](https://github.com/cleyton1986/predator-sense/issues/33).
+
+If that's your case, the community [Linuwu-Sense](https://github.com/0x7375646F/Linuwu-Sense) module (loaded with `predator_v4=1`) exposes the full profile set through the same generic `platform_profile`/`intel_pstate`/`acer-wmi-battery` interfaces this app already reads directly — no `facer`-specific code path involved. Since `v0.2.71-preview` the app detects `linuwu_sense` and skips the "install facer" prompt when it's the driver actually providing those interfaces. RGB and the thermal-profile calibration (both `facer`-only, see above and below) still need `facer` itself and stay unavailable under linuwu_sense.
+
 ### RGB without the kernel module (I2C-HID hardware only)
 
 Some models (confirmed: PHN16S-71, PHN16-73, AN16S-61) route the keyboard's RGB controller through a separate I2C-HID chip (ENEK5130) instead of the `facer.ko` WMI interface — the app talks to it directly via `/dev/hidrawN`, so these work even if the kernel module isn't loaded at all:

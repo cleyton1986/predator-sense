@@ -94,10 +94,10 @@ pub fn build(app: &adw::Application) {
     // Check module status
     let module_status = setup::check_status();
     crate::startup_mark("module status checked");
-    if module_status != setup::ModuleStatus::Ready {
-        build_with_setup(app, &window, &header);
-    } else {
+    if matches!(module_status, setup::ModuleStatus::Ready | setup::ModuleStatus::AlternativeDriver) {
         build_main_ui(app, &window);
+    } else {
+        build_with_setup(app, &window, &header);
     }
     crate::startup_mark("window content built");
 
@@ -1364,6 +1364,7 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     let status = setup::check_status();
     let st_text = match &status {
         setup::ModuleStatus::Ready => if crate::i18n::is_pt() { "facer carregado e funcionando" } else { "facer loaded and running" },
+        setup::ModuleStatus::AlternativeDriver => if crate::i18n::is_pt() { "linuwu_sense carregado (facer não instalado, RGB indisponível)" } else { "linuwu_sense loaded (facer not installed, RGB unavailable)" },
         setup::ModuleStatus::NeedsFacerInstall => if crate::i18n::is_pt() { "Não instalado" } else { "Not installed" },
         setup::ModuleStatus::NeedsFacerLoad => if crate::i18n::is_pt() { "Compilado, não carregado" } else { "Compiled, not loaded" },
         setup::ModuleStatus::MissingDependencies(_) => if crate::i18n::is_pt() { "Dependências faltando" } else { "Missing dependencies" },
@@ -1371,7 +1372,8 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     let mod_row = create_setting_row(t("status"), st_text);
     let dot = gtk::Label::new(Some("●"));
     dot.set_valign(gtk::Align::Center);
-    dot.add_css_class(if status == setup::ModuleStatus::Ready { "status-dot-ok" } else { "status-dot-off" });
+    let dot_ok = matches!(status, setup::ModuleStatus::Ready | setup::ModuleStatus::AlternativeDriver);
+    dot.add_css_class(if dot_ok { "status-dot-ok" } else { "status-dot-off" });
     mod_row.append(&dot);
     page.append(&mod_row);
 
