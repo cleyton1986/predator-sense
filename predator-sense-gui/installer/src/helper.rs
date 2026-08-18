@@ -37,7 +37,6 @@ const CPU_PROFILE_LOCK_RETRY: Duration = Duration::from_millis(50);
 // models and BAT0 on others, so it is discovered at runtime (battery_threshold
 // below) instead of being a constant. These two do have fixed paths. All three
 // come from the shared protocol crate so the GUI resolves them identically.
-const BATTERY_HEALTH: &str = battery::WMI_HEALTH_MODE;
 const BATTERY_CALIBRATION: &str = battery::WMI_CALIBRATION_MODE;
 const BACKLIGHT_TIMEOUT: &str = "devices/platform/acer-wmi/backlight_timeout";
 // Root-only by kernel design (0400) unlike product_name/board_name (0444),
@@ -358,14 +357,11 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
         }
         HelperAction::BatteryHealth => {
             let enabled = parse_bool(&args[1])?;
-            write_attr(
-                "battery-health",
-                bool_str(enabled),
-                &sysfs.join(BATTERY_HEALTH),
-            )
+            write_attr("battery-health", bool_str(enabled), &health_mode(sysfs)?)
         }
         HelperAction::BatteryHealthRead => {
-            let value = read_attr("battery-health", &sysfs.join(BATTERY_HEALTH))
+            let value = health_mode(sysfs)
+                .and_then(|path| read_attr("battery-health", &path))
                 .unwrap_or_else(|_| bool_str(false).into());
             println!("{value}");
             Ok(())
@@ -1021,6 +1017,20 @@ fn ec_read(path: &Path, register: EcRegister) -> AppResult<u8> {
 
 /// The battery charge threshold to write, or a diagnosable error when this
 /// machine caps its charge some other way (or not at all).
+/// The health-mode control, whichever driver exposes it.
+///
+/// `acer-wmi-battery` names it `health_mode` and Linuwu-Sense names it
+/// `battery_limiter`, but both issue the same firmware call, so either will do
+/// and a machine needs only one of them.
+fn health_mode(sysfs: &Path) -> AppResult<PathBuf> {
+    battery::health_mode_control(sysfs).ok_or_else(|| {
+        fail(format!(
+            "no usable battery health-mode control found under {}",
+            sysfs.display()
+        ))
+    })
+}
+
 fn battery_threshold(sysfs: &Path) -> AppResult<PathBuf> {
     battery::charge_limit(sysfs).ok_or_else(|| {
         fail(format!(
@@ -1094,7 +1104,7 @@ fn reapply_battery_with(
             enabled: config.battery_health_mode,
             label: "battery-health",
             value: bool_str(true),
-            attribute: Some(sysfs.join(BATTERY_HEALTH)),
+            attribute: battery::health_mode_control(sysfs),
         },
     ];
     let mut errors = Vec::new();
@@ -1211,6 +1221,9 @@ fn set_gpu_power_limit(
 
 #[cfg(test)]
 mod tests {
+    /// Fixtures write the in-tree driver's attribute; `health_mode_control`
+    /// accepts either backend, and this is the one a stock machine has.
+    const BATTERY_HEALTH: &str = battery::WMI_HEALTH_MODE;
     use super::*;
     use tempfile::TempDir;
 
@@ -1677,6 +1690,65 @@ mod tests {
     /// The whole point of the boot service: the firmware forgets the profile
     /// on every power cycle, landing on an index that is not even in its own
     /// supported set.
+    /// A machine whose only health-mode control is Linuwu-Sense's
+    /// `battery_limiter`. It is the same firmware call under another name, so
+    /// the health action has to reach it - before this it wrote to the in-tree
+    /// path unconditionally and failed on exactly these machines.
+    #[test]
+    fn the_health_action_uses_whichever_driver_is_present() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        write(&sysfs, battery::PREDATOR_SENSE_LIMITER, bool_str(false));
+
+        run_with_paths(
+            &[HelperAction::BatteryHealth.as_str().into(), "1".into()],
+            &sysfs,
+            Path::new("/dev/null"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read(&sysfs, battery::PREDATOR_SENSE_LIMITER),
+            bool_str(true)
+        );
+    }
+
+    /// And the boot restore reaches it too, for the same reason.
+    #[test]
+    fn boot_battery_restore_reaches_the_out_of_tree_health_control() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        let home = fixture.path().join("home/user");
+        write(&home, USER_CONFIG, r#"{"battery_health_mode":true}"#);
+        write(&sysfs, battery::PREDATOR_SENSE_LIMITER, bool_str(false));
+
+        reapply_battery(&sysfs, &home).unwrap();
+
+        assert_eq!(
+            read(&sysfs, battery::PREDATOR_SENSE_LIMITER),
+            bool_str(true)
+        );
+    }
+
+    /// An attribute the firmware does not back reports -1, and must not be
+    /// mistaken for a usable control.
+    #[test]
+    fn an_unsupported_health_attribute_is_not_written_to() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        write(&sysfs, battery::WMI_HEALTH_MODE, "-1");
+
+        let error = run_with_paths(
+            &[HelperAction::BatteryHealth.as_str().into(), "1".into()],
+            &sysfs,
+            Path::new("/dev/null"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("health-mode"), "{error}");
+        assert_eq!(read(&sysfs, battery::WMI_HEALTH_MODE), "-1", "left alone");
+    }
+
     #[test]
     fn boot_thermal_restore_puts_the_recorded_profile_back() {
         let fixture = TempDir::new().unwrap();
