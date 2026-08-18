@@ -28,16 +28,23 @@ pub struct Capabilities {
     pub ec: bool,
     /// NVIDIA GPU monitoring available without waking the dGPU during detection.
     pub nvidia_gpu: bool,
-    /// Battery charge-limit control through a writable charge threshold
-    /// (power_supply `charge_control_end_threshold` or the out-of-tree
-    /// predator_sense `battery_limiter`) — the mechanism the Settings switch
-    /// drives.
+    /// Adjustable charge threshold: the generic power_supply
+    /// `charge_control_end_threshold`, which takes a percentage. The mechanism
+    /// the Settings switch drives.
+    ///
+    /// Deliberately does not include the out-of-tree predator_sense
+    /// `battery_limiter`: despite its name that attribute is the 80% health
+    /// mode below, not a threshold, and counting it here offered a Settings
+    /// switch whose writes had nowhere to go.
     pub battery_limit: bool,
-    /// Battery "Health Mode": the 80% charge cap of the `acer-wmi-battery` WMI
-    /// driver, and only when the firmware actually implements it — the driver
-    /// creates the attribute either way. A separate mechanism from
-    /// `battery_limit`, driven from the Battery page; most machines expose one
-    /// or the other, not both.
+    /// Battery "Health Mode": the firmware's fixed 80% charge cap, driven from
+    /// the Battery page.
+    ///
+    /// One firmware call (`WMID_GUID5` method 21, `HEALTH_MODE`) reachable
+    /// through either driver that exposes it - see
+    /// `battery::health_mode_control`. True only when the firmware really
+    /// implements it, since `acer-wmi-battery` creates its attribute either
+    /// way and reports -1 when it does not.
     pub battery_health: bool,
 }
 
@@ -65,8 +72,8 @@ impl Capabilities {
                 || crate::hardware::magic_rgb::is_logo_available(),
             ec: Path::new("/dev/ec").exists(),
             nvidia_gpu: crate::hardware::nvidia::is_available(),
-            battery_limit: battery_limit_present(),
-            battery_health: wmi_battery_function_supported(battery::WMI_HEALTH_MODE),
+            battery_limit: battery_charge_limit().is_some(),
+            battery_health: health_mode_control().is_some(),
         }
     }
 }
@@ -140,10 +147,9 @@ pub fn wmi_battery_function_supported(relative: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn battery_limit_present() -> bool {
-    // The device number differs across models, so the threshold is discovered
-    // rather than assumed to be on BAT1.
-    battery_charge_limit().is_some() || sysfs(battery::PREDATOR_SENSE_LIMITER).exists()
+/// The health-mode control this machine exposes, whichever driver provides it.
+pub fn health_mode_control() -> Option<PathBuf> {
+    battery::health_mode_control(Path::new(battery::SYSFS_ROOT))
 }
 
 /// Process-wide cached capabilities (detected once on first access).
