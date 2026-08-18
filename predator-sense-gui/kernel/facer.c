@@ -1404,6 +1404,44 @@ enum acer_predator_v4_thermal_profile_wmi {
 	ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED_WMI = 0x010B,
 };
 
+/*
+ * Raw profile indices as the WMI interface numbers them - the high byte of the
+ * *_WMI command values just above, and the same values upstream acer-wmi uses
+ * in its enum acer_predator_v4_thermal_profile.
+ *
+ * This is NOT the EC numbering: the EC offset counts 0..4 in a different order.
+ * Both exist because both interfaces exist, and the profile they name is only
+ * the same profile after the right one is used for the right transport.
+ */
+enum acer_predator_v4_thermal_profile_wmi_index {
+	ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_QUIET	 = 0x00,
+	ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_BALANCED	 = 0x01,
+	ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_PERFORMANCE = 0x04,
+	ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_TURBO	 = 0x05,
+	ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_ECO	 = 0x06,
+};
+
+/*
+ * Which numbering platform_profile speaks, chosen by which transport it uses:
+ * WMI from 6.14 on (WMID_gaming_{get,set}_misc_setting), the EC offset before
+ * that. Reading a WMI value and comparing it against EC constants is how the
+ * supported-profiles bitmask ended up half-decoded and the names ended up
+ * attached to the wrong power levels.
+ */
+#if RTLNX_VER_MIN(6, 14, 0)
+#define ACER_PP_QUIET		ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_QUIET
+#define ACER_PP_BALANCED	ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_BALANCED
+#define ACER_PP_PERFORMANCE	ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_PERFORMANCE
+#define ACER_PP_TURBO		ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_TURBO
+#define ACER_PP_ECO		ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_ECO
+#else
+#define ACER_PP_QUIET		ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET
+#define ACER_PP_BALANCED	ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED
+#define ACER_PP_PERFORMANCE	ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE
+#define ACER_PP_TURBO		ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO
+#define ACER_PP_ECO		ACER_PREDATOR_V4_THERMAL_PROFILE_ECO
+#endif
+
 /* Find which quirks are needed for a particular vendor/ model pair */
 static void __init find_quirks(void)
 {
@@ -3362,19 +3400,19 @@ acer_predator_v4_platform_profile_get(struct platform_profile_handler *pprof,
 #endif
 
 	switch (tp) {
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO:
+	case ACER_PP_TURBO:
 		*profile = PLATFORM_PROFILE_PERFORMANCE;
 		break;
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE:
+	case ACER_PP_PERFORMANCE:
 		*profile = PLATFORM_PROFILE_BALANCED_PERFORMANCE;
 		break;
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED:
+	case ACER_PP_BALANCED:
 		*profile = PLATFORM_PROFILE_BALANCED;
 		break;
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET:
+	case ACER_PP_QUIET:
 		*profile = PLATFORM_PROFILE_QUIET;
 		break;
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_ECO:
+	case ACER_PP_ECO:
 		*profile = PLATFORM_PROFILE_LOW_POWER;
 		break;
 	default:
@@ -3398,19 +3436,19 @@ acer_predator_v4_platform_profile_set(struct platform_profile_handler *pprof,
 
 	switch (profile) {
 	case PLATFORM_PROFILE_PERFORMANCE:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
+		tp = ACER_PP_TURBO;
 		break;
 	case PLATFORM_PROFILE_BALANCED_PERFORMANCE:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE;
+		tp = ACER_PP_PERFORMANCE;
 		break;
 	case PLATFORM_PROFILE_BALANCED:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+		tp = ACER_PP_BALANCED;
 		break;
 	case PLATFORM_PROFILE_QUIET:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET;
+		tp = ACER_PP_QUIET;
 		break;
 	case PLATFORM_PROFILE_LOW_POWER:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
+		tp = ACER_PP_ECO;
 		break;
 	default:
 		return -EOPNOTSUPP;
@@ -3457,45 +3495,45 @@ acer_predator_v4_platform_profile_probe(void *drvdata, unsigned long *choices)
 		return err;
 
 	/* Iterate through supported profiles in order of increasing performance */
-	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_ECO, &supported_profiles)) {
+	if (test_bit(ACER_PP_ECO, &supported_profiles)) {
 		set_bit(PLATFORM_PROFILE_LOW_POWER, choices);
-		acer_predator_v4_max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
-		last_non_turbo_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
+		acer_predator_v4_max_perf = ACER_PP_ECO;
+		last_non_turbo_profile = ACER_PP_ECO;
 	}
 
-	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET, &supported_profiles)) {
+	if (test_bit(ACER_PP_QUIET, &supported_profiles)) {
 		set_bit(PLATFORM_PROFILE_QUIET, choices);
-		acer_predator_v4_max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET;
-		last_non_turbo_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET;
+		acer_predator_v4_max_perf = ACER_PP_QUIET;
+		last_non_turbo_profile = ACER_PP_QUIET;
 	}
 
-	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED, &supported_profiles)) {
+	if (test_bit(ACER_PP_BALANCED, &supported_profiles)) {
 		set_bit(PLATFORM_PROFILE_BALANCED, choices);
-		acer_predator_v4_max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
-		last_non_turbo_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+		acer_predator_v4_max_perf = ACER_PP_BALANCED;
+		last_non_turbo_profile = ACER_PP_BALANCED;
 	}
 
-	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE, &supported_profiles)) {
+	if (test_bit(ACER_PP_PERFORMANCE, &supported_profiles)) {
 		set_bit(PLATFORM_PROFILE_BALANCED_PERFORMANCE, choices);
-		acer_predator_v4_max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE;
+		acer_predator_v4_max_perf = ACER_PP_PERFORMANCE;
 
 		/* We only use this profile as a fallback option in case no prior
 		 * profile is supported.
 		 */
 		if (last_non_turbo_profile < 0)
-			last_non_turbo_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE;
+			last_non_turbo_profile = ACER_PP_PERFORMANCE;
 	}
 
-	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO, &supported_profiles)) {
+	if (test_bit(ACER_PP_TURBO, &supported_profiles)) {
 		set_bit(PLATFORM_PROFILE_PERFORMANCE, choices);
-		acer_predator_v4_max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
+		acer_predator_v4_max_perf = ACER_PP_TURBO;
 
 		/* We need to handle the hypothetical case where only the turbo profile
 		 * is supported. In this case the turbo toggle will essentially be a
 		 * no-op.
 		 */
 		if (last_non_turbo_profile < 0)
-			last_non_turbo_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
+			last_non_turbo_profile = ACER_PP_TURBO;
 	}
 
 	return 0;
