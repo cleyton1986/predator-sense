@@ -1,17 +1,19 @@
-use crate::hardware::capabilities::{battery_charge_limit, sysfs};
+use crate::hardware::capabilities::{battery_charge_limit, health_mode_control};
 use predator_sense_protocol::battery;
 use predator_sense_protocol::helper::{
     Action as HelperAction, BATTERY_LIMIT_DISABLED_PERCENT, BATTERY_LIMIT_ENABLED_PERCENT,
 };
 use std::fs;
 
-/// Battery charge limit (80%) - preserves battery longevity
+/// Adjustable charge threshold (`charge_control_end_threshold`), driven at 80%.
+///
+/// Reads and writes go to the same attribute. An earlier version read the
+/// predator_sense `battery_limiter` here as a first choice while the write
+/// path never touched it, so on a machine that had only that attribute the
+/// switch showed a state it could not change - the write fell through to the
+/// helper, which writes the threshold and has none to write to. That attribute
+/// is the health mode, and lives with the health mode now.
 pub fn get_battery_limiter() -> bool {
-    // Check via sysfs (if available from kernel module)
-    if let Ok(v) = fs::read_to_string(sysfs(battery::PREDATOR_SENSE_LIMITER)) {
-        return v.trim() == "1";
-    }
-    // Fallback: check charge_control_end_threshold
     if let Some(v) = battery_charge_limit().and_then(|path| fs::read_to_string(path).ok()) {
         return v
             .trim()
@@ -23,7 +25,6 @@ pub fn get_battery_limiter() -> bool {
 }
 
 pub fn set_battery_limiter(enabled: bool) -> Result<(), String> {
-    // Try sysfs first
     let threshold = if enabled {
         BATTERY_LIMIT_ENABLED_PERCENT
     } else {
@@ -37,12 +38,14 @@ pub fn set_battery_limiter(enabled: bool) -> Result<(), String> {
     crate::hardware::helper::write_switch(HelperAction::BatteryLimit, enabled)
 }
 
-/// Battery "Health Mode" - a separate WMI mechanism from `set_battery_limiter`
-/// above (some hardware only exposes one or the other). Extracted from what
-/// was inline UI logic in battery_page.rs so the Battery page switch and the
-/// AI assistant's tool dispatcher share one implementation.
+/// Battery "Health Mode" - the firmware's fixed 80% cap, a different mechanism
+/// from the adjustable threshold above.
+///
+/// Reachable through either driver that exposes it: `acer-wmi-battery` calls it
+/// `health_mode`, Linuwu-Sense calls it `battery_limiter`, and both issue the
+/// same `WMID_GUID5` method 21 `HEALTH_MODE` call. Whichever is present is used.
 pub fn get_battery_health_mode() -> bool {
-    if let Ok(v) = fs::read_to_string(sysfs(battery::WMI_HEALTH_MODE)) {
+    if let Some(v) = health_mode_control().and_then(|path| fs::read_to_string(path).ok()) {
         return v.trim() == "1";
     }
     crate::hardware::helper::read_switch(HelperAction::BatteryHealthRead).unwrap_or(false)
@@ -50,9 +53,12 @@ pub fn get_battery_health_mode() -> bool {
 
 pub fn set_battery_health_mode(enabled: bool) -> Result<(), String> {
     let value = predator_sense_protocol::helper::Switch::from(enabled).as_str();
-    // Try sysfs first (works if already root or if udev grants write access).
-    if fs::write(sysfs(battery::WMI_HEALTH_MODE), value).is_ok() {
-        return Ok(());
+    // Try sysfs first (works if already root or if udev grants write access),
+    // on whichever driver exposes the control.
+    if let Some(path) = health_mode_control() {
+        if fs::write(path, value).is_ok() {
+            return Ok(());
+        }
     }
     // Through the registered predator-sense-helper polkit action
     // (auth_admin_keep, cached for a few minutes) rather than an ad-hoc
