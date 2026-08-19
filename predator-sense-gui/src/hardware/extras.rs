@@ -1,5 +1,4 @@
 use crate::hardware::capabilities::{battery_charge_limit, health_mode_control};
-use predator_sense_protocol::battery;
 use predator_sense_protocol::helper::{
     Action as HelperAction, BATTERY_LIMIT_DISABLED_PERCENT, BATTERY_LIMIT_ENABLED_PERCENT,
 };
