@@ -473,9 +473,39 @@ pub mod battery {
     /// both, or neither.
     pub const WMI_HEALTH_MODE: &str = "bus/wmi/drivers/acer-wmi-battery/health_mode";
     pub const WMI_CALIBRATION_MODE: &str = "bus/wmi/drivers/acer-wmi-battery/calibration_mode";
-    /// Charge cap of the out-of-tree `acer-wmi` predator_sense interface.
+    /// The same 80% health mode as [`WMI_HEALTH_MODE`], exposed by the
+    /// out-of-tree Linuwu-Sense driver under its own name.
+    ///
+    /// Not a second mechanism, despite the name: `predator_battery_limit_store`
+    /// there calls `battery_health_set(HEALTH_MODE, value)`, which is
+    /// `wmi_evaluate_method(WMID_GUID5, 0, 21, ...)` - byte for byte the call
+    /// `acer-wmi-battery` makes for `health_mode`. Whichever driver is loaded,
+    /// the firmware sees one command, so this is a backend of the health mode
+    /// and not of the adjustable charge threshold.
     pub const PREDATOR_SENSE_LIMITER: &str =
         "bus/platform/drivers/acer-wmi/acer-wmi/predator_sense/battery_limiter";
+
+    /// Backends for the 80% health mode, in the order they are preferred.
+    ///
+    /// Both drive the same WMI call; a machine may have either driver loaded,
+    /// and in principle both.
+    pub const HEALTH_MODE_BACKENDS: [&str; 2] = [WMI_HEALTH_MODE, PREDATOR_SENSE_LIMITER];
+
+    /// The health-mode control this machine actually exposes, if any.
+    ///
+    /// Existence is not enough for `acer-wmi-battery`: it creates the attribute
+    /// whether or not the firmware implements the function, and says so by
+    /// reporting -1. See [`function_supported`].
+    pub fn health_mode_control(sysfs: &Path) -> Option<PathBuf> {
+        HEALTH_MODE_BACKENDS
+            .iter()
+            .map(|relative| sysfs.join(relative))
+            .find(|path| {
+                std::fs::read_to_string(path)
+                    .map(|value| function_supported(&value))
+                    .unwrap_or(false)
+            })
+    }
 
     const TYPE_ATTRIBUTE: &str = "type";
     const BATTERY_TYPE: &str = "Battery";
@@ -1085,6 +1115,51 @@ mod tests {
                     .join("BAT0")
                     .join(super::battery::CHARGE_LIMIT_ATTRIBUTE)
             )
+        );
+    }
+
+    /// Linuwu-Sense's `battery_limiter` and acer-wmi-battery's `health_mode`
+    /// are the same firmware call, so either satisfies the health mode - and
+    /// neither satisfies the adjustable charge threshold, which is a genuinely
+    /// different mechanism.
+    #[test]
+    fn either_driver_can_provide_the_health_mode() {
+        let sysfs = tempfile::tempdir().unwrap();
+        assert_eq!(super::battery::health_mode_control(sysfs.path()), None);
+
+        let linuwu = sysfs.path().join(super::battery::PREDATOR_SENSE_LIMITER);
+        std::fs::create_dir_all(linuwu.parent().unwrap()).unwrap();
+        std::fs::write(&linuwu, "0\n").unwrap();
+        assert_eq!(
+            super::battery::health_mode_control(sysfs.path()),
+            Some(linuwu.clone())
+        );
+
+        // With both present the in-tree driver wins, but either alone works.
+        let wmi = sysfs.path().join(super::battery::WMI_HEALTH_MODE);
+        std::fs::create_dir_all(wmi.parent().unwrap()).unwrap();
+        std::fs::write(&wmi, "1\n").unwrap();
+        assert_eq!(super::battery::health_mode_control(sysfs.path()), Some(wmi));
+    }
+
+    /// acer-wmi-battery creates the attribute even where the firmware has no
+    /// such function, and reports -1 there. That is not a usable control, and
+    /// must not mask a driver that does have one.
+    #[test]
+    fn an_unsupported_health_mode_is_not_a_backend() {
+        let sysfs = tempfile::tempdir().unwrap();
+        let wmi = sysfs.path().join(super::battery::WMI_HEALTH_MODE);
+        std::fs::create_dir_all(wmi.parent().unwrap()).unwrap();
+        std::fs::write(&wmi, "-1\n").unwrap();
+        assert_eq!(super::battery::health_mode_control(sysfs.path()), None);
+
+        let linuwu = sysfs.path().join(super::battery::PREDATOR_SENSE_LIMITER);
+        std::fs::create_dir_all(linuwu.parent().unwrap()).unwrap();
+        std::fs::write(&linuwu, "1\n").unwrap();
+        assert_eq!(
+            super::battery::health_mode_control(sysfs.path()),
+            Some(linuwu),
+            "the unsupported in-tree attribute must not hide a working one"
         );
     }
 
