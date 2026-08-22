@@ -141,8 +141,15 @@ pub(crate) mod hardware {
     pub const HID_MODE_STATIC: u8 = 0x02;
     pub const HID_MODE_BREATH: u8 = 0x04;
     pub const HID_MODE_NEON: u8 = 0x05;
-    pub const HID_STATIC_FLAG: u8 = 0x01;
-    pub const HID_EFFECT_FLAG: u8 = 0x02;
+    pub const PHN16S71_MODE_WAVE: u8 = 0x07;
+    pub const PHN16S71_MODE_ZOOM: u8 = 0x09;
+    pub const PHN16S71_MODE_METEOR: u8 = 0x0a;
+    pub const HID_COVER_LOGO_STATIC_FLAG: u8 = 0x01;
+    pub const HID_COVER_LOGO_EFFECT_FLAG: u8 = 0x02;
+    pub const HID_GENERIC_KEYBOARD_EFFECT_FLAG: u8 = 0x02;
+    pub const PHN16S71_KEYBOARD_NEUTRAL_DIRECTION: u8 = 0x00;
+    pub const PHN16S71_DIRECTION_LEFT_TO_RIGHT: u8 = 0x01;
+    pub const PHN16S71_DIRECTION_RIGHT_TO_LEFT: u8 = 0x02;
     pub const HID_TARGET_LIST_REPORT_LEN: usize = 11;
     pub const HID_TARGET_CAPABILITIES_REPORT_LEN: usize = 9;
     pub const HID_TARGET_CAPABILITIES_MIN_LEN: usize = 6;
