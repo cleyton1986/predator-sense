@@ -557,7 +557,7 @@ sudo apt install linux-headers-$(uname -r)
 systemctl --user status predator-sense-hotkey.service
 pgrep -af predator-sense-hotkey
 
-# Ensure user is in 'input' group (logout required after adding)
+# Ensure user is in 'input' group (full logout/login or reboot required after adding)
 groups | grep input
 sudo usermod -aG input $USER
 ```
