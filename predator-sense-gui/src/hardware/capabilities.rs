@@ -18,8 +18,8 @@ pub struct Capabilities {
     pub fan_rpm: bool,
     /// Per-fan PWM speed control (hwmon pwmN — kernel >= 6.14 + ACER_CAP_PWM).
     pub fan_pwm: bool,
-    /// Performance profiles via ACPI platform_profile.
-    pub platform_profile: bool,
+    /// Performance profiles via standard ACPI or facer's raw firmware backend.
+    pub performance_profiles: bool,
     /// RGB keyboard backlight (/dev/acer-gkbbl-*).
     pub rgb: bool,
     /// Independently addressable RGB logo on the display lid (ENE target 0x83).
@@ -62,7 +62,8 @@ impl Capabilities {
             model: detect_model(),
             fan_rpm: acer_hwmon_has("fan1_input") || acer_hwmon_has("fan2_input"),
             fan_pwm: crate::hardware::fan::pwm_available(),
-            platform_profile: Path::new("/sys/firmware/acpi/platform_profile").exists(),
+            performance_profiles: Path::new("/sys/firmware/acpi/platform_profile").exists()
+                || crate::hardware::thermal_profile::is_available(),
             rgb: Path::new("/dev/acer-gkbbl-0").exists()
                 || Path::new("/dev/acer-gkbbl-static-0").exists()
                 || crate::hardware::hid_rgb::is_available()

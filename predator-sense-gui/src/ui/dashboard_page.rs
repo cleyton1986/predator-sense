@@ -263,7 +263,10 @@ pub fn build_features_flow() -> gtk::FlowBox {
         (crate::i18n::t("feat_cover_logo"), caps.cover_logo),
         (crate::i18n::t("feat_fan_rpm"), caps.fan_rpm),
         (crate::i18n::t("feat_fan_pwm"), caps.fan_pwm),
-        (crate::i18n::t("feat_profiles"), caps.platform_profile),
+        (
+            crate::i18n::t("feat_profiles"),
+            caps.performance_profiles,
+        ),
         (crate::i18n::t("feat_ec"), caps.ec),
         (crate::i18n::t("feat_gpu"), caps.nvidia_gpu),
         (crate::i18n::t("feat_battery"), caps.battery_charge_cap()),

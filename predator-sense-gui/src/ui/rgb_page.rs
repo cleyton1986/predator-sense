@@ -466,6 +466,42 @@ fn build_keyboard_panel() -> gtk::Box {
         RgbMode::Zoom => 4,
         RgbMode::Breath | RgbMode::Static => 0,
     };
+
+    // PHN16S-71's native Wave mapping is the only ENEK5130 effect whose
+    // direction byte has been verified. Keep the selector hidden for every
+    // other model/effect instead of implying unsupported protocol semantics.
+    let direction_controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let dir_l = gtk::Label::new(Some(crate::i18n::t("direction")));
+    dir_l.add_css_class("rgb-channel-label");
+    let dir_combo = gtk::ComboBoxText::new();
+    dir_combo.append_text(crate::i18n::t("left_to_right"));
+    dir_combo.append_text(crate::i18n::t("right_to_left"));
+    dir_combo.set_active(Some(match saved_dynamic.direction {
+        Direction::LeftToRight => 0,
+        Direction::RightToLeft => 1,
+    }));
+    {
+        let s = state.clone();
+        let da = keyboard_da.clone();
+        dir_combo.connect_changed(move |combo| {
+            let mut st = s.borrow_mut();
+            st.direction = if combo.active() == Some(0) {
+                Direction::LeftToRight
+            } else {
+                Direction::RightToLeft
+            };
+            drop(st);
+            da.queue_draw();
+        });
+    }
+    direction_controls.append(&dir_l);
+    direction_controls.append(&dir_combo);
+    direction_controls.set_visible(
+        !is_static
+            && hid_only
+            && hid_rgb::keyboard_effect_supports_direction(saved_dynamic.mode),
+    );
+
     let mut effect_buttons: Vec<gtk::ToggleButton> = Vec::new();
     for (i, name) in effects.iter().enumerate() {
         let btn = gtk::ToggleButton::with_label(name);
@@ -479,17 +515,21 @@ fn build_keyboard_panel() -> gtk::Box {
         let er = effects_row.clone();
         let note = preview_note.clone();
         let da = keyboard_da.clone();
+        let direction_controls = direction_controls.clone();
         btn.connect_toggled(move |b| {
             if !toggle_activation_is_selected(b, &er) {
                 return;
             }
-            s.borrow_mut().mode = match i {
+            let mode = match i {
                 0 => RgbMode::Breath,
                 1 => RgbMode::Neon,
                 2 => RgbMode::Wave,
                 3 => RgbMode::Shifting,
                 _ => RgbMode::Zoom,
             };
+            s.borrow_mut().mode = mode;
+            direction_controls
+                .set_visible(hid_only && hid_rgb::keyboard_effect_supports_direction(mode));
             let mut c = er.first_child();
             while let Some(w) = c {
                 if let Some(tb) = w.downcast_ref::<gtk::ToggleButton>() {
@@ -508,7 +548,7 @@ fn build_keyboard_panel() -> gtk::Box {
     }
     dyn_controls.append(&effects_row);
 
-    // Speed + direction
+    // Speed and effect-specific controls.
     let sp_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     sp_row.set_halign(gtk::Align::Center);
     let spl = gtk::Label::new(Some(crate::i18n::t("speed")));
@@ -523,6 +563,8 @@ fn build_keyboard_panel() -> gtk::Box {
     }
     sp_row.append(&spl);
     sp_row.append(&sps);
+
+    sp_row.append(&direction_controls);
 
     // Color for dynamic effects
     let cr_l = gtk::Label::new(Some(crate::i18n::t("color")));
@@ -655,19 +697,13 @@ fn build_keyboard_panel() -> gtk::Box {
 
                 hid_result
             } else if hid_only && mode_is_hid_native(st.mode) {
-                // Confirmed native effect on the ENEK5130 controller (issue
-                // #12 follow-up): one feature report write, the EC then loops
-                // the pattern on its own - same "send it once" model as the
-                // WMI dynamic path below, just reached over HID instead.
-                let hid_mode = match st.mode {
-                    RgbMode::Breath => hid_rgb::MODE_BREATH,
-                    RgbMode::Neon => hid_rgb::MODE_NEON,
-                    _ => unreachable!("mode_is_hid_native guards this"),
-                };
+                // Mapping and byte-5 semantics are selected by the HID
+                // backend's model quirk, then checked against A3 before send.
                 hid_rgb::set_effect(
-                    hid_mode,
+                    st.mode,
                     st.brightness,
                     st.speed,
+                    st.direction,
                     st.dyn_color.0,
                     st.dyn_color.1,
                     st.dyn_color.2,
@@ -1437,13 +1473,9 @@ fn toggle_activation_is_selected(button: &gtk::ToggleButton, row: &gtk::Box) -> 
     false
 }
 
-/// Whether `mode` is confirmed reachable as a native single-write effect on
-/// the ENEK5130 HID controller (issue #12 follow-up). Wave/Shifting/Zoom are
-/// deliberately excluded - their effect codes were found to mean different
-/// things on different hardware generations (PHN16S-71 vs ANV16S-41), so they
-/// stay preview-only until confirmed per model.
+/// Whether this model has a verified native single-write mapping for `mode`.
 fn mode_is_hid_native(mode: RgbMode) -> bool {
-    matches!(mode, RgbMode::Breath | RgbMode::Neon)
+    hid_rgb::keyboard_supports_effect(mode)
 }
 
 /// On-screen animation of the selected dynamic effect, shown on the
@@ -1458,7 +1490,6 @@ fn preview_zone_colors(
     direction: Direction,
     color: (u8, u8, u8),
 ) -> [(u8, u8, u8); 4] {
-    use std::f64::consts::FRAC_PI_2;
     use std::f64::consts::FRAC_PI_4;
 
     match mode {
@@ -1491,16 +1522,23 @@ fn preview_zone_colors(
             out
         }
         RgbMode::Shifting => {
-            // Picked color, traveling brightness wave across zones.
-            let sign = if direction == Direction::RightToLeft {
-                1.0
-            } else {
-                -1.0
-            };
+            // On PHN16S-71 the button is wired to native 0x0a, a
+            // snake/meteor-like sweep. Mirror that more closely than the old
+            // generic brightness wave, and reverse it with the direction UI.
+            let forward = direction == Direction::LeftToRight;
+            let pos = ((phase * 0.7).rem_euclid(4.0)) as f64;
             let mut out = [(0u8, 0u8, 0u8); 4];
             for (i, slot) in out.iter_mut().enumerate() {
-                let offset = sign * i as f64 * FRAC_PI_2;
-                let level = 0.15 + 0.85 * (0.5 + 0.5 * (phase + offset).sin());
+                let idx = if forward { i as f64 } else { (3 - i) as f64 };
+                let mut dist = (idx - pos).abs();
+                dist = dist.min(4.0 - dist);
+                let level = if dist < 0.55 {
+                    1.0
+                } else if dist < 1.45 {
+                    0.38
+                } else {
+                    0.08
+                };
                 *slot = scale(color, level);
             }
             out
