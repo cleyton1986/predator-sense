@@ -75,6 +75,7 @@ pub(crate) enum Message {
     KeyHint,
     MenuHint,
     TerminalHint,
+    InputGroupRelog,
     DoneWithErrors,
     Removing,
     ConfirmUninstall,
@@ -162,6 +163,10 @@ pub(crate) const fn text(language: Language, message: Message) -> &'static str {
         Message::TerminalHint => (
             "Terminal: /opt/predator-sense/predator-sense",
             "Terminal: /opt/predator-sense/predator-sense",
+        ),
+        Message::InputGroupRelog => (
+            "Log out completely and log back in, or reboot, before using the PredatorSense key and HID lighting.",
+            "Encerre completamente a sessão e entre novamente, ou reinicie, antes de usar a tecla PredatorSense e a iluminação HID.",
         ),
         Message::DoneWithErrors => ("Completed with errors.", "Concluído com erros."),
         Message::Removing => ("Removing Predator Sense...", "Removendo Predator Sense..."),

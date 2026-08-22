@@ -537,6 +537,10 @@ impl Installer {
         println!("    {CYAN}►{RESET} {}", self.text(Message::KeyHint));
         println!("    {CYAN}►{RESET} {}", self.text(Message::MenuHint));
         println!("    {CYAN}►{RESET} {}", self.text(Message::TerminalHint));
+        println!(
+            "\n  {YELLOW}{}{RESET}",
+            self.text(Message::InputGroupRelog)
+        );
         if interactive {
             self.press_enter();
         }

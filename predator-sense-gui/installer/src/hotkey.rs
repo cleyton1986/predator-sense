@@ -130,6 +130,8 @@ struct SavedLightingConfig {
     #[serde(default = "default_brightness_u8")]
     brightness: u8,
     #[serde(default)]
+    direction: SavedDirection,
+    #[serde(default)]
     red: u8,
     #[serde(default = "default_green_blue")]
     green: u8,
@@ -143,6 +145,7 @@ impl Default for SavedLightingConfig {
             mode: SavedRgbMode::Static,
             speed: default_effect_speed(),
             brightness: default_brightness_u8(),
+            direction: SavedDirection::default(),
             red: 0,
             green: default_green_blue(),
             blue: default_green_blue(),
@@ -156,8 +159,49 @@ enum SavedRgbMode {
     Static,
     Breath,
     Neon,
+    Wave,
+    Shifting,
+    Zoom,
     #[serde(other)]
     Unsupported,
+}
+
+#[derive(Debug, Default, Deserialize, Clone, Copy, PartialEq, Eq)]
+enum SavedDirection {
+    LeftToRight,
+    #[default]
+    RightToLeft,
+    #[serde(other)]
+    Unsupported,
+}
+
+impl SavedDirection {
+    fn wire_value(self) -> u8 {
+        match self {
+            Self::LeftToRight => hardware::PHN16S71_DIRECTION_LEFT_TO_RIGHT,
+            Self::RightToLeft => hardware::PHN16S71_DIRECTION_RIGHT_TO_LEFT,
+            Self::Unsupported => 0,
+        }
+    }
+}
+
+const VERIFIED_PHN16S71_MODEL: &str = "PHN16S-71";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyboardProtocol {
+    Generic,
+    Phn16s71,
+}
+
+fn keyboard_protocol_for_product(product_name: &str) -> KeyboardProtocol {
+    if product_name
+        .split_whitespace()
+        .any(|part| part.eq_ignore_ascii_case(VERIFIED_PHN16S71_MODEL))
+    {
+        KeyboardProtocol::Phn16s71
+    } else {
+        KeyboardProtocol::Generic
+    }
 }
 
 fn default_brightness() -> i64 {
@@ -1114,11 +1158,17 @@ fn keyboard_packets(config: &Config) -> Vec<[u8; hardware::HID_FEATURE_REPORT_LE
 fn keyboard_dynamic_packet(
     saved: &SavedLightingConfig,
     capabilities: TargetCapabilities,
+    protocol: KeyboardProtocol,
 ) -> Option<[u8; hardware::HID_FEATURE_REPORT_LEN]> {
-    let mode = match saved.mode {
-        SavedRgbMode::Breath => hardware::HID_MODE_BREATH,
-        SavedRgbMode::Neon => hardware::HID_MODE_NEON,
-        SavedRgbMode::Static | SavedRgbMode::Unsupported => return None,
+    let mode = match (protocol, saved.mode) {
+        (_, SavedRgbMode::Breath) => hardware::HID_MODE_BREATH,
+        (_, SavedRgbMode::Neon) => hardware::HID_MODE_NEON,
+        (KeyboardProtocol::Phn16s71, SavedRgbMode::Wave) => hardware::PHN16S71_MODE_WAVE,
+        (KeyboardProtocol::Phn16s71, SavedRgbMode::Shifting) => {
+            hardware::PHN16S71_MODE_METEOR
+        }
+        (KeyboardProtocol::Phn16s71, SavedRgbMode::Zoom) => hardware::PHN16S71_MODE_ZOOM,
+        _ => return None,
     };
     if !capabilities.supports(mode) {
         return None;
@@ -1129,7 +1179,15 @@ fn keyboard_dynamic_packet(
             mode,
             brightness: saved.brightness.min(hardware::RGB_MAX_BRIGHTNESS as u8),
             speed: saved.speed.min(hardware::RGB_MAX_SPEED),
-            flag: hardware::HID_EFFECT_FLAG,
+            flag: match protocol {
+                KeyboardProtocol::Generic => hardware::HID_GENERIC_KEYBOARD_EFFECT_FLAG,
+                KeyboardProtocol::Phn16s71 if saved.mode == SavedRgbMode::Wave => {
+                    saved.direction.wire_value()
+                }
+                KeyboardProtocol::Phn16s71 => {
+                    hardware::PHN16S71_KEYBOARD_NEUTRAL_DIRECTION
+                }
+            },
             red: saved.red,
             green: saved.green,
             blue: saved.blue,
@@ -1148,7 +1206,10 @@ fn cover_logo_packet(
             SavedRgbMode::Static => hardware::HID_MODE_STATIC,
             SavedRgbMode::Breath => hardware::HID_MODE_BREATH,
             SavedRgbMode::Neon => hardware::HID_MODE_NEON,
-            SavedRgbMode::Unsupported => return None,
+            SavedRgbMode::Wave
+            | SavedRgbMode::Shifting
+            | SavedRgbMode::Zoom
+            | SavedRgbMode::Unsupported => return None,
         };
         if !capabilities.supports(mode) {
             return None;
@@ -1159,9 +1220,9 @@ fn cover_logo_packet(
             saved.config.speed.min(hardware::RGB_MAX_SPEED)
         };
         let flag = if mode == hardware::HID_MODE_STATIC {
-            hardware::HID_STATIC_FLAG
+            hardware::HID_COVER_LOGO_STATIC_FLAG
         } else {
-            hardware::HID_EFFECT_FLAG
+            hardware::HID_COVER_LOGO_EFFECT_FLAG
         };
         (
             mode,
@@ -1181,7 +1242,7 @@ fn cover_logo_packet(
             hardware::HID_MODE_STATIC,
             0,
             0,
-            hardware::HID_STATIC_FLAG,
+            hardware::HID_COVER_LOGO_STATIC_FLAG,
             (0, 0, 0),
         )
     };
@@ -1225,6 +1286,9 @@ fn reapply_lighting(config_path: &Path) -> AppResult<bool> {
         .write(true)
         .open(&device)
         .map_err(|error| format!("não foi possível abrir {}: {error}", device.display()))?;
+    let keyboard_protocol = fs::read_to_string(path::PRODUCT_NAME)
+        .map(|name| keyboard_protocol_for_product(name.trim()))
+        .unwrap_or(KeyboardProtocol::Generic);
     let (targets, discovery_failed) = match read_targets(&file) {
         Ok(targets) if !targets.is_empty() => (targets, false),
         Ok(_) | Err(_) => (vec![hardware::HID_TARGET_KEYBOARD], true),
@@ -1237,7 +1301,9 @@ fn reapply_lighting(config_path: &Path) -> AppResult<bool> {
             }
         } else if let Some(saved) = &config.rgb_dynamic_last {
             let capabilities = target_capabilities(&file, hardware::HID_TARGET_KEYBOARD)?;
-            if let Some(mut packet) = keyboard_dynamic_packet(saved, capabilities) {
+            if let Some(mut packet) =
+                keyboard_dynamic_packet(saved, capabilities, keyboard_protocol)
+            {
                 set_feature(&file, &mut packet)?;
             }
         }
@@ -1547,6 +1613,7 @@ mod tests {
                 mode: SavedRgbMode::Breath,
                 speed: 42,
                 brightness: 200,
+                direction: SavedDirection::RightToLeft,
                 red: 12,
                 green: 34,
                 blue: 56,
@@ -1560,7 +1627,7 @@ mod tests {
                 hardware::HID_MODE_BREATH,
                 100,
                 hardware::RGB_MAX_SPEED,
-                hardware::HID_EFFECT_FLAG,
+                hardware::HID_COVER_LOGO_EFFECT_FLAG,
                 12,
                 34,
                 56,
@@ -1578,7 +1645,7 @@ mod tests {
                 hardware::HID_MODE_STATIC,
                 0,
                 0,
-                hardware::HID_STATIC_FLAG,
+                hardware::HID_COVER_LOGO_STATIC_FLAG,
                 0,
                 0,
                 0,
@@ -1598,19 +1665,21 @@ mod tests {
             mode: SavedRgbMode::Breath,
             speed: 6,
             brightness: 80,
+            direction: SavedDirection::RightToLeft,
             red: 10,
             green: 20,
             blue: 30,
         };
         assert_eq!(
-            keyboard_dynamic_packet(&breath, capabilities).unwrap(),
+            keyboard_dynamic_packet(&breath, capabilities, KeyboardProtocol::Generic)
+                .unwrap(),
             [
                 hardware::HID_REPORT_LIGHTING,
                 hardware::HID_TARGET_KEYBOARD,
                 hardware::HID_MODE_BREATH,
                 80,
                 6,
-                hardware::HID_EFFECT_FLAG,
+                2,
                 10,
                 20,
                 30,
@@ -1619,24 +1688,74 @@ mod tests {
             ]
         );
 
-        // Static and any mode this daemon doesn't recognize as HID-native
-        // (Wave/Shifting/Zoom - preview-only on this hardware, issue #12)
-        // must not produce a packet: nothing real to restore, and forcing
-        // one would guess at a wire mode we never confirmed.
+        // Static and unknown modes must not produce a dynamic packet.
         let static_mode = SavedLightingConfig {
             mode: SavedRgbMode::Static,
             speed: breath.speed,
             brightness: breath.brightness,
+            direction: breath.direction,
             red: breath.red,
             green: breath.green,
             blue: breath.blue,
         };
-        assert!(keyboard_dynamic_packet(&static_mode, capabilities).is_none());
+        assert!(
+            keyboard_dynamic_packet(&static_mode, capabilities, KeyboardProtocol::Generic)
+                .is_none()
+        );
         let unsupported = SavedLightingConfig {
             mode: SavedRgbMode::Unsupported,
             ..static_mode
         };
-        assert!(keyboard_dynamic_packet(&unsupported, capabilities).is_none());
+        assert!(
+            keyboard_dynamic_packet(&unsupported, capabilities, KeyboardProtocol::Generic)
+                .is_none()
+        );
+
+        let wave = SavedLightingConfig {
+            mode: SavedRgbMode::Wave,
+            direction: SavedDirection::LeftToRight,
+            ..breath
+        };
+        assert!(
+            keyboard_dynamic_packet(&wave, capabilities, KeyboardProtocol::Generic).is_none()
+        );
+        let packet = keyboard_dynamic_packet(
+            &wave,
+            TargetCapabilities {
+                zone_mask: 0x0f,
+                mode_mask: u32::MAX,
+            },
+            KeyboardProtocol::Phn16s71,
+        )
+        .unwrap();
+        assert_eq!(packet[2], hardware::PHN16S71_MODE_WAVE);
+        assert_eq!(packet[5], hardware::PHN16S71_DIRECTION_LEFT_TO_RIGHT);
+        let packet = keyboard_dynamic_packet(
+            &breath,
+            TargetCapabilities {
+                zone_mask: 0x0f,
+                mode_mask: u32::MAX,
+            },
+            KeyboardProtocol::Phn16s71,
+        )
+        .unwrap();
+        assert_eq!(packet[5], hardware::PHN16S71_KEYBOARD_NEUTRAL_DIRECTION);
+    }
+
+    #[test]
+    fn phn16s71_quirk_is_exactly_model_gated() {
+        assert_eq!(
+            keyboard_protocol_for_product("Predator PHN16S-71"),
+            KeyboardProtocol::Phn16s71
+        );
+        assert_eq!(
+            keyboard_protocol_for_product("Predator PHN16-73"),
+            KeyboardProtocol::Generic
+        );
+        assert_eq!(
+            keyboard_protocol_for_product("Predator PHN16S-71X"),
+            KeyboardProtocol::Generic
+        );
     }
 
     #[test]

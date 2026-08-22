@@ -1,4 +1,4 @@
-use crate::hardware::rgb::{RgbConfig, RgbMode};
+use crate::hardware::rgb::{Direction, RgbConfig, RgbMode};
 use crate::i18n::{t, tf};
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -22,23 +22,106 @@ const TARGET_KEYBOARD: u8 = 0x21;
 const TARGET_COVER_LOGO: u8 = 0x83;
 
 const MODE_STATIC: u8 = 0x02;
-pub const MODE_BREATH: u8 = 0x04;
-pub const MODE_NEON: u8 = 0x05;
+const MODE_BREATH: u8 = 0x04;
+const MODE_NEON: u8 = 0x05;
+const PHN16S71_MODE_WAVE: u8 = 0x07;
+const PHN16S71_MODE_ZOOM: u8 = 0x09;
+const PHN16S71_MODE_METEOR: u8 = 0x0a;
 
 const REPORT_LIGHTING_LEN: usize = 11;
 const REPORT_TARGET_LIST_MAX_LEN: usize = 11;
 const REPORT_TARGET_CAPS_LEN: usize = 9;
 const REPORT_TARGET_CAPS_MIN_LEN: usize = 6;
-// A4 byte 5 is 0x01 for static cover-logo writes and 0x02 for its effects.
-// The older, already-deployed keyboard static path intentionally retains its
-// confirmed 0x00 value; only its effect writes are normalized to 0x02.
-const STATIC_FLAG: u8 = 0x01;
-const EFFECT_FLAG: u8 = 0x02;
+// Byte 5 is target-specific: the cover logo uses a static/effect flag, while
+// the PHN16S-71 keyboard uses it as the native-effect direction field. Keep
+// these values separate so a keyboard quirk cannot alter logo behaviour.
+const COVER_LOGO_STATIC_FLAG: u8 = 0x01;
+const COVER_LOGO_EFFECT_FLAG: u8 = 0x02;
+const GENERIC_KEYBOARD_EFFECT_FLAG: u8 = 0x02;
+const PHN16S71_KEYBOARD_NEUTRAL_DIRECTION: u8 = 0x00;
+const PHN16S71_DIRECTION_LEFT_TO_RIGHT: u8 = 0x01;
+const PHN16S71_DIRECTION_RIGHT_TO_LEFT: u8 = 0x02;
+
+const DMI_PRODUCT_NAME: &str = "/sys/class/dmi/id/product_name";
+const VERIFIED_PHN16S71_MODEL: &str = "PHN16S-71";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyboardProtocol {
+    /// Mapping retained from the existing ENEK5130 implementation.
+    Generic,
+    /// Mapping verified against kbrgb on Predator PHN16S-71 / BIOS V1.26.
+    Phn16s71,
+}
+
+fn is_phn16s71(product_name: &str) -> bool {
+    product_name
+        .split_whitespace()
+        .any(|part| part.eq_ignore_ascii_case(VERIFIED_PHN16S71_MODEL))
+}
+
+fn keyboard_protocol_for_product(product_name: &str) -> KeyboardProtocol {
+    if is_phn16s71(product_name) {
+        KeyboardProtocol::Phn16s71
+    } else {
+        KeyboardProtocol::Generic
+    }
+}
+
+fn keyboard_protocol() -> KeyboardProtocol {
+    fs::read_to_string(DMI_PRODUCT_NAME)
+        .map(|name| keyboard_protocol_for_product(name.trim()))
+        .unwrap_or(KeyboardProtocol::Generic)
+}
+
+fn generic_wire_mode(mode: RgbMode) -> Option<u8> {
+    match mode {
+        RgbMode::Static => Some(MODE_STATIC),
+        RgbMode::Breath => Some(MODE_BREATH),
+        RgbMode::Neon => Some(MODE_NEON),
+        RgbMode::Wave | RgbMode::Shifting | RgbMode::Zoom => None,
+    }
+}
+
+fn keyboard_wire_mode(protocol: KeyboardProtocol, mode: RgbMode) -> Option<u8> {
+    match (protocol, mode) {
+        (_, RgbMode::Static) => None,
+        (_, RgbMode::Breath) => Some(MODE_BREATH),
+        (_, RgbMode::Neon) => Some(MODE_NEON),
+        (KeyboardProtocol::Phn16s71, RgbMode::Wave) => Some(PHN16S71_MODE_WAVE),
+        (KeyboardProtocol::Phn16s71, RgbMode::Shifting) => Some(PHN16S71_MODE_METEOR),
+        (KeyboardProtocol::Phn16s71, RgbMode::Zoom) => Some(PHN16S71_MODE_ZOOM),
+        (KeyboardProtocol::Generic, _) => None,
+    }
+}
+
+/// Whether the current model has a verified native mapping for this effect.
+pub fn keyboard_supports_effect(mode: RgbMode) -> bool {
+    keyboard_wire_mode(keyboard_protocol(), mode).is_some()
+}
+
+/// Direction is verified only for Wave on the PHN16S-71 mapping.
+pub fn keyboard_effect_supports_direction(mode: RgbMode) -> bool {
+    keyboard_protocol() == KeyboardProtocol::Phn16s71 && mode == RgbMode::Wave
+}
+
+fn keyboard_effect_byte(
+    protocol: KeyboardProtocol,
+    mode: RgbMode,
+    direction: Direction,
+) -> u8 {
+    match protocol {
+        KeyboardProtocol::Generic => GENERIC_KEYBOARD_EFFECT_FLAG,
+        KeyboardProtocol::Phn16s71 if mode == RgbMode::Wave => match direction {
+            Direction::LeftToRight => PHN16S71_DIRECTION_LEFT_TO_RIGHT,
+            Direction::RightToLeft => PHN16S71_DIRECTION_RIGHT_TO_LEFT,
+        },
+        KeyboardProtocol::Phn16s71 => PHN16S71_KEYBOARD_NEUTRAL_DIRECTION,
+    }
+}
 
 /// Low-byte masks for the keyboard's four zones. A4 stores the complete
 /// 16-bit zone mask at offsets 9-10.
 pub const ZONE_MASKS: [u8; 4] = [0x01, 0x02, 0x04, 0x08];
-const KEYBOARD_ALL_ZONES: u16 = 0x000f;
 
 /// Capability report returned by the controller after selecting one of the
 /// targets listed by report A1. The zone count and 32-bit mode bitmap drive
@@ -63,13 +146,7 @@ impl TargetCapabilities {
     }
 
     pub fn supports_rgb_mode(self, mode: RgbMode) -> bool {
-        let wire_mode = match mode {
-            RgbMode::Static => MODE_STATIC,
-            RgbMode::Breath => MODE_BREATH,
-            RgbMode::Neon => MODE_NEON,
-            _ => return false,
-        };
-        self.supports_wire_mode(wire_mode)
+        generic_wire_mode(mode).is_some_and(|wire_mode| self.supports_wire_mode(wire_mode))
     }
 }
 
@@ -367,28 +444,35 @@ pub fn set_zone_color(
     write_lighting_packet(&file, &path, packet)
 }
 
-/// Apply one of the native hardware-driven keyboard effects confirmed across
-/// ENEK5130 generations. One feature write starts the controller-side loop.
+/// Apply a native hardware-driven keyboard effect whose wire mapping is known
+/// for this model. The A3 bitmap is checked before the A4 report is sent.
 pub fn set_effect(
-    mode: u8,
+    mode: RgbMode,
     brightness_pct: u8,
     speed: u8,
+    direction: Direction,
     red: u8,
     green: u8,
     blue: u8,
 ) -> Result<(), String> {
-    if !matches!(mode, MODE_BREATH | MODE_NEON) {
+    let protocol = keyboard_protocol();
+    let wire_mode = keyboard_wire_mode(protocol, mode)
+        .ok_or_else(|| t("hid_rgb_err_unsupported_mode").to_string())?;
+    let (file, path) = open_controller()?;
+    let caps = query_target_capabilities(&file, TARGET_KEYBOARD)?
+        .ok_or_else(|| t("hid_rgb_err_unsupported_mode").to_string())?;
+    if !caps.supports_wire_mode(wire_mode) {
         return Err(t("hid_rgb_err_unsupported_mode").to_string());
     }
-    let (file, path) = open_controller()?;
+    let effect_byte = keyboard_effect_byte(protocol, mode, direction);
     let packet = LightingCommand {
         target: TARGET_KEYBOARD,
-        mode,
+        mode: wire_mode,
         brightness: brightness_pct,
         speed: speed.min(9),
-        flag: EFFECT_FLAG,
+        flag: effect_byte,
         color: (red, green, blue),
-        zones: KEYBOARD_ALL_ZONES,
+        zones: caps.all_zones_mask(),
     }
     .encode();
     write_lighting_packet(&file, &path, packet)
@@ -415,7 +499,7 @@ fn cover_logo_packet(
         return Err(t("cover_logo_mode_unsupported").to_string());
     }
     let (mode, brightness, speed, flag, red, green, blue) = if !enabled {
-        (MODE_STATIC, 0, 0, STATIC_FLAG, 0, 0, 0)
+        (MODE_STATIC, 0, 0, COVER_LOGO_STATIC_FLAG, 0, 0, 0)
     } else {
         let mode = match config.mode {
             RgbMode::Static => MODE_STATIC,
@@ -432,9 +516,9 @@ fn cover_logo_packet(
             config.speed.min(9)
         };
         let flag = if config.mode == RgbMode::Static {
-            STATIC_FLAG
+            COVER_LOGO_STATIC_FLAG
         } else {
-            EFFECT_FLAG
+            COVER_LOGO_EFFECT_FLAG
         };
         (
             mode,
@@ -462,6 +546,34 @@ fn cover_logo_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phn16s71_effect_mapping_is_model_gated() {
+        let verified = keyboard_protocol_for_product("Predator PHN16S-71");
+        let other = keyboard_protocol_for_product("Predator PHN16-73");
+        assert_eq!(verified, KeyboardProtocol::Phn16s71);
+        assert_eq!(other, KeyboardProtocol::Generic);
+        assert_eq!(keyboard_wire_mode(verified, RgbMode::Wave), Some(0x07));
+        assert_eq!(keyboard_wire_mode(verified, RgbMode::Shifting), Some(0x0a));
+        assert_eq!(keyboard_wire_mode(verified, RgbMode::Zoom), Some(0x09));
+        assert_eq!(keyboard_wire_mode(other, RgbMode::Wave), None);
+        assert_eq!(
+            keyboard_effect_byte(verified, RgbMode::Breath, Direction::RightToLeft),
+            0
+        );
+        assert_eq!(
+            keyboard_effect_byte(verified, RgbMode::Wave, Direction::RightToLeft),
+            2
+        );
+        assert_eq!(
+            keyboard_effect_byte(other, RgbMode::Breath, Direction::RightToLeft),
+            2
+        );
+        assert_eq!(
+            keyboard_protocol_for_product("Predator PHN16S-71X"),
+            KeyboardProtocol::Generic
+        );
+    }
 
     #[test]
     fn parses_runtime_target_list() {
@@ -568,7 +680,19 @@ mod tests {
         };
         assert_eq!(
             cover_logo_packet(caps, false, &config).unwrap(),
-            [0xa4, 0x83, MODE_STATIC, 0, 0, STATIC_FLAG, 0, 0, 0, 0x01, 0]
+            [
+                0xa4,
+                0x83,
+                MODE_STATIC,
+                0,
+                0,
+                COVER_LOGO_STATIC_FLAG,
+                0,
+                0,
+                0,
+                0x01,
+                0,
+            ]
         );
         assert!(cover_logo_packet(caps, true, &config).is_err());
     }
