@@ -1,6 +1,6 @@
 [package]
 name = "predator-sense-installer"
-version = "0.2.73-preview"
+version = "0.2.73"
 edition = "2021"
 rust-version = "1.80"
 description = "Rust installer and system services for Predator Sense"
