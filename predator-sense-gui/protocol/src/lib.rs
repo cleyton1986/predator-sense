@@ -230,10 +230,20 @@ pub mod helper {
         /// index on every power cycle - on a PHN16-73 to one it then refuses to
         /// be set back to - so without this the profile is lost every reboot.
         BootReapplyThermal,
+        /// What this CPU allows as a temperature ceiling: Tjmax, the ceiling in
+        /// effect, and whether the offset may be written at all. Read-only, and
+        /// privileged because it comes from an MSR.
+        TempLimitCaps,
+        /// CPU temperature ceiling, in Celsius, plus the bound it may use.
+        /// Written as a TCC activation offset from Tjmax.
+        TempLimit,
+        /// Reapply the recorded ceiling at boot. The offset is not preserved
+        /// across a power cycle, so without this the ceiling is lost every time.
+        BootReapplyTempLimit,
     }
 
     impl Action {
-        pub const ALL: [Self; 38] = [
+        pub const ALL: [Self; 41] = [
             Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
@@ -272,6 +282,9 @@ pub mod helper {
             Self::ChiconyRgb,
             Self::ThermalProfile,
             Self::BootReapplyThermal,
+            Self::TempLimitCaps,
+            Self::TempLimit,
+            Self::BootReapplyTempLimit,
         ];
 
         pub fn parse(value: &str) -> Option<Self> {
@@ -314,6 +327,9 @@ pub mod helper {
                 "chicony-rgb" => Some(Self::ChiconyRgb),
                 "thermal-profile" => Some(Self::ThermalProfile),
                 "boot-reapply-thermal" => Some(Self::BootReapplyThermal),
+                "temp-limit-caps" => Some(Self::TempLimitCaps),
+                "temp-limit" => Some(Self::TempLimit),
+                "boot-reapply-temp-limit" => Some(Self::BootReapplyTempLimit),
                 _ => None,
             }
         }
@@ -358,6 +374,9 @@ pub mod helper {
                 Self::ChiconyRgb => "chicony-rgb",
                 Self::ThermalProfile => "thermal-profile",
                 Self::BootReapplyThermal => "boot-reapply-thermal",
+                Self::TempLimitCaps => "temp-limit-caps",
+                Self::TempLimit => "temp-limit",
+                Self::BootReapplyTempLimit => "boot-reapply-temp-limit",
             }
         }
 
@@ -401,6 +420,9 @@ pub mod helper {
                 Self::ChiconyRgb => 4,
                 Self::ThermalProfile => 1,
                 Self::BootReapplyThermal => 1,
+                Self::TempLimitCaps => 0,
+                Self::TempLimit => 2,
+                Self::BootReapplyTempLimit => 1,
             }
         }
 
@@ -446,6 +468,9 @@ pub mod helper {
                 Self::ChiconyRgb => "chicony-rgb EFFECT BRIGHTNESS COLOR SPEED",
                 Self::ThermalProfile => "thermal-profile INDEX",
                 Self::BootReapplyThermal => "boot-reapply-thermal USER_HOME",
+                Self::TempLimitCaps => "temp-limit-caps",
+                Self::TempLimit => "temp-limit CELSIUS BOUND",
+                Self::BootReapplyTempLimit => "boot-reapply-temp-limit USER_HOME",
             }
         }
     }
@@ -930,6 +955,282 @@ pub mod thermal_profile {
     /// Reads back what [`remember`] stored, if anything.
     pub fn remembered(path: &Path) -> Option<u8> {
         std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    }
+}
+
+/// CPU temperature ceiling, via the kernel's TCC offset cooling device.
+///
+/// Intel CPUs throttle at `Tjmax - TCC offset`. Both values are reachable from
+/// sysfs without touching an MSR: `intel_tcc_cooling` publishes the offset as a
+/// thermal cooling device, and `coretemp` publishes `Tjmax` as the critical
+/// temperature.
+///
+/// Going through the kernel rather than writing `MSR_TEMPERATURE_TARGET`
+/// directly is deliberate. The offset field is *not* a fixed width - Linux's
+/// `intel_tcc` uses per-model masks of 0, 4, 6 and 7 bits - and the register
+/// also carries a lock bit that silently discards writes. Reproducing that
+/// table here would mean re-deriving it for every new CPU and getting it wrong
+/// in the meantime; `max_state` already reflects whatever the running kernel
+/// knows about this part. It also keeps one owner for the register, instead of
+/// racing the very driver that manages it.
+pub mod temp_limit {
+    use std::path::{Path, PathBuf};
+
+    /// Thermal class root, relative to a sysfs root so tests can point at a
+    /// fixture tree.
+    pub const THERMAL_CLASS: &str = "class/thermal";
+
+    /// `type` of the cooling device published by `intel_tcc_cooling`.
+    pub const COOLING_DEVICE_TYPE: &str = "TCC Offset";
+
+    /// hwmon class root, where `coretemp` reports `Tjmax`.
+    pub const HWMON_CLASS: &str = "class/hwmon";
+
+    /// hwmon device whose critical temperature is `Tjmax`.
+    pub const CORETEMP_NAME: &str = "coretemp";
+
+    /// Module that publishes the cooling device. Not loaded by default on most
+    /// distributions, so the installer probes it and the helper loads it on
+    /// demand.
+    pub const KERNEL_MODULE: &str = "intel_tcc_cooling";
+
+    /// Where the offset this boot started with is recorded.
+    ///
+    /// Under `/run` on purpose: it is cleared on every boot, so whatever is
+    /// found there always describes the current one. The first privileged
+    /// operation of a boot writes it, before anything here has had a chance to
+    /// change the register.
+    ///
+    /// It exists because the factory ceiling is not always `Tjmax`. Firmware
+    /// can boot with a nonzero, unlocked offset - this was written on a machine
+    /// that boots at offset 5, so 100 C rather than 105 C. Treating `Tjmax` as
+    /// the top would let a control advertised as *lowering* the ceiling quietly
+    /// raise it above what the vendor configured.
+    pub const FACTORY_OFFSET_FILE: &str = "/run/predator-sense/tcc-factory-offset";
+
+    /// Lowest ceiling the UI and the helper will accept, in Celsius.
+    ///
+    /// The hardware floor is far lower - a part reporting a seven-bit offset
+    /// with Tjmax 105 can express a 0 C ceiling - and a value down there is not
+    /// a cooler machine, it is a permanently throttled one. Since the ceiling
+    /// is restored at every boot, a mistake there is one the user keeps.
+    ///
+    /// 70 C is a judgement call, not a hardware property: low enough to be
+    /// useful on a laptop that otherwise runs into the 90s, high enough that
+    /// the CPU can still reach it under real work. Machines whose Tjmax is at
+    /// or below this keep their own ceiling instead, so the floor can never
+    /// invert the range.
+    ///
+    /// It is a default, not a hard limit: callers can opt out per call with
+    /// [`Bound::Hardware`]. The point is that going lower has to be asked for,
+    /// so it cannot happen by dragging a slider or by a stale record.
+    pub const SAFETY_FLOOR_C: u8 = 70;
+
+    /// How far down a caller is allowed to go.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub enum Bound {
+        /// Stop at [`SAFETY_FLOOR_C`]. What the UI uses unless told otherwise.
+        #[default]
+        Safe,
+        /// Go as low as the silicon allows. Only ever from an explicit opt-in.
+        Hardware,
+    }
+
+    impl Bound {
+        /// Wire form, so the helper and the GUI agree on one spelling.
+        pub fn as_str(self) -> &'static str {
+            match self {
+                Self::Safe => "safe",
+                Self::Hardware => "hardware",
+            }
+        }
+
+        pub fn parse(value: &str) -> Option<Self> {
+            match value {
+                "safe" => Some(Self::Safe),
+                "hardware" => Some(Self::Hardware),
+                _ => None,
+            }
+        }
+    }
+
+    /// Last ceiling the user asked for, relative to the config directory.
+    ///
+    /// A file of its own, for the same reason as the thermal profile next to
+    /// it: the boot service reads it as root and must not have to parse - or
+    /// rewrite - a config it only partly understands.
+    pub const LAST_LIMIT_FILE: &str = "predator-sense/temp_limit";
+
+    /// Why the ceiling cannot be set, when it cannot.
+    ///
+    /// Kept distinct from "unsupported" so the UI can tell a machine that will
+    /// never offer this from one where something went wrong this time. Caching
+    /// the two as one value is how a cancelled authentication turns into a
+    /// permanent "your CPU does not support this".
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Unavailable {
+        /// No TCC cooling device: not an Intel part, the module is missing, or
+        /// the firmware does not expose the offset. Stable - worth caching.
+        Unsupported,
+        /// The device is there but its range is empty (`max_state` 0), which is
+        /// how a locked offset surfaces. Stable - worth caching.
+        Locked,
+        /// Something failed this time: unreadable sysfs, missing helper, denied
+        /// authorization. Not stable - the caller should be able to retry.
+        Error(String),
+    }
+
+    /// What this CPU allows, all of it read from the kernel.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Capability {
+        /// Thermal junction maximum, in Celsius.
+        pub tjmax_c: u8,
+        /// Largest offset the running kernel accepts for this part. Six bits on
+        /// many models, seven on others, four on some - hence reading it rather
+        /// than assuming.
+        pub max_offset: u8,
+        /// Ceiling in effect right now, in Celsius.
+        pub current_c: u8,
+        /// Offset the firmware booted with. Usually zero, but not always.
+        pub factory_offset: u8,
+    }
+
+    impl Capability {
+        /// Builds a capability from what sysfs reports, plus the offset this
+        /// boot started with.
+        pub fn new(tjmax_c: u8, max_offset: u8, current_offset: u8, factory_offset: u8) -> Self {
+            Self {
+                tjmax_c,
+                max_offset,
+                current_c: tjmax_c.saturating_sub(current_offset.min(max_offset)),
+                factory_offset: factory_offset.min(max_offset),
+            }
+        }
+
+        /// Lowest ceiling allowed under `bound`.
+        ///
+        /// Under [`Bound::Safe`] the deeper of the two limits wins: the
+        /// hardware floor when the part cannot even reach [`SAFETY_FLOOR_C`],
+        /// and the safety floor when it can. Clamped to `Tjmax` so a CPU whose
+        /// maximum is already at or below the floor still reports a valid, if
+        /// single-valued, range rather than an inverted one.
+        pub fn min_c_within(&self, bound: Bound) -> u8 {
+            match bound {
+                Bound::Safe => self.hardware_min_c().max(SAFETY_FLOOR_C).min(self.max_c()),
+                Bound::Hardware => self.hardware_min_c().min(self.max_c()),
+            }
+        }
+
+        /// Lowest ceiling under the default bound.
+        pub fn min_c(&self) -> u8 {
+            self.min_c_within(Bound::Safe)
+        }
+
+        /// Lowest ceiling the silicon can express, ignoring the safety floor.
+        ///
+        /// Exposed so callers can explain the difference between "this part
+        /// cannot go lower" and "we will not go lower by default".
+        pub fn hardware_min_c(&self) -> u8 {
+            self.tjmax_c.saturating_sub(self.max_offset)
+        }
+
+        /// Whether `bound` would actually widen the range on this part.
+        ///
+        /// False when the silicon stops at or above the safety floor: offering
+        /// to unlock something that changes nothing is worse than not offering
+        /// it, so the UI can hide the switch entirely.
+        pub fn can_go_below_floor(&self) -> bool {
+            self.hardware_min_c() < self.min_c_within(Bound::Safe)
+        }
+
+        /// Highest ceiling this control will set: the one the firmware booted
+        /// with.
+        ///
+        /// Not `Tjmax`. This control lowers the factory ceiling; raising it
+        /// above what the vendor configured is a different feature, and one
+        /// nobody asked for by dragging a slider labelled "temperature ceiling".
+        pub fn max_c(&self) -> u8 {
+            self.tjmax_c.saturating_sub(self.factory_offset)
+        }
+
+        /// Whether `celsius` is a ceiling this CPU can be set to under `bound`.
+        ///
+        /// Callers validate instead of clamping: a request for 0 C silently
+        /// becoming the deepest offset the part allows is how a hand-edited
+        /// file or a stale record turns into permanent throttling with no error
+        /// anywhere.
+        pub fn accepts_within(&self, celsius: u8, bound: Bound) -> bool {
+            (self.min_c_within(bound)..=self.max_c()).contains(&celsius)
+        }
+
+        /// Whether `celsius` is allowed under the default bound.
+        pub fn accepts(&self, celsius: u8) -> bool {
+            self.accepts_within(celsius, Bound::Safe)
+        }
+
+        /// The offset that produces `celsius` under `bound`, or `None` if out
+        /// of range.
+        pub fn offset_for_within(&self, celsius: u8, bound: Bound) -> Option<u8> {
+            self.accepts_within(celsius, bound)
+                .then(|| self.tjmax_c.saturating_sub(celsius))
+        }
+
+        /// The offset that produces `celsius` under the default bound.
+        pub fn offset_for(&self, celsius: u8) -> Option<u8> {
+            self.offset_for_within(celsius, Bound::Safe)
+        }
+    }
+
+    /// Recorded ceiling, under the same `$HOME/.config` the boot service reads.
+    pub fn last_limit_path_under(config_home: &Path) -> PathBuf {
+        config_home.join(LAST_LIMIT_FILE)
+    }
+
+    /// `$HOME/.config`, ignoring `XDG_CONFIG_HOME`, because root at boot cannot
+    /// resolve that user's environment.
+    pub fn last_limit_path() -> Option<PathBuf> {
+        Some(
+            PathBuf::from(std::env::var_os("HOME")?)
+                .join(".config")
+                .join(LAST_LIMIT_FILE),
+        )
+    }
+
+    /// Records the ceiling, and the bound it was allowed under, so the boot
+    /// service can restore it on the same terms it was set.
+    ///
+    /// The bound is stored rather than re-derived from the value, because
+    /// deriving it would mean any number in the file below the safety floor
+    /// implicitly authorises itself - which is exactly the opt-in this is meant
+    /// to require.
+    ///
+    /// Written to a temporary file and renamed, so a crash mid-write cannot
+    /// leave a half-written record the boot service would then reject.
+    pub fn remember(path: &Path, celsius: u8, bound: Bound) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let temporary = path.with_extension("tmp");
+        std::fs::write(&temporary, format!("{celsius} {}\n", bound.as_str()))?;
+        std::fs::rename(&temporary, path)
+    }
+
+    /// Reads back what [`remember`] stored, if anything.
+    ///
+    /// A record with no bound field at all is read as [`Bound::Safe`], which
+    /// covers the older one-number format. A bound field that is present but
+    /// unrecognised invalidates the whole record instead of defaulting: the
+    /// helper refuses unknown spellings, and quietly accepting them here would
+    /// be the one path that lets `85 saf` through.
+    pub fn remembered(path: &Path) -> Option<(u8, Bound)> {
+        let contents = std::fs::read_to_string(path).ok()?;
+        let mut fields = contents.split_whitespace();
+        let celsius: u8 = fields.next()?.parse().ok()?;
+        let bound = match fields.next() {
+            None => Bound::Safe,
+            Some(field) => Bound::parse(field)?,
+        };
+        Some((celsius, bound))
     }
 }
 
@@ -1535,5 +1836,195 @@ mod thermal_profile_tests {
         let c = phn16_73();
         let json = serde_json::to_string(&c).unwrap();
         assert_eq!(serde_json::from_str::<Calibration>(&json).unwrap(), c);
+    }
+}
+
+#[cfg(test)]
+mod temp_limit_tests {
+    use super::temp_limit::{Bound, Capability, Unavailable, SAFETY_FLOOR_C};
+
+    /// Offset field widths Linux's `intel_tcc` actually uses, as `max_state`
+    /// would report them. The whole point of reading the kernel's value instead
+    /// of hard-coding one is that this column is not constant across models.
+    const WIDTHS: [(&str, u8); 3] = [("4-bit", 15), ("6-bit", 63), ("7-bit", 127)];
+
+    #[test]
+    fn the_hardware_range_follows_whatever_width_the_kernel_reports() {
+        for (label, max_offset) in WIDTHS {
+            let cap = Capability::new(105, max_offset, 0, 0);
+            assert_eq!(cap.max_c(), 105, "{label}: top is always Tjmax");
+            assert_eq!(
+                cap.hardware_min_c(),
+                105u8.saturating_sub(max_offset),
+                "{label}: silicon floor follows max_state"
+            );
+        }
+    }
+
+    /// The machine this was written on reports a 7-bit field. An implementation
+    /// assuming six would silently offer a shallower range than the hardware
+    /// allows.
+    #[test]
+    fn a_seven_bit_part_reaches_deeper_than_six_bits_would() {
+        assert_eq!(Capability::new(105, 127, 25, 0).hardware_min_c(), 0);
+        assert_eq!(Capability::new(105, 63, 25, 0).hardware_min_c(), 42);
+    }
+
+    #[test]
+    fn the_default_bound_stops_at_the_safety_floor() {
+        let cap = Capability::new(105, 127, 25, 0);
+        assert_eq!(cap.min_c(), SAFETY_FLOOR_C);
+        assert!(!cap.accepts(SAFETY_FLOOR_C - 1));
+        assert!(cap.accepts(SAFETY_FLOOR_C));
+        // the silicon could go to 0, but only if asked
+        assert_eq!(cap.min_c_within(Bound::Hardware), 0);
+        assert!(cap.accepts_within(10, Bound::Hardware));
+        assert_eq!(cap.offset_for_within(10, Bound::Hardware), Some(95));
+    }
+
+    /// A part whose silicon stops above the floor gains nothing from the
+    /// opt-in, so the UI should not offer it.
+    #[test]
+    fn the_opt_in_is_only_offered_when_it_widens_the_range() {
+        assert!(Capability::new(105, 127, 0, 0).can_go_below_floor());
+        // 4-bit part: floor is 90, already above the safety floor
+        let narrow = Capability::new(105, 15, 0, 0);
+        assert_eq!(narrow.min_c(), 90);
+        assert!(!narrow.can_go_below_floor());
+        assert_eq!(narrow.min_c_within(Bound::Hardware), narrow.min_c());
+    }
+
+    /// The floor must never invert the range on a part whose Tjmax is already
+    /// at or below it.
+    #[test]
+    fn a_low_tjmax_keeps_a_valid_range() {
+        let cap = Capability::new(65, 63, 0, 0);
+        assert_eq!(cap.max_c(), 65);
+        assert_eq!(cap.min_c(), 65);
+        assert!(cap.min_c() <= cap.max_c());
+        assert!(cap.accepts(65));
+        assert!(!cap.accepts(64));
+    }
+
+    #[test]
+    fn a_different_tjmax_shifts_the_whole_range() {
+        let cap = Capability::new(100, 63, 10, 0);
+        assert_eq!(cap.tjmax_c, 100);
+        assert_eq!(cap.current_c, 90);
+        assert_eq!(cap.hardware_min_c(), 37);
+        assert_eq!(cap.offset_for(80), Some(20));
+    }
+
+    #[test]
+    fn out_of_range_is_rejected_rather_than_clamped() {
+        let cap = Capability::new(105, 63, 5, 0);
+        // Silently turning this into the deepest offset is exactly how a
+        // hand-edited record becomes permanent throttling with no error.
+        assert_eq!(cap.offset_for(0), None);
+        assert_eq!(cap.offset_for(200), None);
+        assert_eq!(cap.offset_for(105), Some(0));
+        // even the hardware bound refuses what the silicon cannot express
+        assert_eq!(cap.offset_for_within(41, Bound::Hardware), None);
+        assert_eq!(cap.offset_for_within(42, Bound::Hardware), Some(63));
+    }
+
+    /// `max_state` of zero is how a locked offset surfaces: the device exists
+    /// but has no usable range.
+    #[test]
+    fn a_zero_width_field_offers_nothing() {
+        let cap = Capability::new(105, 0, 0, 0);
+        assert_eq!(cap.hardware_min_c(), 105);
+        assert_eq!(cap.min_c(), 105);
+        assert!(cap.accepts(105));
+        assert!(!cap.accepts(104));
+    }
+
+    /// A current offset larger than the field can hold means something else
+    /// wrote the register.
+    #[test]
+    fn a_current_offset_beyond_the_field_is_clamped_when_reading() {
+        assert_eq!(Capability::new(105, 63, 200, 0).current_c, 42);
+    }
+
+    /// Firmware can boot with a nonzero, unlocked offset - this was written on
+    /// a machine that boots at 5, so 100 C rather than 105 C. Treating Tjmax as
+    /// the top would let a control advertised as lowering the ceiling raise it
+    /// above what the vendor configured.
+    #[test]
+    fn the_factory_ceiling_is_the_top_not_tjmax() {
+        let cap = Capability::new(105, 127, 5, 5);
+        assert_eq!(cap.tjmax_c, 105);
+        assert_eq!(cap.current_c, 100);
+        assert_eq!(cap.max_c(), 100, "restore default must not go above 100");
+        assert!(!cap.accepts(105), "raising past the factory ceiling is refused");
+        assert_eq!(cap.offset_for(101), None);
+        assert_eq!(cap.offset_for(100), Some(5));
+    }
+
+    #[test]
+    fn the_safety_floor_never_exceeds_the_factory_ceiling() {
+        // A factory ceiling already at or below the floor collapses the range
+        // rather than inverting it.
+        let cap = Capability::new(105, 127, 40, 40);
+        assert_eq!(cap.max_c(), 65);
+        assert_eq!(cap.min_c(), 65);
+        assert!(cap.min_c() <= cap.max_c());
+        // the opt-in still reaches deeper
+        assert_eq!(cap.min_c_within(Bound::Hardware), 0);
+    }
+
+    #[test]
+    fn unavailable_separates_stable_answers_from_transient_ones() {
+        // Caching an Error is what turns a cancelled auth dialog into a
+        // permanent "unsupported", so the two must not compare equal.
+        assert_ne!(Unavailable::Unsupported, Unavailable::Error("x".into()));
+        assert_ne!(Unavailable::Locked, Unavailable::Unsupported);
+    }
+
+    #[test]
+    fn the_bound_round_trips_through_its_wire_name() {
+        for bound in [Bound::Safe, Bound::Hardware] {
+            assert_eq!(Bound::parse(bound.as_str()), Some(bound));
+        }
+        // an unknown spelling must not silently widen the range
+        assert_eq!(Bound::parse("hardwarE"), None);
+        assert_eq!(Bound::parse(""), None);
+        assert_eq!(Bound::default(), Bound::Safe);
+    }
+
+    #[test]
+    fn the_record_keeps_the_bound_it_was_allowed_under() {
+        let dir = std::env::temp_dir().join("predator-sense-temp-limit-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = super::temp_limit::last_limit_path_under(&dir);
+
+        assert_eq!(super::temp_limit::remembered(&path), None);
+        super::temp_limit::remember(&path, 85, Bound::Safe).expect("remember");
+        assert_eq!(super::temp_limit::remembered(&path), Some((85, Bound::Safe)));
+
+        super::temp_limit::remember(&path, 40, Bound::Hardware).expect("remember");
+        assert_eq!(
+            super::temp_limit::remembered(&path),
+            Some((40, Bound::Hardware))
+        );
+
+        // A bare number - the older format, or something hand-written - reads
+        // as the safe bound, so it cannot authorise itself past the floor.
+        std::fs::write(&path, "40\n").expect("write");
+        assert_eq!(super::temp_limit::remembered(&path), Some((40, Bound::Safe)));
+
+        // A bound field that is present but unrecognised invalidates the whole
+        // record. Defaulting it to Safe here would be the one path that lets a
+        // typo through, since the helper refuses unknown spellings.
+        std::fs::write(&path, "85 saf\n").expect("write");
+        assert_eq!(super::temp_limit::remembered(&path), None);
+
+        std::fs::write(&path, "not a number\n").expect("write junk");
+        assert_eq!(super::temp_limit::remembered(&path), None);
+
+        // the write is atomic, so no stray temporary is left behind
+        assert!(!path.with_extension("tmp").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
