@@ -8,6 +8,7 @@ use predator_sense_protocol::battery;
 use predator_sense_protocol::helper::{
     Action as HelperAction, CpuGovernor, EnergyPreference, Switch, OPTIONAL_VALUE_SKIP,
 };
+use predator_sense_protocol::temp_limit::{self, Bound, Capability};
 use predator_sense_protocol::thermal_profile;
 use serde::Deserialize;
 use std::fs::{self, File, OpenOptions};
@@ -423,6 +424,9 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
         HelperAction::PwmGpuEnableRead => pwm_read(sysfs, PwmAttribute::GpuEnable),
         HelperAction::BootReapplyBattery => reapply_battery(sysfs, Path::new(&args[1])),
         HelperAction::BootReapplyThermal => reapply_thermal(sysfs, Path::new(&args[1])),
+        HelperAction::TempLimitCaps => temp_limit_caps(sysfs),
+        HelperAction::TempLimit => temp_limit_apply(&args[1], &args[2], sysfs),
+        HelperAction::BootReapplyTempLimit => reapply_temp_limit(sysfs, Path::new(&args[1])),
         HelperAction::SerialNumberRead => {
             println!("{}", read_attr("serial-number", &sysfs.join(DMI_SERIAL))?);
             Ok(())
@@ -442,6 +446,270 @@ fn ensure_arity(action: HelperAction, args: &[String]) -> AppResult {
         Ok(())
     } else {
         Err(fail(format!("usage: {}", action.usage())))
+    }
+}
+
+
+/// Best-effort `modprobe` of the TCC cooling driver.
+///
+/// The module autoloads from a CPU modalias only where the running kernel
+/// already knows the part, which is why it is not simply left to udev. Failure
+/// is ignored on purpose: on AMD, on a kernel without the module, or on
+/// firmware that locks the offset, there is nothing to load and nothing to
+/// report - the caller finds no device and says so.
+fn tcc_ensure_module(sysfs: &Path) {
+    // Only meaningful against the real sysfs; a fixture tree has no modules.
+    if sysfs != Path::new(path::REAL_SYSFS)
+        || matches!(tcc_cooling_device(sysfs), Ok(Some(_)))
+    {
+        return;
+    }
+    let _ = Command::new(external::MODPROBE)
+        .arg(temp_limit::KERNEL_MODULE)
+        .output();
+}
+
+/// Path of the TCC offset cooling device, if the kernel published one.
+///
+/// Found by scanning `type` rather than assuming an index: the number depends
+/// on how many thermal zones registered first, so it moves between machines and
+/// even between boots.
+fn tcc_cooling_device(sysfs: &Path) -> AppResult<Option<PathBuf>> {
+    let directory = sysfs.join(temp_limit::THERMAL_CLASS);
+    let entries = fs::read_dir(&directory).map_err(|error| {
+        fail(format!(
+            "temp-limit: cannot read {}: {error}",
+            directory.display()
+        ))
+    })?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // An unreadable `type` on one device says nothing about the others.
+        let Ok(kind) = fs::read_to_string(path.join("type")) else {
+            continue;
+        };
+        if kind.trim() == temp_limit::COOLING_DEVICE_TYPE {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+/// Reads a `coretemp` attribute in millidegrees, as whole Celsius.
+fn coretemp_celsius(sysfs: &Path, attribute: &str) -> AppResult<Option<u8>> {
+    let directory = sysfs.join(temp_limit::HWMON_CLASS);
+    let entries = fs::read_dir(&directory).map_err(|error| {
+        fail(format!(
+            "temp-limit: cannot read {}: {error}",
+            directory.display()
+        ))
+    })?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(name) = fs::read_to_string(path.join("name")) else {
+            continue;
+        };
+        if name.trim() != temp_limit::CORETEMP_NAME {
+            continue;
+        }
+        // Found coretemp: from here a failure is a failure, not an absence.
+        let target = path.join(attribute);
+        let raw = read_attr("coretemp", &target)?;
+        let millicelsius: i64 = raw.trim().parse().map_err(|error| {
+            fail(format!(
+                "temp-limit: unreadable {}: {error}",
+                target.display()
+            ))
+        })?;
+        return Ok(u8::try_from(millicelsius / 1000).ok());
+    }
+    Ok(None)
+}
+
+/// `Tjmax`, from `coretemp`'s critical temperature.
+fn tjmax_celsius(sysfs: &Path) -> AppResult<Option<u8>> {
+    coretemp_celsius(sysfs, "temp1_crit")
+}
+
+/// The offset this boot started with, recorded once per boot under `/run`.
+///
+/// Written on the first privileged call of a boot, before anything here has
+/// changed the register, so it captures the firmware's own ceiling. Best
+/// effort: if `/run` cannot be written the current offset is used, which is
+/// correct as long as nothing has moved it yet - and only ever loses the
+/// distinction between the factory ceiling and Tjmax.
+fn tcc_factory_offset(current_offset: u8) -> u8 {
+    let path = Path::new(temp_limit::FACTORY_OFFSET_FILE);
+    if let Ok(recorded) = fs::read_to_string(path) {
+        if let Ok(offset) = recorded.trim().parse() {
+            return offset;
+        }
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(path, format!("{current_offset}\n"));
+    current_offset
+}
+
+/// What this CPU allows as a temperature ceiling.
+///
+/// `Err` is reserved for things that might work next time; a machine that
+/// simply has no such control reports `Ok(None)` so callers can cache that
+/// answer without turning a transient failure into a permanent verdict.
+fn temp_limit_capability(sysfs: &Path) -> AppResult<Option<Capability>> {
+    tcc_ensure_module(sysfs);
+    let Some(device) = tcc_cooling_device(sysfs)? else {
+        return Ok(None);
+    };
+    let Some(tjmax_c) = tjmax_celsius(sysfs)? else {
+        // The offset is meaningless without the temperature it counts down
+        // from, so this is unsupported rather than an error.
+        return Ok(None);
+    };
+    let max_offset = read_attr("tcc max_state", &device.join("max_state"))?
+        .trim()
+        .parse::<u8>()
+        .map_err(|error| fail(format!("temp-limit: unreadable max_state: {error}")))?;
+    let current_offset = read_attr("tcc cur_state", &device.join("cur_state"))?
+        .trim()
+        .parse::<u8>()
+        .map_err(|error| fail(format!("temp-limit: unreadable cur_state: {error}")))?;
+    let factory_offset = tcc_factory_offset(current_offset);
+    Ok(Some(Capability::new(
+        tjmax_c,
+        max_offset,
+        current_offset,
+        factory_offset,
+    )))
+}
+
+/// Prints one of `ok TJMAX MAX_OFFSET CURRENT_OFFSET`, `locked`, or
+/// `unsupported`.
+///
+/// Genuine failures exit non-zero instead of printing a verdict, so the caller
+/// can tell "this machine will never do it" from "this did not work now".
+///
+/// `unsupported` is deliberately broad. `intel_tcc_cooling` refuses to register
+/// a cooling device at all when the firmware locks the offset - it logs "TCC
+/// Offset locked" and returns - so from here a locked machine is
+/// indistinguishable from AMD, from a kernel without the module, and from a
+/// part the module does not recognise. Claiming to know which would be a guess;
+/// the UI says what the user can check instead.
+fn temp_limit_caps(sysfs: &Path) -> AppResult {
+    match temp_limit_capability(sysfs)? {
+        // Defensive: the current driver never registers a zero-width device,
+        // but a device with no usable range is not something to offer either.
+        Some(capability) if capability.max_offset == 0 => println!("locked"),
+        Some(capability) => println!(
+            "ok {} {} {}",
+            capability.tjmax_c,
+            capability.max_offset,
+            capability.tjmax_c.saturating_sub(capability.current_c)
+        ),
+        None => println!("unsupported"),
+    }
+    Ok(())
+}
+
+/// Applies a ceiling in Celsius by writing the kernel's TCC offset.
+///
+/// Serialized against other changes: the GUI and the boot service can both
+/// reach this, and the kernel's own cooling device is a third writer.
+fn temp_limit_apply(value: &str, bound: &str, sysfs: &Path) -> AppResult {
+    let celsius: u8 = value
+        .parse()
+        .map_err(|_| fail(format!("temp-limit: invalid temperature '{value}'")))?;
+    // Unknown spellings are refused rather than defaulted, so a typo in a
+    // hand-written record cannot quietly widen the allowed range.
+    let bound = Bound::parse(bound)
+        .ok_or_else(|| fail(format!("temp-limit: invalid bound '{bound}'")))?;
+
+    let _lock = CpuProfileLock::acquire(sysfs)?;
+
+    let capability = temp_limit_capability(sysfs)?
+        .ok_or_else(|| fail("temp-limit: this machine has no TCC offset control"))?;
+    if capability.max_offset == 0 {
+        return Err(fail(
+            "temp-limit: the firmware locks the TCC offset (look for a 'HwP Lock' style option in the BIOS)",
+        ));
+    }
+    // Rejected, not clamped: an out-of-range value here comes from a file the
+    // user can edit or a stale record, never from the slider, and silently
+    // turning it into the deepest offset available is how a machine ends up
+    // permanently throttled with no error anywhere.
+    // Rejected, not clamped. Under the default bound the floor is the safety
+    // one, which the caller has to opt out of explicitly - a value below it
+    // coming from a file nobody confirmed is exactly what that opt-in exists to
+    // catch.
+    let offset = capability.offset_for_within(celsius, bound).ok_or_else(|| {
+        fail(format!(
+            "temp-limit: {celsius} C is outside {}..={} C for this CPU under the {} bound",
+            capability.min_c_within(bound),
+            capability.max_c(),
+            bound.as_str()
+        ))
+    })?;
+
+    let device = tcc_cooling_device(sysfs)?
+        .ok_or_else(|| fail("temp-limit: TCC cooling device disappeared"))?;
+    write_attr("temp-limit", &offset.to_string(), &device.join("cur_state"))?;
+
+    // Read back: the kernel rejects some values with a write that appears to
+    // succeed, and a silently ignored ceiling is worse than a reported failure.
+    let applied = temp_limit_capability(sysfs)?
+        .ok_or_else(|| fail("temp-limit: cannot confirm the ceiling"))?;
+    if applied.current_c != celsius {
+        return Err(fail(format!(
+            "temp-limit: kernel kept {} C after asking for {celsius} C",
+            applied.current_c
+        )));
+    }
+    Ok(())
+}
+
+/// Restores the recorded ceiling at boot. The offset does not survive a power
+/// cycle, so without this the setting is lost every time.
+fn reapply_temp_limit(sysfs: &Path, home: &Path) -> AppResult {
+    if !home.is_absolute() {
+        return Err(fail("USER_HOME must be an absolute path"));
+    }
+    // Load the module even when there is nothing to restore. The GUI reads
+    // sysfs unprivileged and never calls the helper to discover, so without
+    // this a supported machine whose modalias autoload did not fire would show
+    // the feature as unsupported for the whole session.
+    tcc_ensure_module(sysfs);
+
+    // `$HOME/.config` and not XDG_CONFIG_HOME, for the same reason as the
+    // thermal profile: root at boot cannot resolve that user's environment.
+    //
+    // The record lives in the user's home, so anything running as that user can
+    // write it, including the `hardware` bound that widens the range past the
+    // safety floor. That is a real weakness and worth naming: it means the
+    // opt-in protects against a mistake, not against a hostile process with the
+    // user's privileges. It is not a privilege boundary either way - the same
+    // user can already call this helper directly through the shipped polkit
+    // rule - and the worst outcome is a throttled machine the user can see and
+    // undo. Storing consent root-side would close it, at the cost of diverging
+    // from how every other persisted setting here works; that is a project-wide
+    // decision rather than one this feature should make alone.
+    let recorded = temp_limit::last_limit_path_under(&home.join(".config"));
+    let Some((celsius, bound)) = temp_limit::remembered(&recorded) else {
+        return Ok(());
+    };
+    // A machine that no longer offers the control - different CPU, module gone,
+    // firmware update - must not fail the boot service over it. A recorded
+    // value the hardware rejects still surfaces, because that one is a real
+    // mismatch the user should hear about.
+    match temp_limit_capability(sysfs) {
+        Ok(Some(capability)) if capability.max_offset > 0 => {
+            temp_limit_apply(&celsius.to_string(), bound.as_str(), sysfs)
+        }
+        // No control on this machine: nothing to restore, not a failure.
+        Ok(_) => Ok(()),
+        // A transient read failure is worth surfacing rather than silently
+        // skipping the ceiling the user asked for.
+        Err(error) => Err(error),
     }
 }
 

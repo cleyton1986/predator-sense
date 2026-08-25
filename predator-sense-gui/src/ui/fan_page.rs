@@ -552,6 +552,7 @@ pub fn build() -> gtk::Box {
     info_box.append(&info_label);
 
     page.append(&info_box);
+    page.append(&temp_limit_section());
 
     // This page is built once at app startup and never rebuilt (unlike the
     // temperatures page, which window.rs already rebuilds live) - so a
@@ -576,4 +577,294 @@ pub fn build() -> gtk::Box {
     });
 
     page
+}
+
+/// CPU temperature ceiling.
+///
+/// Built lazily behind a button rather than on page load: reading the capability
+/// goes through pkexec, and opening a tab must not raise an authentication
+/// dialog. Once the user asks, the answer is cached for the process.
+fn temp_limit_section() -> gtk::Box {
+    let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    section.set_margin_top(14);
+
+    let title = gtk::Label::new(Some(crate::i18n::t("temp_limit")));
+    title.set_halign(gtk::Align::Start);
+    title.add_css_class("section-title");
+    section.append(&title);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    section.append(&content);
+    temp_limit_fill(&content);
+    section
+}
+
+/// Populates the section from a fresh read, replacing whatever was there.
+///
+/// Reading is unprivileged sysfs, so this runs while building the page: no
+/// authentication dialog just for opening a tab, and no cached verdict that
+/// could outlive whatever caused it.
+fn temp_limit_fill(content: &gtk::Box) {
+    while let Some(child) = content.first_child() {
+        content.remove(&child);
+    }
+    match crate::hardware::temp_limit::capability() {
+        Ok(capability) => content.append(&temp_limit_slider(capability)),
+        Err(reason) => {
+            content.append(&temp_limit_note(&reason));
+            // The unprivileged read cannot load a kernel module, so a machine
+            // whose modalias autoload did not fire looks exactly like one
+            // without the hardware. The retry goes through the helper, which
+            // loads it - at the cost of a prompt, hence a button rather than
+            // doing it on every page build.
+            let retry = gtk::Button::with_label(crate::i18n::t("temp_limit_retry"));
+            retry.set_halign(gtk::Align::Start);
+            retry.add_css_class("flat");
+            let target = content.clone();
+            retry.connect_clicked(move |_| {
+                crate::hardware::temp_limit::probe_through_helper();
+                temp_limit_fill(&target);
+            });
+            content.append(&retry);
+        }
+    }
+}
+
+/// Why there is no slider, said in the terms the user can act on.
+fn temp_limit_note(reason: &crate::hardware::temp_limit::Unavailable) -> gtk::Label {
+    use crate::hardware::temp_limit::Unavailable;
+    let note = gtk::Label::new(Some(match reason {
+        Unavailable::Unsupported => crate::i18n::t("temp_limit_unsupported"),
+        // Worth its own message: this one the user can often fix in the BIOS.
+        Unavailable::Locked => crate::i18n::t("temp_limit_locked"),
+        Unavailable::Error(detail) => detail,
+    }));
+    note.set_halign(gtk::Align::Start);
+    note.set_wrap(true);
+    note.add_css_class("dim-label");
+    note
+}
+
+/// The slider, with the range taken from the CPU: `Tjmax` at the top and, by
+/// default, the safety floor at the bottom. Nothing is assumed about the model.
+///
+/// Moving the slider only picks a value; applying is an explicit button. Two
+/// reasons: writing goes through pkexec, so an auto-applying slider would fire
+/// a privileged call - and potentially an auth dialog - for every value the
+/// handle passes over; and a thermal ceiling is not a preview-able setting, so
+/// the user should say when they mean it.
+fn temp_limit_slider(capability: crate::hardware::temp_limit::Capability) -> gtk::Box {
+    use crate::hardware::temp_limit::Bound;
+
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
+
+    let hint = gtk::Label::new(Some(crate::i18n::t("temp_limit_hint")));
+    hint.set_halign(gtk::Align::Start);
+    hint.set_wrap(true);
+    hint.add_css_class("dim-label");
+    row.append(&hint);
+
+    // What the hardware holds right now. The recorded value is the user's
+    // intent, but until it is applied the two can differ - after a reboot the
+    // register is back at the default while the file still says otherwise - and
+    // the status line has to show the truth, not the intent.
+    let applied = Rc::new(Cell::new(capability.current_c));
+    let recorded = crate::hardware::temp_limit::remembered();
+    let bound = Rc::new(Cell::new(
+        recorded.map(|(_, bound)| bound).unwrap_or_default(),
+    ));
+    // The bound that is currently recorded, as opposed to the one selected.
+    // Tracked separately because revoking the opt-in is a change worth applying
+    // even when the temperature does not move: without this, unchecking the box
+    // on a record like `80 hardware` leaves Apply disabled, `safe` is never
+    // written, and reopening the app re-enables the checkbox from the stale
+    // record.
+    let applied_bound = Rc::new(Cell::new(
+        recorded.map(|(_, bound)| bound).unwrap_or_default(),
+    ));
+
+    let scale = gtk::Scale::with_range(
+        gtk::Orientation::Horizontal,
+        f64::from(capability.min_c_within(bound.get())),
+        f64::from(capability.max_c()),
+        1.0,
+    );
+    // A ceiling set outside this app can sit below the floor the slider offers,
+    // so the starting position is clamped into the range actually on show.
+    let initial = recorded
+        .map(|(celsius, _)| celsius)
+        .unwrap_or(capability.current_c)
+        .clamp(capability.min_c_within(bound.get()), capability.max_c());
+    scale.set_value(f64::from(initial));
+    scale.set_hexpand(true);
+    scale.set_draw_value(true);
+    scale.set_value_pos(gtk::PositionType::Right);
+    // Tjmax is where the firmware throttles on its own, so it is the one
+    // landmark worth naming on the track.
+    scale.add_mark(
+        f64::from(capability.max_c()),
+        gtk::PositionType::Bottom,
+        Some(crate::i18n::t("temp_limit_default")),
+    );
+    row.append(&scale);
+
+    // Built before the buttons so "restore default" can clear the opt-in too:
+    // returning to the factory ceiling while leaving the hardware-range consent
+    // recorded would keep authorising a range the user just stepped out of.
+    // `None` on parts where the opt-in would not widen anything.
+    let unlock = capability
+        .can_go_below_floor()
+        .then(|| gtk::CheckButton::with_label(crate::i18n::t("temp_limit_unlock")));
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions.set_margin_top(2);
+
+    let status = gtk::Label::new(None);
+    status.set_halign(gtk::Align::Start);
+    status.set_hexpand(true);
+    status.add_css_class("dim-label");
+    actions.append(&status);
+
+    let reset = gtk::Button::with_label(crate::i18n::t("temp_limit_reset"));
+    reset.add_css_class("flat");
+    actions.append(&reset);
+
+    let apply = gtk::Button::with_label(crate::i18n::t("temp_limit_apply"));
+    apply.add_css_class("suggested-action");
+    actions.append(&apply);
+    row.append(&actions);
+
+    // Sets the status line and enables Apply only when the handle is somewhere
+    // other than what the hardware currently holds, so the button never invites
+    // a privileged call that would change nothing.
+    let refresh = {
+        let status = status.clone();
+        let apply = apply.clone();
+        let reset = reset.clone();
+        let applied = applied.clone();
+        let applied_bound = applied_bound.clone();
+        let bound = bound.clone();
+        Rc::new(move |selected: u8| {
+            let live = applied.get();
+            status.remove_css_class("error");
+            status.set_text(&format!(
+                "{}: {live} °C",
+                crate::i18n::t("temp_limit_current")
+            ));
+            let dirty = selected != live || bound.get() != applied_bound.get();
+            apply.set_sensitive(dirty);
+            reset.set_sensitive(live != capability.max_c() || selected != capability.max_c());
+        })
+    };
+    refresh(initial);
+
+    {
+        let refresh = refresh.clone();
+        scale.connect_value_changed(move |scale| refresh(scale.value().round() as u8));
+    }
+
+    {
+        let scale = scale.clone();
+        let unlock = unlock.clone();
+        reset.connect_clicked(move |_| {
+            // Only stages the change: applying stays the one explicit step, so
+            // "restore default" behaves like every other change here. Clearing
+            // the checkbox fires its own handler, which narrows the range and
+            // refreshes, so the order here matters - widen first, then let the
+            // toggle settle the bound.
+            scale.set_value(f64::from(capability.max_c()));
+            if let Some(unlock) = unlock.as_ref() {
+                unlock.set_active(false);
+            }
+        });
+    }
+
+    {
+        let scale = scale.clone();
+        let status = status.clone();
+        let refresh = refresh.clone();
+        let applied = applied.clone();
+        let applied_bound = applied_bound.clone();
+        let bound = bound.clone();
+        apply.connect_clicked(move |button| {
+            let selected = scale.value().round() as u8;
+            button.set_sensitive(false);
+            match crate::hardware::temp_limit::apply(selected, bound.get()) {
+                Ok(outcome) => {
+                    applied.set(selected);
+                    applied_bound.set(bound.get());
+                    refresh(selected);
+                    if !outcome.persisted {
+                        // The kernel took it, but it will not come back after a
+                        // reboot - say so rather than implying it stuck.
+                        status.set_text(crate::i18n::t("temp_limit_not_persisted"));
+                    }
+                }
+                Err(error) => {
+                    // Keep the handle where the user left it - moving it back
+                    // would hide what they tried - and say what went wrong.
+                    status.set_text(&error);
+                    status.add_css_class("error");
+                    button.set_sensitive(true);
+                }
+            }
+        });
+    }
+
+    // Only offered when it would actually widen the range: a part whose
+    // silicon stops at or above the floor gains nothing from the switch, and
+    // showing a toggle that changes nothing is worse than not showing it.
+    if let Some(unlock) = unlock {
+        row.append(&temp_limit_unlock(capability, &scale, bound, refresh, unlock));
+    }
+
+    row
+}
+
+/// Opt-in to the deeper, hardware-limited range.
+///
+/// Separate and off by default because the floor exists to stop an accident,
+/// not to stop the user: dragging a slider or restoring a stale record must not
+/// be able to reach a ceiling the machine spends its life throttled against,
+/// but asking for it plainly should work.
+fn temp_limit_unlock(
+    capability: crate::hardware::temp_limit::Capability,
+    scale: &gtk::Scale,
+    bound: Rc<Cell<crate::hardware::temp_limit::Bound>>,
+    refresh: Rc<impl Fn(u8) + 'static>,
+    toggle: gtk::CheckButton,
+) -> gtk::Box {
+    use crate::hardware::temp_limit::Bound;
+
+    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    box_.set_margin_top(6);
+
+    toggle.set_active(bound.get() == Bound::Hardware);
+    box_.append(&toggle);
+
+    let hint = gtk::Label::new(Some(crate::i18n::t("temp_limit_unlock_hint")));
+    hint.set_halign(gtk::Align::Start);
+    hint.set_wrap(true);
+    hint.add_css_class("dim-label");
+    box_.append(&hint);
+
+    {
+        let scale = scale.clone();
+        toggle.connect_toggled(move |toggle| {
+            let selected = if toggle.is_active() {
+                Bound::Hardware
+            } else {
+                Bound::Safe
+            };
+            bound.set(selected);
+            let floor = capability.min_c_within(selected);
+            scale.set_range(f64::from(floor), f64::from(capability.max_c()));
+            // Narrowing the range leaves the handle below the new floor, and
+            // GTK clamps it silently; re-reading keeps the status line and the
+            // Apply button agreeing with what is actually on screen.
+            refresh(scale.value().round() as u8);
+        });
+    }
+
+    box_
 }
