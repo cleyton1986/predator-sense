@@ -711,18 +711,14 @@ fn temp_limit_slider(
     // register is back at the default while the file still says otherwise - and
     // the status line has to show the truth, not the intent.
     let applied = Rc::new(Cell::new(capability.current_c));
-    let recorded = crate::hardware::temp_limit::remembered();
+    // What is on disk, as opposed to what the hardware holds and what the
+    // handle is pointing at - three things that can all disagree. A boot where
+    // the service could not run leaves the record saying 80 C with the CPU at
+    // its factory ceiling, and revoking the opt-in is a change worth applying
+    // even when the temperature does not move.
+    let recorded = Rc::new(Cell::new(crate::hardware::temp_limit::remembered()));
     let bound = Rc::new(Cell::new(
-        recorded.map(|(_, bound)| bound).unwrap_or_default(),
-    ));
-    // The bound that is currently recorded, as opposed to the one selected.
-    // Tracked separately because revoking the opt-in is a change worth applying
-    // even when the temperature does not move: without this, unchecking the box
-    // on a record like `80 hardware` leaves Apply disabled, `safe` is never
-    // written, and reopening the app re-enables the checkbox from the stale
-    // record.
-    let applied_bound = Rc::new(Cell::new(
-        recorded.map(|(_, bound)| bound).unwrap_or_default(),
+        recorded.get().map(|(_, bound)| bound).unwrap_or_default(),
     ));
 
     let scale = gtk::Scale::with_range(
@@ -734,6 +730,7 @@ fn temp_limit_slider(
     // A ceiling set outside this app can sit below the floor the slider offers,
     // so the starting position is clamped into the range actually on show.
     let initial = recorded
+        .get()
         .map(|(celsius, _)| celsius)
         .unwrap_or(capability.current_c)
         .clamp(capability.min_c_within(bound.get()), capability.max_c());
@@ -784,7 +781,7 @@ fn temp_limit_slider(
         let apply = apply.clone();
         let reset = reset.clone();
         let applied = applied.clone();
-        let applied_bound = applied_bound.clone();
+        let recorded = recorded.clone();
         let bound = bound.clone();
         Rc::new(move |selected: u8| {
             let live = applied.get();
@@ -793,18 +790,24 @@ fn temp_limit_slider(
                 "{}: {live} °C",
                 crate::i18n::t("temp_limit_current")
             ));
-            let dirty = selected != live || bound.get() != applied_bound.get();
+            // Applying is worth offering when it would change the hardware or
+            // the record - the record half on its own, because a machine whose
+            // boot service could not run sits at its factory ceiling with an
+            // older one still written down. Comparing only against the hardware
+            // there would grey out Apply on the very selection that clears it,
+            // and the discarded ceiling would come back at the next boot.
+            let dirty = selected != live
+                || recorded.get()
+                    != crate::hardware::temp_limit::record_for(capability, selected, bound.get());
             apply.set_sensitive(dirty);
             // Reset stages the factory ceiling *and* clears the opt-in, so it
-            // stays available while either is away from its default - including
-            // the case where the hardware is already at the factory ceiling but
-            // a `hardware` bound is still recorded, which is otherwise reachable
-            // by ticking the box and applying without moving the handle.
+            // stays available while anything is away from that: the hardware,
+            // the handle, the staged bound, or a record of any kind.
             reset.set_sensitive(
                 live != capability.max_c()
                     || selected != capability.max_c()
                     || bound.get() != Bound::Safe
-                    || applied_bound.get() != Bound::Safe,
+                    || recorded.get().is_some(),
             );
         })
     };
@@ -836,15 +839,19 @@ fn temp_limit_slider(
         let status = status.clone();
         let refresh = refresh.clone();
         let applied = applied.clone();
-        let applied_bound = applied_bound.clone();
+        let recorded = recorded.clone();
         let bound = bound.clone();
         apply.connect_clicked(move |button| {
             let selected = scale.value().round() as u8;
             button.set_sensitive(false);
-            match crate::hardware::temp_limit::apply(selected, bound.get()) {
+            match crate::hardware::temp_limit::apply(capability, selected, bound.get()) {
                 Ok(outcome) => {
                     applied.set(selected);
-                    applied_bound.set(bound.get());
+                    // Read back rather than assume: after a failed write what
+                    // is on disk is the older record, and the dirty state has
+                    // to keep reflecting it so Apply stays available to try
+                    // again.
+                    recorded.set(crate::hardware::temp_limit::remembered());
                     // The reconciler compares against this, so recording the
                     // change here is what keeps the user's own apply from
                     // reading as one from outside and rebuilding the section
@@ -852,7 +859,7 @@ fn temp_limit_slider(
                     shown.set(Some(selected));
                     refresh(selected);
                     match outcome {
-                        Applied::Recorded => {}
+                        Applied::Persisted => {}
                         // The kernel took it, but it will not come back after a
                         // reboot - say so rather than implying it stuck.
                         Applied::ThisBootOnly => {
