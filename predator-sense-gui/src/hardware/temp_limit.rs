@@ -39,10 +39,14 @@ pub enum Applied {
     /// read-only config directory fails both the same way. The next boot will
     /// restore the ceiling it names, not the one just applied.
     StaleRecord(u8),
-    /// The same, for a record that names the ceiling just applied but keeps a
-    /// bound the user revoked: the temperature is right, the opt-in past the
+    /// The same, for a record that names the ceiling just applied but keeps the
+    /// opt-in the user revoked: the temperature is right, the consent past the
     /// safety floor is the part that survived.
     StaleConsent,
+    /// The other direction: the opt-in the user just gave is what failed to
+    /// stick, and the surviving record keeps the safe bound. Nothing unsafe is
+    /// restored - the box is simply unticked again next session.
+    LostConsent,
     /// A record survived and this process cannot read it, so what the next boot
     /// will make of it is unknown. Not the same as malformed: the boot service
     /// runs as root and may parse what this could not.
@@ -241,12 +245,18 @@ fn survivor(path: &Path, wanted: Option<(u8, Bound)>) -> Applied {
             // A record naming exactly what was asked for is not stale: the next
             // boot restores what is in effect now.
             (Some(record), Some(asked)) if record == asked => Applied::Persisted,
-            // Same ceiling, but the opt-in the user just revoked survived. Worth
-            // its own outcome: the temperature says nothing here, and next
-            // session the deeper range is offered again from a withdrawn
-            // consent.
-            (Some((recorded, _)), Some((celsius, _))) if recorded == celsius => {
+            // Same ceiling, different opt-in - and which way round it went is
+            // the whole message. The temperature says nothing here.
+            (Some((recorded, Bound::Hardware)), Some((celsius, _))) if recorded == celsius => {
+                // The consent the user just revoked survived: next session
+                // offers the deeper range again from a withdrawn opt-in.
                 Applied::StaleConsent
+            }
+            (Some((recorded, _)), Some((celsius, _))) if recorded == celsius => {
+                // The opposite: the new opt-in is what did not stick, and the
+                // record still holds the safe bound. Nothing unsafe comes back,
+                // but the box will be unticked again next session.
+                Applied::LostConsent
             }
             (Some((recorded, _)), _) => Applied::StaleRecord(recorded),
         },
@@ -287,6 +297,15 @@ fn remember_at(path: &Path, celsius: u8, bound: Bound) -> Applied {
         }
     }
     survivor(path, Some((celsius, bound)))
+}
+
+/// Whether there is a record at all, readable or not.
+///
+/// Presence rather than content: a file this process cannot parse is still one
+/// the boot service - which reads the same path as root - can, so the controls
+/// that clear it have to stay on offer.
+pub fn record_present() -> bool {
+    record_path().is_some_and(|path| path.exists())
 }
 
 /// Where the record lives, for messages that ask the user to go and look at it.
@@ -382,6 +401,28 @@ mod tests {
             return;
         }
         assert_eq!(outcome, Applied::StaleConsent);
+    }
+
+    #[test]
+    fn an_opt_in_that_failed_to_stick_is_not_reported_as_one_that_survived() {
+        let directory = sealed_directory("lost-consent");
+        let path = directory.join("temp_limit");
+        shared::remember(&path, 80, Bound::Safe).expect("seed the older record");
+        seal(&directory);
+
+        // Same ceiling, opt-in given rather than revoked: what survives is the
+        // safe bound, so the consent was lost - saying it "is still recorded"
+        // would be exactly backwards.
+        let outcome = remember_at(&path, 80, Bound::Hardware);
+        unseal(&directory);
+
+        // Running as root defeats the setup; nothing to assert then.
+        if outcome == Applied::Persisted
+            && shared::remembered(&path) == Some((80, Bound::Hardware))
+        {
+            return;
+        }
+        assert_eq!(outcome, Applied::LostConsent);
     }
 
     #[test]

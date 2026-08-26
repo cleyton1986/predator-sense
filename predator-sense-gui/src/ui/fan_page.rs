@@ -647,26 +647,49 @@ fn temp_limit_fill(content: &gtk::Box, shown: &Rc<Cell<Option<u8>>>) {
             shown.set(Some(capability.current_c));
             content.append(&temp_limit_slider(capability, shown.clone()));
         }
-        Err(reason) => {
-            shown.set(None);
-            content.append(&temp_limit_note(&reason));
-            // The unprivileged read cannot load a kernel module, so a machine
-            // whose modalias autoload did not fire looks exactly like one
-            // without the hardware. The retry goes through the helper, which
-            // loads it - at the cost of a prompt, hence a button rather than
-            // doing it on every page build.
-            let retry = gtk::Button::with_label(crate::i18n::t("temp_limit_retry"));
-            retry.set_halign(gtk::Align::Start);
-            retry.add_css_class("flat");
-            let target = content.clone();
-            let shown = shown.clone();
-            retry.connect_clicked(move |_| {
-                crate::hardware::temp_limit::probe_through_helper();
-                temp_limit_fill(&target, &shown);
-            });
-            content.append(&retry);
-        }
+        Err(reason) => temp_limit_unavailable(content, shown, &reason),
     }
+}
+
+/// Says why there is no control, and offers the one retry that can change the
+/// answer.
+fn temp_limit_unavailable(
+    content: &gtk::Box,
+    shown: &Rc<Cell<Option<u8>>>,
+    reason: &crate::hardware::temp_limit::Unavailable,
+) {
+    while let Some(child) = content.first_child() {
+        content.remove(&child);
+    }
+    shown.set(None);
+    content.append(&temp_limit_note(reason));
+    // The unprivileged read cannot load a kernel module, so a machine whose
+    // modalias autoload did not fire looks exactly like one without the
+    // hardware. The retry goes through the helper, which loads it - at the cost
+    // of a prompt, hence a button rather than doing it on every page build.
+    let retry = gtk::Button::with_label(crate::i18n::t("temp_limit_retry"));
+    retry.set_halign(gtk::Align::Start);
+    retry.add_css_class("flat");
+    let target = content.clone();
+    let shown = shown.clone();
+    retry.connect_clicked(move |_| {
+        if crate::hardware::temp_limit::probe_through_helper() {
+            temp_limit_fill(&target, &shown);
+            return;
+        }
+        // A cancelled dialog, a missing helper, a transient failure - anything
+        // but an answer about the hardware. Re-reading unprivileged now would
+        // print "unsupported" over it, which is the one thing this attempt did
+        // not establish.
+        temp_limit_unavailable(
+            &target,
+            &shown,
+            &crate::hardware::temp_limit::Unavailable::Error(
+                crate::i18n::t("temp_limit_retry_failed").to_string(),
+            ),
+        );
+    });
+    content.append(&retry);
 }
 
 /// Why there is no slider, said in the terms the user can act on.
@@ -929,7 +952,9 @@ fn temp_limit_single_value(capability: crate::hardware::temp_limit::Capability) 
     // machine, a firmware update narrows what the kernel accepts. Without a way
     // to clear it from here it would sit there until the wider range came back,
     // and then apply itself.
-    if crate::hardware::temp_limit::remembered().is_none() {
+    // Presence, not readability: a record this process cannot parse is still one
+    // the boot service - running as root - can.
+    if !crate::hardware::temp_limit::record_present() {
         return row;
     }
 
@@ -958,7 +983,7 @@ fn temp_limit_single_value(capability: crate::hardware::temp_limit::Capability) 
                 show_persistence(&status, outcome);
                 // Whatever happened, the button belongs to the record: it stays
                 // only while there is still one to clear.
-                button.set_sensitive(crate::hardware::temp_limit::remembered().is_some());
+                button.set_sensitive(crate::hardware::temp_limit::record_present());
             }
             Err(error) => {
                 status.set_text(&error);
@@ -990,6 +1015,7 @@ fn show_persistence(status: &gtk::Label, outcome: crate::hardware::temp_limit::A
         // The ceiling is right and the opt-in is what survived, so naming a
         // temperature here would say nothing.
         Applied::StaleConsent => crate::i18n::t("temp_limit_stale_consent").to_string(),
+        Applied::LostConsent => crate::i18n::t("temp_limit_lost_consent").to_string(),
         // Nothing can be said about what is in the file, so the only useful
         // thing to give the user is where it is.
         Applied::StaleUnknown => crate::i18n::tf(
