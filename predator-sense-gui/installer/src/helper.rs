@@ -14,6 +14,7 @@ use serde::Deserialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -550,6 +551,13 @@ fn tjmax_celsius(sysfs: &Path) -> AppResult<Option<u8>> {
 /// A record that exists but cannot be parsed is refused for the same reason:
 /// overwriting it would mean guessing that nothing has moved the register yet,
 /// which is exactly what this file exists to avoid guessing.
+///
+/// The directory and the file are given explicit modes rather than inheriting
+/// the umask. This runs under pkexec, which passes the calling session's umask
+/// through: at `077` the snapshot would land as `0600` in a `0700` directory,
+/// unreadable by the very GUI it exists for - which would then fall back to the
+/// current offset and, right after a ceiling was applied, treat the user's own
+/// lowered value as the factory maximum.
 fn tcc_factory_offset(sysfs: &Path, current_offset: u8) -> AppResult<u8> {
     // A fixture tree has no register to snapshot, and the path is absolute -
     // there is nothing under it that a test could redirect.
@@ -581,6 +589,7 @@ fn tcc_factory_offset(sysfs: &Path, current_offset: u8) -> AppResult<u8> {
                 parent.display()
             ))
         })?;
+        set_readable(parent, 0o755)?;
     }
     fs::write(path, format!("{current_offset}\n")).map_err(|error| {
         fail(format!(
@@ -588,7 +597,23 @@ fn tcc_factory_offset(sysfs: &Path, current_offset: u8) -> AppResult<u8> {
             path.display()
         ))
     })?;
+    set_readable(path, 0o644)?;
     Ok(current_offset)
+}
+
+/// Puts an explicit mode on something the unprivileged GUI has to read.
+///
+/// An error rather than best effort: a snapshot nobody can read is the case
+/// this whole path exists to prevent, and it would fail silently - the helper
+/// would report success while the GUI kept reading the lowered offset as the
+/// factory one.
+fn set_readable(path: &Path, mode: u32) -> AppResult {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|error| {
+        fail(format!(
+            "temp-limit: cannot make {} readable: {error}",
+            path.display()
+        ))
+    })
 }
 
 /// What this CPU allows as a temperature ceiling.

@@ -22,14 +22,22 @@ use std::path::{Path, PathBuf};
 
 pub use predator_sense_protocol::temp_limit::{Bound, Capability, Unavailable};
 
-/// Outcome of applying a ceiling.
+/// What the next boot will restore, after a ceiling was applied.
 ///
-/// `persisted` is separate from success because the two really can differ: the
-/// kernel takes the value and recording it for the next boot fails. Reporting
-/// that as a plain success would promise a persistence that will not happen.
+/// Separate from success because the two really can differ: the kernel takes
+/// the value and recording it fails. Reporting that as a plain success would
+/// promise a persistence that will not happen - and reporting it as a plain
+/// failure would hide the worse case, where the *previous* record survives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Applied {
-    pub persisted: bool,
+pub enum Applied {
+    /// The ceiling is on disk. The next boot puts it back.
+    Recorded,
+    /// Nothing is on disk. The ceiling holds until the machine is powered off.
+    ThisBootOnly,
+    /// Recording failed *and* the older record could not be removed - a
+    /// read-only config directory fails both the same way. The next boot will
+    /// restore the ceiling it names, not the one just applied.
+    StaleRecord(u8),
 }
 
 fn sysfs() -> &'static Path {
@@ -147,32 +155,57 @@ pub fn apply(celsius: u8, bound: Bound) -> Result<Applied, String> {
         HelperAction::TempLimit,
         &[&celsius.to_string(), bound.as_str()],
     )?;
-    Ok(Applied {
-        persisted: remember(celsius, bound),
-    })
+    Ok(remember(celsius, bound))
 }
 
-/// Records the ceiling for the boot service. Returns whether it stuck.
+/// Records the ceiling for the boot service, and says what the next boot will
+/// actually restore.
 ///
 /// When recording fails, the previous record is deleted rather than left
 /// alone. Otherwise raising a ceiling back to the default while the write fails
 /// would leave the *older*, lower request on disk, and the boot service would
 /// faithfully restore a value the user had just moved away from. Losing the
 /// setting is recoverable; silently reinstating a discarded one is not.
-fn remember(celsius: u8, bound: Bound) -> bool {
+///
+/// The delete can fail for the same reason the write did - a read-only config
+/// directory, a full disk - so it is not enough to try. What survived is read
+/// back and reported: "could not save" and "the older ceiling is what comes
+/// back at the next boot" are different things to tell someone.
+fn remember(celsius: u8, bound: Bound) -> Applied {
     let Some(path) = shared::last_limit_path() else {
-        return false;
+        return Applied::ThisBootOnly;
     };
-    match shared::remember(&path, celsius, bound) {
-        Ok(()) => true,
+    remember_at(&path, celsius, bound)
+}
+
+fn remember_at(path: &Path, celsius: u8, bound: Bound) -> Applied {
+    let Err(error) = shared::remember(path, celsius, bound) else {
+        return Applied::Recorded;
+    };
+    eprintln!("temp-limit: could not record {celsius} C: {error}");
+
+    let previous = shared::remembered(path);
+    match std::fs::remove_file(path) {
+        Ok(()) => Applied::ThisBootOnly,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Applied::ThisBootOnly,
         Err(error) => {
-            eprintln!("temp-limit: could not record {celsius} C: {error}");
-            if let Err(error) = std::fs::remove_file(&path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    eprintln!("temp-limit: stale record left at {}: {error}", path.display());
-                }
+            eprintln!(
+                "temp-limit: stale record left at {}: {error}",
+                path.display()
+            );
+            match previous {
+                // A record naming the ceiling that was just applied is not
+                // stale: the next boot restores what is in effect now, which is
+                // what a successful write would have promised anyway. It can
+                // still hold a wider bound than the one just used - a double
+                // failure on the same path, and not one worth a message the
+                // user cannot act on.
+                Some((recorded, _)) if recorded == celsius => Applied::Recorded,
+                Some((recorded, _)) => Applied::StaleRecord(recorded),
+                // Unreadable or malformed: the helper refuses it at boot, so
+                // nothing will be restored from it.
+                None => Applied::ThisBootOnly,
             }
-            false
         }
     }
 }
@@ -180,4 +213,64 @@ fn remember(celsius: u8, bound: Bound) -> bool {
 /// The ceiling the user last asked for, and the bound it was allowed under.
 pub fn remembered() -> Option<(u8, Bound)> {
     shared::remembered(&shared::last_limit_path()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A directory nothing can be written to, which is what a read-only config
+    /// home looks like from here - and the case where both the write and the
+    /// cleanup that follows it fail.
+    fn sealed_directory(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!("predator-sense-{name}"));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("create");
+        directory
+    }
+
+    fn seal(directory: &Path) {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o555)).expect("seal");
+    }
+
+    fn unseal(directory: &Path) {
+        let _ = fs::set_permissions(directory, fs::Permissions::from_mode(0o755));
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn a_record_that_survives_a_failed_write_is_reported_not_swallowed() {
+        let directory = sealed_directory("stale-record");
+        let path = directory.join("temp_limit");
+        shared::remember(&path, 80, Bound::Safe).expect("seed the older record");
+        seal(&directory);
+
+        let outcome = remember_at(&path, 95, Bound::Safe);
+        unseal(&directory);
+
+        // Running as root defeats the setup: the write goes through and there
+        // is nothing to report. Nothing to assert then either.
+        if outcome == Applied::Recorded && shared::remembered(&path) == Some((95, Bound::Safe)) {
+            return;
+        }
+        // Not just "could not save": 80 C is what the next boot would restore,
+        // and the user can only act on that if they are told the number.
+        assert_eq!(outcome, Applied::StaleRecord(80));
+    }
+
+    #[test]
+    fn a_failed_write_with_nothing_left_behind_is_only_a_lost_setting() {
+        let directory = sealed_directory("no-record");
+        let path = directory.join("temp_limit");
+        seal(&directory);
+
+        let outcome = remember_at(&path, 95, Bound::Safe);
+        unseal(&directory);
+
+        if outcome == Applied::Recorded {
+            return;
+        }
+        assert_eq!(outcome, Applied::ThisBootOnly);
+    }
 }
