@@ -12,6 +12,7 @@ pub mod hid_rgb;
 pub mod magic_rgb;
 pub mod sensors;
 pub mod profile;
+pub mod temp_limit;
 pub mod thermal_profile;
 pub mod setup;
 pub mod fan;

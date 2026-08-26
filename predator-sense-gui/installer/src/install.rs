@@ -74,6 +74,15 @@ enum ModuleLoadPolicy {
 struct KernelModuleLoad {
     name: &'static str,
     policy: ModuleLoadPolicy,
+    /// Whether the module belongs in the static modules-load file.
+    ///
+    /// Separate from `policy`, which only governs the install-time probe.
+    /// modules-load.d has no notion of an optional entry: every name there is
+    /// probed unconditionally at every boot, so a module that does not apply to
+    /// this machine leaves systemd-modules-load reporting a failure forever.
+    /// Modules that autoload from hardware, or that only exist on some vendors,
+    /// are loaded on demand instead.
+    persist_at_boot: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -87,18 +96,29 @@ impl KernelModuleLoad {
         Self {
             name,
             policy: ModuleLoadPolicy::Required,
+            persist_at_boot: true,
+        }
+    }
+
+    /// Probed once at install time, never written to modules-load.d.
+    const fn on_demand(name: &'static str) -> Self {
+        Self {
+            name,
+            policy: ModuleLoadPolicy::Optional,
+            persist_at_boot: false,
         }
     }
 
     const fn optional(name: &'static str) -> Self {
         Self {
             name,
+            persist_at_boot: true,
             policy: ModuleLoadPolicy::Optional,
         }
     }
 }
 
-const KERNEL_MODULE_LOAD_PLAN: [KernelModuleLoad; 7] = [
+const KERNEL_MODULE_LOAD_PLAN: [KernelModuleLoad; 8] = [
     KernelModuleLoad::required("wmi"),
     KernelModuleLoad::required("sparse-keymap"),
     KernelModuleLoad::required("video"),
@@ -106,6 +126,12 @@ const KERNEL_MODULE_LOAD_PLAN: [KernelModuleLoad; 7] = [
     KernelModuleLoad::required(MODULE_NAME),
     KernelModuleLoad::optional(ACER_WMI_BATTERY_MODULE_NAME),
     KernelModuleLoad::optional(ACPI_EC_MODULE_NAME),
+    // Publishes the TCC offset as a cooling device. Intel-only, and it
+    // autoloads from a CPU modalias where the kernel knows the part, so it is
+    // probed once here and never forced at boot: on AMD or a kernel without it,
+    // a static entry would fail the modules-load service on every boot for a
+    // feature the machine simply does not have.
+    KernelModuleLoad::on_demand(predator_sense_protocol::temp_limit::KERNEL_MODULE),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1366,10 +1392,12 @@ impl Installer {
         // thermal restore goes first with a leading `-`, which makes it
         // non-fatal: a machine without facer.ko, or one whose BIOS update
         // dropped the recorded profile, must not fail the boot service. The
-        // battery restore stays last and unprefixed, so it still surfaces its
-        // own failure in `systemctl status` exactly as it did before this
-        // second command existed. Putting them the other way round would let a
-        // battery write error silently skip the thermal restore entirely.
+        // temperature ceiling follows, also non-fatal and for the same shape of
+        // reason: a CPU with no TCC offset, or a firmware that locks it, must
+        // not fail the boot. The battery restore stays last and unprefixed, so
+        // it still surfaces its own failure in `systemctl status` exactly as it
+        // did before these other commands existed. Putting them the other way
+        // round would let a battery write error silently skip the restores.
         let boot_unit = format!(
             "[Unit]\n\
              Description={}\n\
@@ -1377,12 +1405,16 @@ impl Installer {
              [Service]\n\
              Type=oneshot\n\
              ExecStart=-{} {} {}\n\
+             ExecStart=-{} {} {}\n\
              ExecStart={} {} {}\n\n\
              [Install]\n\
              WantedBy=multi-user.target\n",
             service::BOOT_DESCRIPTION,
             path::HELPER,
             HelperAction::BootReapplyThermal.as_str(),
+            self.user.home.display(),
+            path::HELPER,
+            HelperAction::BootReapplyTempLimit.as_str(),
             self.user.home.display(),
             path::HELPER,
             HelperAction::BootReapplyBattery.as_str(),
@@ -1397,6 +1429,9 @@ impl Installer {
 fn modules_load_config() -> String {
     let mut config = String::new();
     for module in KERNEL_MODULE_LOAD_PLAN {
+        if !module.persist_at_boot {
+            continue;
+        }
         config.push_str(module.name);
         config.push('\n');
     }
@@ -2004,8 +2039,21 @@ mod tests {
 
         assert_eq!(
             optional_modules,
-            [ACER_WMI_BATTERY_MODULE_NAME, ACPI_EC_MODULE_NAME]
+            [
+                ACER_WMI_BATTERY_MODULE_NAME,
+                ACPI_EC_MODULE_NAME,
+                // Only Intel parts publish the TCC offset, and the machine is
+                // fully usable without a temperature ceiling, so a failure to
+                // load this one must not fail the install.
+                predator_sense_protocol::temp_limit::KERNEL_MODULE,
+            ]
         );
+
+        // ...but it must not reach the static modules-load file, which has no
+        // optional entries: forcing it on AMD would fail that service at every
+        // boot.
+        assert!(!modules_load_config()
+            .contains(predator_sense_protocol::temp_limit::KERNEL_MODULE));
         assert_eq!(
             KERNEL_MODULE_LOAD_PLAN
                 .iter()
@@ -2030,15 +2078,20 @@ mod tests {
     }
 
     #[test]
-    fn renders_every_planned_module_in_boot_order() {
+    fn renders_every_persisted_module_in_boot_order() {
         let expected = KERNEL_MODULE_LOAD_PLAN
             .iter()
+            .filter(|module| module.persist_at_boot)
             .map(|module| module.name)
             .collect::<Vec<_>>()
             .join("\n")
             + "\n";
 
         assert_eq!(modules_load_config(), expected);
+        // The distinction has to be real, or the filter above is vacuous.
+        assert!(KERNEL_MODULE_LOAD_PLAN
+            .iter()
+            .any(|module| !module.persist_at_boot));
     }
 
     #[test]
