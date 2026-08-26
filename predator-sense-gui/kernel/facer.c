@@ -675,10 +675,19 @@ static struct quirk_entry quirk_acer_predator_ph317_53 = {
 	.cpu_fans = 1,
 	.gpu_fans = 1,
 };
+/*
+ * PH317-54, issue #39: this firmware answers 0x2 for the predator_v4
+ * sub-functions, so that path has to stay off, but ACER_CAP_PWM only
+ * depends on quirks->pwm (see find_quirks()) - the two are independent.
+ * Confirmed on real hardware: fan1/fan2 respond monotonically to pwm1/pwm2
+ * from 50% up (with a floor around 3000/3540 RPM below that), and turbo
+ * measurably drops package thermal throttling to zero.
+ */
 static struct quirk_entry quirk_acer_predator_ph317_54 = {
 	.turbo = 1,
 	.cpu_fans = 1,
 	.gpu_fans = 1,
+	.pwm = 1,
 };
 static struct quirk_entry quirk_acer_predator_ph317_56 = {
 	.turbo = 1,
