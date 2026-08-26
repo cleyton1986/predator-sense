@@ -30,8 +30,9 @@ pub use predator_sense_protocol::temp_limit::{Bound, Capability, Unavailable};
 /// failure would hide the worse case, where the *previous* record survives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Applied {
-    /// The ceiling is on disk. The next boot puts it back.
-    Recorded,
+    /// The next boot will bring this ceiling back: it is either recorded, or
+    /// it is the factory one and nothing on disk overrides it any more.
+    Persisted,
     /// Nothing is on disk. The ceiling holds until the machine is powered off.
     ThisBootOnly,
     /// Recording failed *and* the older record could not be removed - a
@@ -150,12 +151,62 @@ pub fn probe_through_helper() -> bool {
 /// Recording is part of applying rather than a separate call the caller could
 /// forget: the offset does not survive a power cycle, so a ceiling that is not
 /// written down is a ceiling that quietly disappears at the next boot.
-pub fn apply(celsius: u8, bound: Bound) -> Result<Applied, String> {
+///
+/// Asking for the factory ceiling records *nothing*, and clears whatever was
+/// there. The factory ceiling is the absence of an override, not an override
+/// that happens to equal today's factory value: a firmware update that moves
+/// that value - or a BIOS setting that does - would find the old number still
+/// written down and pin the machine to it at every boot, which is the opposite
+/// of what "restore default" was asked to do.
+pub fn apply(capability: Capability, celsius: u8, bound: Bound) -> Result<Applied, String> {
     crate::hardware::helper::execute(
         HelperAction::TempLimit,
         &[&celsius.to_string(), bound.as_str()],
     )?;
-    Ok(remember(celsius, bound))
+    Ok(match record_for(capability, celsius, bound) {
+        Some((celsius, bound)) => remember(celsius, bound),
+        None => forget(),
+    })
+}
+
+/// What the record should say once `celsius` is applied under `bound`.
+///
+/// `None` at the factory ceiling under the safe bound: that is the absence of
+/// an override, and the one selection whose record has to be removed rather
+/// than written. Shared with the UI so the two cannot disagree about which
+/// selection is "no override" - a disagreement there is a button that stays
+/// greyed out over a change that is real.
+pub fn record_for(capability: Capability, celsius: u8, bound: Bound) -> Option<(u8, Bound)> {
+    (celsius != capability.max_c() || bound != Bound::Safe).then_some((celsius, bound))
+}
+
+/// Drops the record, so nothing overrides the firmware at the next boot.
+fn forget() -> Applied {
+    let Some(path) = shared::last_limit_path() else {
+        return Applied::ThisBootOnly;
+    };
+    forget_at(&path)
+}
+
+fn forget_at(path: &Path) -> Applied {
+    match std::fs::remove_file(path) {
+        Ok(()) => Applied::Persisted,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Applied::Persisted,
+        Err(error) => {
+            eprintln!(
+                "temp-limit: stale record left at {}: {error}",
+                path.display()
+            );
+            match shared::remembered(path) {
+                // The override the user just asked to drop is still there, and
+                // still what the next boot will apply.
+                Some((recorded, _)) => Applied::StaleRecord(recorded),
+                // Unreadable or malformed: the helper refuses it at boot, so
+                // nothing will be restored from it either way.
+                None => Applied::Persisted,
+            }
+        }
+    }
 }
 
 /// Records the ceiling for the boot service, and says what the next boot will
@@ -180,7 +231,7 @@ fn remember(celsius: u8, bound: Bound) -> Applied {
 
 fn remember_at(path: &Path, celsius: u8, bound: Bound) -> Applied {
     let Err(error) = shared::remember(path, celsius, bound) else {
-        return Applied::Recorded;
+        return Applied::Persisted;
     };
     eprintln!("temp-limit: could not record {celsius} C: {error}");
 
@@ -200,7 +251,7 @@ fn remember_at(path: &Path, celsius: u8, bound: Bound) -> Applied {
                 // still hold a wider bound than the one just used - a double
                 // failure on the same path, and not one worth a message the
                 // user cannot act on.
-                Some((recorded, _)) if recorded == celsius => Applied::Recorded,
+                Some((recorded, _)) if recorded == celsius => Applied::Persisted,
                 Some((recorded, _)) => Applied::StaleRecord(recorded),
                 // Unreadable or malformed: the helper refuses it at boot, so
                 // nothing will be restored from it.
@@ -251,11 +302,58 @@ mod tests {
 
         // Running as root defeats the setup: the write goes through and there
         // is nothing to report. Nothing to assert then either.
-        if outcome == Applied::Recorded && shared::remembered(&path) == Some((95, Bound::Safe)) {
+        if outcome == Applied::Persisted && shared::remembered(&path) == Some((95, Bound::Safe)) {
             return;
         }
         // Not just "could not save": 80 C is what the next boot would restore,
         // and the user can only act on that if they are told the number.
+        assert_eq!(outcome, Applied::StaleRecord(80));
+    }
+
+    #[test]
+    fn the_factory_ceiling_is_the_absence_of_a_record_not_a_record_of_its_value() {
+        // Tjmax 105, but the firmware boots at offset 5 - so 100 C is this
+        // machine's factory ceiling, and 105 is not reachable at all.
+        let capability = Capability::new(105, 127, 0, 5);
+        assert_eq!(capability.max_c(), 100);
+
+        // Writing 100 down would survive a firmware update that moves the
+        // factory ceiling, and pin the machine to the old number forever.
+        assert_eq!(record_for(capability, 100, Bound::Safe), None);
+        assert_eq!(
+            record_for(capability, 95, Bound::Safe),
+            Some((95, Bound::Safe))
+        );
+        // The opt-in is still an override at the factory temperature: it widens
+        // the range the next session offers, so it has to be written down.
+        assert_eq!(
+            record_for(capability, 100, Bound::Hardware),
+            Some((100, Bound::Hardware))
+        );
+    }
+
+    #[test]
+    fn restoring_the_default_drops_the_record_and_says_so_when_it_cannot() {
+        let directory = sealed_directory("forget");
+        let path = directory.join("temp_limit");
+
+        // Nothing to drop is the outcome asked for, not a failure.
+        assert_eq!(forget_at(&path), Applied::Persisted);
+
+        shared::remember(&path, 80, Bound::Safe).expect("seed a record");
+        assert_eq!(forget_at(&path), Applied::Persisted);
+        assert_eq!(shared::remembered(&path), None);
+
+        shared::remember(&path, 80, Bound::Safe).expect("seed a record");
+        seal(&directory);
+        let outcome = forget_at(&path);
+        unseal(&directory);
+
+        // Running as root defeats the setup; nothing to assert then.
+        if outcome == Applied::Persisted {
+            return;
+        }
+        // The override the user asked to drop is what the next boot applies.
         assert_eq!(outcome, Applied::StaleRecord(80));
     }
 
@@ -268,7 +366,7 @@ mod tests {
         let outcome = remember_at(&path, 95, Bound::Safe);
         unseal(&directory);
 
-        if outcome == Applied::Recorded {
+        if outcome == Applied::Persisted {
             return;
         }
         assert_eq!(outcome, Applied::ThisBootOnly);
