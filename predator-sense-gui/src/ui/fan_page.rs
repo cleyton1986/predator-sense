@@ -696,7 +696,7 @@ fn temp_limit_slider(
     capability: crate::hardware::temp_limit::Capability,
     shown: Rc<Cell<Option<u8>>>,
 ) -> gtk::Box {
-    use crate::hardware::temp_limit::Bound;
+    use crate::hardware::temp_limit::{Applied, Bound};
 
     let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
 
@@ -851,10 +851,24 @@ fn temp_limit_slider(
                     // out from under them.
                     shown.set(Some(selected));
                     refresh(selected);
-                    if !outcome.persisted {
+                    match outcome {
+                        Applied::Recorded => {}
                         // The kernel took it, but it will not come back after a
                         // reboot - say so rather than implying it stuck.
-                        status.set_text(crate::i18n::t("temp_limit_not_persisted"));
+                        Applied::ThisBootOnly => {
+                            status.set_text(crate::i18n::t("temp_limit_not_persisted"));
+                        }
+                        // Worse than not saving: an older ceiling is still on
+                        // disk and is what the next boot will restore. Naming
+                        // it is the difference between "try again later" and
+                        // "delete this file before rebooting".
+                        Applied::StaleRecord(previous) => {
+                            status.set_text(&crate::i18n::tf(
+                                "temp_limit_stale_record",
+                                &[&previous.to_string()],
+                            ));
+                            status.add_css_class("error");
+                        }
                     }
                 }
                 Err(error) => {

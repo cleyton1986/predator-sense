@@ -419,6 +419,12 @@ pub(crate) fn run() -> AppResult {
             // cycle, and unlike the lighting nothing else would notice - the
             // index changes with no event anywhere.
             reapply_thermal_profile(&mut logger);
+            // The TCC offset does not always survive a suspend cycle either -
+            // it is a register the firmware owns, restored to its own value on
+            // resume on some machines - and like the firmware profile, nothing
+            // else would notice: the ceiling silently goes back up with no
+            // event anywhere. A no-op when the hardware still holds it.
+            reapply_temp_limit(&mut logger);
             restore_lighting_with_retries(&config_path, &mut logger);
         }
         last_suspend_offset = current_suspend_offset;
