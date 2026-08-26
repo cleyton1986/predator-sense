@@ -698,6 +698,14 @@ fn temp_limit_slider(
 ) -> gtk::Box {
     use crate::hardware::temp_limit::{Applied, Bound};
 
+    // A part whose whole expressible range is a single ceiling has nothing to
+    // offer: no value to choose, and no scale either - GTK refuses one whose
+    // ends meet. Reachable when the firmware boots at the deepest offset the
+    // kernel accepts, which leaves the factory ceiling as the only value.
+    if capability.min_c_within(Bound::Hardware) >= capability.max_c() {
+        return temp_limit_single_value(capability);
+    }
+
     let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
 
     let hint = gtk::Label::new(Some(crate::i18n::t("temp_limit_hint")));
@@ -721,12 +729,19 @@ fn temp_limit_slider(
         recorded.get().map(|(_, bound)| bound).unwrap_or_default(),
     ));
 
+    // Built over the widest range the part can express, then narrowed to the
+    // bound in force. Not built at the narrowed range directly, because
+    // `gtk_scale_new_with_range` requires min < max - it returns NULL otherwise
+    // and the binding turns that into a panic - and the safe range really does
+    // collapse to one value on a part whose factory ceiling is at or below the
+    // safety floor.
     let scale = gtk::Scale::with_range(
         gtk::Orientation::Horizontal,
-        f64::from(capability.min_c_within(bound.get())),
+        f64::from(capability.min_c_within(Bound::Hardware)),
         f64::from(capability.max_c()),
         1.0,
     );
+    set_scale_range(&scale, &capability, bound.get());
     // A ceiling set outside this app can sit below the floor the slider offers,
     // so the starting position is clamped into the range actually on show.
     let initial = recorded
@@ -821,6 +836,8 @@ fn temp_limit_slider(
     {
         let scale = scale.clone();
         let unlock = unlock.clone();
+        let bound = bound.clone();
+        let refresh = refresh.clone();
         reset.connect_clicked(move |_| {
             // Only stages the change: applying stays the one explicit step, so
             // "restore default" behaves like every other change here. Clearing
@@ -831,6 +848,15 @@ fn temp_limit_slider(
             if let Some(unlock) = unlock.as_ref() {
                 unlock.set_active(false);
             }
+            // And directly, because there is not always a checkbox to clear: a
+            // record carrying the opt-in can be opened on a part where the
+            // switch is not offered at all - the home moved to another machine,
+            // or the kernel reports a narrower range than it used to - and this
+            // button is then the only way left to revoke it.
+            bound.set(Bound::Safe);
+            // The two steps above only refresh when they change something, and
+            // a machine already sitting at its factory ceiling changes neither.
+            refresh(scale.value().round() as u8);
         });
     }
 
@@ -876,6 +902,12 @@ fn temp_limit_slider(
                             ));
                             status.add_css_class("error");
                         }
+                        // The ceiling is right and the opt-in is what survived,
+                        // so naming a temperature here would say nothing.
+                        Applied::StaleConsent => {
+                            status.set_text(crate::i18n::t("temp_limit_stale_consent"));
+                            status.add_css_class("error");
+                        }
                     }
                 }
                 Err(error) => {
@@ -897,6 +929,46 @@ fn temp_limit_slider(
     }
 
     row
+}
+
+/// The one ceiling this part can express, said plainly.
+///
+/// No controls: a slider over a single value is a control that cannot be used,
+/// and applying what is already in effect would only cost an authentication
+/// prompt.
+fn temp_limit_single_value(capability: crate::hardware::temp_limit::Capability) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let note = gtk::Label::new(Some(&crate::i18n::tf(
+        "temp_limit_single_value",
+        &[&capability.max_c().to_string()],
+    )));
+    note.set_halign(gtk::Align::Start);
+    note.set_wrap(true);
+    note.add_css_class("dim-label");
+    row.append(&note);
+    row
+}
+
+/// Narrows the scale to what `bound` allows.
+///
+/// A range that collapses to a single value - the factory ceiling at or below
+/// the safety floor - parks the handle on it and goes insensitive instead of
+/// asking GTK for a zero-width range. The opt-in, where it is offered, widens
+/// it again through this same path.
+fn set_scale_range(
+    scale: &gtk::Scale,
+    capability: &crate::hardware::temp_limit::Capability,
+    bound: crate::hardware::temp_limit::Bound,
+) {
+    let floor = capability.min_c_within(bound);
+    let ceiling = capability.max_c();
+    if floor < ceiling {
+        scale.set_range(f64::from(floor), f64::from(ceiling));
+        scale.set_sensitive(true);
+    } else {
+        scale.set_value(f64::from(ceiling));
+        scale.set_sensitive(false);
+    }
 }
 
 /// Opt-in to the deeper, hardware-limited range.
@@ -935,8 +1007,7 @@ fn temp_limit_unlock(
                 Bound::Safe
             };
             bound.set(selected);
-            let floor = capability.min_c_within(selected);
-            scale.set_range(f64::from(floor), f64::from(capability.max_c()));
+            set_scale_range(&scale, &capability, selected);
             // Narrowing the range leaves the handle below the new floor, and
             // GTK clamps it silently; re-reading keeps the status line and the
             // Apply button agreeing with what is actually on screen.

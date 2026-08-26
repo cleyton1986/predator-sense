@@ -39,6 +39,10 @@ pub enum Applied {
     /// read-only config directory fails both the same way. The next boot will
     /// restore the ceiling it names, not the one just applied.
     StaleRecord(u8),
+    /// The same, for a record that names the ceiling just applied but keeps a
+    /// bound the user revoked: the temperature is right, the opt-in past the
+    /// safety floor is the part that survived.
+    StaleConsent,
 }
 
 fn sysfs() -> &'static Path {
@@ -245,13 +249,15 @@ fn remember_at(path: &Path, celsius: u8, bound: Bound) -> Applied {
                 path.display()
             );
             match previous {
-                // A record naming the ceiling that was just applied is not
-                // stale: the next boot restores what is in effect now, which is
-                // what a successful write would have promised anyway. It can
-                // still hold a wider bound than the one just used - a double
-                // failure on the same path, and not one worth a message the
-                // user cannot act on.
-                Some((recorded, _)) if recorded == celsius => Applied::Persisted,
+                // A record naming exactly what was just applied is not stale:
+                // the next boot restores what is in effect now, which is what a
+                // successful write would have promised anyway.
+                Some(record) if record == (celsius, bound) => Applied::Persisted,
+                // Same ceiling, but the opt-in the user just revoked survived.
+                // Worth its own message: the temperature says nothing here, and
+                // next session the deeper range is offered again from a consent
+                // that was withdrawn.
+                Some((recorded, _)) if recorded == celsius => Applied::StaleConsent,
                 Some((recorded, _)) => Applied::StaleRecord(recorded),
                 // Unreadable or malformed: the helper refuses it at boot, so
                 // nothing will be restored from it.
@@ -330,6 +336,45 @@ mod tests {
             record_for(capability, 100, Bound::Hardware),
             Some((100, Bound::Hardware))
         );
+    }
+
+    #[test]
+    fn a_revoked_opt_in_that_survives_a_failed_write_is_reported_on_its_own() {
+        let directory = sealed_directory("stale-consent");
+        let path = directory.join("temp_limit");
+        shared::remember(&path, 80, Bound::Hardware).expect("seed the older record");
+        seal(&directory);
+
+        // Same ceiling, narrower bound: the temperature says nothing about what
+        // went wrong, so it is the consent that has to be named.
+        let outcome = remember_at(&path, 80, Bound::Safe);
+        unseal(&directory);
+
+        // Running as root defeats the setup; nothing to assert then.
+        if outcome == Applied::Persisted && shared::remembered(&path) == Some((80, Bound::Safe)) {
+            return;
+        }
+        assert_eq!(outcome, Applied::StaleConsent);
+    }
+
+    #[test]
+    fn a_range_that_collapses_to_one_value_is_recognised_before_a_scale_is_built() {
+        // Firmware booting at the deepest offset the kernel accepts: the
+        // factory ceiling is the only value this part can express, and GTK
+        // refuses a scale whose ends meet.
+        let single = Capability::new(105, 20, 20, 20);
+        assert_eq!(single.min_c_within(Bound::Hardware), single.max_c());
+
+        // The case the scale is built at the hardware range for: Tjmax at or
+        // below the safety floor collapses the *safe* range to one value while
+        // the hardware range still has somewhere to go.
+        let low = Capability::new(65, 63, 0, 0);
+        assert_eq!(low.min_c_within(Bound::Safe), low.max_c());
+        assert!(low.min_c_within(Bound::Hardware) < low.max_c());
+
+        // And the ordinary part, which neither branch applies to.
+        let usual = Capability::new(105, 127, 0, 5);
+        assert!(usual.min_c_within(Bound::Safe) < usual.max_c());
     }
 
     #[test]
