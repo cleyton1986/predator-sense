@@ -565,55 +565,79 @@ fn tcc_factory_offset(sysfs: &Path, current_offset: u8) -> AppResult<u8> {
         return Ok(current_offset);
     }
     let path = Path::new(temp_limit::FACTORY_OFFSET_FILE);
-    match fs::read_to_string(path) {
-        Ok(recorded) => {
-            return recorded.trim().parse().map_err(|error| {
-                fail(format!(
-                    "temp-limit: unreadable {}: {error} (delete it to re-snapshot)",
-                    path.display()
-                ))
-            });
-        }
+    let offset = match fs::read_to_string(path) {
+        Ok(recorded) => Some(recorded.trim().parse().map_err(|error| {
+            fail(format!(
+                "temp-limit: unreadable {}: {error} (delete it to re-snapshot)",
+                path.display()
+            ))
+        })?),
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
             return Err(fail(format!(
                 "temp-limit: cannot read {}: {error}",
                 path.display()
             )));
         }
-        Err(_) => {}
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
+        Err(_) => None,
+    };
+    if offset.is_none() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                fail(format!(
+                    "temp-limit: cannot create {}: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        fs::write(path, format!("{current_offset}\n")).map_err(|error| {
             fail(format!(
-                "temp-limit: cannot create {}: {error}",
-                parent.display()
+                "temp-limit: cannot record the factory offset in {}: {error}",
+                path.display()
             ))
         })?;
-        set_readable(parent, 0o755)?;
     }
-    fs::write(path, format!("{current_offset}\n")).map_err(|error| {
-        fail(format!(
-            "temp-limit: cannot record the factory offset in {}: {error}",
-            path.display()
-        ))
-    })?;
-    set_readable(path, 0o644)?;
-    Ok(current_offset)
+    // Also on the branch that found an existing snapshot. A call whose chmod
+    // failed - or one from before this was set at all - leaves a file behind
+    // that every later call would hand back unreadable, applying the ceiling
+    // happily while the GUI still cannot see what the factory one was.
+    if let Some(parent) = path.parent() {
+        ensure_readable(parent, 0o755)?;
+    }
+    ensure_readable(path, 0o644)?;
+    Ok(offset.unwrap_or(current_offset))
 }
 
-/// Puts an explicit mode on something the unprivileged GUI has to read.
+/// Makes sure the unprivileged GUI can get at something, repairing the mode if
+/// it cannot.
 ///
-/// An error rather than best effort: a snapshot nobody can read is the case
-/// this whole path exists to prevent, and it would fail silently - the helper
-/// would report success while the GUI kept reading the lowered offset as the
-/// factory one.
-fn set_readable(path: &Path, mode: u32) -> AppResult {
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|error| {
-        fail(format!(
-            "temp-limit: cannot make {} readable: {error}",
-            path.display()
-        ))
-    })
+/// The chmod itself is best effort and the result is what is checked: the mode
+/// the file ends up with is what matters, not whether this call is what set it.
+/// A failure is an error rather than a warning, because a snapshot nobody can
+/// read is exactly the case this path exists to prevent, and it would fail
+/// silently - the helper reporting success while the GUI kept reading a lowered
+/// offset as the factory one.
+fn ensure_readable(path: &Path, mode: u32) -> AppResult {
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+    let actual = fs::metadata(path)
+        .map_err(|error| {
+            fail(format!(
+                "temp-limit: cannot stat {}: {error}",
+                path.display()
+            ))
+        })?
+        .permissions()
+        .mode();
+    // What the mode being asked for grants to everyone else - read on the
+    // file, read and traverse on the directory holding it.
+    let needed = mode & 0o007;
+    if actual & needed != needed {
+        return Err(fail(format!(
+            "temp-limit: {} is mode {:o}, which the desktop session cannot read",
+            path.display(),
+            actual & 0o777
+        )));
+    }
+    Ok(())
 }
 
 /// What this CPU allows as a temperature ceiling.
@@ -728,10 +752,32 @@ fn temp_limit_apply(value: &str, bound: &str, sysfs: &Path) -> AppResult {
 
     let device = tcc_cooling_device(sysfs)?
         .ok_or_else(|| fail("temp-limit: TCC cooling device disappeared"))?;
-    write_attr("temp-limit", &offset.to_string(), &device.join("cur_state"))?;
+    let attribute = device.join("cur_state");
+    let previous = capability.tjmax_c.saturating_sub(capability.current_c);
+    write_attr("temp-limit", &offset.to_string(), &attribute)?;
 
-    // Read back: the kernel rejects some values with a write that appears to
-    // succeed, and a silently ignored ceiling is worse than a reported failure.
+    // Either the ceiling is applied and confirmed, or the register goes back
+    // where it was. A failure that leaves it somewhere else is the one outcome
+    // the caller cannot act on: the record on the user's side still names the
+    // old ceiling, so a half-applied change disagrees with it until the next
+    // boot, and nothing in the error says which value the machine is actually
+    // running.
+    let Err(error) = temp_limit_confirm(sysfs, celsius) else {
+        return Ok(());
+    };
+    Err(
+        match write_attr("temp-limit rollback", &previous.to_string(), &attribute) {
+            Ok(()) => error,
+            Err(rollback) => fail(format!("{error}; {rollback}")),
+        },
+    )
+}
+
+/// Reads the ceiling back after writing it.
+///
+/// The kernel rejects some values with a write that appears to succeed, and a
+/// silently ignored ceiling is worse than a reported failure.
+fn temp_limit_confirm(sysfs: &Path, celsius: u8) -> AppResult {
     let applied = temp_limit_capability(sysfs)?
         .ok_or_else(|| fail("temp-limit: cannot confirm the ceiling"))?;
     if applied.current_c != celsius {
