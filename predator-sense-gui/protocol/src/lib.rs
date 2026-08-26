@@ -994,6 +994,12 @@ pub mod temp_limit {
     /// demand.
     pub const KERNEL_MODULE: &str = "intel_tcc_cooling";
 
+    /// Module that publishes `Tjmax`. Usually autoloaded from the CPU modalias,
+    /// but it is loadable - and without it the offset device alone cannot say
+    /// what temperature the offset counts down from, so the helper loads it on
+    /// demand too rather than calling the machine unsupported.
+    pub const CORETEMP_MODULE: &str = "coretemp";
+
     /// Where the offset this boot started with is recorded.
     ///
     /// Under `/run` on purpose: it is cleared on every boot, so whatever is
