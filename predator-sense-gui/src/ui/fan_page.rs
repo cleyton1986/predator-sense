@@ -696,7 +696,7 @@ fn temp_limit_slider(
     capability: crate::hardware::temp_limit::Capability,
     shown: Rc<Cell<Option<u8>>>,
 ) -> gtk::Box {
-    use crate::hardware::temp_limit::{Applied, Bound};
+    use crate::hardware::temp_limit::Bound;
 
     // A part whose whole expressible range is a single ceiling has nothing to
     // offer: no value to choose, and no scale either - GTK refuses one whose
@@ -884,31 +884,7 @@ fn temp_limit_slider(
                     // out from under them.
                     shown.set(Some(selected));
                     refresh(selected);
-                    match outcome {
-                        Applied::Persisted => {}
-                        // The kernel took it, but it will not come back after a
-                        // reboot - say so rather than implying it stuck.
-                        Applied::ThisBootOnly => {
-                            status.set_text(crate::i18n::t("temp_limit_not_persisted"));
-                        }
-                        // Worse than not saving: an older ceiling is still on
-                        // disk and is what the next boot will restore. Naming
-                        // it is the difference between "try again later" and
-                        // "delete this file before rebooting".
-                        Applied::StaleRecord(previous) => {
-                            status.set_text(&crate::i18n::tf(
-                                "temp_limit_stale_record",
-                                &[&previous.to_string()],
-                            ));
-                            status.add_css_class("error");
-                        }
-                        // The ceiling is right and the opt-in is what survived,
-                        // so naming a temperature here would say nothing.
-                        Applied::StaleConsent => {
-                            status.set_text(crate::i18n::t("temp_limit_stale_consent"));
-                            status.add_css_class("error");
-                        }
-                    }
+                    show_persistence(&status, outcome);
                 }
                 Err(error) => {
                     // Keep the handle where the user left it - moving it back
@@ -937,6 +913,8 @@ fn temp_limit_slider(
 /// and applying what is already in effect would only cost an authentication
 /// prompt.
 fn temp_limit_single_value(capability: crate::hardware::temp_limit::Capability) -> gtk::Box {
+    use crate::hardware::temp_limit::Bound;
+
     let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
     let note = gtk::Label::new(Some(&crate::i18n::tf(
         "temp_limit_single_value",
@@ -946,7 +924,83 @@ fn temp_limit_single_value(capability: crate::hardware::temp_limit::Capability) 
     note.set_wrap(true);
     note.add_css_class("dim-label");
     row.append(&note);
+
+    // A record outlives the range it was made in: the home moves to another
+    // machine, a firmware update narrows what the kernel accepts. Without a way
+    // to clear it from here it would sit there until the wider range came back,
+    // and then apply itself.
+    if crate::hardware::temp_limit::remembered().is_none() {
+        return row;
+    }
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    actions.set_margin_top(2);
+    let status = gtk::Label::new(None);
+    status.set_halign(gtk::Align::Start);
+    status.set_hexpand(true);
+    status.add_css_class("dim-label");
+    actions.append(&status);
+
+    let reset = gtk::Button::with_label(crate::i18n::t("temp_limit_reset"));
+    reset.add_css_class("flat");
+    actions.append(&reset);
+    row.append(&actions);
+
+    reset.connect_clicked(move |button| {
+        button.set_sensitive(false);
+        // The factory ceiling under the safe bound, which is what drops the
+        // record - and still worth writing, since the register can sit above
+        // this machine's factory ceiling when something else moved it.
+        match crate::hardware::temp_limit::apply(capability, capability.max_c(), Bound::Safe) {
+            Ok(outcome) => {
+                status.remove_css_class("error");
+                status.set_text(crate::i18n::t("temp_limit_applied"));
+                show_persistence(&status, outcome);
+                // Whatever happened, the button belongs to the record: it stays
+                // only while there is still one to clear.
+                button.set_sensitive(crate::hardware::temp_limit::remembered().is_some());
+            }
+            Err(error) => {
+                status.set_text(&error);
+                status.add_css_class("error");
+                button.set_sensitive(true);
+            }
+        }
+    });
     row
+}
+
+/// Says what the next boot will do, when it is not simply "the same as now".
+///
+/// Shared by every path that applies, so a machine with a stale record hears
+/// about it wherever the change was made from.
+fn show_persistence(status: &gtk::Label, outcome: crate::hardware::temp_limit::Applied) {
+    use crate::hardware::temp_limit::Applied;
+    let message = match outcome {
+        Applied::Persisted => return,
+        // The kernel took it, but it will not come back after a reboot - say so
+        // rather than implying it stuck.
+        Applied::ThisBootOnly => crate::i18n::t("temp_limit_not_persisted").to_string(),
+        // Worse than not saving: an older ceiling is still on disk and is what
+        // the next boot will restore. Naming it is the difference between "try
+        // again later" and "delete this file before rebooting".
+        Applied::StaleRecord(previous) => {
+            crate::i18n::tf("temp_limit_stale_record", &[&previous.to_string()])
+        }
+        // The ceiling is right and the opt-in is what survived, so naming a
+        // temperature here would say nothing.
+        Applied::StaleConsent => crate::i18n::t("temp_limit_stale_consent").to_string(),
+        // Nothing can be said about what is in the file, so the only useful
+        // thing to give the user is where it is.
+        Applied::StaleUnknown => crate::i18n::tf(
+            "temp_limit_stale_unknown",
+            &[&crate::hardware::temp_limit::record_path()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default()],
+        ),
+    };
+    status.set_text(&message);
+    status.add_css_class("error");
 }
 
 /// Narrows the scale to what `bound` allows.

@@ -43,6 +43,10 @@ pub enum Applied {
     /// bound the user revoked: the temperature is right, the opt-in past the
     /// safety floor is the part that survived.
     StaleConsent,
+    /// A record survived and this process cannot read it, so what the next boot
+    /// will make of it is unknown. Not the same as malformed: the boot service
+    /// runs as root and may parse what this could not.
+    StaleUnknown,
 }
 
 fn sysfs() -> &'static Path {
@@ -193,23 +197,59 @@ fn forget() -> Applied {
 }
 
 fn forget_at(path: &Path) -> Applied {
-    match std::fs::remove_file(path) {
-        Ok(()) => Applied::Persisted,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Applied::Persisted,
-        Err(error) => {
+    if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
             eprintln!(
                 "temp-limit: stale record left at {}: {error}",
                 path.display()
             );
-            match shared::remembered(path) {
-                // The override the user just asked to drop is still there, and
-                // still what the next boot will apply.
-                Some((recorded, _)) => Applied::StaleRecord(recorded),
-                // Unreadable or malformed: the helper refuses it at boot, so
-                // nothing will be restored from it either way.
-                None => Applied::Persisted,
-            }
         }
+    }
+    survivor(path, None)
+}
+
+/// What the next boot will do, judged from whatever is still on disk.
+///
+/// `wanted` is what the record should say now - `None` when it should be gone.
+///
+/// The distinction that matters here is between a record this process cannot
+/// read and one it can read and finds malformed. Malformed is harmless: the
+/// boot service parses it with the same code and refuses it. Unreadable is not:
+/// the service runs as root and may well parse what this process could not, so
+/// it cannot be reported as a record successfully dealt with.
+fn survivor(path: &Path, wanted: Option<(u8, Bound)>) -> Applied {
+    // Nothing left behind is the outcome asked for when the record was meant to
+    // go, and a lost setting when it was meant to be written.
+    let gone = if wanted.is_none() {
+        Applied::Persisted
+    } else {
+        Applied::ThisBootOnly
+    };
+    match std::fs::read_to_string(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => gone,
+        Err(error) => {
+            eprintln!(
+                "temp-limit: cannot tell what is left at {}: {error}",
+                path.display()
+            );
+            Applied::StaleUnknown
+        }
+        // Readable, so `remembered` speaks for the boot service too.
+        Ok(_) => match (shared::remembered(path), wanted) {
+            // Malformed: refused at boot, so nothing is restored from it.
+            (None, _) => gone,
+            // A record naming exactly what was asked for is not stale: the next
+            // boot restores what is in effect now.
+            (Some(record), Some(asked)) if record == asked => Applied::Persisted,
+            // Same ceiling, but the opt-in the user just revoked survived. Worth
+            // its own outcome: the temperature says nothing here, and next
+            // session the deeper range is offered again from a withdrawn
+            // consent.
+            (Some((recorded, _)), Some((celsius, _))) if recorded == celsius => {
+                Applied::StaleConsent
+            }
+            (Some((recorded, _)), _) => Applied::StaleRecord(recorded),
+        },
     }
 }
 
@@ -238,33 +278,20 @@ fn remember_at(path: &Path, celsius: u8, bound: Bound) -> Applied {
         return Applied::Persisted;
     };
     eprintln!("temp-limit: could not record {celsius} C: {error}");
-
-    let previous = shared::remembered(path);
-    match std::fs::remove_file(path) {
-        Ok(()) => Applied::ThisBootOnly,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Applied::ThisBootOnly,
-        Err(error) => {
+    if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
             eprintln!(
                 "temp-limit: stale record left at {}: {error}",
                 path.display()
             );
-            match previous {
-                // A record naming exactly what was just applied is not stale:
-                // the next boot restores what is in effect now, which is what a
-                // successful write would have promised anyway.
-                Some(record) if record == (celsius, bound) => Applied::Persisted,
-                // Same ceiling, but the opt-in the user just revoked survived.
-                // Worth its own message: the temperature says nothing here, and
-                // next session the deeper range is offered again from a consent
-                // that was withdrawn.
-                Some((recorded, _)) if recorded == celsius => Applied::StaleConsent,
-                Some((recorded, _)) => Applied::StaleRecord(recorded),
-                // Unreadable or malformed: the helper refuses it at boot, so
-                // nothing will be restored from it.
-                None => Applied::ThisBootOnly,
-            }
         }
     }
+    survivor(path, Some((celsius, bound)))
+}
+
+/// Where the record lives, for messages that ask the user to go and look at it.
+pub fn record_path() -> Option<PathBuf> {
+    shared::last_limit_path()
 }
 
 /// The ceiling the user last asked for, and the bound it was allowed under.
@@ -355,6 +382,32 @@ mod tests {
             return;
         }
         assert_eq!(outcome, Applied::StaleConsent);
+    }
+
+    #[test]
+    fn a_record_this_process_cannot_read_is_not_a_record_it_can_vouch_for() {
+        let directory = sealed_directory("unreadable-record");
+        let path = directory.join("temp_limit");
+        shared::remember(&path, 80, Bound::Safe).expect("seed a record");
+        // Unreadable here, but the boot service reads the same path as root and
+        // would parse it happily - so "cannot read it" is not evidence that
+        // nothing will be restored from it.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("hide");
+        seal(&directory);
+
+        let outcome = forget_at(&path);
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o644));
+        unseal(&directory);
+
+        // Running as root defeats the setup: nothing is hidden from it.
+        if outcome != Applied::StaleUnknown {
+            assert!(
+                matches!(outcome, Applied::Persisted | Applied::StaleRecord(80)),
+                "unexpected outcome {outcome:?}"
+            );
+            return;
+        }
+        assert_eq!(outcome, Applied::StaleUnknown);
     }
 
     #[test]
