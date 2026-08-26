@@ -765,12 +765,21 @@ fn temp_limit_apply(value: &str, bound: &str, sysfs: &Path) -> AppResult {
     let Err(error) = temp_limit_confirm(sysfs, celsius) else {
         return Ok(());
     };
-    Err(
-        match write_attr("temp-limit rollback", &previous.to_string(), &attribute) {
-            Ok(()) => error,
-            Err(rollback) => fail(format!("{error}; {rollback}")),
-        },
-    )
+    // The rollback is read back too. It goes through the interface that just
+    // failed to confirm, and the whole reason this function reads anything back
+    // is that the kernel can accept a write and leave the register alone - so
+    // treating the rollback's own write as proof would put the machine in
+    // exactly the state the rollback exists to avoid, under an error that reads
+    // like an ordinary refusal.
+    let restored = write_attr("temp-limit rollback", &previous.to_string(), &attribute)
+        .and_then(|()| temp_limit_confirm(sysfs, capability.current_c));
+    Err(match restored {
+        Ok(()) => error,
+        Err(rollback) => fail(format!(
+            "{error}; and the previous {} C ceiling could not be put back: {rollback}",
+            capability.current_c
+        )),
+    })
 }
 
 /// Reads the ceiling back after writing it.
