@@ -449,24 +449,28 @@ fn ensure_arity(action: HelperAction, args: &[String]) -> AppResult {
     }
 }
 
-
-/// Best-effort `modprobe` of the TCC cooling driver.
+/// Best-effort `modprobe`.
 ///
-/// The module autoloads from a CPU modalias only where the running kernel
-/// already knows the part, which is why it is not simply left to udev. Failure
-/// is ignored on purpose: on AMD, on a kernel without the module, or on
+/// Failure is ignored on purpose: on AMD, on a kernel without the module, or on
 /// firmware that locks the offset, there is nothing to load and nothing to
 /// report - the caller finds no device and says so.
-fn tcc_ensure_module(sysfs: &Path) {
+fn load_module(sysfs: &Path, module: &str) {
     // Only meaningful against the real sysfs; a fixture tree has no modules.
-    if sysfs != Path::new(path::REAL_SYSFS)
-        || matches!(tcc_cooling_device(sysfs), Ok(Some(_)))
-    {
+    if sysfs != Path::new(path::REAL_SYSFS) {
         return;
     }
-    let _ = Command::new(external::MODPROBE)
-        .arg(temp_limit::KERNEL_MODULE)
-        .output();
+    let _ = Command::new(external::MODPROBE).arg(module).output();
+}
+
+/// Loads the TCC cooling driver unless its device is already there.
+///
+/// The module autoloads from a CPU modalias only where the running kernel
+/// already knows the part, which is why it is not simply left to udev.
+fn tcc_ensure_module(sysfs: &Path) {
+    if matches!(tcc_cooling_device(sysfs), Ok(Some(_))) {
+        return;
+    }
+    load_module(sysfs, temp_limit::KERNEL_MODULE);
 }
 
 /// Path of the TCC offset cooling device, if the kernel published one.
@@ -534,22 +538,57 @@ fn tjmax_celsius(sysfs: &Path) -> AppResult<Option<u8>> {
 /// The offset this boot started with, recorded once per boot under `/run`.
 ///
 /// Written on the first privileged call of a boot, before anything here has
-/// changed the register, so it captures the firmware's own ceiling. Best
-/// effort: if `/run` cannot be written the current offset is used, which is
-/// correct as long as nothing has moved it yet - and only ever loses the
-/// distinction between the factory ceiling and Tjmax.
-fn tcc_factory_offset(current_offset: u8) -> u8 {
+/// changed the register, so it captures the firmware's own ceiling.
+///
+/// Not best effort. A failed snapshot is an error rather than a fallback to the
+/// current offset: the very next caller is the readback that runs *after* the
+/// register was lowered, and it would then record the user's own ceiling as the
+/// factory one - making the lowered value the new maximum, with no way to raise
+/// it again until reboot. Failing here happens before any write, so the machine
+/// is left as the firmware set it.
+///
+/// A record that exists but cannot be parsed is refused for the same reason:
+/// overwriting it would mean guessing that nothing has moved the register yet,
+/// which is exactly what this file exists to avoid guessing.
+fn tcc_factory_offset(sysfs: &Path, current_offset: u8) -> AppResult<u8> {
+    // A fixture tree has no register to snapshot, and the path is absolute -
+    // there is nothing under it that a test could redirect.
+    if sysfs != Path::new(path::REAL_SYSFS) {
+        return Ok(current_offset);
+    }
     let path = Path::new(temp_limit::FACTORY_OFFSET_FILE);
-    if let Ok(recorded) = fs::read_to_string(path) {
-        if let Ok(offset) = recorded.trim().parse() {
-            return offset;
+    match fs::read_to_string(path) {
+        Ok(recorded) => {
+            return recorded.trim().parse().map_err(|error| {
+                fail(format!(
+                    "temp-limit: unreadable {}: {error} (delete it to re-snapshot)",
+                    path.display()
+                ))
+            });
         }
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(fail(format!(
+                "temp-limit: cannot read {}: {error}",
+                path.display()
+            )));
+        }
+        Err(_) => {}
     }
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent).map_err(|error| {
+            fail(format!(
+                "temp-limit: cannot create {}: {error}",
+                parent.display()
+            ))
+        })?;
     }
-    let _ = fs::write(path, format!("{current_offset}\n"));
-    current_offset
+    fs::write(path, format!("{current_offset}\n")).map_err(|error| {
+        fail(format!(
+            "temp-limit: cannot record the factory offset in {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(current_offset)
 }
 
 /// What this CPU allows as a temperature ceiling.
@@ -562,10 +601,22 @@ fn temp_limit_capability(sysfs: &Path) -> AppResult<Option<Capability>> {
     let Some(device) = tcc_cooling_device(sysfs)? else {
         return Ok(None);
     };
-    let Some(tjmax_c) = tjmax_celsius(sysfs)? else {
-        // The offset is meaningless without the temperature it counts down
-        // from, so this is unsupported rather than an error.
-        return Ok(None);
+    let tjmax_c = match tjmax_celsius(sysfs)? {
+        Some(tjmax_c) => tjmax_c,
+        None => {
+            // `coretemp` is loadable too, and on a machine where it was not
+            // autoloaded the offset device alone says nothing: the register is
+            // there, only the temperature it counts down from is missing.
+            // Reporting that as unsupported would hide a control the CPU has.
+            load_module(sysfs, temp_limit::CORETEMP_MODULE);
+            match tjmax_celsius(sysfs)? {
+                Some(tjmax_c) => tjmax_c,
+                // The offset is meaningless without Tjmax, so with the driver
+                // loaded and still nothing to read this is unsupported rather
+                // than an error.
+                None => return Ok(None),
+            }
+        }
     };
     let max_offset = read_attr("tcc max_state", &device.join("max_state"))?
         .trim()
@@ -575,7 +626,7 @@ fn temp_limit_capability(sysfs: &Path) -> AppResult<Option<Capability>> {
         .trim()
         .parse::<u8>()
         .map_err(|error| fail(format!("temp-limit: unreadable cur_state: {error}")))?;
-    let factory_offset = tcc_factory_offset(current_offset);
+    let factory_offset = tcc_factory_offset(sysfs, current_offset)?;
     Ok(Some(Capability::new(
         tjmax_c,
         max_offset,
@@ -637,11 +688,10 @@ fn temp_limit_apply(value: &str, bound: &str, sysfs: &Path) -> AppResult {
     // Rejected, not clamped: an out-of-range value here comes from a file the
     // user can edit or a stale record, never from the slider, and silently
     // turning it into the deepest offset available is how a machine ends up
-    // permanently throttled with no error anywhere.
-    // Rejected, not clamped. Under the default bound the floor is the safety
-    // one, which the caller has to opt out of explicitly - a value below it
-    // coming from a file nobody confirmed is exactly what that opt-in exists to
-    // catch.
+    // permanently throttled with no error anywhere. Under the default bound the
+    // floor is the safety one, which the caller has to opt out of explicitly -
+    // a value below it coming from a file nobody confirmed is exactly what that
+    // opt-in exists to catch.
     let offset = capability.offset_for_within(celsius, bound).ok_or_else(|| {
         fail(format!(
             "temp-limit: {celsius} C is outside {}..={} C for this CPU under the {} bound",
@@ -2075,6 +2125,113 @@ mod tests {
         let error =
             reapply_thermal(&fixture.path().join("sys"), Path::new("relative/home")).unwrap_err();
         assert!(error.contains("absolute"), "{error}");
+    }
+
+    /// A TCC offset cooling device, plus a decoy the scan has to walk past.
+    fn tcc_device(root: &Path, max_state: u8, cur_state: u8) {
+        let decoy = format!("{}/cooling_device0", temp_limit::THERMAL_CLASS);
+        write(root, &format!("{decoy}/type"), "Processor");
+        write(root, &format!("{decoy}/max_state"), "3");
+        write(root, &format!("{decoy}/cur_state"), "0");
+
+        let base = format!("{}/cooling_device1", temp_limit::THERMAL_CLASS);
+        write(
+            root,
+            &format!("{base}/type"),
+            temp_limit::COOLING_DEVICE_TYPE,
+        );
+        write(root, &format!("{base}/max_state"), &max_state.to_string());
+        write(root, &format!("{base}/cur_state"), &cur_state.to_string());
+    }
+
+    fn coretemp_hwmon(root: &Path, tjmax_c: u8) {
+        let decoy = format!("{}/hwmon0", temp_limit::HWMON_CLASS);
+        write(root, &format!("{decoy}/name"), "acpitz");
+        write(root, &format!("{decoy}/temp1_crit"), "60000");
+
+        let base = format!("{}/hwmon1", temp_limit::HWMON_CLASS);
+        write(root, &format!("{base}/name"), temp_limit::CORETEMP_NAME);
+        write(
+            root,
+            &format!("{base}/temp1_crit"),
+            &(u32::from(tjmax_c) * 1000).to_string(),
+        );
+    }
+
+    fn tcc_cur_state(root: &Path) -> String {
+        read(
+            root,
+            &format!("{}/cooling_device1/cur_state", temp_limit::THERMAL_CLASS),
+        )
+    }
+
+    #[test]
+    fn temp_limit_capability_comes_from_the_kernel_not_from_a_model_table() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path();
+        // Seven-bit offset, already five degrees below Tjmax - the firmware's
+        // own ceiling, which is what the control counts down from.
+        tcc_device(root, 127, 5);
+        coretemp_hwmon(root, 105);
+
+        let capability = temp_limit_capability(root).unwrap().unwrap();
+        assert_eq!(capability.tjmax_c, 105);
+        assert_eq!(capability.max_offset, 127);
+        assert_eq!(capability.current_c, 100);
+        // Not Tjmax: raising the ceiling above what the vendor set is a
+        // different feature from the one this slider offers.
+        assert_eq!(capability.max_c(), 100);
+    }
+
+    #[test]
+    fn temp_limit_is_unsupported_without_the_temperature_the_offset_counts_from() {
+        let fixture = TempDir::new().unwrap();
+        tcc_device(fixture.path(), 63, 0);
+        write(
+            fixture.path(),
+            &format!("{}/hwmon0/name", temp_limit::HWMON_CLASS),
+            "acpitz",
+        );
+        // A scanned hwmon class with no coretemp in it: the offset device alone
+        // cannot say what temperature it counts down from. Unsupported, not an
+        // error - and the module load the real path attempts before giving up
+        // stays out of a fixture tree.
+        assert_eq!(temp_limit_capability(fixture.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn temp_limit_applies_the_offset_that_produces_the_requested_ceiling() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path();
+        tcc_device(root, 127, 0);
+        coretemp_hwmon(root, 105);
+
+        temp_limit_apply("85", Bound::Safe.as_str(), root).unwrap();
+        assert_eq!(tcc_cur_state(root), "20");
+    }
+
+    #[test]
+    fn temp_limit_rejects_rather_than_clamps_what_the_bound_disallows() {
+        let fixture = TempDir::new().unwrap();
+        let root = fixture.path();
+        tcc_device(root, 127, 0);
+        coretemp_hwmon(root, 105);
+
+        // Below the safety floor without the opt-in: refused outright, because
+        // clamping it to the floor would let a stale record set a ceiling
+        // nobody confirmed.
+        let error = temp_limit_apply("50", Bound::Safe.as_str(), root).unwrap_err();
+        assert!(error.contains("outside"), "{error}");
+        assert_eq!(tcc_cur_state(root), "0");
+
+        // The same value with the opt-in is fine; the floor is a default.
+        temp_limit_apply("50", Bound::Hardware.as_str(), root).unwrap();
+        assert_eq!(tcc_cur_state(root), "55");
+
+        // An unrecognised bound is refused instead of defaulting to safe, so a
+        // typo in a hand-written record cannot widen the range either.
+        let error = temp_limit_apply("50", "hardwear", root).unwrap_err();
+        assert!(error.contains("invalid bound"), "{error}");
     }
 
     #[test]

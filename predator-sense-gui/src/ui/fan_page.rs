@@ -552,7 +552,8 @@ pub fn build() -> gtk::Box {
     info_box.append(&info_label);
 
     page.append(&info_box);
-    page.append(&temp_limit_section());
+    let (temp_limit, reconcile_temp_limit) = temp_limit_section();
+    page.append(&temp_limit);
 
     // This page is built once at app startup and never rebuilt (unlike the
     // temperatures page, which window.rs already rebuilds live) - so a
@@ -573,6 +574,9 @@ pub fn build() -> gtk::Box {
         if let Some(row) = firmware_row.borrow().as_ref() {
             row.show_active(crate::hardware::thermal_profile::current());
         }
+        // Same reasoning for the temperature ceiling: the helper action is
+        // callable from outside this app, and the register has other writers.
+        reconcile_temp_limit();
         glib::ControlFlow::Continue
     });
 
@@ -581,10 +585,13 @@ pub fn build() -> gtk::Box {
 
 /// CPU temperature ceiling.
 ///
-/// Built lazily behind a button rather than on page load: reading the capability
-/// goes through pkexec, and opening a tab must not raise an authentication
-/// dialog. Once the user asks, the answer is cached for the process.
-fn temp_limit_section() -> gtk::Box {
+/// Built from an unprivileged sysfs read, so opening the tab raises no
+/// authentication dialog and no verdict is cached for the process.
+///
+/// Returns the section and the closure that reconciles it with the hardware,
+/// so the page's existing timer drives this on the same tick as everything
+/// else rather than each section keeping its own.
+fn temp_limit_section() -> (gtk::Box, impl Fn()) {
     let section = gtk::Box::new(gtk::Orientation::Vertical, 8);
     section.set_margin_top(14);
 
@@ -595,8 +602,35 @@ fn temp_limit_section() -> gtk::Box {
 
     let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
     section.append(&content);
-    temp_limit_fill(&content);
-    section
+    // What the section was last built against: the ceiling in effect, or `None`
+    // when there is no control to show. Applying from here updates it too, so
+    // the user's own change does not count as one from outside.
+    let shown = Rc::new(Cell::new(None));
+    temp_limit_fill(&content, &shown);
+
+    let reconcile = {
+        let content = content.clone();
+        let shown = shown.clone();
+        move || {
+            // The ceiling moves from outside this app - the helper action is
+            // callable directly, the boot service writes it, and the kernel's
+            // cooling device has other writers - so a section built once would
+            // otherwise disagree with the hardware until a restart.
+            //
+            // Only a successful read reconciles. A transient failure here
+            // would otherwise replace a slider the user may be part-way
+            // through with an error note, on a tick they did not ask for -
+            // and applying surfaces the failure anyway, in the place they
+            // were looking.
+            let Ok(capability) = crate::hardware::temp_limit::capability() else {
+                return;
+            };
+            if shown.get() != Some(capability.current_c) {
+                temp_limit_fill(&content, &shown);
+            }
+        }
+    };
+    (section, reconcile)
 }
 
 /// Populates the section from a fresh read, replacing whatever was there.
@@ -604,13 +638,17 @@ fn temp_limit_section() -> gtk::Box {
 /// Reading is unprivileged sysfs, so this runs while building the page: no
 /// authentication dialog just for opening a tab, and no cached verdict that
 /// could outlive whatever caused it.
-fn temp_limit_fill(content: &gtk::Box) {
+fn temp_limit_fill(content: &gtk::Box, shown: &Rc<Cell<Option<u8>>>) {
     while let Some(child) = content.first_child() {
         content.remove(&child);
     }
     match crate::hardware::temp_limit::capability() {
-        Ok(capability) => content.append(&temp_limit_slider(capability)),
+        Ok(capability) => {
+            shown.set(Some(capability.current_c));
+            content.append(&temp_limit_slider(capability, shown.clone()));
+        }
         Err(reason) => {
+            shown.set(None);
             content.append(&temp_limit_note(&reason));
             // The unprivileged read cannot load a kernel module, so a machine
             // whose modalias autoload did not fire looks exactly like one
@@ -621,9 +659,10 @@ fn temp_limit_fill(content: &gtk::Box) {
             retry.set_halign(gtk::Align::Start);
             retry.add_css_class("flat");
             let target = content.clone();
+            let shown = shown.clone();
             retry.connect_clicked(move |_| {
                 crate::hardware::temp_limit::probe_through_helper();
-                temp_limit_fill(&target);
+                temp_limit_fill(&target, &shown);
             });
             content.append(&retry);
         }
@@ -653,7 +692,10 @@ fn temp_limit_note(reason: &crate::hardware::temp_limit::Unavailable) -> gtk::La
 /// a privileged call - and potentially an auth dialog - for every value the
 /// handle passes over; and a thermal ceiling is not a preview-able setting, so
 /// the user should say when they mean it.
-fn temp_limit_slider(capability: crate::hardware::temp_limit::Capability) -> gtk::Box {
+fn temp_limit_slider(
+    capability: crate::hardware::temp_limit::Capability,
+    shown: Rc<Cell<Option<u8>>>,
+) -> gtk::Box {
     use crate::hardware::temp_limit::Bound;
 
     let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -753,7 +795,17 @@ fn temp_limit_slider(capability: crate::hardware::temp_limit::Capability) -> gtk
             ));
             let dirty = selected != live || bound.get() != applied_bound.get();
             apply.set_sensitive(dirty);
-            reset.set_sensitive(live != capability.max_c() || selected != capability.max_c());
+            // Reset stages the factory ceiling *and* clears the opt-in, so it
+            // stays available while either is away from its default - including
+            // the case where the hardware is already at the factory ceiling but
+            // a `hardware` bound is still recorded, which is otherwise reachable
+            // by ticking the box and applying without moving the handle.
+            reset.set_sensitive(
+                live != capability.max_c()
+                    || selected != capability.max_c()
+                    || bound.get() != Bound::Safe
+                    || applied_bound.get() != Bound::Safe,
+            );
         })
     };
     refresh(initial);
@@ -793,6 +845,11 @@ fn temp_limit_slider(capability: crate::hardware::temp_limit::Capability) -> gtk
                 Ok(outcome) => {
                     applied.set(selected);
                     applied_bound.set(bound.get());
+                    // The reconciler compares against this, so recording the
+                    // change here is what keeps the user's own apply from
+                    // reading as one from outside and rebuilding the section
+                    // out from under them.
+                    shown.set(Some(selected));
                     refresh(selected);
                     if !outcome.persisted {
                         // The kernel took it, but it will not come back after a
