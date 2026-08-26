@@ -3,6 +3,7 @@ use crate::process::process_running;
 use crate::AppResult;
 use predator_sense_protocol::battery;
 use predator_sense_protocol::helper::Action as HelperAction;
+use predator_sense_protocol::temp_limit;
 use predator_sense_protocol::thermal_profile;
 use serde::{Deserialize, Deserializer};
 use std::fs::{self, File, OpenOptions};
@@ -296,6 +297,7 @@ pub(crate) fn run() -> AppResult {
     // machine with no recognised input device would otherwise return below and
     // never reach it - leaving the firmware on its boot default all session.
     reapply_thermal_profile(&mut logger);
+    reapply_temp_limit(&mut logger);
 
     restore_lighting_with_retries(&config_path, &mut logger);
 
@@ -417,6 +419,12 @@ pub(crate) fn run() -> AppResult {
             // cycle, and unlike the lighting nothing else would notice - the
             // index changes with no event anywhere.
             reapply_thermal_profile(&mut logger);
+            // The TCC offset does not always survive a suspend cycle either -
+            // it is a register the firmware owns, restored to its own value on
+            // resume on some machines - and like the firmware profile, nothing
+            // else would notice: the ceiling silently goes back up with no
+            // event anywhere. A no-op when the hardware still holds it.
+            reapply_temp_limit(&mut logger);
             restore_lighting_with_retries(&config_path, &mut logger);
         }
         last_suspend_offset = current_suspend_offset;
@@ -783,6 +791,95 @@ fn reapply_thermal_profile(logger: &mut Logger) {
         firmware.current
     ));
     write_thermal_profile(recorded, logger);
+}
+
+/// Restores the recorded temperature ceiling, for the same reason as
+/// [`reapply_thermal_profile`]: the boot service reads the record from the
+/// user's home, and on systemd-homed, eCryptfs or NFS that home is not mounted
+/// yet when it runs. Without this the ceiling is silently skipped for the whole
+/// session, even though applying it reported the value as persisted.
+///
+/// Does nothing when the hardware already holds the recorded value, which is
+/// the normal case on a machine whose home was mounted in time - so this costs
+/// nothing but a sysfs read there.
+fn reapply_temp_limit(logger: &mut Logger) {
+    let Some((celsius, bound)) =
+        temp_limit::last_limit_path().and_then(|path| temp_limit::remembered(&path))
+    else {
+        return;
+    };
+    if temp_limit_current_celsius() == Some(celsius) {
+        return;
+    }
+    logger.info(format!(
+        "Restaurando limite de temperatura da CPU: {celsius} °C"
+    ));
+    write_temp_limit(celsius, bound, logger);
+}
+
+/// Same shape as [`write_thermal_profile`]: run the helper directly when
+/// already root, otherwise through pkexec.
+fn write_temp_limit(celsius: u8, bound: temp_limit::Bound, logger: &mut Logger) -> bool {
+    // SAFETY: geteuid has no preconditions.
+    let mut command = if unsafe { libc::geteuid() } == 0 {
+        Command::new(path::HELPER)
+    } else {
+        let mut command = Command::new("pkexec");
+        command.arg(path::HELPER);
+        command
+    };
+    let status = command
+        .args([
+            HelperAction::TempLimit.as_str(),
+            &celsius.to_string(),
+            bound.as_str(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match status {
+        Ok(status) if status.success() => true,
+        Ok(status) => {
+            logger.error(format!(
+                "Falha ao restaurar limite de temperatura ({status})"
+            ));
+            false
+        }
+        Err(error) => {
+            logger.error(format!("Falha ao invocar o helper: {error}"));
+            false
+        }
+    }
+}
+
+/// Ceiling the kernel currently holds, or `None` when there is no such control.
+fn temp_limit_current_celsius() -> Option<u8> {
+    let sysfs = Path::new(thermal_profile::SYSFS_ROOT);
+    let device = fs::read_dir(sysfs.join(temp_limit::THERMAL_CLASS))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            fs::read_to_string(path.join("type"))
+                .is_ok_and(|kind| kind.trim() == temp_limit::COOLING_DEVICE_TYPE)
+        })?;
+    let offset: u8 = fs::read_to_string(device.join("cur_state"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let tjmax = fs::read_dir(sysfs.join(temp_limit::HWMON_CLASS))
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            fs::read_to_string(path.join("name"))
+                .is_ok_and(|name| name.trim() == temp_limit::CORETEMP_NAME)
+        })
+        .and_then(|path| fs::read_to_string(path.join("temp1_crit")).ok())
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .and_then(|millicelsius| u8::try_from(millicelsius / 1000).ok())?;
+    Some(tjmax.saturating_sub(offset))
 }
 
 fn remember_thermal_profile(index: u8, logger: &mut Logger) {
