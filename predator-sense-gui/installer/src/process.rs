@@ -18,6 +18,36 @@ pub(crate) fn command_exists(name: &str) -> bool {
         .any(|dir| dir.join(name).is_file())
 }
 
+/// Spawns a process and reaps it when it exits.
+///
+/// A `Child` dropped without being waited on stays in the process table as a
+/// zombie until its parent exits, and these parents are daemons that run for
+/// the whole session - the hotkey daemon was leaking two per keypress, one for
+/// `gdbus` and one for the application it starts.
+///
+/// The `wait` goes on a thread of its own because the callers are an input loop
+/// and a tray callback, and neither can block: one of the children is a GUI
+/// process that lives for hours.
+///
+/// Not `signal(SIGCHLD, SIG_IGN)`, which would reap everything for free. The
+/// same daemons call `Command::status()` elsewhere - the mode key and the boot
+/// ceiling restore both do - and under `SIG_IGN` that call fails with `ECHILD`
+/// instead of returning the exit status, so every invocation that worked would
+/// be reported as a failed helper.
+pub(crate) fn spawn_reaped(command: &mut Command) -> std::io::Result<u32> {
+    let child = command.spawn()?;
+    let pid = child.id();
+    // A thread that cannot be spawned is not worth failing over: the process is
+    // already running, and all that is lost is the zombie this avoids.
+    let _ = std::thread::Builder::new()
+        .name(format!("reap-{pid}"))
+        .spawn(move || {
+            let mut child = child;
+            let _ = child.wait();
+        });
+    Ok(pid)
+}
+
 pub(crate) fn run<I, S>(name: &str, args: I) -> AppResult
 where
     I: IntoIterator<Item = S>,
@@ -176,6 +206,43 @@ pub(crate) fn copy_dir(source: &Path, destination: &Path) -> AppResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether `pid` is a process that has exited and not been collected.
+    fn is_zombie(pid: u32) -> bool {
+        let Ok(stat) = fs::read_to_string(format!("{}/{pid}/stat", path::PROC_DIR)) else {
+            return false;
+        };
+        // The state letter is the field after the parenthesised command name,
+        // which is the only field that can itself contain parentheses.
+        stat.rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.split_whitespace().next() == Some("Z"))
+    }
+
+    #[test]
+    fn a_spawned_process_is_collected_instead_of_staying_in_the_table() {
+        let pids: Vec<u32> = (0..4)
+            .map(|_| {
+                spawn_reaped(Command::new("true").stdout(Stdio::null())).expect("spawn true")
+            })
+            .collect();
+
+        // The reaping is on another thread, so this is where the waiting goes.
+        // Dropping the children instead - which is what leaked two processes
+        // per hotkey press - leaves every one of these a zombie until the
+        // daemon exits, so this loop would run out its deadline.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let left: Vec<u32> = pids.iter().copied().filter(|pid| is_zombie(*pid)).collect();
+            if left.is_empty() {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "still uncollected: {left:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 
     #[test]
     fn executable_matching_does_not_accept_a_shared_name_prefix() {
