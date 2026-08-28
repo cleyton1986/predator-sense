@@ -54,9 +54,12 @@ impl TrayManager {
                 }
             });
         }
-        match command.spawn() {
-            Ok(child) => {
-                eprintln!("[tray] processo Rust iniciado (PID {})", child.id());
+        // Reaped even though the child gets its own session: `setsid` detaches
+        // it from the terminal, not from its parent, so it is still this
+        // process that has to collect the exit status.
+        match crate::process::spawn_reaped(&mut command) {
+            Ok(pid) => {
+                eprintln!("[tray] processo Rust iniciado (PID {pid})");
                 self.started = true;
             }
             Err(error) => eprintln!("[tray] falha ao iniciar: {error}"),

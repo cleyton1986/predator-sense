@@ -1,6 +1,7 @@
 mod app_state;
 mod config;
 mod hardware;
+mod process;
 pub mod i18n;
 mod tray;
 mod ui;
@@ -115,6 +116,11 @@ fn main() {
             app_state::set_window_visible(true);
             window.set_visible(true);
             window.present();
+            // Ask the compositor rather than assume the window came back:
+            // presenting a minimized window can be declined, and clearing the
+            // flag by hand would resume every animation behind a window still
+            // minimized. A restore that does land arrives as a notification.
+            ui::window::sync_window_suspended(&window);
             // Force a full redraw after the WM finishes mapping the window.
             // GTK4 + Cinnamon sometimes leaves the surface blank when reshowing
             // a window that was hidden via set_visible(false).

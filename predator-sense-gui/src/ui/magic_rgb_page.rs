@@ -319,7 +319,10 @@ fn build_keyboard_section() -> gtk::Box {
                 return gtk::glib::ControlFlow::Break;
             }
             let mut st = state.borrow_mut();
-            if st.effect == KeyboardEffect::Breathing && da.is_mapped() {
+            if st.effect == KeyboardEffect::Breathing
+                && da.is_mapped()
+                && crate::app_state::is_window_visible()
+            {
                 st.anim_phase += 0.05 + (st.speed as f64) * 0.03;
                 da.queue_draw();
             }
@@ -614,7 +617,10 @@ fn build_logo_section() -> gtk::Box {
                 return gtk::glib::ControlFlow::Break;
             }
             let mut st = state.borrow_mut();
-            if st.effect == Some(LogoEffect::Breathing) && st.preview_image.is_mapped() {
+            if st.effect == Some(LogoEffect::Breathing)
+                && st.preview_image.is_mapped()
+                && crate::app_state::is_window_visible()
+            {
                 st.anim_phase += 0.05 + (st.speed as f64) * 0.03;
                 update_logo_preview(&st);
             }

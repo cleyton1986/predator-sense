@@ -55,6 +55,9 @@ pub fn build(sensor_data: &SensorData) -> gtk::Box {
             if area.root().is_none() {
                 return glib::ControlFlow::Break;
             }
+            if !crate::app_state::is_window_visible() || !area.is_mapped() {
+                return glib::ControlFlow::Continue;
+            }
             {
                 let mut p = phase.borrow_mut();
                 *p = (*p + 1) % 4; // 0,1,2,3 then wrap to 0 (all off)

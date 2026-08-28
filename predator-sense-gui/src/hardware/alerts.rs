@@ -57,16 +57,16 @@ fn notify(body: &str) {
     }
     LAST_NOTIFY.store(now, Ordering::Relaxed);
 
-    let _ = Command::new("notify-send")
-        .args([
-            "-u",
-            "critical",
-            "-a",
-            "Predator Sense",
-            crate::i18n::t("temp_alert_title"),
-            body,
-        ])
-        .spawn();
+    // Reaped: the GUI stays open for hours, and a dropped `Child` would leave a
+    // zombie behind for every notification it ever sent.
+    let _ = crate::process::spawn_reaped(Command::new("notify-send").args([
+        "-u",
+        "critical",
+        "-a",
+        "Predator Sense",
+        crate::i18n::t("temp_alert_title"),
+        body,
+    ]));
 }
 
 fn unix_secs() -> u64 {
