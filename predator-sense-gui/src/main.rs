@@ -114,13 +114,13 @@ fn main() {
         // Single instance: if window exists, present it
         if let Some(window) = app.active_window() {
             app_state::set_window_visible(true);
-            // Belt and braces: the compositor is the authority on this and its
-            // own notification, if one is coming, lands right after and wins.
-            // Clearing it here means a compositor that never sends one cannot
-            // leave the animations switched off over a window that is back.
-            app_state::set_window_suspended(false);
             window.set_visible(true);
             window.present();
+            // Ask the compositor rather than assume the window came back:
+            // presenting a minimized window can be declined, and clearing the
+            // flag by hand would resume every animation behind a window still
+            // minimized. A restore that does land arrives as a notification.
+            ui::window::sync_window_suspended(&window);
             // Force a full redraw after the WM finishes mapping the window.
             // GTK4 + Cinnamon sometimes leaves the surface blank when reshowing
             // a window that was hidden via set_visible(false).

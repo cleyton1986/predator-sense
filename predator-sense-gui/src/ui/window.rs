@@ -120,8 +120,8 @@ pub fn build(app: &adw::Application) {
         window.connect_notify_local(Some(SUSPENDED_PROPERTY), |window, _| {
             crate::app_state::set_window_suspended(window.property::<bool>(SUSPENDED_PROPERTY));
         });
-        crate::app_state::set_window_suspended(window.property::<bool>(SUSPENDED_PROPERTY));
     }
+    sync_window_suspended(&window);
 
     // Handle ALL close events (native X button, our custom button, Alt+F4, etc.)
     let app_clone = app.clone();
@@ -138,6 +138,21 @@ pub fn build(app: &adw::Application) {
 
     window.present();
     crate::startup_mark("window present called");
+}
+
+/// Reads the compositor's current answer into the shared flag.
+///
+/// Called again after presenting the window, because presenting is a request
+/// and not a guarantee: on Wayland the compositor can decline to restore a
+/// minimized window, and then the property never changes, so no notification
+/// arrives to correct anything. Assuming the window came back would start every
+/// animation up again behind a window that is still minimized, which is the
+/// exact cost the guards exist to avoid.
+pub fn sync_window_suspended(window: &impl IsA<gtk::Window>) {
+    let window = window.as_ref();
+    if window.find_property(SUSPENDED_PROPERTY).is_some() {
+        crate::app_state::set_window_suspended(window.property::<bool>(SUSPENDED_PROPERTY));
+    }
 }
 
 /// Esconde a janela e garante que o tray helper está rodando.
