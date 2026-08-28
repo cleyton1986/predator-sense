@@ -114,6 +114,11 @@ fn main() {
         // Single instance: if window exists, present it
         if let Some(window) = app.active_window() {
             app_state::set_window_visible(true);
+            // Belt and braces: the compositor is the authority on this and its
+            // own notification, if one is coming, lands right after and wins.
+            // Clearing it here means a compositor that never sends one cannot
+            // leave the animations switched off over a window that is back.
+            app_state::set_window_suspended(false);
             window.set_visible(true);
             window.present();
             // Force a full redraw after the WM finishes mapping the window.
