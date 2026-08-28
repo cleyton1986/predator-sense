@@ -565,6 +565,7 @@ static void __init set_quirks(void)
 static int __init dmi_matched(const struct dmi_system_id *dmi)
 {
 	quirks = dmi->driver_data;
+	pr_info("matched DMI quirk entry: %s\n", dmi->ident);
 	return 1;
 }
 
