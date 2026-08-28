@@ -1497,6 +1497,26 @@ impl Installer {
             );
             fs::remove_dir_all(dkms_source_dir(&version)).ok();
         }
+
+        // linuwu_sense already claims the same WMI GUIDs facer does. Building and
+        // dkms-installing facer here would register its modalias entries too, so both
+        // modules become autoload candidates for the same WMI device: on the next boot
+        // the kernel tries to bind whichever wins the race, and the loser's class/kobject
+        // registration collides with -EEXIST (seen as a boot-time kernel panic on some
+        // hardware). The `dkms remove` loop above already stripped any facer version this
+        // installer had registered previously, so returning here also heals a system that
+        // got into that broken state on an earlier run. RGB still works over HID (see
+        // hardware/hid_rgb.rs), and the app reads the generic sysfs interfaces linuwu_sense
+        // exposes for everything else (see hardware/setup.rs::AlternativeDriver).
+        if self.linuwu_sense_present() {
+            fs::remove_file(path::MODULES_LOAD).ok();
+            println!(
+                "    {YELLOW}⚠ {}{RESET}",
+                self.text(Message::LinuwuSenseSkip)
+            );
+            return Ok(());
+        }
+
         let dkms_source = dkms_source_dir(DKMS_VERSION);
         fs::remove_dir_all(&dkms_source).ok();
         copy_kernel_sources(&source, &dkms_source)?;
@@ -1540,15 +1560,6 @@ impl Installer {
             ["install", "-m", MODULE_NAME, "-v", DKMS_VERSION, "--force"],
             &build_environment,
         )?;
-
-        if self.linuwu_sense_present() {
-            fs::remove_file(path::MODULES_LOAD).ok();
-            println!(
-                "    {YELLOW}⚠ {}{RESET}",
-                self.text(Message::LinuwuSenseSkip)
-            );
-            return Ok(());
-        }
 
         const MODPROBE_CONFIG: &str = "blacklist acer_wmi\n";
         let modules_at_boot = modules_load_config();
