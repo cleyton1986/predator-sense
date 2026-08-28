@@ -1,5 +1,5 @@
 use crate::constants::{app, command, hardware, logging, path, timing};
-use crate::process::process_running;
+use crate::process::{process_running, spawn_reaped};
 use crate::AppResult;
 use predator_sense_protocol::battery;
 use predator_sense_protocol::helper::Action as HelperAction;
@@ -1023,7 +1023,7 @@ fn activate_app(logger: &mut Logger) {
     .stdout(Stdio::null())
     .stderr(Stdio::null());
     ensure_display(&mut bus);
-    if let Err(error) = bus.spawn() {
+    if let Err(error) = spawn_reaped(&mut bus) {
         logger.error(format!("Falha ao chamar gdbus: {error}"));
     }
 
@@ -1034,7 +1034,7 @@ fn activate_app(logger: &mut Logger) {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         ensure_display(&mut application);
-        match application.spawn() {
+        match spawn_reaped(&mut application) {
             Ok(_) => logger.info("Aplicação iniciada"),
             Err(error) => logger.error(format!("Falha ao iniciar aplicação: {error}")),
         }

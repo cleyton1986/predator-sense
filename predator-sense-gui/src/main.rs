@@ -1,6 +1,7 @@
 mod app_state;
 mod config;
 mod hardware;
+mod process;
 pub mod i18n;
 mod tray;
 mod ui;
