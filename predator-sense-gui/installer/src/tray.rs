@@ -1,6 +1,6 @@
 use crate::constants::{app, command, path, service};
 use crate::i18n::{self, Language, Message};
-use crate::process::{process_running, terminate_process};
+use crate::process::{process_running, spawn_reaped, terminate_process};
 use crate::AppResult;
 use ksni::blocking::TrayMethods;
 use std::fs::{self, File, OpenOptions};
@@ -110,27 +110,31 @@ fn acquire_lock() -> AppResult<Option<File>> {
 }
 
 fn activate_application() {
-    let _ = Command::new(command::GDBUS)
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            app::DBUS_ID,
-            "--object-path",
-            app::DBUS_OBJECT_PATH,
-            "--method",
-            app::DBUS_ACTIVATE_METHOD,
-            "[]",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    if !process_running(path::APPLICATION) && Path::new(path::APPLICATION).exists() {
-        let _ = Command::new(path::APPLICATION)
+    // Reaped, not dropped: this daemon lives for the whole session, so every
+    // click on the tray icon would otherwise leave a zombie behind.
+    let _ = spawn_reaped(
+        Command::new(command::GDBUS)
+            .args([
+                "call",
+                "--session",
+                "--dest",
+                app::DBUS_ID,
+                "--object-path",
+                app::DBUS_OBJECT_PATH,
+                "--method",
+                app::DBUS_ACTIVATE_METHOD,
+                "[]",
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+            .stderr(Stdio::null()),
+    );
+    if !process_running(path::APPLICATION) && Path::new(path::APPLICATION).exists() {
+        let _ = spawn_reaped(
+            Command::new(path::APPLICATION)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
     }
 }
