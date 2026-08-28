@@ -330,6 +330,12 @@ fn build_keyboard_panel() -> gtk::Box {
             if da.root().is_none() {
                 return glib::ControlFlow::Break;
             }
+            // Mapped is not the same as on screen: a minimized window keeps its
+            // widgets mapped, so without this the preview animates into a
+            // surface nobody is being shown.
+            if !crate::app_state::is_window_visible() || !da.is_mapped() {
+                return glib::ControlFlow::Continue;
+            }
             let mut st = s.borrow_mut();
             if !st.is_static {
                 let speed_factor = 0.03 + (st.speed as f64) * 0.02;
