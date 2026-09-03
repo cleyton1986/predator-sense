@@ -960,10 +960,27 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     lang_title.set_margin_top(16);
     page.append(&lang_title);
 
-    let lang_choices: [(&str, &str); 2] = [("pt", "language_pt"), ("en", "language_en")];
+    let lang_choices: [(&str, &str); 7] = [
+        ("pt", "language_pt"),
+        ("en", "language_en"),
+        ("es", "language_es"),
+        ("zh", "language_zh"),
+        ("ja", "language_ja"),
+        ("ru", "language_ru"),
+        ("de", "language_de"),
+    ];
     let lang_labels: Vec<&str> = lang_choices.iter().map(|(_, k)| t(k)).collect();
     let current_lang_code = cfg.language.clone().unwrap_or_else(|| {
-        if crate::i18n::is_pt() { "pt".to_string() } else { "en".to_string() }
+        match crate::i18n::lang() {
+            crate::i18n::Lang::Pt => "pt",
+            crate::i18n::Lang::En => "en",
+            crate::i18n::Lang::Es => "es",
+            crate::i18n::Lang::Zh => "zh",
+            crate::i18n::Lang::Ja => "ja",
+            crate::i18n::Lang::Ru => "ru",
+            crate::i18n::Lang::De => "de",
+        }
+        .to_string()
     });
     let lang_selected = lang_choices
         .iter()
@@ -1427,11 +1444,11 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
 
     let status = setup::check_status();
     let st_text = match &status {
-        setup::ModuleStatus::Ready => if crate::i18n::is_pt() { "facer carregado e funcionando" } else { "facer loaded and running" },
-        setup::ModuleStatus::AlternativeDriver => if crate::i18n::is_pt() { "linuwu_sense carregado (facer não instalado, RGB indisponível)" } else { "linuwu_sense loaded (facer not installed, RGB unavailable)" },
-        setup::ModuleStatus::NeedsFacerInstall => if crate::i18n::is_pt() { "Não instalado" } else { "Not installed" },
-        setup::ModuleStatus::NeedsFacerLoad => if crate::i18n::is_pt() { "Compilado, não carregado" } else { "Compiled, not loaded" },
-        setup::ModuleStatus::MissingDependencies(_) => if crate::i18n::is_pt() { "Dependências faltando" } else { "Missing dependencies" },
+        setup::ModuleStatus::Ready => t("module_status_ready"),
+        setup::ModuleStatus::AlternativeDriver => t("module_status_alt_driver"),
+        setup::ModuleStatus::NeedsFacerInstall => t("module_status_needs_install"),
+        setup::ModuleStatus::NeedsFacerLoad => t("module_status_needs_load"),
+        setup::ModuleStatus::MissingDependencies(_) => t("module_status_missing_deps"),
     };
     let mod_row = create_setting_row(t("status"), st_text);
     let dot = gtk::Label::new(Some("●"));
