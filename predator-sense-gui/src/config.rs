@@ -108,6 +108,12 @@ pub struct AppConfig {
     pub font_scale: f64,
     #[serde(default)]
     pub debug_logging: bool,
+    /// Issue #41 (TongkyakHermit): keep the fan on Auto even when
+    /// Performance/Turbo is selected, instead of forcing Max like the
+    /// physical Predator/Turbo key does. Off by default - preserves the
+    /// existing safety-first behavior for everyone who doesn't touch it.
+    #[serde(default)]
+    pub keep_fan_auto_in_performance: bool,
     /// Last-applied static RGB zone colors (issue #11: nothing persisted this
     /// before, so a full power cycle always reset the keyboard to its default
     /// pulsing effect). Reapplied after login/resume by the Rust hotkey service.
@@ -233,6 +239,7 @@ impl Default for AppConfig {
             profile_battery: default_profile_battery(),
             font_scale: 1.0,
             debug_logging: false,
+            keep_fan_auto_in_performance: false,
             rgb_static_zones: None,
             rgb_brightness: 100,
             rgb_is_static: true,

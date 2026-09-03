@@ -212,6 +212,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         crate::hardware::power_profile::set_auto(cfg.auto_profile_ac);
         crate::hardware::power_profile::set_target_profiles(cfg.profile_ac, cfg.profile_battery);
         crate::hardware::applog::set_enabled(cfg.debug_logging);
+        crate::hardware::profile::set_keep_fan_auto_in_performance(
+            cfg.keep_fan_auto_in_performance,
+        );
         crate::hardware::game_sync::set_enabled(cfg.game_sync_enabled);
         glib::timeout_add_seconds_local(5, || {
             let (cpu, gpu) = sensors::read_critical_temps();
@@ -1175,6 +1178,30 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     });
     log_row.append(&log_switch);
     page.append(&log_row);
+
+    // Keep fan on Auto in Performance/Turbo (issue #41, TongkyakHermit) - off
+    // by default, matches the physical Predator/Turbo key forcing Max. The
+    // physical-key handler and the "Modo" page both go through
+    // hardware::profile::set_profile(), which reads this same in-memory
+    // flag, so no daemon restart is needed here (unlike debug_logging
+    // above): the change takes effect on the very next profile switch,
+    // whichever path triggers it.
+    let fan_auto_row = create_setting_row(
+        t("keep_fan_auto_in_performance"),
+        t("keep_fan_auto_in_performance_desc"),
+    );
+    let fan_auto_switch = gtk::Switch::new();
+    fan_auto_switch.set_active(cfg.keep_fan_auto_in_performance);
+    fan_auto_switch.set_valign(gtk::Align::Center);
+    fan_auto_switch.connect_state_set(move |_, active| {
+        let mut c = config::load_app_config();
+        c.keep_fan_auto_in_performance = active;
+        let _ = config::save_app_config(&c);
+        crate::hardware::profile::set_keep_fan_auto_in_performance(active);
+        glib::Propagation::Proceed
+    });
+    fan_auto_row.append(&fan_auto_switch);
+    page.append(&fan_auto_row);
 
     // === Accessibility Section ===
     let acc_title = gtk::Label::new(Some(t("accessibility")));

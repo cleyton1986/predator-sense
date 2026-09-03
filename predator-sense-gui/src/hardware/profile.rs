@@ -3,8 +3,37 @@ use predator_sense_protocol::helper::{
 };
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const PROFILE_STATE_FILE: &str = "/opt/predator-sense/current_profile";
+
+// Issue #41 (TongkyakHermit): forcing FanMode::Max on Performance/Turbo (see
+// fan_mode_for() below) matches the physical Predator/Turbo key, but some
+// users would rather keep the automatic fan curve even at those power
+// targets and accept a louder/hotter machine only if the curve itself
+// decides that's needed. Opt-in, default off - keeps the existing
+// safety-first behavior for everyone who doesn't touch the new setting.
+static KEEP_FAN_AUTO_IN_PERFORMANCE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_keep_fan_auto_in_performance(v: bool) {
+    KEEP_FAN_AUTO_IN_PERFORMANCE.store(v, Ordering::Relaxed);
+}
+
+pub fn keep_fan_auto_in_performance() -> bool {
+    KEEP_FAN_AUTO_IN_PERFORMANCE.load(Ordering::Relaxed)
+}
+
+/// Pure so it's directly testable without touching hardware - see
+/// `fan_mode_for_tests` below.
+fn fan_mode_for(profile: PowerProfile, keep_auto: bool) -> crate::hardware::fan::FanMode {
+    match profile {
+        PowerProfile::Performance | PowerProfile::Turbo if keep_auto => {
+            crate::hardware::fan::FanMode::Auto
+        }
+        PowerProfile::Performance | PowerProfile::Turbo => crate::hardware::fan::FanMode::Max,
+        PowerProfile::Quiet | PowerProfile::Balanced => crate::hardware::fan::FanMode::Auto,
+    }
+}
 const SYSFS_ROOT: &str = "/sys";
 const CPUINFO_MIN_FREQ: &str = "cpuinfo_min_freq";
 const CPUINFO_MAX_FREQ: &str = "cpuinfo_max_freq";
@@ -811,12 +840,10 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     // best-effort like the GPU wattage write above - some models have no EC
     // fan control at all. Performance/Turbo push CPU+GPU power targets high
     // enough that automatic fan curves alone won't keep up, so both force
-    // Max (matching what the physical Turbo key already does); only
-    // Quiet/Balanced leave the fan on Auto.
-    let fan_mode = match profile {
-        PowerProfile::Performance | PowerProfile::Turbo => crate::hardware::fan::FanMode::Max,
-        PowerProfile::Quiet | PowerProfile::Balanced => crate::hardware::fan::FanMode::Auto,
-    };
+    // Max by default (matching what the physical Turbo key already does);
+    // only Quiet/Balanced leave the fan on Auto - unless the user opted into
+    // keeping Auto on Performance/Turbo too (see fan_mode_for() above).
+    let fan_mode = fan_mode_for(profile, keep_fan_auto_in_performance());
     let _ = crate::hardware::fan::set_fan_mode(fan_mode);
 
     // Save the selected profile to state file
@@ -1218,5 +1245,45 @@ mod tests {
         assert_eq!(info.kind, CpuPolicyKind::Other);
         assert_eq!(info.governor, "powersave");
         assert_eq!(info.epp, None);
+    }
+
+    // Issue #41 (TongkyakHermit): opt-in "keep fan on Auto even in
+    // Performance/Turbo" setting.
+    #[test]
+    fn fan_mode_defaults_to_max_on_performance_and_turbo() {
+        assert_eq!(
+            fan_mode_for(PowerProfile::Performance, false),
+            crate::hardware::fan::FanMode::Max
+        );
+        assert_eq!(
+            fan_mode_for(PowerProfile::Turbo, false),
+            crate::hardware::fan::FanMode::Max
+        );
+    }
+
+    #[test]
+    fn fan_mode_stays_auto_on_performance_and_turbo_when_opted_in() {
+        assert_eq!(
+            fan_mode_for(PowerProfile::Performance, true),
+            crate::hardware::fan::FanMode::Auto
+        );
+        assert_eq!(
+            fan_mode_for(PowerProfile::Turbo, true),
+            crate::hardware::fan::FanMode::Auto
+        );
+    }
+
+    #[test]
+    fn fan_mode_is_always_auto_on_quiet_and_balanced_regardless_of_the_toggle() {
+        for keep_auto in [false, true] {
+            assert_eq!(
+                fan_mode_for(PowerProfile::Quiet, keep_auto),
+                crate::hardware::fan::FanMode::Auto
+            );
+            assert_eq!(
+                fan_mode_for(PowerProfile::Balanced, keep_auto),
+                crate::hardware::fan::FanMode::Auto
+            );
+        }
     }
 }
