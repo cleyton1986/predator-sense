@@ -1503,6 +1503,16 @@ pub(crate) fn create_setting_row(title: &str, desc: &str) -> gtk::Box {
     let d = gtk::Label::new(Some(desc));
     d.add_css_class("settings-row-desc");
     d.set_halign(gtk::Align::Start);
+    // Every other long-text label in the app wraps (dashboard_page.rs's spec
+    // cards, ai_desc/note a few lines below, gpu/fan/rgb page hints...) -
+    // this one never did. ~15 setting rows use this, some with genuinely
+    // long descriptions (ai_auto_apply_desc, keep_fan_auto_in_performance_desc),
+    // so without wrap the row's natural width is the full unwrapped line,
+    // which is wider than the window can give it once the control on the
+    // right (switch/dropdown) is accounted for - the text just overflows/
+    // gets clipped instead of reflowing, the "less responsive than
+    // Dashboard" symptom reported.
+    d.set_wrap(true);
     text.append(&t);
     text.append(&d);
     row.append(&text);
