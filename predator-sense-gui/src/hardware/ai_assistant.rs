@@ -189,10 +189,14 @@ const SYSTEM_PROMPT: &str = "You manage a laptop's hardware settings through a f
 /// language, not whatever the model defaults to (English, even for
 /// Portuguese input, going by small-model behavior observed in testing).
 fn system_prompt() -> String {
-    let language_line = if crate::i18n::is_pt() {
-        "Always reply in Brazilian Portuguese (pt-BR), never in English."
-    } else {
-        "Always reply in English."
+    let language_line = match crate::i18n::lang() {
+        crate::i18n::Lang::Pt => "Always reply in Brazilian Portuguese (pt-BR), never in English.",
+        crate::i18n::Lang::En => "Always reply in English.",
+        crate::i18n::Lang::Es => "Always reply in Spanish, never in English.",
+        crate::i18n::Lang::Zh => "Always reply in Simplified Chinese, never in English.",
+        crate::i18n::Lang::Ja => "Always reply in Japanese, never in English.",
+        crate::i18n::Lang::Ru => "Always reply in Russian, never in English.",
+        crate::i18n::Lang::De => "Always reply in German, never in English.",
     };
     format!("{} {}", SYSTEM_PROMPT, language_line)
 }
