@@ -61,7 +61,7 @@ Se este app/projeto te ajudou e/ou gostou de alguma forma, considere deixar uma 
 <p align="center"><b>Iluminação</b> — Cores estáticas por zona (4 secções) e efeitos dinâmicos RGB do teclado (Respiração, Neon, Onda, Deslizar, Zoom).</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Iluminação"></p>
 
-<p align="center"><b>Modos</b> — Perfis de desempenho: Silencioso, Balanceado, Performance e Turbo (CPU governor + Intel EPP + limite de potência da GPU).</p>
+<p align="center"><b>Modos</b> — Perfis de desempenho: Silencioso, Balanceado, Performance e Turbo, mais um Eco exclusivo de bateria (CPU governor + Intel EPP + limite de potência da GPU).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modos"></p>
 
 <p align="center"><b>GameSync</b> — Cadastre um jogo e o perfil desejado; o app troca automaticamente enquanto o jogo está rodando e restaura o que estava ativo antes assim que ele fecha.</p>
@@ -113,7 +113,7 @@ Inspirado e baseado no projeto [acer-predator-turbo-and-rgb-keyboard-linux-modul
 | **Rede** | Gráficos de download/upload em tempo real, com tracking de pico e detecção automática de interface |
 | **Controle RGB do Teclado** | Cores estáticas por zona (4 zonas) e efeitos dinâmicos (Respiração, Neon, Onda, Deslizar, Zoom) via WMI. Em hardware sem o módulo kernel, RGB funciona nativamente via USB/I2C-HID — chip ENEK5130 (4 zonas estáticas, Respiração/Neon), chip Sunrex 2024+ (zona única, lista completa de efeitos) ou chip Chicony (paleta de 7 cores, Helios 300) — auto-detectado, veja [Compatibilidade](#compatibilidade) |
 | **Logo RGB da Tampa** | Controle independente de energia, cor estática, brilho, Respiração e Neon para o emblema atrás da tela, com prévia vetorial ao vivo. Só aparece após detecção de capacidades HID em tempo de execução |
-| **Perfis de Desempenho** | Silencioso / Balanceado / Performance / Turbo (CPU governor + Intel EPP + limite de potência da GPU) |
+| **Perfis de Desempenho** | Silencioso / Balanceado / Performance / Turbo, mais um Eco exclusivo de bateria (CPU governor + Intel EPP + limite de potência da GPU) |
 | **Controle de Ventoinha** | RPM ao vivo com animação girando, toggle do CoolBoost, modos Auto/Max, e controle PWM por ventoinha + curva automática por temperatura (experimental, onde suportado) |
 | **Bateria** | Estatísticas de carga, ciclos, saúde, fabricante e limite de carga em 80% para preservar a longevidade |
 | **Dashboard GPU** | Métricas NVIDIA: temperatura, utilização, VRAM, clocks, consumo, info PCIe com gráficos ao vivo, e **slider de limite de potência (TGP)** |
@@ -353,6 +353,7 @@ Em sistemas com Intel P-State ativo + HWP, a parte de CPU é resolvida assim:
 
 | Perfil | Política HWP | Intel EPP | Performance mínima | GPU Power | Ventoinha | Uso |
 |--------|--------------|-----------|--------------------|-----------|-----------|-----|
+| **Eco**⁴ | powersave | power | 5% | 25W³ | Automático | Máxima autonomia de bateria |
 | **Silencioso** | powersave | power | 10% | 40W³ | Automático | Trabalho silencioso |
 | **Balanceado** | powersave | balance_performance | 17% | 80W³ | Automático | Uso geral |
 | **Performance** | powersave¹ | performance | 50% | 100W³ | Máx | Jogos |
@@ -360,7 +361,13 @@ Em sistemas com Intel P-State ativo + HWP, a parte de CPU é resolvida assim:
 
 Selecionar qualquer perfil já aplica o modo de ventoinha junto - sem passo
 separado. Performance e Turbo colocam a ventoinha em Máx (igual à tecla física
-Turbo); Silencioso e Balanceado deixam em Automático.
+Turbo); Silencioso, Balanceado e Eco deixam em Automático.
+
+⁴ Exclusivo de bateria, igual ao app oficial do Windows: ele nunca oferece
+Eco na tomada, o card só aparece na página Modo enquanto desconectado. Não
+existe número real de watts/EPP da Acer pra esse perfil, então os valores
+são uma extrapolação conservadora abaixo do próprio Silencioso, não um valor
+medido como os outros quatro.
 
 ¹ A política HWP `powersave` do Intel P-State é um algoritmo de escalonamento
 dinâmico, não o governor genérico que fixa a frequência mínima. Ela mantém o
@@ -383,6 +390,14 @@ firmware, não algo que este app - ou qualquer software Linux - consiga mudar;
 aumentar isso exige flashear uma vBIOS diferente com ferramenta Windows-only
 como `nvflash`, risco real de brickar a GPU, decisão exclusivamente do dono do
 hardware.
+
+**Diferença conhecida em relação ao app oficial do Windows:** no Silencioso,
+o PredatorSense oficial também liga o Whisper Mode da NVIDIA
+(`NvAPI_NvToppsJpacSetControl`), que limita os FPS a 60 pra deixar a curva de
+ventoinha rodar mais quieta. Esse controle é parte da API do driver NVIDIA
+exclusiva do Windows, sem equivalente no Linux, então o Silencioso aqui não
+fica tão silencioso sob carga quanto o Silencioso do Windows no mesmo
+hardware - é limitação de plataforma, não bug deste app.
 
 ### Perfis de energia do firmware (medidos, não chutados)
 

@@ -61,7 +61,7 @@ If this app/project helped you and/or you liked it in some way, consider leaving
 <p align="center"><b>Lighting</b> — Static per-zone (4 sections) and dynamic RGB keyboard effects (Breathing, Neon, Wave, Shifting, Zoom).</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Lighting"></p>
 
-<p align="center"><b>Modes</b> — Performance profiles: Quiet, Balanced, Performance and Turbo (CPU governor + Intel EPP + GPU power limit).</p>
+<p align="center"><b>Modes</b> — Performance profiles: Quiet, Balanced, Performance and Turbo, plus a battery-only Eco tier (CPU governor + Intel EPP + GPU power limit).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modes"></p>
 
 <p align="center"><b>GameSync</b> — Register a game and its profile; the app switches to it automatically while the game is running and restores whatever was active before once it exits.</p>
@@ -113,7 +113,7 @@ Inspired by and based on the [acer-predator-turbo-and-rgb-keyboard-linux-module]
 | **Network** | Real-time download/upload graphs with peak tracking and auto interface detection |
 | **RGB Keyboard Control** | Static per-zone (4 zones) and dynamic effects (Breathing, Neon, Wave, Shifting, Zoom) over WMI. On hardware without the kernel module, RGB works natively over USB/I2C-HID instead — ENEK5130 chip (4-zone static, Breathing/Neon), 2024+ Sunrex chip (single-zone, full effect list) or Chicony chip (7-color palette, Helios 300) — auto-detected, see [Compatibility](#compatibility) |
 | **RGB Cover Logo** | Independent power, solid-color, brightness, Breathing and Neon controls for the emblem on the back of the display, with a live vector preview. Exposed only after runtime HID capability detection |
-| **Performance Profiles** | Quiet / Balanced / Performance / Turbo modes (CPU governor + Intel EPP + GPU power limit) |
+| **Performance Profiles** | Quiet / Balanced / Performance / Turbo modes, plus a battery-only Eco tier (CPU governor + Intel EPP + GPU power limit) |
 | **Fan Control** | Live RPM with animated spinning fans, CoolBoost toggle, Auto/Max modes, plus experimental per-fan PWM control & auto temperature curve (where supported) |
 | **Battery** | Charge stats, cycles, health, manufacturer info and 80% charge limit for longevity |
 | **GPU Dashboard** | NVIDIA metrics: temperature, utilization, VRAM, clocks, power draw, PCIe info with live graphs, plus a **power limit (TGP) slider** |
@@ -353,6 +353,7 @@ On active Intel P-State + HWP systems, the CPU side resolves as follows:
 
 | Profile | HWP policy | Intel EPP | Min. performance | GPU Power | Fan | Use Case |
 |---------|------------|-----------|------------------|-----------|-----|----------|
+| **Eco**⁴ | powersave | power | 5% | 25W³ | Auto | Maximum battery life |
 | **Quiet** | powersave | power | 10% | 40W³ | Auto | Silent work |
 | **Balanced** | powersave | balance_performance | 17% | 80W³ | Auto | General use |
 | **Performance** | powersave¹ | performance | 50% | 100W³ | Max | Gaming |
@@ -360,7 +361,13 @@ On active Intel P-State + HWP systems, the CPU side resolves as follows:
 
 Selecting any profile also applies its fan mode - no separate step needed.
 Picking Performance or Turbo pushes the fan to Max (same as the physical
-Turbo key); Quiet and Balanced leave it on Auto.
+Turbo key); Quiet, Balanced and Eco leave it on Auto.
+
+⁴ Battery-only, matching the official Windows app: it never offers Eco as an
+AC option at all, so the card only shows up on the Mode page while unplugged.
+No confirmed Acer wattage/EPP numbers exist for this tier, so its settings
+are a conservative extrapolation below Quiet's own numbers, not a measured
+value like the other four.
 
 ¹ Intel P-State's HWP `powersave` policy is a dynamic scaling algorithm, not
 the generic minimum-frequency governor. It keeps the model-specific named EPP
@@ -381,6 +388,13 @@ regardless of what's requested). That's a firmware-level limit, not something
 this app - or any Linux software - can change; raising it means flashing a
 different vBIOS with a Windows-only tool like `nvflash`, a real risk of
 bricking the GPU and squarely the owner's own call.
+
+**Known difference from the official Windows app:** on Quiet, the official
+PredatorSense also turns on NVIDIA's Whisper Mode (`NvAPI_NvToppsJpacSetControl`),
+which caps the frame rate at 60 FPS to let the fan curve run quieter. That
+control is part of NVIDIA's Windows-only driver API and has no Linux
+equivalent, so Quiet here is not as silent under load as Quiet on Windows on
+the same hardware - this is a platform limitation, not a bug in this app.
 
 ### Firmware power profiles (measured, not guessed)
 
