@@ -11,6 +11,12 @@ predator-sense-gui/installer/predator-sense-installer
 *.rlib
 outros/
 
+# POC only: Acer's proprietary Predator brand font, recovered during RE for
+# local visual experiments (see predator-sense-gui/resources/fonts/README.md).
+# Not licensed for redistribution - never commit these files without an
+# explicit decision to accept that risk.
+predator-sense-gui/resources/fonts/
+
 # === Kernel module build artifacts ===
 *.o
 *.ko
