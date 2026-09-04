@@ -6,11 +6,16 @@ use std::rc::Rc;
 use crate::hardware::profile::{self, PowerProfile};
 use crate::hardware::thermal_profile::Measured;
 
-const PROFILES_ORDER: [PowerProfile; 4] = [
+// Eco is appended last here to match visual card order (see `profile_info`
+// in `build()` below), not `PowerProfile::index()` order - `apply_active_visuals`
+// walks the cards left to right and pairs each with this array by position,
+// so the two must always agree regardless of how the enum itself is ordered.
+const PROFILES_ORDER: [PowerProfile; 5] = [
     PowerProfile::Quiet,
     PowerProfile::Balanced,
     PowerProfile::Performance,
     PowerProfile::Turbo,
+    PowerProfile::Eco,
 ];
 
 /// Sustained/burst limits as "95 W / 160 W", or `None` when they were never
@@ -362,6 +367,22 @@ fn cpu_policy_info_text() -> String {
 /// feature, both of which call `profile::set_profile` directly with no way
 /// to reach into this page's widgets - this page used to just go stale
 /// until the app was restarted).
+/// Shows the Eco card only on battery, matching the official app: it never
+/// offers Eco as an AC option at all (`MUI_Mode_Intro_ECO`, "Can be used
+/// when running on battery only") rather than greying it out.
+///
+/// Left visible when the power source can't be read (no `power_supply`
+/// Mains device found) - hiding a real profile because of a sysfs read
+/// failure would be a worse outcome than showing one extra card on a
+/// desktop-only machine that has no battery policy to begin with.
+fn sync_eco_card_visibility(card: &gtk::Box) {
+    let visible = match crate::hardware::power_profile::ac_online() {
+        Some(ac) => !ac,
+        None => true,
+    };
+    card.set_visible(visible);
+}
+
 fn apply_active_visuals(profiles_box: &gtk::Box, current: Option<PowerProfile>) {
     let mut child = profiles_box.first_child();
     let mut idx = 0;
@@ -443,6 +464,18 @@ pub fn build() -> gtk::Box {
             crate::i18n::t("turbo_desc"),
             "OC",
         ),
+        // Kept last: PROFILES_ORDER above and apply_active_visuals() pair
+        // cards with tiers by position, so this has to stay the last one
+        // appended to profiles_box below. Its visibility is reconciled
+        // against the power source on the same 3s timer that already
+        // reconciles the active card - see the AC/battery check near the
+        // bottom of this function.
+        (
+            PowerProfile::Eco,
+            crate::i18n::t("eco"),
+            crate::i18n::t("eco_desc"),
+            "BATT",
+        ),
     ];
 
     // Profile cards
@@ -450,6 +483,12 @@ pub fn build() -> gtk::Box {
     profiles_box.set_halign(gtk::Align::Center);
     profiles_box.set_margin_top(24);
     let mut tier_labels: Vec<(PowerProfile, gtk::Label)> = Vec::new();
+    // The Eco card: hidden whenever AC is connected, matching the official
+    // app's own behavior of never offering it outside battery. `None` on a
+    // machine with no readable power_supply Mains device - see
+    // `sync_eco_card_visibility` below, which then leaves it showing rather
+    // than guessing.
+    let mut eco_card: Option<gtk::Box> = None;
 
     for (profile_val, name, description, badge) in &profile_info {
         let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
@@ -522,6 +561,13 @@ pub fn build() -> gtk::Box {
 
         card.append(&select_btn);
         profiles_box.append(&card);
+        if *profile_val == PowerProfile::Eco {
+            eco_card = Some(card);
+        }
+    }
+
+    if let Some(card) = &eco_card {
+        sync_eco_card_visibility(card);
     }
 
     page.append(&profiles_box);
@@ -569,6 +615,12 @@ pub fn build() -> gtk::Box {
             apply_active_visuals(&profiles_box, now);
         }
         info_label.set_text(&cpu_policy_info_text());
+        // The power source can change at any moment by unplugging the
+        // machine, not just around a profile switch, so this gets the same
+        // tick rather than waiting for one.
+        if let Some(card) = &eco_card {
+            sync_eco_card_visibility(card);
+        }
         // The firmware index also changes from outside the app - the physical
         // mode key writes it directly - so reconcile it on the same tick.
         if let Some(row) = firmware_row.borrow().as_ref() {

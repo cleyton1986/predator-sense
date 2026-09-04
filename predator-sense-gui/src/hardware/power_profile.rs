@@ -38,8 +38,8 @@ const CRITICAL_BATTERY_PCT: u32 = 15;
 const OVERRIDE_GRACE: Duration = Duration::from_secs(60);
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
-static AC_PROFILE: AtomicI8 = AtomicI8::new(2); // PowerProfile::Performance
-static BATTERY_PROFILE: AtomicI8 = AtomicI8::new(1); // PowerProfile::Balanced
+static AC_PROFILE: AtomicI8 = AtomicI8::new(PowerProfile::Performance.index());
+static BATTERY_PROFILE: AtomicI8 = AtomicI8::new(PowerProfile::Balanced.index());
 
 /// `((profile index, firmware index) seen out of policy, when first seen)` -
 /// `None` once the machine is compliant again. Guarded by a mutex rather than a pair of
@@ -112,12 +112,18 @@ fn desired_profile(
     }
     if battery_pct.is_some_and(|pct| pct < CRITICAL_BATTERY_PCT) {
         return match current {
-            Some(PowerProfile::Quiet) => None,
+            // Eco is at least as conservative as Quiet - forcing it up to
+            // Quiet at the critical threshold would spend more power, not
+            // less, which is backwards for what this branch exists to do.
+            Some(PowerProfile::Quiet) | Some(PowerProfile::Eco) => None,
             _ => Some(PowerProfile::Quiet),
         };
     }
     match current {
-        Some(PowerProfile::Balanced) | Some(PowerProfile::Quiet) => None,
+        // Eco is never fought here either, for the same reason: it is
+        // strictly more conservative than the two profiles this policy
+        // already leaves alone on battery, never less.
+        Some(PowerProfile::Balanced) | Some(PowerProfile::Quiet) | Some(PowerProfile::Eco) => None,
         _ => Some(PowerProfile::from_index(
             BATTERY_PROFILE.load(Ordering::Relaxed),
         )),
@@ -331,6 +337,38 @@ mod tests {
         assert_eq!(
             desired_profile(false, Some(PowerProfile::Performance), None),
             Some(PowerProfile::Balanced)
+        );
+    }
+
+    // Issue #41 (TongkyakHermit): Eco, battery-only. It has to be at least as
+    // welcome on battery as Quiet already is, on both branches of this
+    // policy - never fought back up to Quiet, which would spend more power,
+    // not less.
+    #[test]
+    fn battery_never_fights_eco() {
+        assert_eq!(
+            desired_profile(false, Some(PowerProfile::Eco), Some(50)),
+            None
+        );
+    }
+
+    #[test]
+    fn eco_survives_the_critical_battery_override_too() {
+        assert_eq!(
+            desired_profile(false, Some(PowerProfile::Eco), Some(5)),
+            None,
+            "Eco is already at or below Quiet's conservation level"
+        );
+    }
+
+    /// AC is the one place Eco *should* get moved off of: the official app
+    /// never offers it there at all.
+    #[test]
+    fn ac_moves_off_eco_like_any_other_low_power_tier() {
+        AC_PROFILE.store(PowerProfile::Performance.index(), Ordering::Relaxed);
+        assert_eq!(
+            desired_profile(true, Some(PowerProfile::Eco), None),
+            Some(PowerProfile::Performance)
         );
     }
 }
