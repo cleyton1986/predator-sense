@@ -129,15 +129,23 @@ pub fn build(sensor_data: &SensorData) -> gtk::Box {
             icon("internet.png"),
         ));
     }
-    if sensor_data.ram_used_pct.is_some() {
-        let ram_label = format!(
-            "RAM {:.1}/{:.0}GB",
-            sensor_data.ram_used_gb.unwrap_or(0.0),
-            sensor_data.ram_total_gb.unwrap_or(0.0)
-        );
+    if sensor_data.ram0_temp.is_some() {
+        let label = if sensor_data.ram1_temp.is_some() {
+            "RAM 1"
+        } else {
+            "RAM"
+        };
         row2.append(&gauge_widget::create_gauge_with_icon(
-            &ram_label,
-            sensor_data.ram_used_pct,
+            label,
+            sensor_data.ram0_temp,
+            100.0,
+            icon("memoria-ram.png"),
+        ));
+    }
+    if sensor_data.ram1_temp.is_some() {
+        row2.append(&gauge_widget::create_gauge_with_icon(
+            "RAM 2",
+            sensor_data.ram1_temp,
             100.0,
             icon("memoria-ram.png"),
         ));
