@@ -14,18 +14,24 @@
 //! each ending in a checksum byte that is the bitwise NOT of the wrapped sum
 //! of specific preceding bytes (never a two's-complement negation).
 //!
-//! Two things intentionally were not carried over from the Windows driver:
-//! - `MAG_Direct` (per-key addressing, wire code 0x4F) uses a completely
-//!   different multi-packet payload (bulk `hid_write`, not feature reports)
-//!   that was out of scope for this pass - `KeyboardEffect` has no variant
-//!   for it.
-//! - The single-packet "instant off" shortcut (`[00,08,01,00,00,00,00,00,F6]`,
-//!   triggered by an internal `param_2 == 0` the Windows app never seems to
-//!   pass through the same call site this was traced from) is skipped in
-//!   favor of `KeyboardEffect::Off` (wire code 0x40), which runs through the
-//!   same four-report pipeline as every other effect and was fully traced.
+//! One thing intentionally was not carried over from the Windows driver: the
+//! single-packet "instant off" shortcut (`[00,08,01,00,00,00,00,00,F6]`,
+//! triggered by an internal `param_2 == 0` the Windows app never seems to
+//! pass through the same call site this was traced from) is skipped in
+//! favor of `KeyboardEffect::Off` (wire code 0x40), which runs through the
+//! same four-report pipeline as every other effect and was fully traced.
+//!
+//! `MAG_Direct` (per-key addressing, wire code 0x4F, issue #44) is a
+//! completely different, later addition: it uses a multi-packet bulk
+//! `hid_write` payload instead of feature reports, decoded from
+//! `FUN_180001530` in a full Ghidra decompile (not just disassembly) of
+//! `SunrexUSBKeyboard.dll`. See `set_keyboard_direct_color` and the
+//! `DIRECT_*` constants below - kept separate from `KeyboardEffect` on
+//! purpose, since it is confirmed for only one narrow product family and
+//! has never been tested against real hardware (issue #44 is still open).
 
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -43,6 +49,21 @@ const KEYBOARD_PRODUCT_BASES: &[u16] = &[
     0x668A, 0x868A, // 2026
 ];
 const KEYBOARD_VENDOR: u16 = 0x05AF;
+
+/// The one confirmed per-key (`MAG_Direct`) product family, a strict subset
+/// of `KEYBOARD_PRODUCT_BASES` - issue #44 (PT14-51 / Predator Aethon 700,
+/// PID `0x766D`). Ghidra-decompiling `SunrexUSBKeyboard.dll`'s device table
+/// (`param_1[0x4b]+0x28` dispatch in the real driver) shows `0x766A`-`0x766E`
+/// all resolving to the same internal table id, confirming they share one
+/// per-key layout - but every OTHER base in `KEYBOARD_PRODUCT_BASES` (2024's
+/// `0x666A`, 2025/2026's `0x667A`/`0x668A`/etc.) resolves to a *different*
+/// table id in that same dispatch, meaning they are not necessarily per-key
+/// at all and were never confirmed to share this framing. Gating Direct mode
+/// to just this one family, rather than the whole product range the
+/// zone/effect protocol already covers, is deliberate: a keyboard that is
+/// actually zone-based getting sent a per-key buffer sized for a different
+/// physical layout would silently light up the wrong keys.
+const DIRECT_KEYBOARD_PRODUCTS: std::ops::Range<u16> = 0x766A..0x766F;
 
 /// Every USB HWID shipped for the cover logo, same source (`RGBDevice.ini`
 /// "Darfon device" through "Darfon device 2026"), all mapped to
@@ -196,6 +217,147 @@ pub fn is_keyboard_available() -> bool {
 
 pub fn is_logo_available() -> bool {
     find_hidraw(DeviceKind::Logo).is_some()
+}
+
+fn find_hidraw_direct_keyboard() -> Option<PathBuf> {
+    let entries = fs::read_dir("/sys/class/hidraw").ok()?;
+    for entry in entries.flatten() {
+        let uevent_path = entry.path().join("device/uevent");
+        let Ok(content) = fs::read_to_string(&uevent_path) else {
+            continue;
+        };
+        let Some((vendor, product)) = parse_hid_id(&content) else {
+            continue;
+        };
+        if vendor == KEYBOARD_VENDOR && DIRECT_KEYBOARD_PRODUCTS.contains(&product) {
+            return Some(PathBuf::from("/dev").join(entry.file_name()));
+        }
+    }
+    None
+}
+
+/// Whether the connected keyboard is confirmed to be part of the one
+/// product family `set_keyboard_direct_color` covers - narrower than
+/// `is_keyboard_available()`, which also matches the zone/effect-only
+/// families. See `DIRECT_KEYBOARD_PRODUCTS`.
+pub fn is_keyboard_direct_available() -> bool {
+    find_hidraw_direct_keyboard().is_some()
+}
+
+/// The 9-byte "priming" feature report `SunrexUSBKeyboard.dll` sends before
+/// any Direct-mode (per-key, wire code 0x4F) color data. Decoded from
+/// `FUN_180001530` in a full Ghidra decompile of the real driver (issue
+/// #44) - byte 1 and byte 8 move together, and this is the Direct-specific
+/// pair; every other wire mode uses `0x12`/`0xE5` instead (not needed here,
+/// this path only ever sends Direct).
+const DIRECT_PRIMING: [u8; REPORT_LEN] = [0x00, 0x13, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0xE4];
+
+/// Number of 4-byte per-key slots in the Direct color buffer sent to the
+/// device. `138` (552 bytes total) is the allocated buffer size the real
+/// driver bound-checks writes against; only slots `0..=DIRECT_MAX_VALID_SLOT`
+/// are known to land on a real key for this family - the rest are sent as
+/// zero, matching the diagnostic script already shared on issue #44.
+const DIRECT_BUFFER_SLOTS: usize = 138;
+const DIRECT_MAX_VALID_SLOT: usize = 101;
+
+fn direct_color_buffer(color: (u8, u8, u8)) -> Vec<u8> {
+    let mut buffer = vec![0u8; DIRECT_BUFFER_SLOTS * 4];
+    for slot in 0..=DIRECT_MAX_VALID_SLOT {
+        let offset = slot * 4;
+        buffer[offset] = 0x00;
+        buffer[offset + 1] = color.0;
+        buffer[offset + 2] = color.1;
+        buffer[offset + 3] = color.2;
+    }
+    buffer
+}
+
+/// The terminator feature report sent after all Direct-mode color data, same
+/// source as `DIRECT_PRIMING`. `speed_param` is the real driver's own 4th
+/// argument to `FUN_180001530`, read there from a per-effect config field -
+/// most likely the speed byte, though the decompile was not traced far
+/// enough to confirm that with certainty. Always `0` from
+/// `set_keyboard_direct_color`, since a static per-key color has no
+/// animation to speed up or down.
+fn direct_terminator(speed_param: u8) -> [u8; REPORT_LEN] {
+    /// `'g'`, confirmed as a literal `char` constant in the decompile - the
+    /// checksum base for Direct specifically (non-Direct modes use `'K'`,
+    /// `0x4B`, not needed here since this path only ever sends Direct).
+    const DIRECT_CHECKSUM_BASE: u8 = 0x67;
+    [
+        0x00,
+        0x08,
+        0x02,
+        0x4F, // Direct's own wire code, same as DIRECT_PRIMING's mode byte
+        0x05,
+        speed_param,
+        0x08,
+        0x01,
+        !DIRECT_CHECKSUM_BASE.wrapping_add(speed_param),
+    ]
+}
+
+/// Applies one solid color to every key this family's Direct-mode buffer
+/// covers, via the per-key protocol (issue #44) instead of the zone/effect
+/// one `set_keyboard_effect` uses. Only available on the one confirmed
+/// per-key product family - see `DIRECT_KEYBOARD_PRODUCTS` and
+/// `is_keyboard_direct_available`.
+///
+/// EXPERIMENTAL: every byte here comes from decompiling the real Windows
+/// driver, and the priming/terminator formulas both reproduce known-correct
+/// constants exactly (see the module doc and the tests below) - but nobody
+/// who owns this keyboard family has confirmed it lights up real hardware
+/// yet. Call sites must not present this as a working feature without
+/// saying so.
+pub fn set_keyboard_direct_color(color: (u8, u8, u8)) -> Result<(), String> {
+    let path = find_hidraw_direct_keyboard()
+        .ok_or_else(|| t("magic_rgb_err_device_not_found").to_string())?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| {
+            crate::hardware::applog::error(&format!(
+                "Cannot open Direct keyboard HID device at {}: {}",
+                path.display(),
+                error
+            ));
+            tf(
+                "magic_rgb_err_open_device",
+                &[&path.display().to_string(), &error.to_string()],
+            )
+        })?;
+
+    let mut priming = DIRECT_PRIMING;
+    crate::hardware::hid_rgb::set_feature(&file, &mut priming)?;
+
+    let buffer = direct_color_buffer(color);
+    for chunk in buffer.chunks(64) {
+        let mut packet = Vec::with_capacity(65);
+        packet.push(0x00); // report ID, same convention as the zone/effect path
+        packet.extend_from_slice(chunk);
+        packet.resize(65, 0); // pad a short final chunk, never truncate a full one
+        file.write_all(&packet).map_err(|error| {
+            crate::hardware::applog::error(&format!(
+                "Direct keyboard HID write failed on {}: {}",
+                path.display(),
+                error
+            ));
+            tf(
+                "magic_rgb_err_write_device",
+                &[&path.display().to_string(), &error.to_string()],
+            )
+        })?;
+    }
+
+    let mut terminator = direct_terminator(0);
+    crate::hardware::hid_rgb::set_feature(&file, &mut terminator)?;
+
+    crate::hardware::applog::info(&format!(
+        "Direct (per-key) HID lighting command applied via {}",
+        path.display()
+    ));
+    Ok(())
 }
 
 fn open(kind: DeviceKind) -> Result<(File, PathBuf), String> {
@@ -403,6 +565,94 @@ mod tests {
         }
         assert!(!is_known(DeviceKind::Keyboard, KEYBOARD_VENDOR, 0x0117)); // AcerUSBController, different device
         assert!(!is_known(DeviceKind::Keyboard, 0x0D62, 0x666A)); // right PID, wrong vendor
+    }
+
+    // Issue #44 (G-911, PT14-51/Aethon 700): MAG_Direct per-key protocol,
+    // decoded from a full Ghidra decompile of SunrexUSBKeyboard.dll.
+
+    #[test]
+    fn direct_priming_matches_the_known_correct_bytes() {
+        // Same constant already confirmed in PROTOCOLO-HARDWARE.md section
+        // 1.1 by independent disassembly - this is the cross-check that the
+        // decompile-derived constant here did not drift from it.
+        assert_eq!(
+            DIRECT_PRIMING,
+            [0x00, 0x13, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0xE4]
+        );
+    }
+
+    #[test]
+    fn direct_priming_is_a_valid_checksummed_report() {
+        // The same NOT(sum of bytes 1-7) rule every other 9-byte report in
+        // this protocol family follows (section 1.3-bis) - a second,
+        // independent way of catching a transcription error in the constant
+        // above, not just comparing it to another copy of the same number.
+        let sum = DIRECT_PRIMING[1..8]
+            .iter()
+            .fold(0u8, |acc, b| acc.wrapping_add(*b));
+        assert_eq!(DIRECT_PRIMING[8], !sum);
+    }
+
+    #[test]
+    fn direct_terminator_checksum_matches_the_decompiled_formula() {
+        // P=0 (static color, no animation speed) is what
+        // set_keyboard_direct_color always sends.
+        let terminator = direct_terminator(0);
+        assert_eq!(
+            terminator,
+            [0x00, 0x08, 0x02, 0x4F, 0x05, 0x00, 0x08, 0x01, 0x98]
+        );
+        // And the same cross-check as priming: byte 8 really is NOT(sum of
+        // 1-7), not just a value that happens to match by construction.
+        let sum = terminator[1..8]
+            .iter()
+            .fold(0u8, |acc, b| acc.wrapping_add(*b));
+        assert_eq!(terminator[8], !sum);
+    }
+
+    #[test]
+    fn direct_terminator_checksum_tracks_a_nonzero_speed_param() {
+        // Confirms the checksum is computed from speed_param, not a
+        // hardcoded constant that happens to equal 0x98 - if this ever
+        // wires up to a real speed control, the checksum must move with it.
+        let terminator = direct_terminator(5);
+        assert_eq!(terminator[5], 5);
+        assert_eq!(terminator[8], !(0x67u8.wrapping_add(5)));
+        assert_ne!(terminator[8], direct_terminator(0)[8]);
+    }
+
+    #[test]
+    fn direct_color_buffer_only_fills_the_confirmed_valid_slots() {
+        let buffer = direct_color_buffer((0x11, 0x22, 0x33));
+        assert_eq!(buffer.len(), DIRECT_BUFFER_SLOTS * 4);
+
+        // Every valid slot gets [0x00, R, G, B].
+        for slot in 0..=DIRECT_MAX_VALID_SLOT {
+            let offset = slot * 4;
+            assert_eq!(
+                &buffer[offset..offset + 4],
+                &[0x00, 0x11, 0x22, 0x33],
+                "slot {slot} not colored"
+            );
+        }
+        // Padding past the confirmed range is left zeroed, not colored -
+        // sending a color into a slot nobody has confirmed maps to a real
+        // key is not something to do by default.
+        let padding_start = (DIRECT_MAX_VALID_SLOT + 1) * 4;
+        assert!(buffer[padding_start..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn direct_keyboard_family_is_the_confirmed_766_range_only() {
+        for product in 0x766A..0x766F {
+            assert!(DIRECT_KEYBOARD_PRODUCTS.contains(&product));
+        }
+        // The other confirmed zone/effect-only bases must NOT be treated as
+        // per-key - sending a 552-byte Direct buffer sized for a different
+        // physical layout to one of these would light up the wrong keys.
+        for base in [0x666Au16, 0x667A, 0x668A, 0x866A, 0x867A, 0x868A] {
+            assert!(!DIRECT_KEYBOARD_PRODUCTS.contains(&base));
+        }
     }
 
     #[test]

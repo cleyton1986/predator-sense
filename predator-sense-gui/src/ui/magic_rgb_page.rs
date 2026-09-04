@@ -507,6 +507,50 @@ fn build_keyboard_section() -> gtk::Box {
     }
     btn_row.append(&off_btn);
     page.append(&btn_row);
+
+    // Issue #44 (G-911, PT14-51/Aethon 700): per-key Direct mode, only on the
+    // one confirmed product family (magic_rgb::DIRECT_KEYBOARD_PRODUCTS) -
+    // every other keyboard this page already supports keeps using the
+    // zone/effect buttons above, unaffected. Shown as its own row rather than
+    // folded into the effect list above: it is not a `KeyboardEffect` variant
+    // (different wire protocol entirely, see magic_rgb.rs), and it genuinely
+    // has not been confirmed against real hardware yet, which the label and
+    // hint say outright instead of presenting it as equivalent to the
+    // already-working effects above.
+    if magic_rgb::is_keyboard_direct_available() {
+        let direct_hint = gtk::Label::new(Some(crate::i18n::t("magic_rgb_direct_hint")));
+        direct_hint.add_css_class("cover-logo-hint");
+        direct_hint.set_wrap(true);
+        direct_hint.set_halign(gtk::Align::Start);
+        direct_hint.set_margin_top(10);
+        page.append(&direct_hint);
+
+        let direct_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        direct_row.set_halign(gtk::Align::Center);
+        direct_row.set_margin_top(6);
+        let direct_btn = gtk::Button::with_label(crate::i18n::t("magic_rgb_direct_button"));
+        direct_btn.add_css_class("secondary-button");
+        {
+            let state = state.clone();
+            let direct_btn = direct_btn.clone();
+            direct_btn.clone().connect_clicked(move |_| {
+                let color = state.borrow().color;
+                let status = state.borrow().status.clone();
+                direct_btn.set_sensitive(false);
+                let result_btn = direct_btn.clone();
+                background::run(
+                    move || magic_rgb::set_keyboard_direct_color(color),
+                    move |result| {
+                        apply_result(&status, result);
+                        result_btn.set_sensitive(true);
+                    },
+                );
+            });
+        }
+        direct_row.append(&direct_btn);
+        page.append(&direct_row);
+    }
+
     page.append(&status);
 
     page
