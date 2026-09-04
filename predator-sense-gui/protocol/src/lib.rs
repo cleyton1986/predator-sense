@@ -643,8 +643,14 @@ pub mod thermal_profile {
     /// it does not know about. One value, one file, no reserialization.
     pub const LAST_PROFILE_FILE: &str = "predator-sense/thermal_profile";
 
-    /// The app's four power tiers (Quiet, Balanced, Performance, Turbo).
-    pub const TIERS: u8 = 4;
+    /// The app's five power tiers (Quiet, Balanced, Performance, Turbo, Eco).
+    ///
+    /// Eco is the odd one out: the official Acer app only ever offers it on
+    /// battery (`MUI_Mode_Intro_ECO`, "Can be used when running on battery
+    /// only"), swapping the whole card set instead of adding a fifth card to
+    /// the AC row. It still needs a slot here because it is index-anchored
+    /// like every other tier - see [`Calibration::index_for_tier`].
+    pub const TIERS: u8 = 5;
 
     /// Only 8 indices exist: the firmware reports the supported set as one u8.
     const MAX_INDICES: u8 = 8;
@@ -741,7 +747,8 @@ pub mod thermal_profile {
                 .flatten()
         }
 
-        /// Firmware index for one of the app's tiers (0 = Quiet .. 3 = Turbo).
+        /// Firmware index for one of the app's tiers (0 = Eco .. 4 = Turbo -
+        /// see `PowerProfile::index()` in the GUI crate).
         ///
         /// The count of firmware profiles varies per machine - five on the
         /// PHN16-73, possibly fewer elsewhere - so the tiers are anchored at
@@ -1557,12 +1564,17 @@ mod thermal_profile_tests {
     #[test]
     fn tiers_anchor_on_the_real_extremes() {
         let c = phn16_73();
-        assert_eq!(c.index_for_tier(0), Some(6), "Quiet -> weakest");
-        assert_eq!(c.index_for_tier(3), Some(5), "Turbo -> strongest");
-        // Four tiers spread over five profiles, so one gets skipped: on this
-        // machine that means 45 / 55 / 95 / 115 W and no 70 W tier.
+        assert_eq!(c.index_for_tier(0), Some(6), "Eco -> weakest");
+        assert_eq!(c.index_for_tier(4), Some(5), "Turbo -> strongest");
+        // Five tiers over five profiles: with the tier count matching the
+        // profile count exactly, every tier lands on a distinct firmware
+        // index, none skipped and none shared. This also happens to
+        // reproduce the fixed OPERATING_MODE wire values from the official
+        // app exactly (Eco=6, Quiet=0, Balanced=1, Performance=4, Turbo=5)
+        // purely from measured wattage - nothing about those wire values is
+        // hard-coded anywhere in this math.
         let all: Vec<u8> = (0..TIERS).map(|t| c.index_for_tier(t).unwrap()).collect();
-        assert_eq!(all, vec![6, 0, 4, 5]);
+        assert_eq!(all, vec![6, 0, 1, 4, 5]);
         // Whatever the spread, tiers must never go backwards in power.
         let watts: Vec<u64> = all
             .iter()
@@ -1619,11 +1631,13 @@ mod thermal_profile_tests {
             measured(0, 45_000_000, 45_000_000),
             measured(1, 95_000_000, 160_000_000),
         ]);
-        // Both weak tiers write index 0; both strong tiers write index 1.
+        // Five tiers, two profiles: the three weak tiers write index 0, the
+        // two strong tiers write index 1.
         assert_eq!(two.index_for_tier(0), Some(0));
         assert_eq!(two.index_for_tier(1), Some(0));
-        assert_eq!(two.index_for_tier(2), Some(1));
+        assert_eq!(two.index_for_tier(2), Some(0));
         assert_eq!(two.index_for_tier(3), Some(1));
+        assert_eq!(two.index_for_tier(4), Some(1));
 
         // Every tier must survive the round trip when the caller says which
         // one it applied.
@@ -1638,7 +1652,7 @@ mod thermal_profile_tests {
 
         // A belief the index cannot support is not honoured - the firmware
         // really did move, and the answer has to reflect that.
-        assert_eq!(two.tier_for_index(1, Some(0)), Some(2));
+        assert_eq!(two.tier_for_index(1, Some(0)), Some(3));
         // With no belief to go on, the lowest matching tier is the answer.
         assert_eq!(two.tier_for_index(0, None), Some(0));
     }
@@ -1649,8 +1663,11 @@ mod thermal_profile_tests {
     #[test]
     fn a_preference_never_overrides_an_unambiguous_index() {
         let c = phn16_73();
-        let turbo_index = c.index_for_tier(3).unwrap();
-        assert_eq!(c.tier_for_index(turbo_index, Some(0)), Some(3));
+        // Tier 3 is Performance on this 5-profile fixture (see
+        // tiers_anchor_on_the_real_extremes), not Turbo - the point of this
+        // test is the round trip, not which named tier it is.
+        let tier_3_index = c.index_for_tier(3).unwrap();
+        assert_eq!(c.tier_for_index(tier_3_index, Some(0)), Some(3));
     }
 
     #[test]

@@ -521,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "predator-sense-installer"
-version = "0.2.80-preview"
+version = "0.2.81-preview"
 dependencies = [
  "ksni",
  "libc",
@@ -534,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "predator-sense-protocol"
-version = "0.2.60"
+version = "0.2.61"
 dependencies = [
  "serde",
 ]

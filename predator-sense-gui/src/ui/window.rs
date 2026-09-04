@@ -1115,26 +1115,48 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     acp_row.append(&acp_switch);
     page.append(&acp_row);
 
-    let profile_choices: [(&str, crate::hardware::profile::PowerProfile); 4] = [
+    // Eco is battery-only in the official app (`MUI_Mode_Intro_ECO`, "Can be
+    // used when running on battery only") - it never gets an AC card, so the
+    // AC target list stays at the same four choices it always had. The
+    // battery list gets it as a fifth choice.
+    //
+    // Dropdown position is matched against these arrays directly rather than
+    // through `PowerProfile::index()`: Eco sits *below* Quiet in that
+    // ordering (see its doc comment), so position and index no longer agree
+    // once Eco exists, and the AC list does not even carry it at all.
+    let ac_profile_choices: [(&str, crate::hardware::profile::PowerProfile); 4] = [
         ("quiet", crate::hardware::profile::PowerProfile::Quiet),
         ("balanced", crate::hardware::profile::PowerProfile::Balanced),
         ("performance", crate::hardware::profile::PowerProfile::Performance),
         ("turbo", crate::hardware::profile::PowerProfile::Turbo),
     ];
-    let profile_labels: Vec<&str> = profile_choices.iter().map(|(k, _)| t(k)).collect();
+    let battery_profile_choices: [(&str, crate::hardware::profile::PowerProfile); 5] = [
+        ("quiet", crate::hardware::profile::PowerProfile::Quiet),
+        ("balanced", crate::hardware::profile::PowerProfile::Balanced),
+        ("performance", crate::hardware::profile::PowerProfile::Performance),
+        ("turbo", crate::hardware::profile::PowerProfile::Turbo),
+        ("eco", crate::hardware::profile::PowerProfile::Eco),
+    ];
+    let ac_profile_labels: Vec<&str> = ac_profile_choices.iter().map(|(k, _)| t(k)).collect();
+    let battery_profile_labels: Vec<&str> =
+        battery_profile_choices.iter().map(|(k, _)| t(k)).collect();
 
     let ac_profile_row = create_setting_row(t("profile_when_ac"), t("profile_when_ac_desc"));
     ac_profile_row.set_sensitive(cfg.auto_profile_ac);
-    let ac_profile_dd = gtk::DropDown::from_strings(&profile_labels);
-    ac_profile_dd.set_selected(cfg.profile_ac.index() as u32);
+    let ac_profile_dd = gtk::DropDown::from_strings(&ac_profile_labels);
+    let ac_selected = ac_profile_choices
+        .iter()
+        .position(|(_, p)| *p == cfg.profile_ac)
+        .unwrap_or(1) as u32; // Balanced, if the saved choice is somehow Eco.
+    ac_profile_dd.set_selected(ac_selected);
     ac_profile_dd.set_valign(gtk::Align::Center);
     ac_profile_dd.connect_selected_notify(move |dd| {
-        let sel = dd.selected();
-        if sel >= 4 {
+        let sel = dd.selected() as usize;
+        let Some((_, profile)) = ac_profile_choices.get(sel) else {
             return; // GTK_INVALID_LIST_POSITION or other transient state, not a real user pick
-        }
+        };
         let mut c = config::load_app_config();
-        c.profile_ac = crate::hardware::profile::PowerProfile::from_index(sel as i8);
+        c.profile_ac = *profile;
         let _ = config::save_app_config(&c);
         crate::hardware::power_profile::set_target_profiles(c.profile_ac, c.profile_battery);
     });
@@ -1143,16 +1165,20 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
 
     let battery_profile_row = create_setting_row(t("profile_when_battery"), t("profile_when_battery_desc"));
     battery_profile_row.set_sensitive(cfg.auto_profile_ac);
-    let battery_profile_dd = gtk::DropDown::from_strings(&profile_labels);
-    battery_profile_dd.set_selected(cfg.profile_battery.index() as u32);
+    let battery_profile_dd = gtk::DropDown::from_strings(&battery_profile_labels);
+    let battery_selected = battery_profile_choices
+        .iter()
+        .position(|(_, p)| *p == cfg.profile_battery)
+        .unwrap_or(1) as u32; // Balanced, if the saved choice can't be shown.
+    battery_profile_dd.set_selected(battery_selected);
     battery_profile_dd.set_valign(gtk::Align::Center);
     battery_profile_dd.connect_selected_notify(move |dd| {
-        let sel = dd.selected();
-        if sel >= 4 {
+        let sel = dd.selected() as usize;
+        let Some((_, profile)) = battery_profile_choices.get(sel) else {
             return; // GTK_INVALID_LIST_POSITION or other transient state, not a real user pick
-        }
+        };
         let mut c = config::load_app_config();
-        c.profile_battery = crate::hardware::profile::PowerProfile::from_index(sel as i8);
+        c.profile_battery = *profile;
         let _ = config::save_app_config(&c);
         crate::hardware::power_profile::set_target_profiles(c.profile_ac, c.profile_battery);
     });

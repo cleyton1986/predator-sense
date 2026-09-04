@@ -31,7 +31,13 @@ fn fan_mode_for(profile: PowerProfile, keep_auto: bool) -> crate::hardware::fan:
             crate::hardware::fan::FanMode::Auto
         }
         PowerProfile::Performance | PowerProfile::Turbo => crate::hardware::fan::FanMode::Max,
-        PowerProfile::Quiet | PowerProfile::Balanced => crate::hardware::fan::FanMode::Auto,
+        // The official app disables fan control entirely on Quiet and Eco
+        // (`MUI_Fan_Disabled_message_Quiet`/`_Eco`) rather than just leaving
+        // it on Auto - this app has no "disabled" fan mode, so Auto is the
+        // closest match, same as Quiet already gets.
+        PowerProfile::Quiet | PowerProfile::Balanced | PowerProfile::Eco => {
+            crate::hardware::fan::FanMode::Auto
+        }
     }
 }
 const SYSFS_ROOT: &str = "/sys";
@@ -65,6 +71,13 @@ pub enum PowerProfile {
     Balanced,
     Performance,
     Turbo,
+    /// Deeper power saving than Quiet, offered only on battery - the official
+    /// Acer app never gives it an AC card at all (`MUI_Mode_Intro_ECO`, "Can
+    /// be used when running on battery only"). `index()` places it below
+    /// Quiet rather than after Turbo: it is the weakest of the five, not a
+    /// fifth rung above the strongest, and the tier-anchoring math in
+    /// `Calibration::index_for_tier` assumes ascending power order.
+    Eco,
 }
 
 impl PowerProfile {
@@ -74,6 +87,7 @@ impl PowerProfile {
             Self::Balanced => crate::i18n::t("balanced"),
             Self::Performance => crate::i18n::t("performance"),
             Self::Turbo => crate::i18n::t("turbo"),
+            Self::Eco => crate::i18n::t("eco"),
         }
     }
 
@@ -83,6 +97,7 @@ impl PowerProfile {
             Self::Balanced => "balanced",
             Self::Performance => "performance",
             Self::Turbo => "turbo",
+            Self::Eco => "eco",
         }
     }
 
@@ -92,24 +107,33 @@ impl PowerProfile {
             "balanced" => Some(Self::Balanced),
             "performance" => Some(Self::Performance),
             "turbo" => Some(Self::Turbo),
+            "eco" => Some(Self::Eco),
             _ => None,
         }
     }
 
-    pub fn index(&self) -> i8 {
+    /// Position in the measured power ladder, weakest (`Eco`) to strongest
+    /// (`Turbo`) - see [`Calibration::index_for_tier`], which anchors tier 0
+    /// to the weakest firmware profile measured and the last tier to the
+    /// strongest. `const` so the AC/battery policy's default targets below
+    /// can be written as the profile itself rather than a bare number that
+    /// silently goes stale if this ordering ever changes again.
+    pub const fn index(&self) -> i8 {
         match self {
-            Self::Quiet => 0,
-            Self::Balanced => 1,
-            Self::Performance => 2,
-            Self::Turbo => 3,
+            Self::Eco => 0,
+            Self::Quiet => 1,
+            Self::Balanced => 2,
+            Self::Performance => 3,
+            Self::Turbo => 4,
         }
     }
 
     pub fn from_index(i: i8) -> Self {
         match i {
-            0 => Self::Quiet,
-            2 => Self::Performance,
-            3 => Self::Turbo,
+            0 => Self::Eco,
+            1 => Self::Quiet,
+            3 => Self::Performance,
+            4 => Self::Turbo,
             _ => Self::Balanced,
         }
     }
@@ -169,6 +193,19 @@ pub struct CpuPolicyInfo {
 
 fn settings_for(p: PowerProfile) -> ProfileSettings {
     match p {
+        // Weaker than Quiet on every axis: no exact Acer wattage/EPP table
+        // for this tier came out of the reverse-engineering (the firmware's
+        // own OPERATING_MODE=ECO wire value isn't trusted for its *ranking*
+        // either, only calibrated measurement is - see `apply_firmware_profile`),
+        // so this is a deliberately conservative extrapolation below Quiet's
+        // own numbers rather than a measured value.
+        PowerProfile::Eco => ProfileSettings {
+            governor: CpuGovernor::Powersave,
+            epp: EnergyPreference::Power,
+            gpu_watts: 25,
+            min_perf_pct: 5,
+            no_turbo: true,
+        },
         PowerProfile::Quiet => ProfileSettings {
             governor: CpuGovernor::Powersave,
             epp: EnergyPreference::Power,
@@ -737,6 +774,7 @@ fn read_cpu_reading_at(sysfs_root: &Path) -> CpuReading {
         PowerProfile::Balanced,
         PowerProfile::Performance,
         PowerProfile::Turbo,
+        PowerProfile::Eco,
     ]
     .into_iter()
     .filter(|profile| {
@@ -1284,6 +1322,57 @@ mod tests {
                 fan_mode_for(PowerProfile::Balanced, keep_auto),
                 crate::hardware::fan::FanMode::Auto
             );
+        }
+    }
+
+    // Issue #41 (TongkyakHermit, following up on the RE of the official
+    // Acer app): Eco, battery-only, weaker than Quiet on every axis.
+    #[test]
+    fn fan_mode_is_always_auto_on_eco_regardless_of_the_toggle() {
+        for keep_auto in [false, true] {
+            assert_eq!(
+                fan_mode_for(PowerProfile::Eco, keep_auto),
+                crate::hardware::fan::FanMode::Auto
+            );
+        }
+    }
+
+    #[test]
+    fn eco_is_weaker_than_quiet_on_every_setting() {
+        let eco = settings_for(PowerProfile::Eco);
+        let quiet = settings_for(PowerProfile::Quiet);
+        assert!(eco.gpu_watts <= quiet.gpu_watts);
+        assert!(eco.min_perf_pct <= quiet.min_perf_pct);
+        assert_eq!(eco.governor, quiet.governor);
+        assert_eq!(eco.no_turbo, quiet.no_turbo);
+    }
+
+    /// Eco sits *below* Quiet in the tier ladder, not after Turbo - the
+    /// ordering `Calibration::index_for_tier` anchors against.
+    #[test]
+    fn eco_is_the_weakest_tier_by_index() {
+        assert!(PowerProfile::Eco.index() < PowerProfile::Quiet.index());
+        assert!(PowerProfile::Quiet.index() < PowerProfile::Balanced.index());
+        assert!(PowerProfile::Balanced.index() < PowerProfile::Performance.index());
+        assert!(PowerProfile::Performance.index() < PowerProfile::Turbo.index());
+    }
+
+    #[test]
+    fn profile_id_round_trips_through_eco() {
+        assert_eq!(PowerProfile::from_id("eco"), Some(PowerProfile::Eco));
+        assert_eq!(PowerProfile::Eco.to_id(), "eco");
+    }
+
+    #[test]
+    fn from_index_is_the_exact_inverse_of_index_for_every_tier() {
+        for profile in [
+            PowerProfile::Eco,
+            PowerProfile::Quiet,
+            PowerProfile::Balanced,
+            PowerProfile::Performance,
+            PowerProfile::Turbo,
+        ] {
+            assert_eq!(PowerProfile::from_index(profile.index()), profile);
         }
     }
 }
