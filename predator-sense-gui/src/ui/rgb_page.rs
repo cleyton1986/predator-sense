@@ -219,6 +219,62 @@ fn build_keyboard_panel() -> gtk::Box {
         anim_phase: 0.0,
     }));
 
+    // Audio Sync (confirmed real Windows feature, `MUI_Audio_Sync` - see
+    // `hardware::audio_sync` module docs for the reverse-engineering trail).
+    // Built here, before the Static/Dynamic toggle below, only so its
+    // handlers below can reach it - actually placed on the page (appended)
+    // near the end of this function, in its original visual position.
+    //
+    // Static-only: it drives the same static-zone color write the Apply
+    // button uses in Static mode, continuously - Dynamic mode is already
+    // animating via its own WMI effect, so layering this underneath it
+    // does not correspond to anything the firmware actually shows (and
+    // was confirmed not to visually do anything useful there). Gated on
+    // both halves of what it needs to work at all: `parec` on PATH (the
+    // capture side) and a real color-write path, either HID (ENEK5130
+    // chip) or the WMI static-zone device - hidden entirely rather than
+    // shown disabled/erroring when either is missing, same as every other
+    // capability-gated control on this page.
+    let sync_widgets = if crate::hardware::audio_sync::is_available()
+        && (hid_only || rgb::is_static_device_available())
+    {
+        let sync_row = crate::ui::window::create_setting_row(
+            crate::i18n::t("audio_sync_title"),
+            crate::i18n::t("audio_sync_desc"),
+        );
+        let sync_switch = gtk::Switch::new();
+        sync_switch.set_valign(gtk::Align::Center);
+        sync_switch.set_active(is_static && saved_cfg.audio_sync_enabled);
+        sync_row.set_visible(is_static);
+        {
+            let state = state.clone();
+            sync_switch.connect_state_set(move |_, enabled| {
+                let mut cfg = crate::config::load_app_config();
+                cfg.audio_sync_enabled = enabled;
+                let _ = crate::config::save_app_config(&cfg);
+                if enabled {
+                    let color = state.borrow().zone_colors[0];
+                    let _ = crate::hardware::audio_sync::start(color);
+                } else {
+                    crate::hardware::audio_sync::stop();
+                }
+                glib::Propagation::Proceed
+            });
+        }
+        sync_row.append(&sync_switch);
+        // Restore across app restarts - this page (like every other RGB
+        // state on it) is only built once at boot. Only when the saved
+        // mode is actually Static - a config saved mid-Dynamic (or from
+        // before this Static-only restriction existed) must not silently
+        // start capturing in a mode where it cannot do anything useful.
+        if is_static && saved_cfg.audio_sync_enabled {
+            let _ = crate::hardware::audio_sync::start(zone_colors[0]);
+        }
+        Some((sync_row, sync_switch))
+    } else {
+        None
+    };
+
     // Toggle: Estático / Dinâmico + brightness
     let toggle_box = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     let static_btn = gtk::ToggleButton::with_label(crate::i18n::t("static_mode"));
@@ -258,6 +314,7 @@ fn build_keyboard_panel() -> gtk::Box {
         let db = dynamic_btn.clone();
         let dc = dyn_controls.clone();
         let zc = zone_controls.clone();
+        let sync_row = sync_widgets.as_ref().map(|(row, _)| row.clone());
         static_btn.connect_toggled(move |b| {
             if b.is_active() {
                 db.set_active(false);
@@ -266,6 +323,13 @@ fn build_keyboard_panel() -> gtk::Box {
                 s.borrow_mut().is_static = true;
                 zc.set_visible(true);
                 dc.set_visible(false);
+                // Audio Sync is Static-only (see where it's built above) -
+                // its row was hidden while Dynamic was active, show it
+                // again, but leave the switch itself exactly as the user
+                // left it (still off if they never turned it on here).
+                if let Some(row) = &sync_row {
+                    row.set_visible(true);
+                }
             }
         });
     }
@@ -274,6 +338,7 @@ fn build_keyboard_panel() -> gtk::Box {
         let sb = static_btn.clone();
         let dc = dyn_controls.clone();
         let zc = zone_controls.clone();
+        let sync_widgets = sync_widgets.clone();
         dynamic_btn.connect_toggled(move |b| {
             if b.is_active() {
                 sb.set_active(false);
@@ -282,6 +347,22 @@ fn build_keyboard_panel() -> gtk::Box {
                 s.borrow_mut().is_static = false;
                 zc.set_visible(false);
                 dc.set_visible(true);
+                // Audio Sync only makes sense (and was confirmed to only
+                // work) in Static mode - Dynamic mode is already animating
+                // via its own WMI effect. Stop the capture thread and
+                // reflect that in the switch/config, not just hide the
+                // row, so it does not keep silently writing colors
+                // underneath whatever effect is now actually showing.
+                if let Some((row, switch)) = &sync_widgets {
+                    row.set_visible(false);
+                    if switch.is_active() {
+                        switch.set_active(false);
+                        crate::hardware::audio_sync::stop();
+                        let mut cfg = crate::config::load_app_config();
+                        cfg.audio_sync_enabled = false;
+                        let _ = crate::config::save_app_config(&cfg);
+                    }
+                }
             }
         });
     }
@@ -902,6 +983,13 @@ fn build_keyboard_panel() -> gtk::Box {
         w.add_css_class("warning-text");
         w.set_margin_top(4);
         page.append(&w);
+    }
+
+    // Audio Sync widgets (built earlier, right after `state`, so the
+    // Static/Dynamic toggle handlers above could reach them) go here, in
+    // their actual visual position at the end of the page.
+    if let Some((sync_row, _)) = sync_widgets {
+        page.append(&sync_row);
     }
 
     page

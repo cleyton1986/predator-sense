@@ -106,6 +106,16 @@ fn main() {
         startup_mark("startup complete");
     });
 
+    // Audio Sync spawns a real child process (`parec`) that has no reason
+    // to know the app is exiting - closing to tray never fires this (that
+    // path only hides the window, see `window.rs::hide_to_tray`), but the
+    // real process exit (tray "Sair", session logout, `kill`) does, and
+    // without this the capture thread and its `parec` child would leak
+    // for as long as the audio device keeps producing data, i.e. forever.
+    app.connect_shutdown(|_| {
+        hardware::audio_sync::stop();
+    });
+
     app.connect_activate(|app| {
         startup_mark("activate signal");
         config::ensure_dirs();

@@ -1,5 +1,6 @@
 pub mod alerts;
 pub mod applog;
+pub mod audio_sync;
 pub mod capabilities;
 pub mod display;
 pub mod hwmon;

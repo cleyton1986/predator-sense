@@ -192,6 +192,15 @@ pub struct AppConfig {
     /// Temperaturas gauges, instead of the original emoji/plain rings.
     #[serde(default = "default_true")]
     pub custom_icons_enabled: bool,
+    /// Audio Sync (confirmed real Windows feature, `MUI_Audio_Sync`, from
+    /// this session's reverse engineering - the app has no dedicated wire
+    /// protocol for it, it just re-sends ordinary static-zone color writes
+    /// scaled by the live audio level, which is exactly what
+    /// `hardware::audio_sync` reimplements). Off by default, opt-in, same
+    /// reasoning as game_sync_enabled above - it drives writes based on
+    /// something other than a direct user action, so it starts opt-in.
+    #[serde(default)]
+    pub audio_sync_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -259,6 +268,7 @@ impl Default for AppConfig {
             game_sync_enabled: false,
             game_profiles: Vec::new(),
             custom_icons_enabled: true,
+            audio_sync_enabled: false,
         }
     }
 }
