@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "predator-sense"
-version = "0.2.79-preview"
+version = "0.2.80-preview"
 dependencies = [
  "dirs",
  "gtk4",
