@@ -357,6 +357,26 @@
     border-radius: 2px;
 }
 
+/* === Numeric RGB entry (spin button + hex code) === */
+.color-spin {
+    min-width: 52px;
+}
+
+.color-spin entry {
+    padding: 2px 4px;
+    font-size: 12px;
+}
+
+.hex-color-entry {
+    font-family: monospace;
+    min-width: 90px;
+}
+
+.hex-color-entry.entry-error {
+    border-color: @danger;
+    color: @danger;
+}
+
 .scale-value {
     font-size: 12px;
     font-weight: 600;
