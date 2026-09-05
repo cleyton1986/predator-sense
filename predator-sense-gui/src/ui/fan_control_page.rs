@@ -345,14 +345,29 @@ pub fn build() -> gtk::Box {
                 glib::Propagation::Proceed
             });
         }
-        // Apply curve every 3s while enabled.
+        // Apply curve every 3s while enabled. The write goes through the
+        // persistent privileged helper (see hardware::helper), which now
+        // holds a mutex shared with every other privileged caller in the
+        // app - calling it straight from this GTK timer would block the
+        // main thread (and every other feature's privileged call) for the
+        // length of a pkexec auth prompt or a full session respawn, so it
+        // runs on a worker thread like every other privileged call already
+        // does elsewhere in this file (see the fan-mode reconciliation
+        // timer above). `applying` skips a tick instead of queuing a second
+        // write if the previous one is still in flight.
         let on = curve_on.clone();
+        let applying = Rc::new(Cell::new(false));
         glib::timeout_add_seconds_local(3, move || {
-            if *on.borrow() {
+            if *on.borrow() && !applying.get() {
                 let (cpu, _gpu) = sensors::read_critical_temps();
                 if let Some(t) = cpu {
                     let pct = fan_curve_pct(t);
-                    let _ = fan::set_pwm_percent(pct, pct);
+                    applying.set(true);
+                    let applying_done = applying.clone();
+                    background::run(
+                        move || fan::set_pwm_percent(pct, pct),
+                        move |_| applying_done.set(false),
+                    );
                 }
             }
             glib::ControlFlow::Continue
