@@ -8,11 +8,12 @@ use predator_sense_protocol::battery;
 use predator_sense_protocol::helper::{
     Action as HelperAction, CpuGovernor, EnergyPreference, Switch, OPTIONAL_VALUE_SKIP,
 };
+use predator_sense_protocol::internal;
 use predator_sense_protocol::temp_limit::{self, Bound, Capability};
 use predator_sense_protocol::thermal_profile;
 use serde::Deserialize;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -259,7 +260,53 @@ struct CpuProfileLock {
 
 pub(crate) fn run(args: &[String]) -> AppResult {
     let root = test_root().unwrap_or_else(|| PathBuf::from(path::REAL_SYSFS));
-    run_with_paths(args, &root, Path::new(path::EC_DEVICE))
+    let ec = Path::new(path::EC_DEVICE);
+    if args.first().map(String::as_str) == Some(internal::HELPER_DAEMON_ARGUMENT) {
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        return run_daemon(&root, ec, stdin.lock(), stdout.lock());
+    }
+    run_with_paths(args, &root, ec)
+}
+
+/// Daemon mode: reads one action line at a time (same wire format as normal
+/// argv, space-separated) until the caller's end of stdin closes, replying to
+/// each with an [`internal::HELPER_DAEMON_OK`]/[`internal::HELPER_DAEMON_ERR`]
+/// marker line. See [`internal::HELPER_DAEMON_ARGUMENT`] for why this exists.
+///
+/// A read action's own value reaches the caller exactly like it does in the
+/// one-shot binary - by printing it to stdout - because here that stdout
+/// *is* the reply stream; the marker line right after it is what tells a
+/// caller where that value ends. Generic over its I/O so tests can drive it
+/// without real pipes.
+fn run_daemon(sysfs: &Path, ec: &Path, input: impl BufRead, mut output: impl Write) -> AppResult {
+    for line in input.lines() {
+        let line = line.map_err(|error| fail(format!("daemon: reading command: {error}")))?;
+        let args: Vec<String> = line.split_whitespace().map(String::from).collect();
+        if args.is_empty() {
+            // A caller never sends a blank line on purpose, but skipping it
+            // costs nothing and keeps a stray newline from tearing the
+            // session down.
+            continue;
+        }
+        let reply = match run_with_paths(&args, sysfs, ec) {
+            Ok(()) => internal::HELPER_DAEMON_OK.to_string(),
+            Err(message) => {
+                let message = message.replace('\n', " ");
+                format!("{} {message}", internal::HELPER_DAEMON_ERR)
+            }
+        };
+        writeln!(output, "{reply}")
+            .map_err(|error| fail(format!("daemon: writing reply: {error}")))?;
+        // Rust buffers stdout in blocks when it is not a terminal, which a
+        // pipe never is - without an explicit flush the caller would block
+        // forever waiting for a reply already sitting in this process's
+        // buffer.
+        output
+            .flush()
+            .map_err(|error| fail(format!("daemon: flushing reply: {error}")))?;
+    }
+    Ok(())
 }
 
 fn test_root() -> Option<PathBuf> {
@@ -2405,5 +2452,52 @@ mod tests {
             read_fan_preset(&ec, fixture.path()).unwrap(),
             Some(FanPreset::Maximum)
         );
+    }
+
+    #[test]
+    fn daemon_applies_each_line_and_replies_with_a_marker() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        write(&sysfs, thermal_profile::SYSFS_INDEX, "0");
+
+        // Two commands in one session, exactly as the auto fan curve would
+        // send one PWM write after another over the same pipe.
+        let input = b"thermal-profile 3\nthermal-profile 5\n".as_slice();
+        let mut output = Vec::new();
+        run_daemon(&sysfs, Path::new("/dev/null"), input, &mut output).unwrap();
+
+        assert_eq!(read(&sysfs, thermal_profile::SYSFS_INDEX), "5");
+        let replies: Vec<&str> = std::str::from_utf8(&output).unwrap().lines().collect();
+        assert_eq!(replies, vec![internal::HELPER_DAEMON_OK, internal::HELPER_DAEMON_OK]);
+    }
+
+    #[test]
+    fn daemon_reports_a_failed_command_and_keeps_the_session_open() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        write(&sysfs, thermal_profile::SYSFS_INDEX, "0");
+
+        // A bad command must not tear the session down: the next good one on
+        // the same connection still has to go through.
+        let input = b"not-a-real-action\nthermal-profile 4\n".as_slice();
+        let mut output = Vec::new();
+        run_daemon(&sysfs, Path::new("/dev/null"), input, &mut output).unwrap();
+
+        assert_eq!(read(&sysfs, thermal_profile::SYSFS_INDEX), "4");
+        let replies: Vec<&str> = std::str::from_utf8(&output).unwrap().lines().collect();
+        assert_eq!(replies.len(), 2);
+        assert!(replies[0].starts_with(internal::HELPER_DAEMON_ERR));
+        assert_eq!(replies[1], internal::HELPER_DAEMON_OK);
+    }
+
+    #[test]
+    fn daemon_ignores_blank_lines() {
+        let input = b"\n\n".as_slice();
+        let mut output = Vec::new();
+
+        let ec = Path::new("/dev/null");
+        run_daemon(ec, ec, input, &mut output).unwrap();
+
+        assert!(output.is_empty());
     }
 }
