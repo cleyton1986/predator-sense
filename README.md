@@ -1,7 +1,7 @@
 # Predator Sense for Linux
 
 <p align="center">
-  <a href="README-ptbr.md">🇧🇷 Leia em Português</a>
+  <a href="README-ptbr.md">🇧🇷 Leia em Português</a> · <a href="README-tr.md">🇹🇷 Türkçe Oku</a>
 </p>
 
 <p align="center">
