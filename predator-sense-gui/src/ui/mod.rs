@@ -18,3 +18,4 @@ pub mod ai_page;
 pub mod drivers_page;
 pub mod game_sync_page;
 pub mod background;
+pub mod color_input;

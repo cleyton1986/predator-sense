@@ -381,7 +381,9 @@ fn build_keyboard_panel() -> gtk::Box {
 
     for zone in 0..4 {
         let zb = gtk::Box::new(gtk::Orientation::Vertical, 3);
-        zb.set_size_request(140, -1);
+        // Widened from 140 (issue: add numeric 0-255 RGB entry) to fit each
+        // channel's new SpinButton next to its slider without cramping.
+        zb.set_size_request(175, -1);
 
         let lbl = gtk::Label::new(Some(&format!("{} {}", crate::i18n::t("section"), zone + 1)));
         lbl.add_css_class("rgb-zone-label");
@@ -406,7 +408,7 @@ fn build_keyboard_panel() -> gtk::Box {
         });
         zb.append(&cd);
 
-        // R, G, B sliders
+        // R, G, B sliders (+ numeric spin button, see color_input.rs)
         let channels = ["R", "G", "B"];
         let (zr, zg, zb_) = zone_colors[zone];
         let defaults = [zr as f64, zg as f64, zb_ as f64];
@@ -416,10 +418,7 @@ fn build_keyboard_panel() -> gtk::Box {
             let cl = gtk::Label::new(Some(name));
             cl.add_css_class("rgb-channel-label");
             cl.set_size_request(18, -1);
-            let sl = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 255.0, 1.0);
-            sl.set_value(*def);
-            sl.set_size_request(80, -1);
-            sl.add_css_class("color-scale");
+            let (control, sl) = crate::ui::color_input::rgb_channel_control(*def);
             let s = state.clone();
             let z = zone;
             let da = cd.clone();
@@ -437,7 +436,7 @@ fn build_keyboard_panel() -> gtk::Box {
                 kb.queue_draw();
             });
             row.append(&cl);
-            row.append(&sl);
+            row.append(&control);
             zb.append(&row);
             channel_sliders.push(sl);
         }
@@ -571,11 +570,16 @@ fn build_keyboard_panel() -> gtk::Box {
     sp_row.append(&sps);
 
     sp_row.append(&direction_controls);
+    dyn_controls.append(&sp_row);
 
-    // Color for dynamic effects
+    // Color for dynamic effects - its own row (not crammed into sp_row)
+    // since each channel now carries a slider + numeric SpinButton, plus a
+    // shared hex-code field (see color_input.rs).
+    let dyn_color_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    dyn_color_row.set_halign(gtk::Align::Center);
     let cr_l = gtk::Label::new(Some(crate::i18n::t("color")));
     cr_l.add_css_class("rgb-channel-label");
-    sp_row.append(&cr_l);
+    dyn_color_row.append(&cr_l);
     let mut dyn_color_sliders: Vec<gtk::Scale> = Vec::new();
     let dyn_color_defaults = [
         saved_dynamic.red as f64,
@@ -587,10 +591,7 @@ fn build_keyboard_panel() -> gtk::Box {
         (1, dyn_color_defaults[1]),
         (2, dyn_color_defaults[2]),
     ] {
-        let sl = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 255.0, 1.0);
-        sl.set_value(def);
-        sl.set_size_request(60, -1);
-        sl.add_css_class("color-scale");
+        let (control, sl) = crate::ui::color_input::rgb_channel_control(def);
         let s = state.clone();
         sl.connect_value_changed(move |sc| {
             let v = sc.value() as u8;
@@ -601,10 +602,18 @@ fn build_keyboard_panel() -> gtk::Box {
                 _ => st.dyn_color.2 = v,
             }
         });
-        sp_row.append(&sl);
+        dyn_color_row.append(&control);
         dyn_color_sliders.push(sl);
     }
-    dyn_controls.append(&sp_row);
+    dyn_controls.append(&dyn_color_row);
+    let dyn_color_scales = [
+        dyn_color_sliders[0].clone(),
+        dyn_color_sliders[1].clone(),
+        dyn_color_sliders[2].clone(),
+    ];
+    let dyn_hex_row = crate::ui::color_input::hex_entry_row(&dyn_color_scales);
+    dyn_hex_row.set_halign(gtk::Align::Center);
+    dyn_controls.append(&dyn_hex_row);
     page.append(&dyn_controls);
 
     // Apply button
@@ -1206,16 +1215,9 @@ fn build_cover_logo_panel(caps: hid_rgb::TargetCapabilities) -> gtk::Box {
         let channel_label = gtk::Label::new(Some(label));
         channel_label.add_css_class("rgb-channel-label");
         channel_label.set_size_request(18, -1);
-        let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 255.0, 1.0);
-        scale.set_value(value as f64);
-        scale.set_draw_value(false);
-        scale.set_hexpand(true);
-        scale.add_css_class("color-scale");
-        let value_label = gtk::Label::new(Some(&value.to_string()));
-        value_label.add_css_class("cover-logo-value");
+        let (control, scale) = crate::ui::color_input::rgb_channel_control(value as f64);
         {
             let state = state.clone();
-            let value_label = value_label.clone();
             let swatch = color_swatch.clone();
             scale.connect_value_changed(move |scale| {
                 let value = scale.value() as u8;
@@ -1225,7 +1227,6 @@ fn build_cover_logo_panel(caps: hid_rgb::TargetCapabilities) -> gtk::Box {
                     1 => state.config.green = value,
                     _ => state.config.blue = value,
                 }
-                value_label.set_text(&value.to_string());
                 mark_cover_logo_pending(&state);
                 update_cover_logo_preview(&state);
                 drop(state);
@@ -1233,10 +1234,16 @@ fn build_cover_logo_panel(caps: hid_rgb::TargetCapabilities) -> gtk::Box {
             });
         }
         row.append(&channel_label);
-        row.append(&scale);
-        row.append(&value_label);
+        row.append(&control);
         color_scales.push(scale);
         color_controls.append(&row);
+    }
+    if let [r, g, b] = color_scales.as_slice() {
+        color_controls.append(&crate::ui::color_input::hex_entry_row(&[
+            r.clone(),
+            g.clone(),
+            b.clone(),
+        ]));
     }
 
     let presets = gtk::FlowBox::new();
