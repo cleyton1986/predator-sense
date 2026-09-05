@@ -26,3 +26,4 @@ pub mod nvidia;
 pub mod ai_assistant;
 pub mod ai_snapshot;
 pub mod ai_actionlog;
+pub mod macro_player;

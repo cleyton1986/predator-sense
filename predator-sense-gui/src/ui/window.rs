@@ -11,8 +11,8 @@ use crate::hardware::{rgb, sensors, setup};
 use crate::tray::TrayManager;
 use crate::ui::{
     ai_page, background, battery_page, dashboard_page, drivers_page, fan_control_page, fan_page,
-    game_sync_page, gpu_page, monitor_page, network_page, rgb_page, setup_page, temperatures_page,
-    usage_page,
+    game_sync_page, gpu_page, macros_page, monitor_page, network_page, rgb_page, setup_page,
+    temperatures_page, usage_page,
 };
 
 thread_local! {
@@ -458,6 +458,16 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
         );
         pages.insert("drivers".into(), Box::new(|| drivers_page::build().upcast()));
         pages.insert("game_sync".into(), Box::new(|| game_sync_page::build().upcast()));
+        let window_weak = window.downgrade();
+        pages.insert(
+            "macros".into(),
+            Box::new(move || {
+                let window = window_weak
+                    .upgrade()
+                    .expect("lazy Macros page is built only while its window exists");
+                macros_page::build(&window).upcast()
+            }),
+        );
         let app_weak = app.downgrade();
         pages.insert(
             "settings".into(),
@@ -479,6 +489,7 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
         (crate::i18n::t("lighting"), "lighting"),
         (crate::i18n::t("perf_mode"), "fan"),
         (crate::i18n::t("game_sync_nav"), "game_sync"),
+        (crate::i18n::t("macros_nav"), "macros"),
         (crate::i18n::t("fan_control"), "fan_ctrl"),
         (crate::i18n::t("battery"), "battery"),
         (crate::i18n::t("gpu_menu"), "gpu"),

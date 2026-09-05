@@ -17,4 +17,5 @@ pub mod brand_theme;
 pub mod ai_page;
 pub mod drivers_page;
 pub mod game_sync_page;
+pub mod macros_page;
 pub mod background;

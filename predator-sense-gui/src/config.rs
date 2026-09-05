@@ -43,6 +43,31 @@ pub struct ChiconyRgbState {
     pub speed: u8,
 }
 
+/// One captured key press in a saved macro: the key name in `xdotool key`
+/// syntax (e.g. "a", "ctrl+c", "Return", "F5" - whatever `xdotool
+/// getactivewindow key --clearmodifiers` style names accept), and how long
+/// to wait *before* sending it, in milliseconds, measured from the previous
+/// step's send during recording. Real, human-timed delays rather than a
+/// fixed rate, matching how the v3 Windows app's own macro recorder worked
+/// (`MacroSettingPage.cs`'s "recording delay" mode) - the source of the
+/// idea for this feature, not of any wire protocol (this is pure software,
+/// no Acer-specific hardware or WMI call involved at any point).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacroStep {
+    pub key: String,
+    pub delay_ms: u32,
+}
+
+/// A saved, user-recorded keystroke macro (see `hardware::macro_player`).
+/// Deliberately has no hotkey/trigger field - v1 only plays back via an
+/// explicit button in the Macros page, never anything that could fire
+/// without the user looking at the screen and clicking it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Macro {
+    pub name: String,
+    pub steps: Vec<MacroStep>,
+}
+
 /// A saved lighting profile
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LightingProfile {
@@ -311,10 +336,16 @@ pub fn profiles_dir() -> PathBuf {
     config_dir().join("profiles")
 }
 
+/// Get the macros directory path
+pub fn macros_dir() -> PathBuf {
+    config_dir().join("macros")
+}
+
 /// Ensure configuration directories exist
 pub fn ensure_dirs() {
     let _ = fs::create_dir_all(config_dir());
     let _ = fs::create_dir_all(profiles_dir());
+    let _ = fs::create_dir_all(macros_dir());
 }
 
 /// Save a lighting profile
@@ -362,6 +393,53 @@ pub fn load_app_config() -> AppConfig {
     match fs::read_to_string(&path) {
         Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
         Err(_) => AppConfig::default(),
+    }
+}
+
+/// Save a macro, one JSON file per macro named after it (same convention as
+/// lighting profiles above).
+pub fn save_macro(macro_: &Macro) -> Result<(), String> {
+    ensure_dirs();
+    let path = macros_dir().join(format!("{}.json", sanitize_filename(&macro_.name)));
+    let json = serde_json::to_string_pretty(macro_)
+        .map_err(|e| format!("Erro ao serializar macro: {}", e))?;
+    fs::write(&path, json).map_err(|e| format!("Erro ao salvar macro: {}", e))
+}
+
+/// Load a macro by name
+pub fn load_macro(name: &str) -> Result<Macro, String> {
+    let path = macros_dir().join(format!("{}.json", sanitize_filename(name)));
+    let json =
+        fs::read_to_string(&path).map_err(|e| format!("Erro ao ler macro '{}': {}", name, e))?;
+    serde_json::from_str(&json).map_err(|e| format!("Erro ao parsear macro: {}", e))
+}
+
+/// List all saved macro names
+pub fn list_macros() -> Vec<String> {
+    ensure_dirs();
+    let entries = match fs::read_dir(macros_dir()) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            name.strip_suffix(".json").map(str::to_string)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Delete a saved macro. Not an error if it was already gone.
+pub fn delete_macro(name: &str) -> Result<(), String> {
+    let path = macros_dir().join(format!("{}.json", sanitize_filename(name)));
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Erro ao apagar macro: {}", e)),
     }
 }
 
