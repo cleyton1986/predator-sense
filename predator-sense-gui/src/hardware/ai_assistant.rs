@@ -106,7 +106,7 @@ fn tools_schema() -> serde_json::Value {
             "name": "set_rgb_dynamic_effect",
             "description": "Apply an animated keyboard lighting effect.",
             "parameters": { "type": "object", "properties": {
-                "mode": {"type": "string", "enum": ["static", "breath", "neon", "wave", "shifting", "zoom"]},
+                "mode": {"type": "string", "enum": ["static", "breath", "neon", "wave", "shifting", "zoom", "meteor", "twinkling"]},
                 "speed": {"type": "integer", "minimum": 0, "maximum": 9},
                 "brightness": {"type": "integer", "minimum": 0, "maximum": 100},
                 "direction": {"type": "string", "enum": ["right_to_left", "left_to_right"]},
@@ -483,6 +483,8 @@ fn build_tool_call(name: &str, args: &serde_json::Value) -> Result<ToolCall, AiE
                 Some("wave") => rgb::RgbMode::Wave,
                 Some("shifting") => rgb::RgbMode::Shifting,
                 Some("zoom") => rgb::RgbMode::Zoom,
+                Some("meteor") => rgb::RgbMode::Meteor,
+                Some("twinkling") => rgb::RgbMode::Twinkling,
                 _ => return Err(AiError::InvalidArgs("mode".into())),
             };
             let speed = get_u64("speed").unwrap_or(4).min(9) as u8;

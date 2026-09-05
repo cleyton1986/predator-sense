@@ -8,7 +8,18 @@ const DEVICE_DYNAMIC: &str = "/dev/acer-gkbbl-0";
 /// Character device for static zone coloring (4-byte payload)
 const DEVICE_STATIC: &str = "/dev/acer-gkbbl-static-0";
 
-/// RGB effect modes supported by the kernel module
+/// RGB effect modes supported by the kernel module. `Meteor`/`Twinkling`
+/// (values 6/7) were not in the original set - added after
+/// `dados-referencia-acer/connectedDevice.json` (a real Acer app's own
+/// device/mode dump, `ENGENHARIA-REVERSA/CODIGO-FONTE-EXTRAIDO/`) turned up
+/// an `AcerECKeyboard Device` reporting modes 0-7, the first six matching
+/// this enum byte-for-byte (0=Static..5=Zoom). The kernel module has no
+/// validation of its own (`gkbbl_drv_write` just forwards `payload[0]`
+/// straight to WMI), so nothing stops sending 6/7 - unconfirmed until tested
+/// live on real hardware, same "extend a byte the firmware already accepts
+/// unchecked" situation as every mode already in this enum, not the riskier
+/// "guess a brand new, never-used method ID" category from the fan-light
+/// investigation (see `PROTOCOLO-HARDWARE.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RgbMode {
     Static = 0,
@@ -17,6 +28,8 @@ pub enum RgbMode {
     Wave = 3,
     Shifting = 4,
     Zoom = 5,
+    Meteor = 6,
+    Twinkling = 7,
 }
 
 impl RgbMode {
@@ -28,6 +41,8 @@ impl RgbMode {
             Self::Wave => "Onda",
             Self::Shifting => "Deslizar",
             Self::Zoom => "Zoom",
+            Self::Meteor => "Meteoro",
+            Self::Twinkling => "Cintilar",
         }
     }
 
@@ -39,11 +54,16 @@ impl RgbMode {
             Self::Wave,
             Self::Shifting,
             Self::Zoom,
+            Self::Meteor,
+            Self::Twinkling,
         ]
     }
 
     pub fn needs_color(&self) -> bool {
-        matches!(self, Self::Static | Self::Breath | Self::Shifting | Self::Zoom)
+        matches!(
+            self,
+            Self::Static | Self::Breath | Self::Shifting | Self::Zoom | Self::Meteor | Self::Twinkling
+        )
     }
 
     pub fn needs_speed(&self) -> bool {

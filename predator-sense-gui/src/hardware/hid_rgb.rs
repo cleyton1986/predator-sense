@@ -78,7 +78,15 @@ fn generic_wire_mode(mode: RgbMode) -> Option<u8> {
         RgbMode::Static => Some(MODE_STATIC),
         RgbMode::Breath => Some(MODE_BREATH),
         RgbMode::Neon => Some(MODE_NEON),
-        RgbMode::Wave | RgbMode::Shifting | RgbMode::Zoom => None,
+        // `Shifting` already IS this chip's native "meteor-like sweep"
+        // (`PHN16S71_MODE_METEOR` below) under a different label chosen
+        // before that was known - a distinct `RgbMode::Meteor` variant
+        // (added for the separate, older WMI/EC keyboard path in
+        // `hardware::rgb`) has no confirmed wire code of its own here, nor
+        // does `Twinkling`.
+        RgbMode::Wave | RgbMode::Shifting | RgbMode::Zoom | RgbMode::Meteor | RgbMode::Twinkling => {
+            None
+        }
     }
 }
 
@@ -90,6 +98,9 @@ fn keyboard_wire_mode(protocol: KeyboardProtocol, mode: RgbMode) -> Option<u8> {
         (KeyboardProtocol::Phn16s71, RgbMode::Wave) => Some(PHN16S71_MODE_WAVE),
         (KeyboardProtocol::Phn16s71, RgbMode::Shifting) => Some(PHN16S71_MODE_METEOR),
         (KeyboardProtocol::Phn16s71, RgbMode::Zoom) => Some(PHN16S71_MODE_ZOOM),
+        // See `generic_wire_mode`'s comment: no confirmed native code for
+        // either on this chip, on any product.
+        (_, RgbMode::Meteor | RgbMode::Twinkling) => None,
         (KeyboardProtocol::Generic, _) => None,
     }
 }
@@ -557,6 +568,12 @@ mod tests {
         assert_eq!(keyboard_wire_mode(verified, RgbMode::Shifting), Some(0x0a));
         assert_eq!(keyboard_wire_mode(verified, RgbMode::Zoom), Some(0x09));
         assert_eq!(keyboard_wire_mode(other, RgbMode::Wave), None);
+        // Meteor/Twinkling (`hardware::rgb`'s WMI/EC-path additions) have no
+        // confirmed native code on this HID chip, on any product.
+        assert_eq!(keyboard_wire_mode(verified, RgbMode::Meteor), None);
+        assert_eq!(keyboard_wire_mode(verified, RgbMode::Twinkling), None);
+        assert_eq!(keyboard_wire_mode(other, RgbMode::Meteor), None);
+        assert_eq!(keyboard_wire_mode(other, RgbMode::Twinkling), None);
         assert_eq!(
             keyboard_effect_byte(verified, RgbMode::Breath, Direction::RightToLeft),
             0

@@ -1,6 +1,4 @@
 use std::fs;
-use std::sync::Mutex;
-use std::time::Instant;
 
 use crate::hardware::hwmon;
 
@@ -19,11 +17,6 @@ pub struct SensorData {
     pub wifi_temp: Option<f64>,
     pub ram0_temp: Option<f64>,
     pub ram1_temp: Option<f64>,
-    pub ram_used_pct: Option<f64>,
-    pub ram_used_gb: Option<f64>,
-    pub ram_total_gb: Option<f64>,
-    pub net_download_kbps: Option<f64>,
-    pub net_upload_kbps: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -37,13 +30,8 @@ pub struct GpuInfo {
     pub power_watts: Option<f64>,
 }
 
-// Store previous network bytes for delta calculation
-static PREV_NET: Mutex<Option<(u64, u64, Instant)>> = Mutex::new(None);
-
 pub fn read_all_sensors() -> SensorData {
     let gpu_info = read_nvidia_gpu_info();
-    let (ram_used_pct, ram_used_gb, ram_total_gb) = read_memory();
-    let (dl, ul) = read_network_speed();
     SensorData {
         cpu_temp: read_cpu_temperature(),
         gpu_temp: gpu_info.temp,
@@ -58,87 +46,7 @@ pub fn read_all_sensors() -> SensorData {
         wifi_temp: find_hwmon_temp_by_name("iwlwifi_1", "temp1_input"),
         ram0_temp: find_hwmon_temp_by_name("spd5118", "temp1_input"),
         ram1_temp: find_second_hwmon_temp("spd5118", "temp1_input"),
-        ram_used_pct,
-        ram_used_gb,
-        ram_total_gb,
-        net_download_kbps: dl,
-        net_upload_kbps: ul,
     }
-}
-
-fn read_memory() -> (Option<f64>, Option<f64>, Option<f64>) {
-    let c = match fs::read_to_string("/proc/meminfo") { Ok(c) => c, Err(_) => return (None, None, None) };
-    let mut total: u64 = 0;
-    let mut available: u64 = 0;
-    for line in c.lines() {
-        if line.starts_with("MemTotal:") {
-            total = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-        } else if line.starts_with("MemAvailable:") {
-            available = line.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
-        }
-    }
-    if total == 0 { return (None, None, None); }
-    let used = total - available;
-    let pct = (used as f64 / total as f64) * 100.0;
-    let used_gb = used as f64 / 1048576.0;
-    let total_gb = total as f64 / 1048576.0;
-    (Some(pct), Some(used_gb), Some(total_gb))
-}
-
-fn read_network_speed() -> (Option<f64>, Option<f64>) {
-    // Find main interface (wlp* for wifi or enp* for ethernet)
-    let iface = find_active_interface().unwrap_or_default();
-    if iface.is_empty() { return (None, None); }
-
-    let rx = fs::read_to_string(format!("/sys/class/net/{}/statistics/rx_bytes", iface))
-        .ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
-    let tx = fs::read_to_string(format!("/sys/class/net/{}/statistics/tx_bytes", iface))
-        .ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
-
-    let now = std::time::Instant::now();
-    let mut prev = PREV_NET.lock().unwrap();
-
-    let result = if let Some((prev_rx, prev_tx, prev_time)) = prev.as_ref() {
-        let dt = now.duration_since(*prev_time).as_secs_f64();
-        if dt > 0.1 {
-            let dl = (rx.saturating_sub(*prev_rx) as f64 / dt) / 1024.0;
-            let ul = (tx.saturating_sub(*prev_tx) as f64 / dt) / 1024.0;
-            (Some(dl), Some(ul))
-        } else {
-            (Some(0.0), Some(0.0))
-        }
-    } else {
-        // First read: store baseline, return 0
-        (Some(0.0), Some(0.0))
-    };
-
-    *prev = Some((rx, tx, now));
-    result
-}
-
-fn find_active_interface() -> Option<String> {
-    // Try wifi first (wlp*), then ethernet (enp*)
-    let entries = fs::read_dir("/sys/class/net").ok()?;
-    let mut names: Vec<String> = entries
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| n.starts_with("wlp") || n.starts_with("enp"))
-        .collect();
-    // Sort so wlp comes first (wifi priority)
-    names.sort_by(|a, b| {
-        let aw = a.starts_with("wlp");
-        let bw = b.starts_with("wlp");
-        bw.cmp(&aw)
-    });
-    for name in names {
-        let path = format!("/sys/class/net/{}/operstate", name);
-        if let Ok(state) = fs::read_to_string(&path) {
-            if state.trim() == "up" {
-                return Some(name);
-            }
-        }
-    }
-    None
 }
 
 fn read_cpu_model() -> String {

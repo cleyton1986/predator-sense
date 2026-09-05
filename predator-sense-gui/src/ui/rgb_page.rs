@@ -544,13 +544,17 @@ fn build_keyboard_panel() -> gtk::Box {
         crate::i18n::t("wave"),
         crate::i18n::t("shift"),
         crate::i18n::t("zoom"),
+        crate::i18n::t("meteor"),
+        crate::i18n::t("twinkling"),
     ];
-    // Effect order mirrors RgbMode's non-Static variants (Breath=1..Zoom=5).
+    // Effect order mirrors RgbMode's non-Static variants (Breath=1..Twinkling=7).
     let saved_effect_index = match saved_dynamic.mode {
         RgbMode::Neon => 1,
         RgbMode::Wave => 2,
         RgbMode::Shifting => 3,
         RgbMode::Zoom => 4,
+        RgbMode::Meteor => 5,
+        RgbMode::Twinkling => 6,
         RgbMode::Breath | RgbMode::Static => 0,
     };
 
@@ -612,7 +616,9 @@ fn build_keyboard_panel() -> gtk::Box {
                 1 => RgbMode::Neon,
                 2 => RgbMode::Wave,
                 3 => RgbMode::Shifting,
-                _ => RgbMode::Zoom,
+                4 => RgbMode::Zoom,
+                5 => RgbMode::Meteor,
+                _ => RgbMode::Twinkling,
             };
             s.borrow_mut().mode = mode;
             direction_controls
@@ -1642,6 +1648,42 @@ fn preview_zone_colors(
             for (i, slot) in out.iter_mut().enumerate() {
                 let dist = if i == 0 || i == 3 { 1.0 } else { 0.0 };
                 let level = 0.15 + 0.85 * (0.5 + 0.5 * (phase - dist * FRAC_PI_4).sin());
+                *slot = scale(color, level);
+            }
+            out
+        }
+        RgbMode::Meteor => {
+            // Unconfirmed on real hardware (see `RgbMode` docs) - unlike
+            // `Shifting`'s symmetric falloff, a meteor only trails behind
+            // where it's been, not ahead of where it's going. No direction
+            // control here (`needs_direction()` is false for this mode), so
+            // it always sweeps the same way.
+            let pos = (phase * 0.7).rem_euclid(4.0);
+            let mut out = [(0u8, 0u8, 0u8); 4];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let mut behind = pos - i as f64;
+                if behind < 0.0 {
+                    behind += 4.0;
+                }
+                let level = if behind < 0.4 {
+                    1.0
+                } else if behind < 1.5 {
+                    (1.5 - behind) * 0.6
+                } else {
+                    0.05
+                };
+                *slot = scale(color, level);
+            }
+            out
+        }
+        RgbMode::Twinkling => {
+            // Unconfirmed on real hardware (see `RgbMode` docs). Each zone
+            // flickers on its own phase offset instead of moving in
+            // lockstep, unlike every other effect above.
+            let mut out = [(0u8, 0u8, 0u8); 4];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let local = phase * (1.3 + i as f64 * 0.37) + i as f64 * 2.1;
+                let level = 0.1 + 0.9 * (0.5 + 0.5 * local.sin()).powi(3);
                 *slot = scale(color, level);
             }
             out
