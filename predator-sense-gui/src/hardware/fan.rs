@@ -76,6 +76,19 @@ pub fn set_pwm_auto() -> Result<(), String> {
     Ok(())
 }
 
+/// Simple CPU-temperature to fan-speed curve (percent) for the software
+/// auto-curve toggle on the Fan Control page.
+pub fn fan_curve_pct(temp_c: f64) -> u8 {
+    match temp_c {
+        t if t < 45.0 => 25,
+        t if t < 55.0 => 35,
+        t if t < 65.0 => 50,
+        t if t < 75.0 => 65,
+        t if t < 85.0 => 80,
+        _ => 100,
+    }
+}
+
 /// Read current CPU/GPU fan PWM as percentage (0-100), if available.
 pub fn get_pwm_percent() -> Option<(u8, u8)> {
     let cpu: u16 = crate::hardware::helper::read(HelperAction::PwmCpuRead)?

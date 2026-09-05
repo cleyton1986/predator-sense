@@ -4,6 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::f64::consts::PI;
 use std::rc::Rc;
 
+use crate::config;
 use crate::hardware::{fan, sensors};
 use crate::ui::background;
 
@@ -15,6 +16,7 @@ pub fn build() -> gtk::Box {
     page.set_margin_end(20);
 
     let caps = crate::hardware::capabilities::get();
+    let cfg = config::load_app_config();
 
     // Header — CoolBoost only where EC access (/dev/ec) is available.
     let top = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -186,6 +188,9 @@ pub fn build() -> gtk::Box {
 
             match fan::set_fan_mode(fan_mode) {
                 Ok(()) => {
+                    let mut c = config::load_app_config();
+                    c.fan_mode = Some(mode.clone());
+                    let _ = config::save_app_config(&c);
                     let msg = match mode.as_str() {
                         "auto" => crate::i18n::t("automatic"),
                         "max" => crate::i18n::t("max"),
@@ -235,6 +240,9 @@ pub fn build() -> gtk::Box {
                 coolboost.set_active(coolboost_enabled);
                 coolboost.connect_state_set(move |_, enabled| {
                     let _ = fan::set_coolboost(enabled);
+                    let mut c = config::load_app_config();
+                    c.coolboost_enabled = enabled;
+                    let _ = config::save_app_config(&c);
                     glib::Propagation::Proceed
                 });
                 coolboost.set_sensitive(true);
@@ -333,44 +341,21 @@ pub fn build() -> gtk::Box {
         curve_lbl.add_css_class("control-label");
         let curve_switch = gtk::Switch::new();
         curve_switch.set_valign(gtk::Align::Center);
+        curve_switch.set_active(cfg.fan_auto_curve_enabled);
         curve_box.append(&curve_lbl);
         curve_box.append(&curve_switch);
         page.append(&curve_box);
 
-        let curve_on = Rc::new(RefCell::new(false));
-        {
-            let on = curve_on.clone();
-            curve_switch.connect_state_set(move |_, active| {
-                *on.borrow_mut() = active;
-                glib::Propagation::Proceed
-            });
-        }
-        // Apply curve every 3s while enabled. The write goes through the
-        // persistent privileged helper (see hardware::helper), which now
-        // holds a mutex shared with every other privileged caller in the
-        // app - calling it straight from this GTK timer would block the
-        // main thread (and every other feature's privileged call) for the
-        // length of a pkexec auth prompt or a full session respawn, so it
-        // runs on a worker thread like every other privileged call already
-        // does elsewhere in this file (see the fan-mode reconciliation
-        // timer above). `applying` skips a tick instead of queuing a second
-        // write if the previous one is still in flight.
-        let on = curve_on.clone();
-        let applying = Rc::new(Cell::new(false));
-        glib::timeout_add_seconds_local(3, move || {
-            if *on.borrow() && !applying.get() {
-                let (cpu, _gpu) = sensors::read_critical_temps();
-                if let Some(t) = cpu {
-                    let pct = fan_curve_pct(t);
-                    applying.set(true);
-                    let applying_done = applying.clone();
-                    background::run(
-                        move || fan::set_pwm_percent(pct, pct),
-                        move |_| applying_done.set(false),
-                    );
-                }
-            }
-            glib::ControlFlow::Continue
+        // Only persists the choice here - enforcement runs in a global timer
+        // (`build_main_ui` in window.rs) instead of one local to this page,
+        // because pages in this app are built lazily on first navigation, so
+        // a page-local timer would never bring the curve back on a fresh
+        // launch until the user visited Fan Control again.
+        curve_switch.connect_state_set(move |_, active| {
+            let mut c = config::load_app_config();
+            c.fan_auto_curve_enabled = active;
+            let _ = config::save_app_config(&c);
+            glib::Propagation::Proceed
         });
     } else {
         // No per-fan PWM: explain (no error) that only firmware modes exist.
@@ -546,16 +531,4 @@ fn draw_animated_fan(cr: &gtk4::cairo::Context, w: f64, h: f64, rotation: f64, r
     let ext3 = cr.text_extents(&t).unwrap();
     cr.move_to(cx - ext3.width() / 2.0, cy + outer_r + 16.0);
     let _ = cr.show_text(&t);
-}
-
-/// Simple CPU-temperature to fan-speed curve (percent) for the auto mode.
-fn fan_curve_pct(temp_c: f64) -> u8 {
-    match temp_c {
-        t if t < 45.0 => 25,
-        t if t < 55.0 => 35,
-        t if t < 65.0 => 50,
-        t if t < 75.0 => 65,
-        t if t < 85.0 => 80,
-        _ => 100,
-    }
 }

@@ -114,6 +114,23 @@ pub struct AppConfig {
     /// existing safety-first behavior for everyone who doesn't touch it.
     #[serde(default)]
     pub keep_fan_auto_in_performance: bool,
+    /// Fan Control page (`ui::fan_control_page`): CoolBoost and the selected
+    /// fan mode used to only ever be written straight to the EC, with
+    /// nothing remembering the user's choice - so closing Predator Sense (or
+    /// a reboot resetting the EC) silently dropped them back to the
+    /// hardware default, with no way for the app to notice and turn them
+    /// back on. Reapplied by `build_main_ui` on every start.
+    #[serde(default)]
+    pub coolboost_enabled: bool,
+    /// "auto" or "max" - the last fan mode explicitly chosen on that page.
+    /// None means never touched, so startup leaves the firmware alone.
+    /// Custom PWM is intentionally excluded, same as `fan::set_fan_mode`.
+    #[serde(default)]
+    pub fan_mode: Option<String>,
+    /// Same "forgot on close" gap for the page's software auto-curve switch,
+    /// which used to live only in that page's local, in-memory state.
+    #[serde(default)]
+    pub fan_auto_curve_enabled: bool,
     /// Last-applied static RGB zone colors (issue #11: nothing persisted this
     /// before, so a full power cycle always reset the keyboard to its default
     /// pulsing effect). Reapplied after login/resume by the Rust hotkey service.
@@ -240,6 +257,9 @@ impl Default for AppConfig {
             font_scale: 1.0,
             debug_logging: false,
             keep_fan_auto_in_performance: false,
+            coolboost_enabled: false,
+            fan_mode: None,
+            fan_auto_curve_enabled: false,
             rgb_static_zones: None,
             rgb_brightness: 100,
             rgb_is_static: true,
