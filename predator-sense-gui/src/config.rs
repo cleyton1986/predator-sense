@@ -52,10 +52,20 @@ pub struct ChiconyRgbState {
 /// (`MacroSettingPage.cs`'s "recording delay" mode) - the source of the
 /// idea for this feature, not of any wire protocol (this is pure software,
 /// no Acer-specific hardware or WMI call involved at any point).
+///
+/// `delay_only`: when true, `key` is ignored (kept empty) and playback just
+/// waits `delay_ms` without sending anything - a standalone pause the user
+/// inserted by hand rather than something captured from a real keystroke.
+/// Same idea as `MacroSettingPage.cs`'s dedicated delay-row button
+/// (`delay_record_Button_Click`/`insertTimeFunc`), again reimplemented in
+/// software only. `#[serde(default)]` so macros saved before this field
+/// existed still load fine (missing key deserializes to `false`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MacroStep {
     pub key: String,
     pub delay_ms: u32,
+    #[serde(default)]
+    pub delay_only: bool,
 }
 
 /// A saved, user-recorded keystroke macro (see `hardware::macro_player`).
@@ -456,4 +466,34 @@ fn sanitize_filename(name: &str) -> String {
     name.chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == ' ')
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A macro saved before `MacroStep::delay_only` existed has no such key
+    /// in its JSON at all - `#[serde(default)]` must still load it, not
+    /// error out or silently corrupt every macro a user already recorded.
+    #[test]
+    fn a_macro_step_saved_before_delay_only_existed_still_loads() {
+        let json = r#"{"key":"a","delay_ms":200}"#;
+        let step: MacroStep = serde_json::from_str(json).expect("old-format step should parse");
+        assert_eq!(step.key, "a");
+        assert_eq!(step.delay_ms, 200);
+        assert!(!step.delay_only);
+    }
+
+    #[test]
+    fn a_delay_only_step_round_trips() {
+        let step = MacroStep {
+            key: String::new(),
+            delay_ms: 500,
+            delay_only: true,
+        };
+        let json = serde_json::to_string(&step).expect("step should serialize");
+        let back: MacroStep = serde_json::from_str(&json).expect("step should deserialize");
+        assert_eq!(back.delay_ms, 500);
+        assert!(back.delay_only);
+    }
 }

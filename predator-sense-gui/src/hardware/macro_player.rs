@@ -52,10 +52,16 @@ pub fn is_available() -> bool {
 ///
 /// Stops at the first step that fails to send and reports which one, rather
 /// than silently sending a partial macro and calling it success.
+///
+/// A `delay_only` step (see `MacroStep` docs) only sleeps - no `xdotool` call
+/// at all, so it can never itself be the failing step.
 pub fn play(steps: &[MacroStep]) -> Result<(), String> {
     for (index, step) in steps.iter().enumerate() {
         if step.delay_ms > 0 {
             std::thread::sleep(Duration::from_millis(step.delay_ms as u64));
+        }
+        if step.delay_only {
+            continue;
         }
         let status = Command::new("xdotool")
             .args(["key", "--clearmodifiers", &step.key])
@@ -212,22 +218,27 @@ mod tests {
             MacroStep {
                 key: "h".into(),
                 delay_ms: 0,
+                delay_only: false,
             },
             MacroStep {
                 key: "e".into(),
                 delay_ms: 200,
+                delay_only: false,
             },
             MacroStep {
                 key: "l".into(),
                 delay_ms: 200,
+                delay_only: false,
             },
             MacroStep {
                 key: "l".into(),
                 delay_ms: 200,
+                delay_only: false,
             },
             MacroStep {
                 key: "o".into(),
                 delay_ms: 200,
+                delay_only: false,
             },
         ];
         play(&steps).expect("playback failed");

@@ -16,6 +16,17 @@ struct RecordingState {
     active: bool,
     steps: Vec<MacroStep>,
     last_event: Option<Instant>,
+    /// Where the next captured key (or a manually inserted delay row) lands
+    /// in `steps`: `None` means "append at the end" (the only behavior this
+    /// page had before), `Some(pos)` means "insert at `pos`, then advance to
+    /// `pos + 1`" so a run of keys typed right after selecting a step in the
+    /// live list keep landing in order rather than all piling up on the same
+    /// spot. Set by clicking a row in the live list (see
+    /// `live_steps_list`'s `connect_row_selected`), reset to `None` whenever
+    /// a fresh recording starts or the cursor button clears it. Mirrors
+    /// `MacroSettingPage.cs`'s insert-at-selected-position recording mode
+    /// (`Window_insertKeyDown`/`insertCount`) - the idea, not any protocol.
+    insert_cursor: Option<usize>,
 }
 
 /// Seconds between clicking Play and the first key actually going out -
@@ -72,11 +83,37 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::ScrolledWindow {
     status.add_css_class("status-label");
     page.append(&status);
 
-    let live_steps_label = gtk::Label::new(None);
-    live_steps_label.set_halign(gtk::Align::Start);
-    live_steps_label.set_wrap(true);
-    live_steps_label.add_css_class("settings-row-desc");
-    page.append(&live_steps_label);
+    // Live view of the steps captured so far - a real (empty at first)
+    // selectable list rather than a plain preview label, so a step can be
+    // clicked to become the insert point for what gets typed/inserted next.
+    let live_steps_list = gtk::ListBox::new();
+    live_steps_list.set_selection_mode(gtk::SelectionMode::Single);
+    live_steps_list.add_css_class("settings-row");
+    page.append(&live_steps_list);
+
+    let cursor_hint = gtk::Label::new(Some(crate::i18n::t("macros_cursor_hint")));
+    cursor_hint.set_halign(gtk::Align::Start);
+    cursor_hint.set_wrap(true);
+    cursor_hint.add_css_class("settings-row-desc");
+    page.append(&cursor_hint);
+
+    // Manual delay-row insertion (`MacroSettingPage.cs`'s
+    // `delay_record_Button_Click`/`insertTimeFunc`, same idea): drops a
+    // standalone pause into the macro at the current insert point without
+    // needing to actually wait that long while recording.
+    let delay_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let delay_spin = gtk::SpinButton::with_range(0.0, 600_000.0, 100.0);
+    delay_spin.set_value(500.0);
+    delay_spin.set_valign(gtk::Align::Center);
+    delay_spin.set_sensitive(false);
+    let insert_delay_btn = gtk::Button::with_label(crate::i18n::t("macros_insert_delay"));
+    insert_delay_btn.set_sensitive(false);
+    let insert_end_btn = gtk::Button::with_label(crate::i18n::t("macros_insert_at_end"));
+    insert_end_btn.set_sensitive(false);
+    delay_row.append(&delay_spin);
+    delay_row.append(&insert_delay_btn);
+    delay_row.append(&insert_end_btn);
+    page.append(&delay_row);
 
     // --- Saved macros ---
     let list_title = gtk::Label::new(Some(crate::i18n::t("macros_saved_title")));
@@ -95,7 +132,59 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::ScrolledWindow {
         active: false,
         steps: Vec::new(),
         last_event: None,
+        insert_cursor: None,
     }));
+
+    // Selecting a row sets the insert point to "right after this step";
+    // clearing the selection (the "insert at end" button, or GTK's own
+    // click-to-deselect) goes back to append-at-end. Runs for both a real
+    // click and the programmatic `select_row` calls below (after inserting
+    // a step, to keep the visual cursor sitting on what was just added) -
+    // same effect either way, so no need to tell them apart.
+    {
+        let rec_state = rec_state.clone();
+        live_steps_list.connect_row_selected(move |_, row| {
+            let mut rec = rec_state.borrow_mut();
+            rec.insert_cursor = row.and_then(|r| {
+                let index = r.index();
+                (index >= 0).then_some(index as usize + 1)
+            });
+        });
+    }
+
+    {
+        let rec_state = rec_state.clone();
+        let live_steps_list = live_steps_list.clone();
+        let delay_spin = delay_spin.clone();
+        insert_delay_btn.connect_clicked(move |_| {
+            let mut rec = rec_state.borrow_mut();
+            if !rec.active {
+                return;
+            }
+            let delay_ms = delay_spin.value() as u32;
+            let pos = rec.insert_cursor.unwrap_or(rec.steps.len());
+            rec.steps.insert(
+                pos,
+                MacroStep {
+                    key: String::new(),
+                    delay_ms,
+                    delay_only: true,
+                },
+            );
+            rec.insert_cursor = Some(pos + 1);
+            let snapshot = rec.steps.clone();
+            drop(rec);
+            rebuild_live_steps_list(&live_steps_list, &snapshot);
+            if let Some(row) = live_steps_list.row_at_index(pos as i32) {
+                live_steps_list.select_row(Some(&row));
+            }
+        });
+    }
+
+    insert_end_btn.connect_clicked({
+        let live_steps_list = live_steps_list.clone();
+        move |_| live_steps_list.unselect_all()
+    });
 
     // Capture-phase controller on the WINDOW itself, not this page - the
     // same choice `window.rs` already makes for its Up/Down sidebar
@@ -114,7 +203,7 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::ScrolledWindow {
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     {
         let rec_state = rec_state.clone();
-        let live_steps_label = live_steps_label.clone();
+        let live_steps_list = live_steps_list.clone();
         key_controller.connect_key_pressed(move |_, keyval, _, keystate| {
             let mut rec = rec_state.borrow_mut();
             if !rec.active {
@@ -133,17 +222,32 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::ScrolledWindow {
                 None => 0,
             };
             rec.last_event = Some(Instant::now());
-            rec.steps.push(MacroStep {
-                key: key_name,
-                delay_ms,
-            });
-            let preview = rec
-                .steps
-                .iter()
-                .map(|s| s.key.as_str())
-                .collect::<Vec<_>>()
-                .join(" \u{2192} ");
-            live_steps_label.set_text(&preview);
+            // `insert_cursor` is `None` (append) for the common case of
+            // just recording a straight sequence top to bottom - only set
+            // once a step in the live list has been clicked. See
+            // `RecordingState::insert_cursor` docs for why it advances by
+            // one on every insert instead of staying put.
+            let pos = rec.insert_cursor.unwrap_or(rec.steps.len());
+            rec.steps.insert(
+                pos,
+                MacroStep {
+                    key: key_name,
+                    delay_ms,
+                    delay_only: false,
+                },
+            );
+            let advancing = rec.insert_cursor.is_some();
+            if advancing {
+                rec.insert_cursor = Some(pos + 1);
+            }
+            let snapshot = rec.steps.clone();
+            drop(rec);
+            rebuild_live_steps_list(&live_steps_list, &snapshot);
+            if advancing {
+                if let Some(row) = live_steps_list.row_at_index(pos as i32) {
+                    live_steps_list.select_row(Some(&row));
+                }
+            }
             glib::Propagation::Stop
         });
     }
@@ -154,7 +258,10 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::ScrolledWindow {
         let status = status.clone();
         let list_box = list_box.clone();
         let name_entry = name_entry.clone();
-        let live_steps_label = live_steps_label.clone();
+        let live_steps_list = live_steps_list.clone();
+        let insert_delay_btn = insert_delay_btn.clone();
+        let insert_end_btn = insert_end_btn.clone();
+        let delay_spin = delay_spin.clone();
         record_btn.connect_clicked(move |button| {
             let mut rec = rec_state.borrow_mut();
             if !rec.active {
@@ -165,6 +272,7 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::ScrolledWindow {
                 rec.active = true;
                 rec.steps.clear();
                 rec.last_event = None;
+                rec.insert_cursor = None;
                 drop(rec);
                 button.set_label(crate::i18n::t("macros_stop"));
                 button.remove_css_class("accent-button");
@@ -172,7 +280,10 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::ScrolledWindow {
                 status.set_text(crate::i18n::t("macros_recording"));
                 status.remove_css_class("status-error");
                 status.add_css_class("status-success");
-                live_steps_label.set_text("");
+                rebuild_live_steps_list(&live_steps_list, &[]);
+                insert_delay_btn.set_sensitive(true);
+                insert_end_btn.set_sensitive(true);
+                delay_spin.set_sensitive(true);
                 return;
             }
 
@@ -182,6 +293,9 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::ScrolledWindow {
             button.set_label(crate::i18n::t("macros_record"));
             button.remove_css_class("secondary-button");
             button.add_css_class("accent-button");
+            insert_delay_btn.set_sensitive(false);
+            insert_end_btn.set_sensitive(false);
+            delay_spin.set_sensitive(false);
 
             if steps.is_empty() {
                 status.set_text(crate::i18n::t("macros_empty"));
@@ -215,6 +329,31 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::ScrolledWindow {
 
     scroll.set_child(Some(&page));
     scroll
+}
+
+/// Rebuilds `list`'s rows from `steps`, one row per step, in order. Called
+/// after every insert (a captured key or a manually inserted delay) - same
+/// "full rebuild over partial patch" choice `refresh_macros_list` makes
+/// below, for the same reason (list is small, a rebuild rules out row-vs-
+/// data drift), and it keeps row indices lined up 1:1 with `steps` at all
+/// times, which matters because `connect_row_selected` uses `row.index()`
+/// directly as a position into that same vector.
+fn rebuild_live_steps_list(list: &gtk::ListBox, steps: &[MacroStep]) {
+    while let Some(child) = list.first_child() {
+        list.remove(&child);
+    }
+    for step in steps {
+        let label = if step.delay_only {
+            gtk::Label::new(Some(&crate::i18n::tf(
+                "macros_delay_row_label",
+                &[&step.delay_ms.to_string()],
+            )))
+        } else {
+            gtk::Label::new(Some(&step.key))
+        };
+        label.set_halign(gtk::Align::Start);
+        list.append(&label);
+    }
 }
 
 /// Clears and repopulates `list_box` from every macro currently saved on
