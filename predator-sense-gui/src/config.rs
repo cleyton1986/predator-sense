@@ -236,6 +236,13 @@ pub struct AppConfig {
     /// something other than a direct user action, so it starts opt-in.
     #[serde(default)]
     pub audio_sync_enabled: bool,
+    /// User-edited EQ curve (`ui::audio_eq_page`'s "Custom" tab) - always
+    /// exactly 10 values, one per `hardware::audio_eq::BAND_FREQUENCIES_HZ`
+    /// band, low to high. `Vec` rather than a fixed-size array purely so
+    /// serde never has to special-case array (de)serialization; length is
+    /// checked wherever this is read back.
+    #[serde(default)]
+    pub audio_eq_custom: Option<Vec<f64>>,
 }
 
 fn default_true() -> bool {
@@ -304,6 +311,7 @@ impl Default for AppConfig {
             game_profiles: Vec::new(),
             custom_icons_enabled: true,
             audio_sync_enabled: false,
+            audio_eq_custom: None,
         }
     }
 }
