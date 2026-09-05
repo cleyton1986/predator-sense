@@ -11,8 +11,8 @@ use crate::hardware::{rgb, sensors, setup};
 use crate::tray::TrayManager;
 use crate::ui::{
     ai_page, background, battery_page, dashboard_page, drivers_page, fan_control_page, fan_page,
-    game_sync_page, gpu_page, macros_page, monitor_page, network_page, rgb_page, setup_page,
-    temperatures_page, usage_page,
+    gpu_page, monitor_page, network_page, rgb_page, setup_page, temperatures_page, tools_page,
+    usage_page,
 };
 
 thread_local! {
@@ -99,7 +99,10 @@ pub fn build(app: &adw::Application) {
     // Check module status
     let module_status = setup::check_status();
     crate::startup_mark("module status checked");
-    if matches!(module_status, setup::ModuleStatus::Ready | setup::ModuleStatus::AlternativeDriver) {
+    if matches!(
+        module_status,
+        setup::ModuleStatus::Ready | setup::ModuleStatus::AlternativeDriver
+    ) {
         build_main_ui(app, &window);
     } else {
         build_with_setup(app, &window, &header);
@@ -185,7 +188,11 @@ fn hide_to_tray<W: IsA<gtk::Widget>>(win: &W, app: &adw::Application) {
     eprintln!("[close] janela escondida, tray iniciado");
 }
 
-fn build_with_setup(app: &adw::Application, window: &gtk::ApplicationWindow, _header: &gtk::HeaderBar) {
+fn build_with_setup(
+    app: &adw::Application,
+    window: &gtk::ApplicationWindow,
+    _header: &gtk::HeaderBar,
+) {
     let main_stack = gtk::Stack::new();
     main_stack.set_transition_type(gtk::StackTransitionType::SlideLeft);
     let app_c = app.clone();
@@ -291,7 +298,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 crate::hardware::applog::info("Turbo key: pressed, forced profile=Turbo fan=Max");
             } else {
                 let _ = profile::set_profile(profile::PowerProfile::Balanced);
-                crate::hardware::applog::info("Turbo key: released, restored profile=Balanced fan=Auto");
+                crate::hardware::applog::info(
+                    "Turbo key: released, restored profile=Balanced fan=Auto",
+                );
             }
             glib::ControlFlow::Continue
         });
@@ -314,7 +323,11 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         let bar = gtk::DrawingArea::new();
         bar.set_content_width(32);
         bar.set_vexpand(true);
-        bar.set_halign(if left { gtk::Align::Start } else { gtk::Align::End });
+        bar.set_halign(if left {
+            gtk::Align::Start
+        } else {
+            gtk::Align::End
+        });
         bar.set_can_target(false);
         let phase = pulse_phase.clone();
         bar.set_draw_func(move |_a, cr, w, h| {
@@ -334,7 +347,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         }
         let mut p = phase_c.borrow_mut();
         *p += 0.12;
-        if *p > 1.0 { *p -= 1.0; }
+        if *p > 1.0 {
+            *p -= 1.0;
+        }
         drop(p);
         for bar in &neon_bars {
             bar.queue_draw();
@@ -438,34 +453,46 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
                 temperatures_page::build(&readings).upcast()
             }),
         );
-        pages.insert("network".into(), Box::new(|| network_page::build().upcast()));
+        pages.insert(
+            "network".into(),
+            Box::new(|| network_page::build().upcast()),
+        );
         pages.insert("usage".into(), Box::new(|| usage_page::build().upcast()));
         pages.insert("lighting".into(), Box::new(|| rgb_page::build().upcast()));
         pages.insert("fan".into(), Box::new(|| fan_page::build().upcast()));
-        pages.insert("fan_ctrl".into(), Box::new(|| fan_control_page::build().upcast()));
-        pages.insert("battery".into(), Box::new(|| battery_page::build().upcast()));
-        pages.insert("gpu".into(), Box::new(|| gpu_page::build().upcast()));
-        pages.insert("monitor".into(), Box::new(|| monitor_page::build().upcast()));
-        let window_weak = window.downgrade();
         pages.insert(
-            "ai".into(),
-            Box::new(move || {
-                let window = window_weak
-                    .upgrade()
-                    .expect("lazy AI page is built only while its window exists");
-                ai_page::build(&window).upcast()
-            }),
+            "fan_ctrl".into(),
+            Box::new(|| fan_control_page::build().upcast()),
         );
-        pages.insert("drivers".into(), Box::new(|| drivers_page::build().upcast()));
-        pages.insert("game_sync".into(), Box::new(|| game_sync_page::build().upcast()));
+        pages.insert(
+            "battery".into(),
+            Box::new(|| battery_page::build().upcast()),
+        );
+        pages.insert("gpu".into(), Box::new(|| gpu_page::build().upcast()));
+        pages.insert(
+            "monitor".into(),
+            Box::new(|| monitor_page::build().upcast()),
+        );
+        pages.insert(
+            "drivers".into(),
+            Box::new(|| drivers_page::build().upcast()),
+        );
+        // GameSync, Macros and the AI assistant used to be their own
+        // top-level entries here, each reachable as a separate named page.
+        // They moved under one "Tools" hub (`tools_page.rs`, tab bar over a
+        // `gtk::Stack`, same pattern as `usage_page.rs`) once the sidebar
+        // started growing without an obvious ceiling - each tool's build()
+        // call lives inside that page now, still lazy (only runs the first
+        // time "tools" itself is visited), just no longer three separate
+        // entries here.
         let window_weak = window.downgrade();
         pages.insert(
-            "macros".into(),
+            "tools".into(),
             Box::new(move || {
                 let window = window_weak
                     .upgrade()
-                    .expect("lazy Macros page is built only while its window exists");
-                macros_page::build(&window).upcast()
+                    .expect("lazy Tools page is built only while its window exists");
+                tools_page::build(&window).upcast()
             }),
         );
         let app_weak = app.downgrade();
@@ -488,13 +515,17 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
         (crate::i18n::t("network"), "network"),
         (crate::i18n::t("lighting"), "lighting"),
         (crate::i18n::t("perf_mode"), "fan"),
-        (crate::i18n::t("game_sync_nav"), "game_sync"),
-        (crate::i18n::t("macros_nav"), "macros"),
         (crate::i18n::t("fan_control"), "fan_ctrl"),
         (crate::i18n::t("battery"), "battery"),
         (crate::i18n::t("gpu_menu"), "gpu"),
         (crate::i18n::t("monitoring"), "monitor"),
-        (crate::i18n::t("ai_page_nav"), "ai"),
+        // GameSync, Macros and the AI assistant used to be their own
+        // sidebar rows - moved under this one "Tools" hub (a card grid,
+        // `tools_page.rs`) once the sidebar started growing without an
+        // obvious ceiling. Their `pending` page-builder entries above are
+        // unchanged, still built lazily on first visit - only how you get
+        // to them changed.
+        (crate::i18n::t("tools_nav"), "tools"),
         (crate::i18n::t("drivers_and_manuals"), "drivers"),
         (crate::i18n::t("settings"), "settings"),
     ];
@@ -502,19 +533,13 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     let active_idx: Rc<RefCell<usize>> = Rc::new(RefCell::new(0));
     let nav_widgets: Rc<RefCell<Vec<(gtk::DrawingArea, gtk::Label)>>> =
         Rc::new(RefCell::new(Vec::new()));
-    // Captured by the shared sidebar pulse timer created after the loop.
-    let beta_badge: Rc<RefCell<Option<gtk::Label>>> = Rc::new(RefCell::new(None));
 
     // Shared by every item's click handler AND the Up/Down key navigation
     // added below - both just need to land on the same index. nav_widgets
     // is read lazily (through the Rc<RefCell<..>>) so this can be built
     // before the loop below has populated it.
-    let page_names: Rc<Vec<String>> = Rc::new(
-        nav_items
-            .iter()
-            .map(|(_, name)| name.to_string())
-            .collect(),
-    );
+    let page_names: Rc<Vec<String>> =
+        Rc::new(nav_items.iter().map(|(_, name)| name.to_string()).collect());
     let navigate_to: Rc<dyn Fn(usize)> = {
         let stack_c = stack.clone();
         let pending_c = pending.clone();
@@ -532,7 +557,11 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
                 bg_da.queue_draw();
                 lbl_w.remove_css_class("nav-label-active");
                 lbl_w.remove_css_class("nav-label");
-                lbl_w.add_css_class(if j == idx { "nav-label-active" } else { "nav-label" });
+                lbl_w.add_css_class(if j == idx {
+                    "nav-label-active"
+                } else {
+                    "nav-label"
+                });
             }
         })
     };
@@ -560,27 +589,6 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
             lbl.add_css_class("nav-label");
         }
         item_overlay.add_overlay(&lbl);
-
-        // "BETA" ribbon badge - only on the AI assistant nav item, a heads
-        // up that it's an opt-in, experimental feature (small model
-        // reliability isn't guaranteed - see hardware/ai_assistant.rs).
-        // Pulses opacity slowly so it stays noticeable without being a
-        // distracting constant blink, same idea as the header's neon-edge
-        // pulse animation further down this file.
-        if *page_name == "ai" {
-            let badge = gtk::Label::new(Some("BETA"));
-            badge.add_css_class("nav-beta-badge");
-            badge.set_halign(gtk::Align::End);
-            badge.set_valign(gtk::Align::Start);
-            badge.set_margin_end(14);
-            badge.set_margin_top(4);
-            item_overlay.add_overlay(&badge);
-
-            // Pulsed by the shared 5 fps sidebar timer below (was a dedicated
-            // 16 fps timer — see that timer's comment for why the rate
-            // matters).
-            *beta_badge.borrow_mut() = Some(badge.clone());
-        }
 
         // Click
         let gesture = gtk::GestureClick::new();
@@ -662,21 +670,25 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     status_row.set_halign(gtk::Align::Center);
     status_row.set_margin_top(4);
     let dot = gtk::Label::new(Some("●"));
-    dot.add_css_class(if rgb::is_module_loaded() { "status-dot-pulse" } else { "status-dot-off" });
+    dot.add_css_class(if rgb::is_module_loaded() {
+        "status-dot-pulse"
+    } else {
+        "status-dot-off"
+    });
 
-    // One shared 5 fps timer pulses both sidebar accents (status dot + BETA
-    // badge) via opacity. This replaces a CSS `animation: infinite` on the
-    // dot and a dedicated 16 fps set_opacity() timer on the badge: an
-    // infinite CSS animation on an always-mapped widget pins the GTK frame
-    // clock at panel refresh rate, re-rasterizing the window's cairo nodes
-    // in software nonstop — measured at ~84% of a core with the app idle on
-    // a 165 Hz panel (issue #13). A discrete 5 fps sine is visually
-    // equivalent for pulses this slow and lets the frame clock go fully
-    // idle between ticks.
+    // Discrete 5 fps timer pulses the status dot's opacity in place of a CSS
+    // `animation: infinite`: an infinite CSS animation on an always-mapped
+    // widget pins the GTK frame clock at panel refresh rate, re-rasterizing
+    // the window's cairo nodes in software nonstop - measured at ~84% of a
+    // core with the app idle on a 165 Hz panel (issue #13). A discrete 5 fps
+    // sine is visually equivalent for a pulse this slow and lets the frame
+    // clock go fully idle between ticks. Used to also pulse the sidebar's
+    // AI "BETA" badge the same way, back when AI had its own sidebar row -
+    // that badge lives on its Tools-hub card now (`tools_page.rs`), static,
+    // no shared timer needed for just the one spot.
     {
         let dot_pulses = rgb::is_module_loaded();
         let dot_c = dot.clone();
-        let badge_c = beta_badge.clone();
         let phase: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
         glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
             if !crate::app_state::is_window_visible() {
@@ -693,13 +705,14 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
                 // Same 2 s bright↔dim cycle the CSS keyframes had.
                 dot_c.set_opacity(0.45 + 0.55 * wave);
             }
-            if let Some(badge) = badge_c.borrow().as_ref() {
-                badge.set_opacity(0.55 + 0.45 * wave);
-            }
             glib::ControlFlow::Continue
         });
     }
-    let st = gtk::Label::new(Some(crate::i18n::t(if rgb::is_module_loaded() { "module_active" } else { "module_inactive" })));
+    let st = gtk::Label::new(Some(crate::i18n::t(if rgb::is_module_loaded() {
+        "module_active"
+    } else {
+        "module_inactive"
+    })));
     st.add_css_class("info-text-dim");
     status_row.append(&dot);
     status_row.append(&st);
@@ -768,7 +781,9 @@ fn find_model_photo(product_name: &str) -> Option<String> {
     for entry in entries.flatten() {
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
-        let Some(code) = name.rsplit_once('.').map(|(base, _)| base) else { continue };
+        let Some(code) = name.rsplit_once('.').map(|(base, _)| base) else {
+            continue;
+        };
         if product_lower.contains(&code.to_lowercase()) {
             return Some(entry.path().to_string_lossy().to_string());
         }
@@ -784,12 +799,18 @@ fn find_resource_path(name: &str) -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         let dir = exe.parent()?;
         let p = dir.join("../../resources").join(name);
-        if p.exists() { return Some(p); }
+        if p.exists() {
+            return Some(p);
+        }
         let p = dir.join(name);
-        if p.exists() { return Some(p); }
+        if p.exists() {
+            return Some(p);
+        }
     }
     let dev = std::path::PathBuf::from(format!("/opt/predator-sense/resources/{}", name));
-    if dev.exists() { return Some(dev); }
+    if dev.exists() {
+        return Some(dev);
+    }
     None
 }
 
@@ -815,8 +836,14 @@ fn draw_neon_bar(cr: &gtk4::cairo::Context, w: f64, h: f64, phase: f64, left: bo
         let spread = (i as f64 + 1.0) * 4.0;
         let alpha = (0.15 / (i as f64 + 1.0)) * pulse;
         cr.set_source_rgba(r, g, b, alpha);
-        rounded_rect(cr, x0 - spread / 2.0, top - spread / 2.0,
-                     bar_width + spread, bar_h + spread, radius + spread / 2.0);
+        rounded_rect(
+            cr,
+            x0 - spread / 2.0,
+            top - spread / 2.0,
+            bar_width + spread,
+            bar_h + spread,
+            radius + spread / 2.0,
+        );
         let _ = cr.fill();
     }
     // Core bar
@@ -921,12 +948,21 @@ fn draw_panel_border(cr: &gtk4::cairo::Context, w: f64, h: f64) {
 /// Draw brand mark
 fn draw_brand_mark(cr: &gtk4::cairo::Context, w: f64, h: f64) {
     let pts: [(f64, f64); 10] = [
-        (0.12*w, 0.0), (0.37*w, 0.25*h), (0.50*w, 0.0),
-        (0.63*w, 0.24*h), (0.88*w, 0.0), (0.88*w, 0.56*h),
-        (0.63*w, h), (0.50*w, 0.74*h), (0.37*w, h), (0.12*w, 0.56*h),
+        (0.12 * w, 0.0),
+        (0.37 * w, 0.25 * h),
+        (0.50 * w, 0.0),
+        (0.63 * w, 0.24 * h),
+        (0.88 * w, 0.0),
+        (0.88 * w, 0.56 * h),
+        (0.63 * w, h),
+        (0.50 * w, 0.74 * h),
+        (0.37 * w, h),
+        (0.12 * w, 0.56 * h),
     ];
     cr.move_to(pts[0].0, pts[0].1);
-    for &(x, y) in &pts[1..] { cr.line_to(x, y); }
+    for &(x, y) in &pts[1..] {
+        cr.line_to(x, y);
+    }
     cr.close_path();
     let grad = gtk4::cairo::LinearGradient::new(0.0, 0.0, 0.0, h);
     grad.add_color_stop_rgb(0.0, 0.68, 0.70, 0.75);
@@ -1138,13 +1174,19 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     let ac_profile_choices: [(&str, crate::hardware::profile::PowerProfile); 4] = [
         ("quiet", crate::hardware::profile::PowerProfile::Quiet),
         ("balanced", crate::hardware::profile::PowerProfile::Balanced),
-        ("performance", crate::hardware::profile::PowerProfile::Performance),
+        (
+            "performance",
+            crate::hardware::profile::PowerProfile::Performance,
+        ),
         ("turbo", crate::hardware::profile::PowerProfile::Turbo),
     ];
     let battery_profile_choices: [(&str, crate::hardware::profile::PowerProfile); 5] = [
         ("quiet", crate::hardware::profile::PowerProfile::Quiet),
         ("balanced", crate::hardware::profile::PowerProfile::Balanced),
-        ("performance", crate::hardware::profile::PowerProfile::Performance),
+        (
+            "performance",
+            crate::hardware::profile::PowerProfile::Performance,
+        ),
         ("turbo", crate::hardware::profile::PowerProfile::Turbo),
         ("eco", crate::hardware::profile::PowerProfile::Eco),
     ];
@@ -1174,7 +1216,8 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     ac_profile_row.append(&ac_profile_dd);
     page.append(&ac_profile_row);
 
-    let battery_profile_row = create_setting_row(t("profile_when_battery"), t("profile_when_battery_desc"));
+    let battery_profile_row =
+        create_setting_row(t("profile_when_battery"), t("profile_when_battery_desc"));
     battery_profile_row.set_sensitive(cfg.auto_profile_ac);
     let battery_profile_dd = gtk::DropDown::from_strings(&battery_profile_labels);
     let battery_selected = battery_profile_choices
@@ -1265,7 +1308,10 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     page.append(&acc_title);
 
     let font_row = create_setting_row(t("font_scale"), t("font_scale_desc"));
-    let font_scale_label = gtk::Label::new(Some(&format!("{}%", (cfg.font_scale * 100.0).round() as i32)));
+    let font_scale_label = gtk::Label::new(Some(&format!(
+        "{}%",
+        (cfg.font_scale * 100.0).round() as i32
+    )));
     font_scale_label.add_css_class("settings-row-desc");
     let font_scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, 100.0, 150.0, 5.0);
     font_scale.set_value(cfg.font_scale * 100.0);
@@ -1490,8 +1536,15 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     let mod_row = create_setting_row(t("status"), st_text);
     let dot = gtk::Label::new(Some("●"));
     dot.set_valign(gtk::Align::Center);
-    let dot_ok = matches!(status, setup::ModuleStatus::Ready | setup::ModuleStatus::AlternativeDriver);
-    dot.add_css_class(if dot_ok { "status-dot-ok" } else { "status-dot-off" });
+    let dot_ok = matches!(
+        status,
+        setup::ModuleStatus::Ready | setup::ModuleStatus::AlternativeDriver
+    );
+    dot.add_css_class(if dot_ok {
+        "status-dot-ok"
+    } else {
+        "status-dot-off"
+    });
     mod_row.append(&dot);
     page.append(&mod_row);
 
@@ -1523,9 +1576,17 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
             let results = setup::full_setup();
             if let Some(r) = results.last() {
                 sl_c.set_text(&r.message);
-                sl_c.add_css_class(if r.success { "status-success" } else { "status-error" });
-                if r.success { b.set_label(crate::i18n::t("installed")); }
-                else { b.set_sensitive(true); b.set_label(crate::i18n::t("try_again")); }
+                sl_c.add_css_class(if r.success {
+                    "status-success"
+                } else {
+                    "status-error"
+                });
+                if r.success {
+                    b.set_label(crate::i18n::t("installed"));
+                } else {
+                    b.set_sensitive(true);
+                    b.set_label(crate::i18n::t("try_again"));
+                }
             }
         });
         page.append(&btn);
@@ -1537,7 +1598,10 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     about.set_halign(gtk::Align::Start);
     about.set_margin_top(24);
     page.append(&about);
-    let about_t = gtk::Label::new(Some(&crate::i18n::tf("about_text", &[env!("CARGO_PKG_VERSION")])));
+    let about_t = gtk::Label::new(Some(&crate::i18n::tf(
+        "about_text",
+        &[env!("CARGO_PKG_VERSION")],
+    )));
     about_t.add_css_class("about-text");
     about_t.set_halign(gtk::Align::Start);
     page.append(&about_t);
