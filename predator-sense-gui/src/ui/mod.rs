@@ -18,6 +18,7 @@ pub mod ai_page;
 pub mod drivers_page;
 pub mod game_sync_page;
 pub mod macros_page;
+pub mod audio_eq_page;
 pub mod tools_page;
 pub mod badge_widget;
 pub mod background;
