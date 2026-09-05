@@ -58,13 +58,14 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::Box {
         (crate::i18n::t("game_sync_nav"), "game_sync", None),
         (crate::i18n::t("macros_nav"), "macros", None),
         (crate::i18n::t("audio_eq_nav"), "audio_eq", None),
-        (crate::i18n::t("ai_page_nav"), "ai", Some("BETA")),
+        (crate::i18n::t("ai_page_nav"), "ai", None),
     ];
     let buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
     for (i, (label, key, badge)) in tabs.iter().enumerate() {
         // Same overlay-with-badge trick `tool_card` used before this page
-        // became tab-based - kept for the AI tab's "BETA" marker, now via
-        // the shared `badge_widget` component instead of a one-off label.
+        // became tab-based, kept generic (`badge_widget`) even though no
+        // tab currently uses it - the AI tab's "BETA" marker was removed
+        // once the assistant graduated out of beta.
         let btn = gtk::Button::new();
         btn.add_css_class("usage-tab");
         if i == 0 {
