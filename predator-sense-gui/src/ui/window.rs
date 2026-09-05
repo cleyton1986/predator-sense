@@ -216,6 +216,39 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             cfg.keep_fan_auto_in_performance,
         );
         crate::hardware::game_sync::set_enabled(cfg.game_sync_enabled);
+
+        // Fan Control page (ui::fan_control_page): CoolBoost and fan mode
+        // used to only ever be written straight to the EC with nothing
+        // remembering the choice, so closing Predator Sense (or a reboot
+        // resetting the EC) silently dropped them - reapply them here on
+        // every start. Off the GTK thread since each helper write costs
+        // roughly 150ms and can trigger a polkit prompt.
+        let coolboost_enabled = cfg.coolboost_enabled;
+        let fan_mode = cfg.fan_mode.clone();
+        if crate::hardware::capabilities::get().ec && (coolboost_enabled || fan_mode.is_some()) {
+            background::run(
+                move || {
+                    if coolboost_enabled {
+                        let _ = crate::hardware::fan::set_coolboost(true);
+                    }
+                    match fan_mode.as_deref() {
+                        Some("max") => {
+                            let _ = crate::hardware::fan::set_fan_mode(
+                                crate::hardware::fan::FanMode::Max,
+                            );
+                        }
+                        Some("auto") => {
+                            let _ = crate::hardware::fan::set_fan_mode(
+                                crate::hardware::fan::FanMode::Auto,
+                            );
+                        }
+                        _ => {}
+                    }
+                },
+                |()| {},
+            );
+        }
+
         glib::timeout_add_seconds_local(5, || {
             let (cpu, gpu) = sensors::read_critical_temps();
             crate::hardware::alerts::check(cpu, gpu);
@@ -227,6 +260,26 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             crate::hardware::game_sync::check(&config::load_app_config().game_profiles);
             glib::ControlFlow::Continue
         });
+
+        // Software auto fan-curve (fan_control_page.rs "fan_auto_curve"
+        // switch): runs globally rather than only while that page is open,
+        // since pages here are built lazily on first navigation - a
+        // page-local timer would never restart the curve after a fresh
+        // launch until the user visited Fan Control again. Re-reads the
+        // config every tick, same as the game list above: toggling the
+        // switch takes effect on the next tick, no restart needed.
+        if crate::hardware::capabilities::get().fan_pwm {
+            glib::timeout_add_seconds_local(3, || {
+                if config::load_app_config().fan_auto_curve_enabled {
+                    let (cpu, _gpu) = sensors::read_critical_temps();
+                    if let Some(t) = cpu {
+                        let pct = crate::hardware::fan::fan_curve_pct(t);
+                        let _ = crate::hardware::fan::set_pwm_percent(pct, pct);
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
     }
 
     // AI assistant background monitor (opt-in, off unless ai_assistant_enabled).
