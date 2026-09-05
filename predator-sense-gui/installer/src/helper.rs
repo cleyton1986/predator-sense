@@ -4,6 +4,7 @@ use crate::constants::hardware::{
 };
 use crate::constants::{command as external, path};
 use crate::AppResult;
+use predator_sense_protocol::backlight;
 use predator_sense_protocol::battery;
 use predator_sense_protocol::helper::{
     Action as HelperAction, CpuGovernor, EnergyPreference, Switch, OPTIONAL_VALUE_SKIP,
@@ -41,6 +42,9 @@ const CPU_PROFILE_LOCK_RETRY: Duration = Duration::from_millis(50);
 // come from the shared protocol crate so the GUI resolves them identically.
 const BATTERY_CALIBRATION: &str = battery::WMI_CALIBRATION_MODE;
 const BACKLIGHT_TIMEOUT: &str = "devices/platform/acer-wmi/backlight_timeout";
+/// UNCONFIRMED on real hardware - see the doc comment on
+/// `HelperAction::DiscreteGpuMode` and `discrete_gpu_mode` in facer.c.
+const DISCRETE_GPU_MODE: &str = "devices/platform/acer-wmi/discrete_gpu_mode";
 // Root-only by kernel design (0400) unlike product_name/board_name (0444),
 // hence a dedicated privileged read instead of the unprivileged sysfs path
 // most other settings-page fields use.
@@ -390,6 +394,27 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
                 &sysfs.join(BACKLIGHT_TIMEOUT),
             )
         }
+        HelperAction::ScreenBrightness => {
+            let percent = parse_u16("screen-brightness", &args[1], 0, 100)?;
+            let Some(device) = backlight::device(sysfs) else {
+                return Err(fail("screen-brightness: no backlight device found"));
+            };
+            // max_brightness varies by panel, so the requested percent is
+            // scaled against whatever this one reports rather than assumed -
+            // same reasoning as thermal_profile's per-machine bitmask above.
+            let max: u32 = read_attr(
+                "screen-brightness",
+                &device.join(backlight::MAX_BRIGHTNESS_ATTR),
+            )?
+            .parse()
+            .map_err(|_| fail("screen-brightness: unreadable max_brightness"))?;
+            let raw = (u32::from(percent) * max) / 100;
+            write_attr(
+                "screen-brightness",
+                &raw.to_string(),
+                &device.join(backlight::BRIGHTNESS_ATTR),
+            )
+        }
         HelperAction::ThermalProfile => {
             // Raw firmware index, not a platform_profile name. The valid set
             // varies per machine and is published as a bitmask in
@@ -404,6 +429,21 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
                 &index.to_string(),
                 &sysfs.join(thermal_profile::SYSFS_INDEX),
             )
+        }
+        HelperAction::DiscreteGpuMode => {
+            // 1 (hybrid/Optimus) or 2 (discrete-only) - see discrete_gpu_mode
+            // in facer.c. The driver itself rejects anything else with
+            // EINVAL, and refuses a value the firmware does not recognize
+            // without side effects, same reasoning as ThermalProfile above -
+            // this only re-validates so a bad argument fails with a clear
+            // message instead of a generic write error.
+            let mode = args[1].trim();
+            if mode != "1" && mode != "2" {
+                return Err(fail(format!(
+                    "discrete-gpu-mode: invalid mode '{mode}' (must be 1 or 2)"
+                )));
+            }
+            write_attr("discrete-gpu-mode", mode, &sysfs.join(DISCRETE_GPU_MODE))
         }
         HelperAction::BacklightTimeoutRead => {
             let value = read_attr("backlight-timeout", &sysfs.join(BACKLIGHT_TIMEOUT))

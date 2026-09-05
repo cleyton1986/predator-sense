@@ -63,6 +63,15 @@ const KEYBOARD_VENDOR: u16 = 0x05AF;
 /// zone/effect protocol already covers, is deliberate: a keyboard that is
 /// actually zone-based getting sent a per-key buffer sized for a different
 /// physical layout would silently light up the wrong keys.
+///
+/// Independent cross-check, from a different source entirely: the 5.1
+/// Electron app's own model classifier (`re-findings-5.1-RC9/02-modelos/modelos-2025-2026.md`,
+/// `Is2025PrekeyDevice()`) lists `PT14-52T` - the direct sibling of G-911's
+/// `PT14-51` in the Triton 14 line - as per-key, and explicitly does *not*
+/// list `PHN16-73`/`PHN16S-71` there (those are `Is2025Device_PSPrzone`,
+/// zone-based, matching what issues #4/#12/#33 already found empirically).
+/// Nothing about this PID range specifically, but it corroborates gating
+/// Direct mode narrowly instead of trusting the whole Sunrex product range.
 const DIRECT_KEYBOARD_PRODUCTS: std::ops::Range<u16> = 0x766A..0x766F;
 
 /// Every USB HWID shipped for the cover logo, same source (`RGBDevice.ini`

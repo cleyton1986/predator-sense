@@ -210,6 +210,15 @@ pub mod helper {
         UsbChargingRead,
         BacklightTimeout,
         BacklightTimeoutRead,
+        /// Panel brightness, as a percent of `max_brightness`. Write-only
+        /// here for the same reason as `ThermalProfile`: the backlight class
+        /// is world-readable (`brightness`/`max_brightness` both `0644`),
+        /// only the write needs root - at least on this machine, where
+        /// neither a `video`-group membership nor a logind ACL grants it
+        /// (`getfacl` on `/sys/class/backlight/*/brightness` showed no user
+        /// entry). Used by "Eco Mode" (`hardware::eco_mode`) to cap
+        /// brightness, mirroring the same-named real Acer feature.
+        ScreenBrightness,
         PwmAvailable,
         PwmCpu,
         PwmGpu,
@@ -240,10 +249,19 @@ pub mod helper {
         /// Reapply the recorded ceiling at boot. The offset is not preserved
         /// across a power cycle, so without this the ceiling is lost every time.
         BootReapplyTempLimit,
+        /// MUX-style GPU switch, 1 (hybrid/Optimus) or 2 (discrete-only) - see
+        /// `discrete_gpu_mode` in facer.c. Write-only here, same reasoning as
+        /// `ThermalProfile`: the sysfs attribute is world-readable, only the
+        /// write needs root. UNCONFIRMED on real hardware - decoded from the
+        /// real Windows app, never exercised against live firmware by this
+        /// project. The real GPU routing only changes on the next boot, same
+        /// as Windows: a successful write here does not mean the running
+        /// session's GPU state changed at all.
+        DiscreteGpuMode,
     }
 
     impl Action {
-        pub const ALL: [Self; 41] = [
+        pub const ALL: [Self; 43] = [
             Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
@@ -268,6 +286,7 @@ pub mod helper {
             Self::UsbChargingRead,
             Self::BacklightTimeout,
             Self::BacklightTimeoutRead,
+            Self::ScreenBrightness,
             Self::PwmAvailable,
             Self::PwmCpu,
             Self::PwmGpu,
@@ -285,6 +304,7 @@ pub mod helper {
             Self::TempLimitCaps,
             Self::TempLimit,
             Self::BootReapplyTempLimit,
+            Self::DiscreteGpuMode,
         ];
 
         pub fn parse(value: &str) -> Option<Self> {
@@ -313,6 +333,7 @@ pub mod helper {
                 "usb-charge-read" => Some(Self::UsbChargingRead),
                 "backlight-timeout" => Some(Self::BacklightTimeout),
                 "backlight-timeout-read" => Some(Self::BacklightTimeoutRead),
+                "screen-brightness" => Some(Self::ScreenBrightness),
                 "pwm-available" => Some(Self::PwmAvailable),
                 "pwm-cpu" => Some(Self::PwmCpu),
                 "pwm-gpu" => Some(Self::PwmGpu),
@@ -330,6 +351,7 @@ pub mod helper {
                 "temp-limit-caps" => Some(Self::TempLimitCaps),
                 "temp-limit" => Some(Self::TempLimit),
                 "boot-reapply-temp-limit" => Some(Self::BootReapplyTempLimit),
+                "discrete-gpu-mode" => Some(Self::DiscreteGpuMode),
                 _ => None,
             }
         }
@@ -360,6 +382,7 @@ pub mod helper {
                 Self::UsbChargingRead => "usb-charge-read",
                 Self::BacklightTimeout => "backlight-timeout",
                 Self::BacklightTimeoutRead => "backlight-timeout-read",
+                Self::ScreenBrightness => "screen-brightness",
                 Self::PwmAvailable => "pwm-available",
                 Self::PwmCpu => "pwm-cpu",
                 Self::PwmGpu => "pwm-gpu",
@@ -377,6 +400,7 @@ pub mod helper {
                 Self::TempLimitCaps => "temp-limit-caps",
                 Self::TempLimit => "temp-limit",
                 Self::BootReapplyTempLimit => "boot-reapply-temp-limit",
+                Self::DiscreteGpuMode => "discrete-gpu-mode",
             }
         }
 
@@ -396,6 +420,7 @@ pub mod helper {
                 | Self::BootAnimation
                 | Self::UsbCharging
                 | Self::BacklightTimeout
+                | Self::ScreenBrightness
                 | Self::PwmCpu
                 | Self::PwmGpu
                 | Self::PwmCpuEnable
@@ -423,6 +448,7 @@ pub mod helper {
                 Self::TempLimitCaps => 0,
                 Self::TempLimit => 2,
                 Self::BootReapplyTempLimit => 1,
+                Self::DiscreteGpuMode => 1,
             }
         }
 
@@ -454,6 +480,7 @@ pub mod helper {
                 Self::UsbChargingRead => "usb-charge-read",
                 Self::BacklightTimeout => "backlight-timeout 0|1",
                 Self::BacklightTimeoutRead => "backlight-timeout-read",
+                Self::ScreenBrightness => "screen-brightness PERCENT",
                 Self::PwmAvailable => "pwm-available",
                 Self::PwmCpu => "pwm-cpu VALUE",
                 Self::PwmGpu => "pwm-gpu VALUE",
@@ -471,8 +498,39 @@ pub mod helper {
                 Self::TempLimitCaps => "temp-limit-caps",
                 Self::TempLimit => "temp-limit CELSIUS BOUND",
                 Self::BootReapplyTempLimit => "boot-reapply-temp-limit USER_HOME",
+                Self::DiscreteGpuMode => "discrete-gpu-mode 1|2",
             }
         }
+    }
+}
+
+/// Where the panel backlight lives in sysfs.
+///
+/// The device name is not fixed (`intel_backlight`, `amdgpu_bl0`, `acpi_video0`,
+/// ...), so it has to be discovered instead of hard-coded - same reasoning as
+/// [`battery::device`] below, and for the same practical reason: the GUI
+/// (reading, world-readable) and the privileged helper (writing) must resolve
+/// to the same device, or a write could land somewhere a following read never
+/// looks at.
+pub mod backlight {
+    use std::path::{Path, PathBuf};
+
+    pub const SYSFS_CLASS: &str = "class/backlight";
+    pub const BRIGHTNESS_ATTR: &str = "brightness";
+    pub const MAX_BRIGHTNESS_ATTR: &str = "max_brightness";
+
+    /// The backlight device to use: the first one, sorted by name so a
+    /// machine with more than one (an external monitor exposing its own
+    /// backlight class, alongside the panel) resolves the same way every
+    /// time rather than depending on `read_dir`'s arbitrary order.
+    pub fn device(sysfs: &Path) -> Option<PathBuf> {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(sysfs.join(SYSFS_CLASS))
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        entries.sort();
+        entries.into_iter().next()
     }
 }
 

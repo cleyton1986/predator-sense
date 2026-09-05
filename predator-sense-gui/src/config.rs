@@ -243,6 +243,19 @@ pub struct AppConfig {
     /// checked wherever this is read back.
     #[serde(default)]
     pub audio_eq_custom: Option<Vec<f64>>,
+    /// "Eco Mode" (`hardware::eco_mode`) - off by default, opt-in like the
+    /// other automatic-side-effect toggles above.
+    #[serde(default)]
+    pub eco_mode_enabled: bool,
+    /// Volume/brightness percent from just before Eco Mode was turned on,
+    /// so turning it off restores them exactly instead of guessing a
+    /// default. `None` means that control's value could not be read at the
+    /// time (e.g. no backlight device) - left alone on restore, not forced
+    /// to some arbitrary number.
+    #[serde(default)]
+    pub eco_mode_saved_volume_pct: Option<u8>,
+    #[serde(default)]
+    pub eco_mode_saved_brightness_pct: Option<u8>,
 }
 
 fn default_true() -> bool {
@@ -312,6 +325,9 @@ impl Default for AppConfig {
             custom_icons_enabled: true,
             audio_sync_enabled: false,
             audio_eq_custom: None,
+            eco_mode_enabled: false,
+            eco_mode_saved_volume_pct: None,
+            eco_mode_saved_brightness_pct: None,
         }
     }
 }

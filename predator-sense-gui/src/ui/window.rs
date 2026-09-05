@@ -1124,6 +1124,57 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     icons_row.append(&icons_switch);
     page.append(&icons_row);
 
+    // Eco Mode - caps volume/brightness at 40%, restores previous values on
+    // off. Touches the privileged helper for the brightness half (see
+    // `hardware::eco_mode` docs), so this runs off-thread like every other
+    // helper-backed switch, not inline in `connect_state_set`.
+    let eco_row = create_setting_row(t("eco_mode"), t("eco_mode_desc"));
+    let eco_switch = gtk::Switch::new();
+    eco_switch.set_active(cfg.eco_mode_enabled);
+    eco_switch.set_valign(gtk::Align::Center);
+    eco_switch.connect_state_set(move |switch, active| {
+        switch.set_sensitive(false);
+        let switch = switch.clone();
+        background::run(
+            move || {
+                let mut c = config::load_app_config();
+                let result = if active {
+                    crate::hardware::eco_mode::enable().map(|(volume, brightness)| {
+                        c.eco_mode_saved_volume_pct = volume;
+                        c.eco_mode_saved_brightness_pct = brightness;
+                    })
+                } else {
+                    let result = crate::hardware::eco_mode::disable(
+                        c.eco_mode_saved_volume_pct,
+                        c.eco_mode_saved_brightness_pct,
+                    );
+                    c.eco_mode_saved_volume_pct = None;
+                    c.eco_mode_saved_brightness_pct = None;
+                    result
+                };
+                if result.is_ok() {
+                    c.eco_mode_enabled = active;
+                }
+                let _ = config::save_app_config(&c);
+                result
+            },
+            move |result| {
+                switch.set_sensitive(true);
+                // A failure (most likely: the polkit prompt for the
+                // brightness half was dismissed) puts the switch back to
+                // what it actually is now, not what the click asked for -
+                // `set_state` rather than `set_active` so this does not
+                // re-enter `connect_state_set` and retry.
+                if result.is_err() {
+                    switch.set_state(!active);
+                }
+            },
+        );
+        glib::Propagation::Proceed
+    });
+    eco_row.append(&eco_switch);
+    page.append(&eco_row);
+
     // Start on boot
     let boot_row = create_setting_row(t("start_on_boot"), t("start_on_boot_desc"));
     let boot_switch = gtk::Switch::new();
@@ -1508,6 +1559,34 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
                 backlight_timeout_switch.set_sensitive(true);
             },
         );
+    }
+
+    // Discrete GPU mode (MUX switch), decoded from the real Windows app
+    // rather than mainline - gated by the sysfs attribute's own existence,
+    // which `facer.c` only creates after successfully probing the WMI call
+    // at module bind (see discrete_gpu.rs). Most Predator laptops have no
+    // physical MUX switch at all, so this is expected to stay hidden on
+    // most machines - it is not a sign of anything broken.
+    if crate::hardware::discrete_gpu::is_available() {
+        hw_any = true;
+        let gpu_mode_row = create_setting_row(t("discrete_gpu_mode"), t("discrete_gpu_mode_desc"));
+        let gpu_mode_switch = gtk::Switch::new();
+        gpu_mode_switch.set_valign(gtk::Align::Center);
+        gpu_mode_switch.set_active(
+            crate::hardware::discrete_gpu::get()
+                == Some(crate::hardware::discrete_gpu::GpuMode::DiscreteOnly),
+        );
+        gpu_mode_switch.connect_state_set(|_, active| {
+            let mode = if active {
+                crate::hardware::discrete_gpu::GpuMode::DiscreteOnly
+            } else {
+                crate::hardware::discrete_gpu::GpuMode::Hybrid
+            };
+            let _ = crate::hardware::discrete_gpu::set(mode);
+            glib::Propagation::Proceed
+        });
+        gpu_mode_row.append(&gpu_mode_switch);
+        page.append(&gpu_mode_row);
     }
 
     if !hw_any {

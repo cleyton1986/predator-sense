@@ -37,6 +37,51 @@ thread_local! {
     static CSS_PROVIDER: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
 }
 
+/// POC only, not shipped: registers the Predator brand font files (if
+/// present - see `resources/fonts/README.md`) with Fontconfig for this
+/// process only, so `font-family: "Predator"` in `style.css` resolves.
+///
+/// GTK4's own CSS parser does not support `@font-face` (confirmed by an
+/// "Unknown @ rule" warning when it was tried there), so registration has to
+/// go through Fontconfig directly - the same mechanism every GTK app already
+/// gets its system fonts from. `FcConfigAppFontAddFile` adds a font to the
+/// *current process's* config only (nothing is installed system-wide, and
+/// nothing here touches any file outside this app's own resources
+/// directory).
+///
+/// Silently does nothing if the font files are not present, which is the
+/// normal case: they are gitignored (`predator-sense-gui/resources/fonts/`)
+/// and only exist on a machine that opted into this experiment.
+fn register_predator_font() {
+    #[link(name = "fontconfig")]
+    extern "C" {
+        fn FcConfigAppFontAddFile(config: *mut std::ffi::c_void, file: *const i8) -> i32;
+    }
+
+    for candidate in [
+        "resources/fonts/Predator-Bold.otf",
+        "../resources/fonts/Predator-Bold.otf",
+        "/opt/predator-sense/resources/fonts/Predator-Bold.otf",
+    ] {
+        if !std::path::Path::new(candidate).exists() {
+            continue;
+        }
+        for file in [candidate.to_string(), candidate.replace("Bold", "Regular")] {
+            let Ok(cpath) = std::ffi::CString::new(file.as_str()) else {
+                continue;
+            };
+            // SAFETY: `cpath` is a valid, NUL-terminated C string that outlives
+            // the call; `config: NULL` tells Fontconfig to use its current
+            // default config, the documented way to call this function.
+            let added = unsafe { FcConfigAppFontAddFile(std::ptr::null_mut(), cpath.as_ptr()) };
+            if added == 0 {
+                eprintln!("[font-poc] Fontconfig rejected {file}");
+            }
+        }
+        return;
+    }
+}
+
 /// Re-applies the base stylesheet scaled by `scale` (see `ui::font_scale`).
 /// Safe to call at any time after startup - takes effect immediately.
 pub fn apply_font_scale(scale: f64) {
@@ -83,6 +128,7 @@ fn main() {
         // setting so standard Adwaita widgets use the same appearance.
         app.style_manager()
             .set_color_scheme(adw::ColorScheme::ForceDark);
+        register_predator_font();
         let provider = gtk::CssProvider::new();
         let scale = config::load_app_config().font_scale;
         provider.load_from_data(&ui::font_scale::scale_css(

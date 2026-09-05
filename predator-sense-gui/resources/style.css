@@ -3,6 +3,17 @@
    Matching nova-ui.html design
    ================================================ */
 
+/* POC: official Predator brand font, recovered from the real Windows app's
+   installer for reference. NOT committed/shipped until the licensing call is
+   made explicitly - see resources/fonts/README.md. Applied only to the brand
+   wordmark and page titles, never to body text, so the accessibility font
+   scale slider (Settings) keeps controlling everything that's actually read,
+   not just admired.
+   GTK4's CSS engine does NOT support @font-face (confirmed: "Unknown @ rule"
+   parser warning, rule silently dropped) - the font is registered instead via
+   Fontconfig at startup (main.rs::register_predator_font, FcConfigAppFontAddFile),
+   which is why this stylesheet only needs the family name below, not a src. */
+
 @define-color cyan #00cce6;
 @define-color cyan_dark #008899;
 @define-color bg_body #050505;
@@ -51,6 +62,7 @@
 }
 
 .header-brand {
+    font-family: "Predator", sans-serif;
     font-size: 18px;
     font-weight: 700;
     letter-spacing: 2px;
@@ -58,6 +70,7 @@
 }
 
 .header-title-label {
+    font-family: "Predator", sans-serif;
     font-size: 16px;
     font-weight: 600;
     letter-spacing: 1px;
@@ -65,6 +78,7 @@
 }
 
 .header-title-sense {
+    font-family: "Predator", sans-serif;
     font-size: 16px;
     font-weight: 400;
     color: #aaaaaa;
@@ -112,6 +126,7 @@
 
 /* === Section Titles === */
 .section-title {
+    font-family: "Predator", sans-serif;
     font-size: 16px;
     font-weight: 600;
     color: @text_muted;
