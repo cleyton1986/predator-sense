@@ -20,16 +20,43 @@ use crate::hardware::profile::{self, PowerProfile};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// `(index into the registered games list currently active, profile that
-/// was active right before the switch)`. `None` when no registered game is
-/// running. Restoring the "previous" profile on exit means GameSync only
-/// ever *suspends* a manual choice while playing, never overrides it for
-/// good.
-///
-/// The profile is itself optional: the machine may have had no single profile
-/// to snapshot (see the `coherent_profile()` call in `check()`), and inventing
-/// one to restore would switch the user to something they never chose.
-static ACTIVE: Mutex<Option<(usize, Option<PowerProfile>)>> = Mutex::new(None);
+/// Consecutive no-match ticks required before actually restoring the
+/// pre-game profile - modeled after the real Acer app, which also doesn't
+/// restore instantly on process exit (`ResetDelay` in its `Feature.ini`,
+/// configurable there; fixed here since nothing exposes it to us). At the 5s
+/// tick this runs on, 3 ticks is ~15s: enough to absorb a game's launcher
+/// process briefly disappearing from `/proc` (handing off to the real
+/// binary, or itself restarting) without treating that as "the game
+/// closed" and flapping the profile back and forth.
+const RESTORE_DELAY_TICKS: u32 = 3;
+
+/// What GameSync is doing right now. `None` when no registered game is
+/// running. Restoring the "previous" profile only after `PendingRestore`
+/// has seen enough consecutive misses means GameSync still only ever
+/// *suspends* a manual choice while playing, never overrides it for good -
+/// it just no longer jumps to conclusions from a single missed tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveState {
+    /// `index` into the registered games list; `previous` is the profile
+    /// that was active right before the switch, if any (see the doc on
+    /// `previous` in `Transition::Start` for why it can be absent).
+    Playing {
+        index: usize,
+        previous: Option<PowerProfile>,
+    },
+    /// The game matched by `index` stopped showing up in the `/proc` scan
+    /// `misses` ticks in a row. Not restored yet - only once `misses`
+    /// reaches `RESTORE_DELAY_TICKS` - so a momentary gap doesn't trigger a
+    /// restore-then-immediately-switch-back if the same game reappears next
+    /// tick.
+    PendingRestore {
+        index: usize,
+        previous: Option<PowerProfile>,
+        misses: u32,
+    },
+}
+
+static ACTIVE: Mutex<Option<ActiveState>> = Mutex::new(None);
 
 pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::Relaxed);
@@ -43,10 +70,17 @@ pub fn is_enabled() -> bool {
 }
 
 /// The registered game currently detected as running, if any - drives the
-/// "Now playing: X" status line in the UI.
+/// "Now playing: X" status line in the UI. Still reports the game during
+/// `PendingRestore`: the profile hasn't been restored yet either, so the UI
+/// saying otherwise before the delay elapses would be misleading.
 pub fn active_game_name(games: &[GameProfile]) -> Option<String> {
     let active = ACTIVE.lock().unwrap();
-    active.and_then(|(index, _)| games.get(index).map(|g| g.name.clone()))
+    let index = match *active {
+        Some(ActiveState::Playing { index, .. }) => index,
+        Some(ActiveState::PendingRestore { index, .. }) => index,
+        None => return None,
+    };
+    games.get(index).map(|g| g.name.clone())
 }
 
 /// Currently running executables, resolved via `/proc/*/exe`. Processes that
@@ -89,26 +123,64 @@ enum Transition {
     /// game's index. The caller still has to look up the *current* profile
     /// before switching, since that becomes the "previous" to restore later.
     Start(usize),
-    /// A different registered game replaced the one that was active,
-    /// without an in-between tick where none matched. Carries the
-    /// already-known "previous" profile forward unchanged.
+    /// A different registered game replaced the one that was active (or the
+    /// same one reappeared during `PendingRestore`, cancelling it), without
+    /// needing a fresh snapshot. Carries the already-known "previous"
+    /// profile forward unchanged.
     Switch(usize, Option<PowerProfile>),
-    /// No registered game matches anymore; restore this profile, if there was
-    /// a coherent one to go back to.
+    /// No registered game matched this tick, but not for `RESTORE_DELAY_TICKS`
+    /// misses in a row yet - record the miss, apply nothing.
+    Defer {
+        index: usize,
+        previous: Option<PowerProfile>,
+        misses: u32,
+    },
+    /// The miss streak reached the delay; restore this profile now, if there
+    /// was a coherent one to go back to.
     Restore(Option<PowerProfile>),
 }
 
-fn resolve_transition(
-    matched_index: Option<usize>,
-    active: Option<(usize, Option<PowerProfile>)>,
-) -> Transition {
+fn resolve_transition(matched_index: Option<usize>, active: Option<ActiveState>) -> Transition {
     match (matched_index, active) {
         (Some(index), None) => Transition::Start(index),
-        (Some(index), Some((active_index, previous))) if index != active_index => {
+        (Some(index), Some(ActiveState::Playing { index: active_index, .. }))
+            if index == active_index =>
+        {
+            Transition::Nothing
+        }
+        (Some(index), Some(ActiveState::Playing { previous, .. })) => {
             Transition::Switch(index, previous)
         }
-        (None, Some((_, previous))) => Transition::Restore(previous),
-        _ => Transition::Nothing,
+        // The same (or a different) registered game reappeared before the
+        // restore delay elapsed - resume as if it had never left, same as
+        // switching between two games with no gap.
+        (Some(index), Some(ActiveState::PendingRestore { previous, .. })) => {
+            Transition::Switch(index, previous)
+        }
+        (None, Some(ActiveState::Playing { index, previous })) => {
+            if RESTORE_DELAY_TICKS <= 1 {
+                Transition::Restore(previous)
+            } else {
+                Transition::Defer {
+                    index,
+                    previous,
+                    misses: 1,
+                }
+            }
+        }
+        (None, Some(ActiveState::PendingRestore { index, previous, misses })) => {
+            let misses = misses + 1;
+            if misses >= RESTORE_DELAY_TICKS {
+                Transition::Restore(previous)
+            } else {
+                Transition::Defer {
+                    index,
+                    previous,
+                    misses,
+                }
+            }
+        }
+        (None, None) => Transition::Nothing,
     }
 }
 
@@ -148,13 +220,24 @@ pub fn check(games: &[GameProfile]) {
                 );
             }
             if profile::set_profile(games[index].profile).is_ok() {
-                *active = Some((index, previous));
+                *active = Some(ActiveState::Playing { index, previous });
             }
         }
         Transition::Switch(index, previous) => {
             if profile::set_profile(games[index].profile).is_ok() {
-                *active = Some((index, previous));
+                *active = Some(ActiveState::Playing { index, previous });
             }
+        }
+        Transition::Defer {
+            index,
+            previous,
+            misses,
+        } => {
+            *active = Some(ActiveState::PendingRestore {
+                index,
+                previous,
+                misses,
+            });
         }
         Transition::Restore(previous) => {
             if let Some(previous) = previous {
@@ -201,6 +284,18 @@ mod tests {
         }
     }
 
+    fn playing(index: usize, previous: Option<PowerProfile>) -> ActiveState {
+        ActiveState::Playing { index, previous }
+    }
+
+    fn pending(index: usize, previous: Option<PowerProfile>, misses: u32) -> ActiveState {
+        ActiveState::PendingRestore {
+            index,
+            previous,
+            misses,
+        }
+    }
+
     #[test]
     fn starts_when_a_game_matches_with_nothing_active() {
         assert_eq!(resolve_transition(Some(2), None), Transition::Start(2));
@@ -209,7 +304,7 @@ mod tests {
     #[test]
     fn does_nothing_while_the_same_game_stays_active() {
         assert_eq!(
-            resolve_transition(Some(1), Some((1, Some(PowerProfile::Balanced)))),
+            resolve_transition(Some(1), Some(playing(1, Some(PowerProfile::Balanced)))),
             Transition::Nothing
         );
     }
@@ -217,7 +312,7 @@ mod tests {
     #[test]
     fn switches_when_a_different_game_takes_over_without_a_gap() {
         assert_eq!(
-            resolve_transition(Some(2), Some((1, Some(PowerProfile::Balanced)))),
+            resolve_transition(Some(2), Some(playing(1, Some(PowerProfile::Balanced)))),
             Transition::Switch(2, Some(PowerProfile::Balanced))
         );
     }
@@ -226,23 +321,76 @@ mod tests {
     /// profile to snapshot. The game still gets its profile; what must not
     /// happen is the exit "restoring" an invented one.
     #[test]
-    fn a_game_that_started_without_a_snapshot_restores_nothing() {
+    fn a_game_that_started_without_a_snapshot_defers_then_restores_nothing() {
         assert_eq!(
-            resolve_transition(None, Some((0, None))),
+            resolve_transition(None, Some(playing(0, None))),
+            Transition::Defer {
+                index: 0,
+                previous: None,
+                misses: 1
+            },
+            "first miss defers, same as when a profile was snapshotted"
+        );
+        assert_eq!(
+            resolve_transition(None, Some(pending(0, None, RESTORE_DELAY_TICKS - 1))),
             Transition::Restore(None)
         );
         assert_eq!(
-            resolve_transition(Some(3), Some((1, None))),
+            resolve_transition(Some(3), Some(playing(1, None))),
             Transition::Switch(3, None),
             "and the missing snapshot is carried forward, not filled in"
         );
     }
 
     #[test]
-    fn restores_when_no_game_matches_anymore() {
+    fn missing_a_tick_defers_the_restore_instead_of_running_it_immediately() {
         assert_eq!(
-            resolve_transition(None, Some((0, Some(PowerProfile::Quiet)))),
+            resolve_transition(None, Some(playing(0, Some(PowerProfile::Quiet)))),
+            Transition::Defer {
+                index: 0,
+                previous: Some(PowerProfile::Quiet),
+                misses: 1
+            }
+        );
+    }
+
+    #[test]
+    fn restores_only_once_the_miss_streak_reaches_the_delay() {
+        for misses in 1..RESTORE_DELAY_TICKS - 1 {
+            assert_eq!(
+                resolve_transition(None, Some(pending(0, Some(PowerProfile::Quiet), misses))),
+                Transition::Defer {
+                    index: 0,
+                    previous: Some(PowerProfile::Quiet),
+                    misses: misses + 1
+                },
+                "still short of the delay at {misses} consecutive misses"
+            );
+        }
+        assert_eq!(
+            resolve_transition(
+                None,
+                Some(pending(0, Some(PowerProfile::Quiet), RESTORE_DELAY_TICKS - 1))
+            ),
             Transition::Restore(Some(PowerProfile::Quiet))
+        );
+    }
+
+    #[test]
+    fn the_same_game_reappearing_before_the_delay_elapses_cancels_the_restore() {
+        assert_eq!(
+            resolve_transition(Some(0), Some(pending(0, Some(PowerProfile::Quiet), 1))),
+            Transition::Switch(0, Some(PowerProfile::Quiet)),
+            "resumes instead of restoring then immediately re-switching"
+        );
+    }
+
+    #[test]
+    fn a_different_game_reappearing_during_pending_restore_switches_to_it() {
+        assert_eq!(
+            resolve_transition(Some(2), Some(pending(0, Some(PowerProfile::Quiet), 1))),
+            Transition::Switch(2, Some(PowerProfile::Quiet)),
+            "the original snapshot is still the right one to restore later"
         );
     }
 
