@@ -215,6 +215,7 @@ enum PackageManager {
     Dnf,
     Pacman,
     Apt,
+    Zypper,
 }
 
 impl PackageManager {
@@ -226,8 +227,10 @@ impl PackageManager {
             Ok(Self::Pacman)
         } else if command_exists(command::APT_GET) {
             Ok(Self::Apt)
+        } else if command_exists(command::ZYPPER) {
+            Ok(Self::Zypper)
         } else {
-            Err("gerenciador de pacotes não detectado (apt/dnf/pacman)".into())
+            Err("gerenciador de pacotes não detectado (apt/dnf/pacman/zypper)".into())
         }
     }
 }
@@ -789,6 +792,22 @@ impl Installer {
                     "sudo",
                 ],
             ),
+            PackageManager::Zypper => run(
+                command::ZYPPER,
+                [
+                    "--non-interactive",
+                    "install",
+                    "gtk4-devel",
+                    "libadwaita-devel",
+                    "pkg-config",
+                    "gcc",
+                    "make",
+                    "dkms",
+                    "curl",
+                    "tar",
+                    "sudo",
+                ],
+            ),
             PackageManager::Apt => {
                 run_apt(["update", "-qq"])?;
                 run_apt([
@@ -807,6 +826,14 @@ impl Installer {
                 ])
             }
         }
+    }
+
+    fn opensuse_kernel_devel_package(release: &str) -> String {
+        let flavor = release.rsplit_once('-')
+        .map(|(_, flavor)| flavor)
+        .unwrap_or("default");
+
+        format!("kernel-{flavor}-devel")
     }
 
     fn install_kernel_headers(&self) -> AppResult {
@@ -839,6 +866,13 @@ impl Installer {
                         ["-S", "--noconfirm", "--needed", "linux-headers"],
                     )
                 }
+            }
+            PackageManager::Zypper => {
+                let package = opensuse_kernel_devel_package(&release);
+                run(
+                    command::ZYPPER,
+                    ["--non-interactive", "install", package.as_str()],
+                )
             }
         }
     }
@@ -1598,6 +1632,7 @@ impl Installer {
                 run(command::PACMAN, ["-S", "--noconfirm", "--needed", package])
             }
             PackageManager::Apt => run_apt(["install", "-y", package]),
+            PackageManager::Zypper => run(command::ZYPPER, ["--non-interactive", "install", package]),
         }
     }
 
