@@ -1027,7 +1027,7 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     lang_title.set_margin_top(16);
     page.append(&lang_title);
 
-    let lang_choices: [(&str, &str); 7] = [
+    let lang_choices: [(&str, &str); 9] = [
         ("pt", "language_pt"),
         ("en", "language_en"),
         ("es", "language_es"),
@@ -1035,6 +1035,8 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
         ("ja", "language_ja"),
         ("ru", "language_ru"),
         ("de", "language_de"),
+        ("it", "language_it"),
+        ("tr", "language_tr"),
     ];
     let lang_labels: Vec<&str> = lang_choices.iter().map(|(_, k)| t(k)).collect();
     let current_lang_code = cfg.language.clone().unwrap_or_else(|| {
@@ -1046,6 +1048,8 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
             crate::i18n::Lang::Ja => "ja",
             crate::i18n::Lang::Ru => "ru",
             crate::i18n::Lang::De => "de",
+            crate::i18n::Lang::It => "it",
+            crate::i18n::Lang::Tr => "tr",
         }
         .to_string()
     });

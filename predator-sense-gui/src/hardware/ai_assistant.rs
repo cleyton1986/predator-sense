@@ -197,6 +197,8 @@ fn system_prompt() -> String {
         crate::i18n::Lang::Ja => "Always reply in Japanese, never in English.",
         crate::i18n::Lang::Ru => "Always reply in Russian, never in English.",
         crate::i18n::Lang::De => "Always reply in German, never in English.",
+        crate::i18n::Lang::It => "Always reply in Italian, never in English.",
+        crate::i18n::Lang::Tr => "Always reply in Turkish, never in English.",
     };
     format!("{} {}", SYSTEM_PROMPT, language_line)
 }
