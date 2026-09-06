@@ -22,3 +22,4 @@ pub mod audio_eq_page;
 pub mod tools_page;
 pub mod badge_widget;
 pub mod background;
+pub mod color_input;

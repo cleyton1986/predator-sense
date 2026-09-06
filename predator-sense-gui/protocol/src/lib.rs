@@ -33,6 +33,27 @@ pub mod internal {
     pub const TRAY_ARGUMENT: &str = "--internal-tray";
     pub const DELAYED_APPLICATION_START_ARGUMENT: &str = "--internal-delayed-start";
     pub const APPLICATION_RESTART_DELAY_MS: u64 = 500;
+
+    /// Puts the privileged helper into daemon mode: instead of running one
+    /// action and exiting, it reads one action line at a time from stdin
+    /// (same wire format as its normal argv) until stdin closes, replying to
+    /// each with [`HELPER_DAEMON_OK`] or [`HELPER_DAEMON_ERR`] on stdout.
+    ///
+    /// This is what lets a caller pay for `pkexec`'s PAM/polkit session once
+    /// and reuse the same privileged process for many writes - the auto fan
+    /// curve was re-authenticating and spawning a new helper process for
+    /// every single PWM write, tens of thousands of times over a session
+    /// (issue #47). The daemon exits on its own once the caller's end of the
+    /// pipe closes, so nothing has to explicitly tear it down.
+    pub const HELPER_DAEMON_ARGUMENT: &str = "--daemon";
+    /// Marks the end of a successful daemon reply. Never a value any action
+    /// prints for itself (those are plain numbers or fixed enum words), so a
+    /// caller can tell reply framing from output on the same stream.
+    pub const HELPER_DAEMON_OK: &str = "__predator_sense_helper_ok__";
+    /// Marks the end of a failed daemon reply; the rest of the line is the
+    /// error message, with any newlines in it collapsed to spaces so the
+    /// reply still fits on one line.
+    pub const HELPER_DAEMON_ERR: &str = "__predator_sense_helper_err__";
 }
 
 pub mod installer {

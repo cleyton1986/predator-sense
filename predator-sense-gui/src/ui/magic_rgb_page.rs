@@ -167,22 +167,26 @@ fn labeled_scale(label_text: &str, min: f64, max: f64, value: f64) -> (gtk::Box,
 }
 
 fn color_row(defaults: (f64, f64, f64)) -> (gtk::Box, [gtk::Scale; 3]) {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    // Column, not a single wide row: each channel now carries a numeric
+    // SpinButton next to its slider (issue: no way to dial in an exact
+    // 0-255 value), plus a shared hex-code field below - fitting all of
+    // that on one horizontal line would overflow the page.
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 5);
     let label = gtk::Label::new(Some(crate::i18n::t("color")));
     label.add_css_class("rgb-channel-label");
-    row.append(&label);
-    let make = |v: f64| {
-        let sl = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 255.0, 1.0);
-        sl.set_value(v);
-        sl.set_hexpand(true);
-        sl.add_css_class("color-scale");
-        sl
-    };
-    let scales = [make(defaults.0), make(defaults.1), make(defaults.2)];
-    for s in &scales {
-        row.append(s);
-    }
-    (row, scales)
+    column.append(&label);
+
+    let make = |v: f64| crate::ui::color_input::rgb_channel_control(v);
+    let (r_row, r_scale) = make(defaults.0);
+    let (g_row, g_scale) = make(defaults.1);
+    let (b_row, b_scale) = make(defaults.2);
+    column.append(&r_row);
+    column.append(&g_row);
+    column.append(&b_row);
+
+    let scales = [r_scale, g_scale, b_scale];
+    column.append(&crate::ui::color_input::hex_entry_row(&scales));
+    (column, scales)
 }
 
 struct KeyboardState {

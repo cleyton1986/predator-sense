@@ -2,6 +2,10 @@
 #  Predator Sense for Linux - .gitignore
 # ══════════════════════════════════════
 
+# Serena MCP local project data (memories, cache, per-machine config) -
+# never intended to be shared upstream, keep it fully local.
+.serena/
+
 # === Rust build artifacts ===
 predator-sense-gui/target/
 predator-sense-gui/installer/target/
