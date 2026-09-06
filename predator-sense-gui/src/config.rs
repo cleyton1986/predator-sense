@@ -1,6 +1,6 @@
 use crate::hardware::magic_rgb::{KeyboardEffect, LogoEffect};
 use crate::hardware::profile::PowerProfile;
-use crate::hardware::rgb::RgbConfig;
+use crate::hardware::rgb::{EffectParams, RgbConfig, RgbMode};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -186,6 +186,15 @@ pub struct AppConfig {
     /// defaulting to Breath.
     #[serde(default)]
     pub rgb_dynamic_last: Option<RgbConfig>,
+    /// Speed/direction remembered per effect, keyed by `RgbMode` - see
+    /// `EffectParams`'s doc for why (`rgb_dynamic_last` alone only ever
+    /// remembers one shared value, for whichever effect was applied most
+    /// recently). Missing entries (a fresh config, or an effect that was
+    /// never applied since this field existed) fall back to whatever is
+    /// already on the sliders, same as before this existed.
+    #[serde(default)]
+    pub rgb_dynamic_effects: std::collections::HashMap<RgbMode, EffectParams>,
+
     /// Same "remember what was last applied" fix as rgb_is_static/
     /// rgb_dynamic_last above, for the separate 2024+ HID lighting page
     /// (`ui::magic_rgb_page`, issues #25/#26) and the Chicony/Helios 300
@@ -328,6 +337,7 @@ impl Default for AppConfig {
             rgb_brightness: 100,
             rgb_is_static: true,
             rgb_dynamic_last: None,
+            rgb_dynamic_effects: std::collections::HashMap::new(),
             magic_rgb_keyboard: None,
             magic_rgb_logo: None,
             chicony_rgb: None,

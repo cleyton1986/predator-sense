@@ -186,6 +186,15 @@ fn build_keyboard_panel() -> gtk::Box {
     let saved_cfg = crate::config::load_app_config();
     let is_static = saved_cfg.rgb_is_static;
     let saved_dynamic = saved_cfg.rgb_dynamic_last.clone().unwrap_or_default();
+    // Per-effect speed/direction memory (re-findings 10-config-real-ph315-54:
+    // the real Acer app remembers these per pattern, not one shared slot -
+    // see EffectParams's doc). Missing entries fall back to whatever is
+    // already on the sliders when an effect without a saved entry is picked.
+    // Shared and mutable (not a one-time snapshot): Apply below updates this
+    // as the user actually applies effects, so switching back to one already
+    // touched earlier in the same session sees its speed/direction too, not
+    // just whatever was on disk when the page was first built.
+    let saved_effects = Rc::new(RefCell::new(saved_cfg.rgb_dynamic_effects.clone()));
     let default_zone_colors = [(0u8, 200u8, 230u8); 4];
     let zone_colors = saved_cfg
         .rgb_static_zones
@@ -592,6 +601,22 @@ fn build_keyboard_panel() -> gtk::Box {
             && hid_rgb::keyboard_effect_supports_direction(saved_dynamic.mode),
     );
 
+    // Speed and effect-specific controls. Built here (before the effect
+    // buttons below) so their toggle handler can restore a per-effect
+    // speed/direction when one was saved for the effect just picked.
+    let sp_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    sp_row.set_halign(gtk::Align::Center);
+    let spl = gtk::Label::new(Some(crate::i18n::t("speed")));
+    spl.add_css_class("rgb-channel-label");
+    let sps = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 9.0, 1.0);
+    sps.set_value(saved_dynamic.speed as f64);
+    sps.set_size_request(150, -1);
+    sps.add_css_class("accent-scale");
+    {
+        let s = state.clone();
+        sps.connect_value_changed(move |sc| s.borrow_mut().speed = sc.value() as u8);
+    }
+
     let mut effect_buttons: Vec<gtk::ToggleButton> = Vec::new();
     for (i, name) in effects.iter().enumerate() {
         let btn = gtk::ToggleButton::with_label(name);
@@ -606,6 +631,9 @@ fn build_keyboard_panel() -> gtk::Box {
         let note = preview_note.clone();
         let da = keyboard_da.clone();
         let direction_controls = direction_controls.clone();
+        let sps = sps.clone();
+        let dir_combo = dir_combo.clone();
+        let saved_effects = saved_effects.clone();
         btn.connect_toggled(move |b| {
             if !toggle_activation_is_selected(b, &er) {
                 return;
@@ -620,6 +648,24 @@ fn build_keyboard_panel() -> gtk::Box {
                 _ => RgbMode::Twinkling,
             };
             s.borrow_mut().mode = mode;
+            // Restore this effect's own speed/direction if one was saved for
+            // it before - falls back to leaving the sliders exactly as they
+            // are (the pre-existing behavior) when this effect has never
+            // been applied yet. Copied out and the borrow dropped *before*
+            // touching the widgets below: both already update `state`
+            // themselves via their own change handlers (same as a user
+            // dragging them), and calling `set_value`/`set_active` while
+            // still holding a `borrow_mut()` here would re-enter this same
+            // RefCell from inside those handlers and panic.
+            if let Some(params) = saved_effects.borrow().get(&mode).copied() {
+                sps.set_value(params.speed as f64);
+                if let Some(direction) = params.direction {
+                    dir_combo.set_active(Some(match direction {
+                        Direction::LeftToRight => 0,
+                        Direction::RightToLeft => 1,
+                    }));
+                }
+            }
             direction_controls
                 .set_visible(hid_only && hid_rgb::keyboard_effect_supports_direction(mode));
             let mut c = er.first_child();
@@ -640,19 +686,6 @@ fn build_keyboard_panel() -> gtk::Box {
     }
     dyn_controls.append(&effects_row);
 
-    // Speed and effect-specific controls.
-    let sp_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    sp_row.set_halign(gtk::Align::Center);
-    let spl = gtk::Label::new(Some(crate::i18n::t("speed")));
-    spl.add_css_class("rgb-channel-label");
-    let sps = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 9.0, 1.0);
-    sps.set_value(saved_dynamic.speed as f64);
-    sps.set_size_request(150, -1);
-    sps.add_css_class("accent-scale");
-    {
-        let s = state.clone();
-        sps.connect_value_changed(move |sc| s.borrow_mut().speed = sc.value() as u8);
-    }
     sp_row.append(&spl);
     sp_row.append(&sps);
 
@@ -712,6 +745,7 @@ fn build_keyboard_panel() -> gtk::Box {
     apply_btn.add_css_class("accent-button");
     {
         let s = state.clone();
+        let saved_effects = saved_effects.clone();
         apply_btn.connect_clicked(move |_| {
             let st = s.borrow();
             let result = if st.is_static {
@@ -847,6 +881,19 @@ fn build_keyboard_panel() -> gtk::Box {
                         green: st.dyn_color.1,
                         blue: st.dyn_color.2,
                     });
+                    let params = rgb::EffectParams {
+                        speed: st.speed,
+                        direction: Some(st.direction),
+                    };
+                    // Update the live map too, not just the config on disk -
+                    // otherwise switching back to this effect later in the
+                    // same session (before the page is rebuilt) would still
+                    // see the stale snapshot taken when the page was built.
+                    saved_effects.borrow_mut().insert(st.mode, params);
+                    cfg.rgb_dynamic_effects.insert(
+                        st.mode,
+                        params,
+                    );
                 }
                 let _ = crate::config::save_app_config(&cfg);
             }
@@ -970,6 +1017,7 @@ fn build_keyboard_panel() -> gtk::Box {
             cfg.rgb_static_zones = None;
             cfg.rgb_is_static = true;
             cfg.rgb_dynamic_last = None;
+            cfg.rgb_dynamic_effects.clear();
             cfg.rgb_brightness = 100;
             let save_result = crate::config::save_app_config(&cfg);
 

@@ -20,7 +20,7 @@ const DEVICE_STATIC: &str = "/dev/acer-gkbbl-static-0";
 /// unchecked" situation as every mode already in this enum, not the riskier
 /// "guess a brand new, never-used method ID" category from the fan-light
 /// investigation (see `PROTOCOLO-HARDWARE.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum RgbMode {
     Static = 0,
     Breath = 1,
@@ -80,6 +80,20 @@ impl RgbMode {
 pub enum Direction {
     RightToLeft = 1,
     LeftToRight = 2,
+}
+
+/// Speed/direction remembered per dynamic effect (issue re-findings
+/// `10-config-real-ph315-54`: the real Acer app's own per-model lighting
+/// profile, `ProfilePool/LightProfilePool/Default/Main.xml`, stores each of
+/// its 17 patterns with its own `speed`/`duration`/`direction` - not one
+/// shared value for whichever effect happens to be selected, which is what
+/// `AppConfig::rgb_dynamic_last` alone gives us). Color and brightness stay
+/// global (the real profile's `<Pattern>` color is on the outer element, not
+/// per sub-pattern), only speed/direction are remembered per effect.
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+pub struct EffectParams {
+    pub speed: u8,
+    pub direction: Option<Direction>,
 }
 
 /// RGB configuration for a single zone or dynamic effect
