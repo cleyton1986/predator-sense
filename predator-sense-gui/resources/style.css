@@ -96,12 +96,14 @@
 
 /* === Nav Labels (drawn over Cairo background) === */
 .nav-label {
+    font-family: "Predator", sans-serif;
     color: @text_label;
     font-size: 13px;
     font-weight: 500;
 }
 
 .nav-label-active {
+    font-family: "Predator", sans-serif;
     color: white;
     font-size: 13px;
     font-weight: 700;
@@ -260,6 +262,8 @@
     padding: 18px;
     background-color: rgba(14, 14, 14, 0.82);
     border: 1px solid @border_dim;
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(0, 210, 235, 0.05);
 }
 
 .cover-logo-preview-card {
@@ -510,7 +514,8 @@
 .profile-card {
     background-color: rgba(20, 20, 20, 0.8);
     border: 1px solid @border_dim;
-    border-radius: 0;
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(0, 210, 235, 0.05);
     padding: 16px;
     border-left: 2px solid @cyan_dark;
 }
@@ -733,7 +738,8 @@ scrollbar slider:hover {
 .monitor-section {
     background-color: rgba(17, 17, 17, 0.9);
     border: 1px solid rgba(0, 204, 230, 0.2);
-    border-radius: 0;
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(0, 210, 235, 0.05);
     padding: 16px;
 }
 
@@ -793,7 +799,8 @@ scrollbar slider:hover {
     padding: 18px 20px;
     background-color: rgba(17, 17, 17, 0.75);
     border: 1px solid rgba(0, 204, 230, 0.25);
-    border-radius: 0;
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(0, 210, 235, 0.05);
 }
 
 .dashboard-vendor {
@@ -819,7 +826,8 @@ scrollbar slider:hover {
     padding: 14px 16px;
     background-color: rgba(17, 17, 17, 0.85);
     border: 1px solid @border_dim;
-    border-radius: 0;
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(0, 210, 235, 0.05);
 }
 
 .spec-icon {
@@ -846,7 +854,8 @@ scrollbar slider:hover {
     padding: 14px 18px;
     background-color: rgba(17, 17, 17, 0.9);
     border: 1px solid rgba(0, 204, 230, 0.25);
-    border-radius: 0;
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(0, 210, 235, 0.05);
 }
 
 .net-card-title {
@@ -872,7 +881,8 @@ scrollbar slider:hover {
     padding: 10px 14px;
     background-color: rgba(17, 17, 17, 0.75);
     border: 1px solid @border_dim;
-    border-radius: 0;
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(0, 210, 235, 0.05);
 }
 
 /* === Usage page === */
@@ -901,14 +911,16 @@ scrollbar slider:hover {
 .usage-panel {
     background-color: rgba(17, 17, 17, 0.88);
     border: 1px solid @border_dim;
-    border-radius: 0;
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(0, 210, 235, 0.05);
     padding: 12px 14px;
 }
 
 .usage-hero-card {
     background-color: rgba(17, 17, 17, 0.9);
     border: 1px solid rgba(0, 204, 230, 0.25);
-    border-radius: 0;
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(0, 210, 235, 0.05);
     padding: 14px 16px;
 }
 
@@ -999,7 +1011,8 @@ scrollbar slider:hover {
 .usage-disk-card {
     background-color: rgba(17, 17, 17, 0.9);
     border: 1px solid @border_dim;
-    border-radius: 0;
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(0, 210, 235, 0.05);
     min-width: 300px;
     transition: border-color 180ms ease-in-out;
 }
