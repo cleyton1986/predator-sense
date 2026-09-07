@@ -829,9 +829,10 @@ impl Installer {
     }
 
     fn opensuse_kernel_devel_package(release: &str) -> String {
-        let flavor = release.rsplit_once('-')
-        .map(|(_, flavor)| flavor)
-        .unwrap_or("default");
+        let flavor = release
+            .rsplit_once('-')
+            .map(|(_, flavor)| flavor)
+            .unwrap_or("default");
 
         format!("kernel-{flavor}-devel")
     }
@@ -868,7 +869,7 @@ impl Installer {
                 }
             }
             PackageManager::Zypper => {
-                let package = opensuse_kernel_devel_package(&release);
+                let package = Self::opensuse_kernel_devel_package(&release);
                 run(
                     command::ZYPPER,
                     ["--non-interactive", "install", package.as_str()],
@@ -1632,7 +1633,9 @@ impl Installer {
                 run(command::PACMAN, ["-S", "--noconfirm", "--needed", package])
             }
             PackageManager::Apt => run_apt(["install", "-y", package]),
-            PackageManager::Zypper => run(command::ZYPPER, ["--non-interactive", "install", package]),
+            PackageManager::Zypper => {
+                run(command::ZYPPER, ["--non-interactive", "install", package])
+            }
         }
     }
 
