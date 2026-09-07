@@ -343,6 +343,15 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
     {
         use crate::hardware::profile;
         let last_state: Rc<std::cell::Cell<Option<bool>>> = Rc::new(std::cell::Cell::new(None));
+        // What to go back to on release - whatever was actually active right
+        // before the key forced Turbo, not a hardcoded guess. Fixes a real
+        // bug: releasing the key used to always force Balanced, silently
+        // discarding Quiet/Performance/anything else the user had picked
+        // before pressing it (and, since Balanced's EPP differs from
+        // Quiet's, could leave the machine warmer than the user actually
+        // asked for with no visible sign anything overrode their choice).
+        let before_turbo: Rc<std::cell::Cell<Option<profile::PowerProfile>>> =
+            Rc::new(std::cell::Cell::new(None));
         glib::timeout_add_seconds_local(2, move || {
             let Some(now) = profile::get_turbo_button_state() else {
                 return glib::ControlFlow::Continue; // no such attribute on this hardware/kernel module
@@ -361,13 +370,29 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             // for Turbo, Auto otherwise), so this only needs to pick the
             // profile - no separate fan::set_fan_mode call to keep in sync.
             if now {
+                // Snapshot whichever profile is coherently active right now,
+                // before overwriting it - None (no single coherent profile
+                // to snapshot) is handled the same way GameSync already
+                // handles it: the key still gets its Turbo, restoring on
+                // release just falls back to Balanced since there is
+                // nothing truthful to go back to.
+                before_turbo.set(profile::coherent_profile());
                 let _ = profile::set_profile(profile::PowerProfile::Turbo);
                 crate::hardware::applog::info("Turbo key: pressed, forced profile=Turbo fan=Max");
             } else {
-                let _ = profile::set_profile(profile::PowerProfile::Balanced);
-                crate::hardware::applog::info(
-                    "Turbo key: released, restored profile=Balanced fan=Auto",
-                );
+                let restore = before_turbo.get().unwrap_or(profile::PowerProfile::Balanced);
+                let _ = profile::set_profile(restore);
+                crate::hardware::applog::info(&format!(
+                    "Turbo key: released, restored profile={} fan={}",
+                    restore.to_id(),
+                    if restore == profile::PowerProfile::Turbo
+                        || restore == profile::PowerProfile::Performance
+                    {
+                        "Max"
+                    } else {
+                        "Auto"
+                    }
+                ));
             }
             glib::ControlFlow::Continue
         });
