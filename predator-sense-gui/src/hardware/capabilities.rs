@@ -46,6 +46,30 @@ pub struct Capabilities {
     /// implements it, since `acer-wmi-battery` creates its attribute either
     /// way and reports -1 when it does not.
     pub battery_health: bool,
+    /// What this exact model is known to do with `fan::set_fan_mode`'s raw EC
+    /// write - see [`FanPresetStatus`].
+    pub fan_preset_status: FanPresetStatus,
+}
+
+/// What a given model is known to do with the raw EC write behind
+/// `fan::set_fan_mode` (offsets 0x21/0x22, values 0x50/0x54 Auto and
+/// 0x60/0x58 Max). One fact per model, sourced from a real report or
+/// hand-verification - never guessed. See `fan_preset_status_for` for the
+/// list, and add to it only with a citation (issue link, or hand-verified
+/// hardware) the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanPresetStatus {
+    /// Write + readback confirmed by hand on real hardware.
+    Verified,
+    /// A report confirmed this model's EC firmware uses different values -
+    /// sending the PH315-54 ones here does nothing useful and cannot be
+    /// trusted. `fan::set_fan_mode` refuses instead of guessing.
+    KnownIncompatible,
+    /// No report either way. `fan::set_fan_mode` still sends the PH315-54
+    /// bytes - refusing fan control entirely on every unlisted model would be
+    /// worse than an unverified write - but logs the gap instead of silently
+    /// assuming it behaves the same everywhere.
+    Unverified,
 }
 
 impl Capabilities {
@@ -58,8 +82,10 @@ impl Capabilities {
     }
 
     fn detect() -> Self {
+        let model = detect_model();
         Capabilities {
-            model: detect_model(),
+            fan_preset_status: fan_preset_status_for(&model),
+            model,
             fan_rpm: acer_hwmon_has("fan1_input") || acer_hwmon_has("fan2_input"),
             fan_pwm: crate::hardware::fan::pwm_available(),
             performance_profiles: Path::new("/sys/firmware/acpi/platform_profile").exists()
@@ -87,6 +113,115 @@ fn detect_model() -> String {
         "Unknown".to_string()
     } else {
         m
+    }
+}
+
+/// The only chassis the fan-preset EC bytes were hand-verified on - write
+/// then readback, confirmed on this project's own dev hardware.
+const FAN_PRESET_VERIFIED: &[&str] = &["PH315-54"];
+
+/// Confirmed by a real report to use different EC values, not just untested.
+/// - **PH317-55** (issue #1, `hunter3141592653`, closed): reporter had no fan
+///   control at all; root cause confirmed to be a different EC firmware, not
+///   an app bug. Refusing here beats sending PH315-54 bytes that are already
+///   known not to mean the same thing on this board.
+const FAN_PRESET_KNOWN_INCOMPATIBLE: &[&str] = &["PH317-55"];
+
+/// Every other Predator/Nitro model this project knows the name of, with no
+/// fan-preset report either way yet - `fan_preset_status_for` returns
+/// `Unverified` for these exactly like it does for a model not listed at all.
+/// Listed anyway so there is one place to check off against as reports come
+/// in, instead of a name only ever surfacing again inside a closed issue.
+///
+/// Two sources, kept separate because they answer different questions:
+///
+/// - Already in `kernel/facer.c`'s own DMI quirk table (this project already
+///   recognizes the model at the kernel level for RGB/fan-RPM/PWM, just never
+///   tested this specific EC write on it).
+/// - `Predator PHN16S-71` is the one exception promoted out of this list: a
+///   real report (issue #3, `Skepller`, CachyOS) confirmed fan RPM *reading*
+///   works on it via the same `quirk_acer_predator_phn16_71` family PH315-54
+///   uses, but that confirms the read side, not this write's exact byte
+///   pair - still `Unverified` for `set_fan_mode` until someone actually
+///   reports Auto/Max working.
+#[allow(dead_code)] // Reference list for future confirmations, not read at runtime.
+const FAN_PRESET_KERNEL_KNOWN_MODELS: &[&str] = &[
+    "PH16-71",
+    "PH16-72",
+    "PHN16-71",
+    "PHN16S-71",
+    "PHN16-72",
+    "PHN18-71",
+    "PH314-51s",
+    "PH314-52s",
+    "PH315-52",
+    "PH315-53",
+    "PH315-55",
+    "PH317-53",
+    "PH317-54",
+    "PH317-56",
+    "PH517-51",
+    "PH517-52",
+    "PH517-61",
+    "PH717-71",
+    "PH717-72",
+    "PT315-51",
+    "PT314-52s",
+    "PT315-52",
+    "PT515-51",
+    "PT316-51",
+    "PT316-51s",
+    "PT515-52",
+    "PT516-52s",
+    "PT917-71",
+    "PHN16-73",
+    "PH18-71",
+    "Nitro AN515-58",
+];
+
+/// - `outros/.../re-findings-5.1-RC9/02-modelos/modelos-2025-2026.md`,
+///   `SupportedModel.txt` (the official Windows 5.1 app's own supported-model
+///   list) minus every model already in one of the lists above. `facer.c`
+///   has no DMI quirk entry at all yet for any of these - fan behavior is
+///   unknown at every level here, not just this one byte pair, so kernel-side
+///   model recognition would have to land before this list even matters.
+///   `"PHN 18-i71"` keeps the literal space from the source string - see the
+///   doc's own note that it reads like an Acer typo, but it is the exact
+///   value compared against DMI.
+#[allow(dead_code)] // Reference list for future confirmations, not read at runtime.
+const FAN_PRESET_NEWER_UNMAPPED_MODELS: &[&str] = &[
+    "PH18-72",
+    "PH18-73",
+    "PH3D15-71",
+    "PHN14-51",
+    "PHN14-71",
+    "PHN18-72",
+    "PHN16-i71",
+    "PHN16-131",
+    "PHN16S-i51",
+    "PHN16S-i71",
+    "PH18-i71",
+    "PHN 18-i71",
+    "PT14-51",
+    "PT14-52T",
+    "PT16-51",
+    "PTN16-51",
+    "PTX17-71",
+    "T7001",
+];
+
+fn fan_preset_status_for(product_name: &str) -> FanPresetStatus {
+    let matches = |list: &[&str]| {
+        product_name
+            .split_whitespace()
+            .any(|part| list.iter().any(|model| part.eq_ignore_ascii_case(model)))
+    };
+    if matches(FAN_PRESET_VERIFIED) {
+        FanPresetStatus::Verified
+    } else if matches(FAN_PRESET_KNOWN_INCOMPATIBLE) {
+        FanPresetStatus::KnownIncompatible
+    } else {
+        FanPresetStatus::Unverified
     }
 }
 
@@ -158,4 +293,45 @@ pub fn get() -> &'static Capabilities {
     use std::sync::OnceLock;
     static CAPS: OnceLock<Capabilities> = OnceLock::new();
     CAPS.get_or_init(Capabilities::detect)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fan_preset_status_for, FanPresetStatus};
+
+    #[test]
+    fn verified_only_on_the_hand_tested_chassis() {
+        assert_eq!(
+            fan_preset_status_for("Predator PH315-54"),
+            FanPresetStatus::Verified
+        );
+        // Case/whitespace-insensitive, same rule as keyboard_protocol_for_product.
+        assert_eq!(fan_preset_status_for("ph315-54"), FanPresetStatus::Verified);
+    }
+
+    #[test]
+    fn known_incompatible_model_is_flagged_not_just_unverified() {
+        assert_eq!(
+            fan_preset_status_for("Predator PH317-55"),
+            FanPresetStatus::KnownIncompatible
+        );
+    }
+
+    #[test]
+    fn unverified_on_every_model_without_a_report() {
+        assert_eq!(
+            fan_preset_status_for("Predator PHN16-73"),
+            FanPresetStatus::Unverified
+        );
+        // Substring, not an exact word match.
+        assert_eq!(
+            fan_preset_status_for("Predator PH315-54X"),
+            FanPresetStatus::Unverified
+        );
+        assert_eq!(
+            fan_preset_status_for("Unknown"),
+            FanPresetStatus::Unverified
+        );
+        assert_eq!(fan_preset_status_for(""), FanPresetStatus::Unverified);
+    }
 }
