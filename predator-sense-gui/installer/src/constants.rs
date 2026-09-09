@@ -114,6 +114,7 @@ pub(crate) mod command {
     pub const UNAME: &str = "uname";
     pub const UPDATE_DESKTOP_DATABASE: &str = "update-desktop-database";
     pub const USERMOD: &str = "usermod";
+    pub const ZYPPER: &str = "zypper";
 }
 
 pub(crate) mod hardware {
