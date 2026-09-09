@@ -596,9 +596,7 @@ fn build_keyboard_panel() -> gtk::Box {
     direction_controls.append(&dir_l);
     direction_controls.append(&dir_combo);
     direction_controls.set_visible(
-        !is_static
-            && hid_only
-            && hid_rgb::keyboard_effect_supports_direction(saved_dynamic.mode),
+        !is_static && hid_only && hid_rgb::keyboard_effect_supports_direction(saved_dynamic.mode),
     );
 
     // Speed and effect-specific controls. Built here (before the effect
@@ -890,10 +888,7 @@ fn build_keyboard_panel() -> gtk::Box {
                     // same session (before the page is rebuilt) would still
                     // see the stale snapshot taken when the page was built.
                     saved_effects.borrow_mut().insert(st.mode, params);
-                    cfg.rgb_dynamic_effects.insert(
-                        st.mode,
-                        params,
-                    );
+                    cfg.rgb_dynamic_effects.insert(st.mode, params);
                 }
                 let _ = crate::config::save_app_config(&cfg);
             }
@@ -1156,8 +1151,11 @@ fn build_cover_logo_panel(caps: hid_rgb::TargetCapabilities) -> gtk::Box {
     content.set_homogeneous(true);
     content.add_css_class("cover-logo-content");
 
-    let preview_card = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    preview_card.add_css_class("cover-logo-preview-card");
+    let preview_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let preview_card = preview_faceted.content;
+    preview_card.set_orientation(gtk::Orientation::Vertical);
+    preview_card.set_spacing(10);
     preview_card.set_hexpand(true);
     let preview_title = gtk::Label::new(Some(crate::i18n::t("cover_logo_live_preview")));
     preview_title.add_css_class("cover-logo-section-title");
@@ -1183,10 +1181,13 @@ fn build_cover_logo_panel(caps: hid_rgb::TargetCapabilities) -> gtk::Box {
     preview_note.set_wrap(true);
     preview_note.set_xalign(0.0);
     preview_card.append(&preview_note);
-    content.append(&preview_card);
+    content.append(&preview_faceted.widget);
 
-    let controls_card = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    controls_card.add_css_class("cover-logo-controls-card");
+    let controls_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let controls_card = controls_faceted.content;
+    controls_card.set_orientation(gtk::Orientation::Vertical);
+    controls_card.set_spacing(12);
     controls_card.set_hexpand(true);
 
     let config_controls = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -1519,7 +1520,7 @@ fn build_cover_logo_panel(caps: hid_rgb::TargetCapabilities) -> gtk::Box {
     apply_footer.append(&reset_button);
     apply_footer.append(&apply_button);
     controls_card.append(&apply_footer);
-    content.append(&controls_card);
+    content.append(&controls_faceted.widget);
 
     let responsive_content = adw::BreakpointBin::new();
     responsive_content.set_child(Some(&content));

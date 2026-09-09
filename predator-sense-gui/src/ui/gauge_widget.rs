@@ -7,6 +7,46 @@ pub fn create_gauge(label_text: &str, value: Option<f64>, max_value: f64) -> gtk
     create_gauge_with_icon(label_text, value, max_value, None)
 }
 
+/// Just the dashed progress ring - no center number, no icon, no label under
+/// it. For layouts that show the name/value as text elsewhere (e.g. a card
+/// with a dedicated info column) and only want the ring as a plain visual
+/// indicator on its own.
+pub fn create_bare_ring(value: Option<f64>, max_value: f64, size: i32) -> gtk::DrawingArea {
+    let drawing_area = gtk::DrawingArea::new();
+    drawing_area.set_size_request(size, size);
+    drawing_area.set_halign(gtk::Align::Center);
+    drawing_area.set_valign(gtk::Align::Center);
+
+    drawing_area.set_draw_func(move |_area, cr, width, height| {
+        let w = width as f64;
+        let h = height as f64;
+        let cx = w / 2.0;
+        let cy = h / 2.0;
+        let radius = (w.min(h) / 2.0) - 8.0;
+        let line_width = 10.0;
+        let dash_len = 6.0;
+        let gap_len = 3.0;
+
+        cr.set_line_width(line_width);
+        cr.set_dash(&[dash_len, gap_len], 0.0);
+        cr.set_source_rgba(0.13, 0.13, 0.13, 1.0);
+        cr.arc(cx, cy, radius, 0.0, 2.0 * PI);
+        let _ = cr.stroke();
+
+        if let Some(val) = value {
+            let fraction = (val / max_value).clamp(0.0, 1.0);
+            let start = -PI / 2.0;
+            let end = start + fraction * 2.0 * PI;
+            let (r, g, b) = crate::ui::brand_theme::accent().bright;
+            cr.set_source_rgba(r, g, b, 1.0);
+            cr.arc(cx, cy, radius, start, end);
+            let _ = cr.stroke();
+        }
+    });
+
+    drawing_area
+}
+
 /// Same as [`create_gauge`], with a small icon overlaid above the
 /// temperature number - experimental, only used where `icon_file` (a
 /// `resources/icons/<name>.png` file name) is `Some`.
@@ -69,25 +109,41 @@ pub fn create_gauge_with_icon(
             // Temperature text - large white number
             cr.set_dash(&[], 0.0); // Reset dash
             cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
-            cr.select_font_face("Sans", gtk4::cairo::FontSlant::Normal, gtk4::cairo::FontWeight::Bold);
+            cr.select_font_face(
+                "Sans",
+                gtk4::cairo::FontSlant::Normal,
+                gtk4::cairo::FontWeight::Bold,
+            );
             cr.set_font_size(font_size);
             let temp_text = format!("{}°", val as i32);
             let extents = cr.text_extents(&temp_text).unwrap();
-            cr.move_to(cx - extents.width() / 2.0, cy + extents.height() / 3.0 + y_offset);
+            cr.move_to(
+                cx - extents.width() / 2.0,
+                cy + extents.height() / 3.0 + y_offset,
+            );
             let _ = cr.show_text(&temp_text);
         } else {
             cr.set_dash(&[], 0.0);
             cr.set_source_rgba(1.0, 1.0, 1.0, 0.4);
-            cr.select_font_face("Sans", gtk4::cairo::FontSlant::Normal, gtk4::cairo::FontWeight::Bold);
+            cr.select_font_face(
+                "Sans",
+                gtk4::cairo::FontSlant::Normal,
+                gtk4::cairo::FontWeight::Bold,
+            );
             cr.set_font_size(font_size);
             let text = "--°";
             let extents = cr.text_extents(text).unwrap();
-            cr.move_to(cx - extents.width() / 2.0, cy + extents.height() / 3.0 + y_offset);
+            cr.move_to(
+                cx - extents.width() / 2.0,
+                cy + extents.height() / 3.0 + y_offset,
+            );
             let _ = cr.show_text(text);
         }
     });
 
-    if let Some(name) = icon_file.and_then(|n| crate::ui::window::find_resource(&format!("icons/{n}"))) {
+    if let Some(name) =
+        icon_file.and_then(|n| crate::ui::window::find_resource(&format!("icons/{n}")))
+    {
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&drawing_area));
         let icon = gtk::Image::from_file(&name);

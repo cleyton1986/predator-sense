@@ -19,9 +19,11 @@ pub fn build() -> gtk::ScrolledWindow {
     page.set_margin_end(24);
 
     // === Hero header: foto + nome/modelo ===
-    let hero = gtk::Box::new(gtk::Orientation::Horizontal, 24);
+    let hero_card =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let hero = hero_card.content;
+    hero.set_spacing(24);
     hero.set_halign(gtk::Align::Fill);
-    hero.add_css_class("dashboard-hero");
 
     if let Some(path) = find_model_photo(&info.product_name)
         .or_else(|| find_resource("models/notebook-404.png"))
@@ -56,7 +58,7 @@ pub fn build() -> gtk::ScrolledWindow {
     hero_info.append(&summary);
 
     hero.append(&hero_info);
-    page.append(&hero);
+    page.append(&hero_card.widget);
 
     // === Specs grid ===
     let specs_title = gtk::Label::new(Some(crate::i18n::t("dashboard_specs")));
@@ -152,10 +154,30 @@ pub fn build() -> gtk::ScrolledWindow {
     let cards = [
         ("CPU", "💻", Some("cpu.png"), cpu_detail),
         ("GPU", "🎮", Some("gpu.png"), gpu_detail),
-        (crate::i18n::t("memory"), "🧠", Some("memoria-ram.png"), ram_detail),
-        (crate::i18n::t("storage"), "💾", Some("ssd.png"), storage_detail),
-        (crate::i18n::t("network"), "🌐", Some("internet.png"), net_detail),
-        (crate::i18n::t("system_os"), "🐧", Some("linux.png"), os_detail),
+        (
+            crate::i18n::t("memory"),
+            "🧠",
+            Some("memoria-ram.png"),
+            ram_detail,
+        ),
+        (
+            crate::i18n::t("storage"),
+            "💾",
+            Some("ssd.png"),
+            storage_detail,
+        ),
+        (
+            crate::i18n::t("network"),
+            "🌐",
+            Some("internet.png"),
+            net_detail,
+        ),
+        (
+            crate::i18n::t("system_os"),
+            "🐧",
+            Some("linux.png"),
+            os_detail,
+        ),
         ("BIOS", "⚙", Some("bios.png"), bios_detail),
     ];
 
@@ -214,9 +236,7 @@ fn refresh_gpu_detail(label: &gtk::Label) {
                     crate::i18n::t("gpu_suspended_static")
                 }
             }
-            crate::hardware::gpu::GpuLiveState::Live => {
-                crate::i18n::t("gpu_live_unavailable")
-            }
+            crate::hardware::gpu::GpuLiveState::Live => crate::i18n::t("gpu_live_unavailable"),
         })
     };
     label.set_text(&format_gpu_detail(
@@ -263,10 +283,7 @@ pub fn build_features_flow() -> gtk::FlowBox {
         (crate::i18n::t("feat_cover_logo"), caps.cover_logo),
         (crate::i18n::t("feat_fan_rpm"), caps.fan_rpm),
         (crate::i18n::t("feat_fan_pwm"), caps.fan_pwm),
-        (
-            crate::i18n::t("feat_profiles"),
-            caps.performance_profiles,
-        ),
+        (crate::i18n::t("feat_profiles"), caps.performance_profiles),
         (crate::i18n::t("feat_ec"), caps.ec),
         (crate::i18n::t("feat_gpu"), caps.nvidia_gpu),
         (crate::i18n::t("feat_battery"), caps.battery_charge_cap()),
@@ -280,7 +297,11 @@ pub fn build_features_flow() -> gtk::FlowBox {
 fn make_feature_chip(name: &str, supported: bool) -> gtk::Box {
     let chip = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     chip.add_css_class("feature-chip");
-    chip.add_css_class(if supported { "feature-on" } else { "feature-off" });
+    chip.add_css_class(if supported {
+        "feature-on"
+    } else {
+        "feature-off"
+    });
     chip.set_margin_top(2);
     chip.set_margin_bottom(2);
     let icon = gtk::Label::new(Some(if supported { "✓" } else { "—" }));
@@ -312,10 +333,15 @@ fn build_short_summary(info: &SystemInfo) -> String {
     parts.join(" · ")
 }
 
-fn create_spec_card(icon: &str, image: Option<&str>, title: &str, value: &str) -> (gtk::Box, gtk::Label) {
-    let card = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    card.add_css_class("spec-card");
-    // Fill the grid row so both cards on a row keep the same height (no misalign).
+fn create_spec_card(
+    icon: &str,
+    image: Option<&str>,
+    title: &str,
+    value: &str,
+) -> (gtk::Widget, gtk::Label) {
+    let accent = crate::ui::brand_theme::accent().bright;
+    let faceted = crate::ui::faceted_card::build_simple(accent, None);
+    let card = faceted.content;
     card.set_valign(gtk::Align::Fill);
     card.set_vexpand(true);
 
@@ -360,7 +386,7 @@ fn create_spec_card(icon: &str, image: Option<&str>, title: &str, value: &str) -
     text.append(&v);
 
     card.append(&text);
-    (card, v)
+    (faceted.widget, v)
 }
 
 /// Model-specific photos live in `resources/models/<CODE>.png`, background
@@ -377,7 +403,9 @@ fn find_model_photo(product_name: &str) -> Option<String> {
     for entry in entries.flatten() {
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
-        let Some(code) = name.rsplit_once('.').map(|(base, _)| base) else { continue };
+        let Some(code) = name.rsplit_once('.').map(|(base, _)| base) else {
+            continue;
+        };
         if product_lower.contains(&code.to_lowercase()) {
             return Some(entry.path().to_string_lossy().to_string());
         }

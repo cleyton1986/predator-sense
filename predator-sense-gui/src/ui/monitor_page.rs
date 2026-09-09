@@ -30,10 +30,21 @@ pub fn build() -> gtk::Box {
     }));
 
     // === CPU Section ===
-    let cpu_frame = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    cpu_frame.add_css_class("monitor-section");
+    let cpu_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let cpu_frame = cpu_faceted.content;
+    cpu_frame.set_orientation(gtk::Orientation::Vertical);
+    cpu_frame.set_spacing(8);
 
     let cpu_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    // Generic chip icon, not a vendor logo (Intel/NVIDIA's own Core/GeForce
+    // badges are trademarked and not ours to redistribute) - same icon file
+    // the Dashboard's spec cards already use for this same purpose.
+    if let Some(icon_path) = crate::ui::window::find_resource("icons/cpu.png") {
+        let icon = gtk::Image::from_file(icon_path);
+        icon.set_pixel_size(22);
+        cpu_header.append(&icon);
+    }
     let cpu_title = gtk::Label::new(Some("CPU"));
     cpu_title.add_css_class("monitor-title");
     let cpu_model_label = gtk::Label::new(None);
@@ -67,8 +78,21 @@ pub fn build() -> gtk::Box {
     cpu_temp_display.append(&cpu_temp_max);
     cpu_temp_display.append(&cpu_temp_value);
 
+    // Frequency moved here from the stats row below: the animated gauge,
+    // to the right of the min/max/current temperature text.
+    let cpu_freq_gauge = crate::ui::tech_gauge::build(
+        120,
+        crate::ui::brand_theme::accent().bright,
+        "CPU",
+        crate::i18n::t("mon_freq"),
+        "--",
+        "MHz",
+        false,
+    );
+
     cpu_graph_box.append(&cpu_graph);
     cpu_graph_box.append(&cpu_temp_display);
+    cpu_graph_box.append(&cpu_freq_gauge.widget);
     cpu_frame.append(&cpu_graph_box);
 
     // CPU stats row
@@ -76,20 +100,26 @@ pub fn build() -> gtk::Box {
     cpu_stats.set_margin_top(8);
 
     let cpu_fan_box = create_stat_widget(crate::i18n::t("mon_fan_speed"), "--", "RPM");
-    let cpu_freq_box = create_stat_widget(crate::i18n::t("mon_freq"), "--", "MHz");
 
     cpu_stats.append(&cpu_fan_box);
-    cpu_stats.append(&cpu_freq_box);
     cpu_frame.append(&cpu_stats);
 
-    page.append(&cpu_frame);
+    page.append(&cpu_faceted.widget);
 
     // === GPU Section ===
-    let gpu_frame = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    gpu_frame.add_css_class("monitor-section");
-    gpu_frame.set_margin_top(12);
+    let gpu_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let gpu_frame = gpu_faceted.content;
+    gpu_frame.set_orientation(gtk::Orientation::Vertical);
+    gpu_frame.set_spacing(8);
+    gpu_faceted.widget.set_margin_top(12);
 
     let gpu_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    if let Some(icon_path) = crate::ui::window::find_resource("icons/gpu.png") {
+        let icon = gtk::Image::from_file(icon_path);
+        icon.set_pixel_size(22);
+        gpu_header.append(&icon);
+    }
     let gpu_title = gtk::Label::new(Some("GPU"));
     gpu_title.add_css_class("monitor-title");
     let gpu_model_label = gtk::Label::new(None);
@@ -122,40 +152,64 @@ pub fn build() -> gtk::Box {
     gpu_temp_display.append(&gpu_temp_max);
     gpu_temp_display.append(&gpu_temp_value);
 
+    // Core Clock moved here from the stats row below, same as CPU
+    // Frequency above: the animated gauge, to the right of the min/max/
+    // current temperature text.
+    let gpu_clock_gauge = crate::ui::tech_gauge::build(
+        120,
+        crate::ui::brand_theme::accent().bright,
+        "GPU",
+        crate::i18n::t("mon_core_clock"),
+        "--",
+        "MHz",
+        false,
+    );
+
     gpu_graph_box.append(&gpu_graph);
     gpu_graph_box.append(&gpu_temp_display);
+    gpu_graph_box.append(&gpu_clock_gauge.widget);
     gpu_frame.append(&gpu_graph_box);
 
     // GPU stats row
     let gpu_stats = gtk::Box::new(gtk::Orientation::Horizontal, 32);
     gpu_stats.set_margin_top(8);
 
-    let gpu_clock_box = create_stat_widget(crate::i18n::t("mon_core_clock"), "--", "MHz");
     let gpu_mem_box = create_stat_widget(crate::i18n::t("clock_vram"), "--", "MHz");
     let gpu_util_box = create_stat_widget(crate::i18n::t("mon_utilization"), "--", "%");
     let gpu_power_box = create_stat_widget(crate::i18n::t("mon_power"), "--", "W");
 
-    gpu_stats.append(&gpu_clock_box);
     gpu_stats.append(&gpu_mem_box);
     gpu_stats.append(&gpu_util_box);
     gpu_stats.append(&gpu_power_box);
     gpu_frame.append(&gpu_stats);
 
-    page.append(&gpu_frame);
+    page.append(&gpu_faceted.widget);
 
     // Setup graph draw functions
     {
         let state_c = state.clone();
         cpu_graph.set_draw_func(move |_area, cr, w, h| {
             let st = state_c.borrow();
-            draw_temp_graph(cr, w as f64, h as f64, &st.cpu_temp_history, (0.0, 0.83, 0.67));
+            draw_temp_graph(
+                cr,
+                w as f64,
+                h as f64,
+                &st.cpu_temp_history,
+                (0.0, 0.83, 0.67),
+            );
         });
     }
     {
         let state_c = state.clone();
         gpu_graph.set_draw_func(move |_area, cr, w, h| {
             let st = state_c.borrow();
-            draw_temp_graph(cr, w as f64, h as f64, &st.gpu_temp_history, (0.0, 0.7, 1.0));
+            draw_temp_graph(
+                cr,
+                w as f64,
+                h as f64,
+                &st.gpu_temp_history,
+                (0.0, 0.7, 1.0),
+            );
         });
     }
 
@@ -170,8 +224,8 @@ pub fn build() -> gtk::Box {
     let gpu_tmin = gpu_temp_min;
     let gpu_tmax = gpu_temp_max;
     let cpu_fan_w = cpu_fan_box;
-    let cpu_freq_w = cpu_freq_box;
-    let gpu_clock_w = gpu_clock_box;
+    let cpu_freq_w = cpu_freq_gauge;
+    let gpu_clock_w = gpu_clock_gauge;
     let gpu_mem_w = gpu_mem_box;
     let gpu_util_w = gpu_util_box;
     let gpu_power_w = gpu_power_box;
@@ -199,12 +253,23 @@ pub fn build() -> gtk::Box {
         let gpu_g = gpu_g.clone();
         move || {
             do_update(
-                &state_c, &cpu_model_l, &gpu_model_l,
-                &cpu_tv, &cpu_tmin, &cpu_tmax,
-                &gpu_tv, &gpu_tmin, &gpu_tmax,
-                &cpu_fan_w, &cpu_freq_w,
-                &gpu_clock_w, &gpu_mem_w, &gpu_util_w, &gpu_power_w,
-                &cpu_g, &gpu_g,
+                &state_c,
+                &cpu_model_l,
+                &gpu_model_l,
+                &cpu_tv,
+                &cpu_tmin,
+                &cpu_tmax,
+                &gpu_tv,
+                &gpu_tmin,
+                &gpu_tmax,
+                &cpu_fan_w,
+                &cpu_freq_w,
+                &gpu_clock_w,
+                &gpu_mem_w,
+                &gpu_util_w,
+                &gpu_power_w,
+                &cpu_g,
+                &gpu_g,
             );
         }
     });
@@ -215,12 +280,23 @@ pub fn build() -> gtk::Box {
             return glib::ControlFlow::Continue;
         }
         do_update(
-            &state_c, &cpu_model_l, &gpu_model_l,
-            &cpu_tv, &cpu_tmin, &cpu_tmax,
-            &gpu_tv, &gpu_tmin, &gpu_tmax,
-            &cpu_fan_w, &cpu_freq_w,
-            &gpu_clock_w, &gpu_mem_w, &gpu_util_w, &gpu_power_w,
-            &cpu_g, &gpu_g,
+            &state_c,
+            &cpu_model_l,
+            &gpu_model_l,
+            &cpu_tv,
+            &cpu_tmin,
+            &cpu_tmax,
+            &gpu_tv,
+            &gpu_tmin,
+            &gpu_tmax,
+            &cpu_fan_w,
+            &cpu_freq_w,
+            &gpu_clock_w,
+            &gpu_mem_w,
+            &gpu_util_w,
+            &gpu_power_w,
+            &cpu_g,
+            &gpu_g,
         );
         glib::ControlFlow::Continue
     });
@@ -230,12 +306,22 @@ pub fn build() -> gtk::Box {
 
 fn do_update(
     state: &Rc<RefCell<MonitorState>>,
-    cpu_model_l: &gtk::Label, gpu_model_l: &gtk::Label,
-    cpu_tv: &gtk::Label, cpu_tmin: &gtk::Label, cpu_tmax: &gtk::Label,
-    gpu_tv: &gtk::Label, gpu_tmin: &gtk::Label, gpu_tmax: &gtk::Label,
-    cpu_fan_w: &gtk::Box, cpu_freq_w: &gtk::Box,
-    gpu_clock_w: &gtk::Box, gpu_mem_w: &gtk::Box, gpu_util_w: &gtk::Box, gpu_power_w: &gtk::Box,
-    cpu_g: &gtk::DrawingArea, gpu_g: &gtk::DrawingArea,
+    cpu_model_l: &gtk::Label,
+    gpu_model_l: &gtk::Label,
+    cpu_tv: &gtk::Label,
+    cpu_tmin: &gtk::Label,
+    cpu_tmax: &gtk::Label,
+    gpu_tv: &gtk::Label,
+    gpu_tmin: &gtk::Label,
+    gpu_tmax: &gtk::Label,
+    cpu_fan_w: &gtk::Box,
+    cpu_freq_w: &crate::ui::tech_gauge::TechGauge,
+    gpu_clock_w: &crate::ui::tech_gauge::TechGauge,
+    gpu_mem_w: &gtk::Box,
+    gpu_util_w: &gtk::Box,
+    gpu_power_w: &gtk::Box,
+    cpu_g: &gtk::DrawingArea,
+    gpu_g: &gtk::DrawingArea,
 ) {
     let data = sensors::read_all_sensors();
 
@@ -284,14 +370,52 @@ fn do_update(
     drop(st);
 
     // CPU stats
-    update_stat_value(cpu_fan_w, &data.cpu_fan_rpm.map(|v| v.to_string()).unwrap_or("--".into()));
-    update_stat_value(cpu_freq_w, &data.cpu_freq_mhz.map(|v| v.to_string()).unwrap_or("--".into()));
+    update_stat_value(
+        cpu_fan_w,
+        &data
+            .cpu_fan_rpm
+            .map(|v| v.to_string())
+            .unwrap_or("--".into()),
+    );
+    cpu_freq_w.set_value(
+        &data
+            .cpu_freq_mhz
+            .map(|v| v.to_string())
+            .unwrap_or("--".into()),
+    );
 
     // GPU stats
-    update_stat_value(gpu_clock_w, &data.gpu_info.clock_mhz.map(|v| v.to_string()).unwrap_or("--".into()));
-    update_stat_value(gpu_mem_w, &data.gpu_info.mem_clock_mhz.map(|v| v.to_string()).unwrap_or("--".into()));
-    update_stat_value(gpu_util_w, &data.gpu_info.utilization_pct.map(|v| v.to_string()).unwrap_or("--".into()));
-    update_stat_value(gpu_power_w, &data.gpu_info.power_watts.map(|v| format!("{:.1}", v)).unwrap_or("--".into()));
+    gpu_clock_w.set_value(
+        &data
+            .gpu_info
+            .clock_mhz
+            .map(|v| v.to_string())
+            .unwrap_or("--".into()),
+    );
+    update_stat_value(
+        gpu_mem_w,
+        &data
+            .gpu_info
+            .mem_clock_mhz
+            .map(|v| v.to_string())
+            .unwrap_or("--".into()),
+    );
+    update_stat_value(
+        gpu_util_w,
+        &data
+            .gpu_info
+            .utilization_pct
+            .map(|v| v.to_string())
+            .unwrap_or("--".into()),
+    );
+    update_stat_value(
+        gpu_power_w,
+        &data
+            .gpu_info
+            .power_watts
+            .map(|v| format!("{:.1}", v))
+            .unwrap_or("--".into()),
+    );
 
     // Redraw graphs
     cpu_g.queue_draw();
@@ -299,7 +423,13 @@ fn do_update(
 }
 
 /// Draw a temperature history graph using Cairo
-fn draw_temp_graph(cr: &gtk4::cairo::Context, w: f64, h: f64, history: &VecDeque<f64>, color: (f64, f64, f64)) {
+fn draw_temp_graph(
+    cr: &gtk4::cairo::Context,
+    w: f64,
+    h: f64,
+    history: &VecDeque<f64>,
+    color: (f64, f64, f64),
+) {
     let margin = 4.0;
     let gw = w - margin * 2.0;
     let gh = h - margin * 2.0;
@@ -334,7 +464,11 @@ fn draw_temp_graph(cr: &gtk4::cairo::Context, w: f64, h: f64, history: &VecDeque
     let range = max_temp - min_temp;
 
     let n = history.len();
-    let step_x = if n > 1 { gw / (HISTORY_SIZE as f64 - 1.0) } else { 0.0 };
+    let step_x = if n > 1 {
+        gw / (HISTORY_SIZE as f64 - 1.0)
+    } else {
+        0.0
+    };
 
     // Fill area under curve
     cr.set_source_rgba(color.0, color.1, color.2, 0.15);

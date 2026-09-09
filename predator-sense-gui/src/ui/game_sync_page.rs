@@ -55,9 +55,11 @@ pub fn build() -> gtk::ScrolledWindow {
     page.append(&header);
 
     // === Status card ===
-    let status_card = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    status_card.add_css_class("usage-panel");
-    status_card.set_margin_top(6);
+    let status_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let status_card = status_faceted.content;
+    status_card.set_spacing(10);
+    status_faceted.widget.set_margin_top(6);
     let status_icon = gtk::Image::from_icon_name("applications-games-symbolic");
     let status_dot = gtk::Label::new(Some("\u{25cf}"));
     status_dot.set_valign(gtk::Align::Center);
@@ -67,7 +69,7 @@ pub fn build() -> gtk::ScrolledWindow {
     status_card.append(&status_icon);
     status_card.append(&status_label);
     status_card.append(&status_dot);
-    page.append(&status_card);
+    page.append(&status_faceted.widget);
 
     refresh_status(&status_dot, &status_label);
     {
@@ -102,9 +104,12 @@ pub fn build() -> gtk::ScrolledWindow {
     list_title.set_margin_top(18);
     page.append(&list_title);
 
-    let list_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    list_box.add_css_class("usage-panel");
-    page.append(&list_box);
+    let list_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let list_box = list_faceted.content;
+    list_box.set_orientation(gtk::Orientation::Vertical);
+    list_box.set_spacing(0);
+    page.append(&list_faceted.widget);
 
     let games = Rc::new(RefCell::new(cfg.game_profiles.clone()));
     rebuild_list(&list_box, &games);
@@ -116,8 +121,11 @@ pub fn build() -> gtk::ScrolledWindow {
     form_title.set_margin_top(18);
     page.append(&form_title);
 
-    let form_card = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    form_card.add_css_class("usage-panel");
+    let form_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let form_card = form_faceted.content;
+    form_card.set_orientation(gtk::Orientation::Vertical);
+    form_card.set_spacing(10);
 
     let name_entry = gtk::Entry::new();
     name_entry.set_placeholder_text(Some(crate::i18n::t("game_sync_name_placeholder")));
@@ -220,7 +228,7 @@ pub fn build() -> gtk::ScrolledWindow {
     }
     form_card.append(&add_btn);
     form_card.append(&feedback);
-    page.append(&form_card);
+    page.append(&form_faceted.widget);
 
     scroll.set_child(Some(&page));
     scroll

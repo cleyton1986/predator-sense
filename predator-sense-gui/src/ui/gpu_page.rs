@@ -51,6 +51,14 @@ pub fn build() -> gtk::Box {
 
     // === Header: GPU name + info ===
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    // Generic chip icon, not NVIDIA's own GeForce/RTX logo (trademarked,
+    // not ours to redistribute) - same icon file the Dashboard's spec
+    // cards already use for this same purpose.
+    if let Some(icon_path) = crate::ui::window::find_resource("icons/gpu.png") {
+        let icon = gtk::Image::from_file(icon_path);
+        icon.set_pixel_size(22);
+        header.append(&icon);
+    }
     let gpu_title = gtk::Label::new(Some("GPU"));
     gpu_title.add_css_class("monitor-title");
     let gpu_name = gtk::Label::new(None);
@@ -139,20 +147,39 @@ pub fn build() -> gtk::Box {
 
     // === GPU power limit (TGP) slider ===
     let m0 = read_gpu_metrics();
-    let min_w = if m0.power_min_w > 0.0 { m0.power_min_w } else { 20.0 };
-    let max_w = if m0.power_max_w > min_w { m0.power_max_w } else { min_w + 50.0 };
-    let cur_w = if m0.power_limit_w > 0.0 { m0.power_limit_w } else { max_w };
+    let min_w = if m0.power_min_w > 0.0 {
+        m0.power_min_w
+    } else {
+        20.0
+    };
+    let max_w = if m0.power_max_w > min_w {
+        m0.power_max_w
+    } else {
+        min_w + 50.0
+    };
+    let cur_w = if m0.power_limit_w > 0.0 {
+        m0.power_limit_w
+    } else {
+        max_w
+    };
     let power_controls_ready = Rc::new(Cell::new(m0.live));
 
-    let pl_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    pl_box.add_css_class("usage-panel");
-    pl_box.set_margin_top(10);
+    let pl_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let pl_box = pl_faceted.content;
+    pl_box.set_orientation(gtk::Orientation::Vertical);
+    pl_box.set_spacing(4);
+    pl_faceted.widget.set_margin_top(10);
     let pl_head = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let pl_title = gtk::Label::new(Some(crate::i18n::t("gpu_power_limit")));
     pl_title.add_css_class("section-title");
     pl_title.set_hexpand(true);
     pl_title.set_halign(gtk::Align::Start);
-    let initial_power_value = if m0.live { format!("{cur_w:.0} W") } else { "--".to_string() };
+    let initial_power_value = if m0.live {
+        format!("{cur_w:.0} W")
+    } else {
+        "--".to_string()
+    };
     let pl_value = gtk::Label::new(Some(&initial_power_value));
     pl_value.add_css_class("usage-big-number");
     pl_head.append(&pl_title);
@@ -219,33 +246,64 @@ pub fn build() -> gtk::Box {
             });
         });
     }
-    page.append(&pl_box);
+    page.append(&pl_faceted.widget);
 
     // === Graph draw functions ===
     {
         let s = state.clone();
         temp_graph.set_draw_func(move |_a, cr, w, h| {
-            draw_graph(cr, w as f64, h as f64, &s.borrow().temp_history, 20.0, 100.0, crate::ui::brand_theme::accent().bright, "°C");
+            draw_graph(
+                cr,
+                w as f64,
+                h as f64,
+                &s.borrow().temp_history,
+                20.0,
+                100.0,
+                crate::ui::brand_theme::accent().bright,
+                "°C",
+            );
         });
     }
     {
         let s = state.clone();
         util_graph.set_draw_func(move |_a, cr, w, h| {
-            draw_graph(cr, w as f64, h as f64, &s.borrow().util_history, 0.0, 100.0, (0.0, 0.9, 0.5), "%");
+            draw_graph(
+                cr,
+                w as f64,
+                h as f64,
+                &s.borrow().util_history,
+                0.0,
+                100.0,
+                (0.0, 0.9, 0.5),
+                "%",
+            );
         });
     }
 
     // === Periodic update ===
     let all_widgets = AllWidgets {
-        gpu_name, gpu_driver, live_status,
-        temp_da: temp_gauge.1, util_da: util_gauge.1,
-        vram_da: vram_gauge.1, power_da: power_gauge.1,
-        temp_label: temp_gauge.2, util_label: util_gauge.2,
-        vram_label: vram_gauge.2, power_label: power_gauge.2,
-        core_val: core_clk.1, mem_val: mem_clk.1,
-        pstate_val: pstate_w.1, pcie_val: pcie_w.1, vbios_val: vbios_w.1,
-        temp_graph_da: temp_graph, util_graph_da: util_graph,
-        power_scale: pl_scale, power_value: pl_value, power_error: pl_error, power_controls_ready,
+        gpu_name,
+        gpu_driver,
+        live_status,
+        temp_da: temp_gauge.1,
+        util_da: util_gauge.1,
+        vram_da: vram_gauge.1,
+        power_da: power_gauge.1,
+        temp_label: temp_gauge.2,
+        util_label: util_gauge.2,
+        vram_label: vram_gauge.2,
+        power_label: power_gauge.2,
+        core_val: core_clk.1,
+        mem_val: mem_clk.1,
+        pstate_val: pstate_w.1,
+        pcie_val: pcie_w.1,
+        vbios_val: vbios_w.1,
+        temp_graph_da: temp_graph,
+        util_graph_da: util_graph,
+        power_scale: pl_scale,
+        power_value: pl_value,
+        power_error: pl_error,
+        power_controls_ready,
     };
 
     // Initial update
@@ -293,22 +351,38 @@ pub fn build() -> gtk::Box {
 
 #[derive(Clone)]
 struct AllWidgets {
-    gpu_name: gtk::Label, gpu_driver: gtk::Label, live_status: gtk::Label,
-    temp_da: gtk::DrawingArea, util_da: gtk::DrawingArea,
-    vram_da: gtk::DrawingArea, power_da: gtk::DrawingArea,
-    temp_label: gtk::Label, util_label: gtk::Label,
-    vram_label: gtk::Label, power_label: gtk::Label,
-    core_val: gtk::Label, mem_val: gtk::Label,
-    pstate_val: gtk::Label, pcie_val: gtk::Label, vbios_val: gtk::Label,
-    temp_graph_da: gtk::DrawingArea, util_graph_da: gtk::DrawingArea,
-    power_scale: gtk::Scale, power_value: gtk::Label, power_error: gtk::Label,
+    gpu_name: gtk::Label,
+    gpu_driver: gtk::Label,
+    live_status: gtk::Label,
+    temp_da: gtk::DrawingArea,
+    util_da: gtk::DrawingArea,
+    vram_da: gtk::DrawingArea,
+    power_da: gtk::DrawingArea,
+    temp_label: gtk::Label,
+    util_label: gtk::Label,
+    vram_label: gtk::Label,
+    power_label: gtk::Label,
+    core_val: gtk::Label,
+    mem_val: gtk::Label,
+    pstate_val: gtk::Label,
+    pcie_val: gtk::Label,
+    vbios_val: gtk::Label,
+    temp_graph_da: gtk::DrawingArea,
+    util_graph_da: gtk::DrawingArea,
+    power_scale: gtk::Scale,
+    power_value: gtk::Label,
+    power_error: gtk::Label,
     power_controls_ready: Rc<Cell<bool>>,
 }
 
 fn update(state: &Rc<RefCell<GpuState>>, w: &AllWidgets) {
     let m = read_gpu_metrics();
 
-    w.gpu_name.set_text(if m.name.is_empty() { "NVIDIA GPU" } else { &m.name });
+    w.gpu_name.set_text(if m.name.is_empty() {
+        "NVIDIA GPU"
+    } else {
+        &m.name
+    });
     let mut identity = Vec::new();
     if !m.driver.is_empty() {
         identity.push(format!("Driver: {}", m.driver));
@@ -353,9 +427,21 @@ fn update(state: &Rc<RefCell<GpuState>>, w: &AllWidgets) {
     w.live_status.set_text(crate::i18n::t("gpu_live_ready"));
 
     if !w.power_controls_ready.replace(true) {
-        let min_w = if m.power_min_w > 0.0 { m.power_min_w } else { 20.0 };
-        let max_w = if m.power_max_w > min_w { m.power_max_w } else { min_w + 50.0 };
-        let current_w = if m.power_limit_w > 0.0 { m.power_limit_w } else { max_w };
+        let min_w = if m.power_min_w > 0.0 {
+            m.power_min_w
+        } else {
+            20.0
+        };
+        let max_w = if m.power_max_w > min_w {
+            m.power_max_w
+        } else {
+            min_w + 50.0
+        };
+        let current_w = if m.power_limit_w > 0.0 {
+            m.power_limit_w
+        } else {
+            max_w
+        };
         w.power_scale.set_range(min_w, max_w);
         w.power_scale.set_value(current_w);
         w.power_scale.set_sensitive(m.power_limit_supported());
@@ -370,15 +456,21 @@ fn update(state: &Rc<RefCell<GpuState>>, w: &AllWidgets) {
     // Update gauges
     w.temp_label.set_text(&format!("{}°C", m.temp as i32));
     w.util_label.set_text(&format!("{}%", m.util_gpu_pct));
-    let vram_pct = if m.vram_total_mb > 0 { (m.vram_used_mb as f64 / m.vram_total_mb as f64) * 100.0 } else { 0.0 };
-    w.vram_label.set_text(&format!("{}/{} MB", m.vram_used_mb, m.vram_total_mb));
+    let vram_pct = if m.vram_total_mb > 0 {
+        (m.vram_used_mb as f64 / m.vram_total_mb as f64) * 100.0
+    } else {
+        0.0
+    };
+    w.vram_label
+        .set_text(&format!("{}/{} MB", m.vram_used_mb, m.vram_total_mb));
     w.power_label.set_text(&format!("{:.1}W", m.power_draw_w));
 
     // Stats
     w.core_val.set_text(&format!("{}", m.clock_core_mhz));
     w.mem_val.set_text(&format!("{}", m.clock_mem_mhz));
     w.pstate_val.set_text(&m.pstate);
-    w.pcie_val.set_text(&format!("Gen{} x{}", m.pcie_gen, m.pcie_width));
+    w.pcie_val
+        .set_text(&format!("Gen{} x{}", m.pcie_gen, m.pcie_width));
     w.vbios_val.set_text(&m.vbios);
 
     // Update histories
@@ -395,7 +487,11 @@ fn update(state: &Rc<RefCell<GpuState>>, w: &AllWidgets) {
     let temp_frac = (m.temp / 100.0).clamp(0.0, 1.0);
     let util_frac = (m.util_gpu_pct as f64 / 100.0).clamp(0.0, 1.0);
     let vram_frac = (vram_pct / 100.0).clamp(0.0, 1.0);
-    let power_frac = if m.power_max_w > 0.0 { (m.power_draw_w / m.power_max_w).clamp(0.0, 1.0) } else { 0.0 };
+    let power_frac = if m.power_max_w > 0.0 {
+        (m.power_draw_w / m.power_max_w).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
 
     set_gauge_draw(&w.temp_da, temp_frac);
     set_gauge_draw(&w.util_da, util_frac);
@@ -407,7 +503,9 @@ fn update(state: &Rc<RefCell<GpuState>>, w: &AllWidgets) {
 }
 
 fn push_history(h: &mut VecDeque<f64>, v: f64) {
-    if h.len() >= HISTORY { h.pop_front(); }
+    if h.len() >= HISTORY {
+        h.pop_front();
+    }
     h.push_back(v);
 }
 
@@ -460,9 +558,13 @@ fn draw_gauge_arc(cr: &gtk4::cairo::Context, w: f64, h: f64, fraction: f64) {
 
     // Progress arc
     if fraction > 0.001 {
-        let (rv, gv, bv) = if fraction < 0.6 { crate::ui::brand_theme::accent().bright }
-            else if fraction < 0.8 { (0.9, 0.7, 0.0) }
-            else { (0.9, 0.2, 0.1) };
+        let (rv, gv, bv) = if fraction < 0.6 {
+            crate::ui::brand_theme::accent().bright
+        } else if fraction < 0.8 {
+            (0.9, 0.7, 0.0)
+        } else {
+            (0.9, 0.2, 0.1)
+        };
         cr.set_source_rgba(rv, gv, bv, 1.0);
         cr.arc(cx, cy, r, -PI / 2.0, -PI / 2.0 + fraction * 2.0 * PI);
         let _ = cr.stroke();
@@ -480,13 +582,24 @@ fn create_stat(title: &str, value: &str, unit: &str) -> (gtk::Box, gtk::Label) {
     u.add_css_class("stat-unit");
     u.set_valign(gtk::Align::End);
     vb.append(&v);
-    if !unit.is_empty() { vb.append(&u); }
+    if !unit.is_empty() {
+        vb.append(&u);
+    }
     c.append(&t);
     c.append(&vb);
     (c, v)
 }
 
-fn draw_graph(cr: &gtk4::cairo::Context, w: f64, h: f64, history: &VecDeque<f64>, min: f64, max: f64, color: (f64, f64, f64), _unit: &str) {
+fn draw_graph(
+    cr: &gtk4::cairo::Context,
+    w: f64,
+    h: f64,
+    history: &VecDeque<f64>,
+    min: f64,
+    max: f64,
+    color: (f64, f64, f64),
+    _unit: &str,
+) {
     let m = 4.0;
     let gw = w - m * 2.0;
     let gh = h - m * 2.0;
@@ -503,17 +616,27 @@ fn draw_graph(cr: &gtk4::cairo::Context, w: f64, h: f64, history: &VecDeque<f64>
     cr.set_dash(&[], 0.0);
     for i in 0..=4 {
         let y = m + gh * (i as f64 / 4.0);
-        cr.move_to(m, y); cr.line_to(m + gw, y); let _ = cr.stroke();
+        cr.move_to(m, y);
+        cr.line_to(m + gw, y);
+        let _ = cr.stroke();
     }
     for i in 0..=6 {
         let x = m + gw * (i as f64 / 6.0);
-        cr.move_to(x, m); cr.line_to(x, m + gh); let _ = cr.stroke();
+        cr.move_to(x, m);
+        cr.line_to(x, m + gh);
+        let _ = cr.stroke();
     }
 
-    if history.is_empty() { return; }
+    if history.is_empty() {
+        return;
+    }
 
     let n = history.len();
-    let step = if n > 1 { gw / (HISTORY as f64 - 1.0) } else { 0.0 };
+    let step = if n > 1 {
+        gw / (HISTORY as f64 - 1.0)
+    } else {
+        0.0
+    };
     let sx = m + (HISTORY - n) as f64 * step;
 
     // Fill
@@ -534,7 +657,11 @@ fn draw_graph(cr: &gtk4::cairo::Context, w: f64, h: f64, history: &VecDeque<f64>
     for (i, &v) in history.iter().enumerate() {
         let x = sx + i as f64 * step;
         let y = m + gh - ((v - min) / range).clamp(0.0, 1.0) * gh;
-        if i == 0 { cr.move_to(x, y); } else { cr.line_to(x, y); }
+        if i == 0 {
+            cr.move_to(x, y);
+        } else {
+            cr.line_to(x, y);
+        }
     }
     let _ = cr.stroke();
 
@@ -542,7 +669,11 @@ fn draw_graph(cr: &gtk4::cairo::Context, w: f64, h: f64, history: &VecDeque<f64>
     if let Some(&last) = history.back() {
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.8);
         cr.set_dash(&[], 0.0);
-        cr.select_font_face("Sans", gtk4::cairo::FontSlant::Normal, gtk4::cairo::FontWeight::Bold);
+        cr.select_font_face(
+            "Sans",
+            gtk4::cairo::FontSlant::Normal,
+            gtk4::cairo::FontWeight::Bold,
+        );
         cr.set_font_size(11.0);
         let txt = format!("{:.0}", last);
         let ext = cr.text_extents(&txt).unwrap();

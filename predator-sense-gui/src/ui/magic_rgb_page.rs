@@ -245,7 +245,10 @@ fn build_keyboard_section() -> gtk::Box {
     // reboots on its own, only the app's own memory of "which one" was
     // missing, which is what made it look like the setting had been lost.
     let saved = crate::config::load_app_config().magic_rgb_keyboard;
-    let initial_effect = saved.as_ref().map(|s| s.effect).unwrap_or(KeyboardEffect::Static);
+    let initial_effect = saved
+        .as_ref()
+        .map(|s| s.effect)
+        .unwrap_or(KeyboardEffect::Static);
     let initial_brightness = saved.as_ref().map(|s| s.brightness).unwrap_or(100);
     let initial_speed = saved.as_ref().map(|s| s.speed).unwrap_or(4);
     let initial_reverse = saved.as_ref().map(|s| s.reverse).unwrap_or(false);
@@ -260,8 +263,11 @@ fn build_keyboard_section() -> gtk::Box {
     // renderer expects just gets the same single color). Purely cosmetic:
     // reacts to the controls below as they move, hardware only changes on
     // Apply, same as every other control on this page already did.
-    let preview_card = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    preview_card.add_css_class("cover-logo-preview-card");
+    let preview_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let preview_card = preview_faceted.content;
+    preview_card.set_orientation(gtk::Orientation::Vertical);
+    preview_card.set_spacing(6);
     let preview_title = gtk::Label::new(Some(crate::i18n::t("cover_logo_live_preview")));
     preview_title.add_css_class("cover-logo-section-title");
     preview_title.set_halign(gtk::Align::Start);
@@ -310,7 +316,7 @@ fn build_keyboard_section() -> gtk::Box {
             crate::ui::rgb_page::draw_keyboard(cr, w as f64, h as f64, &[dimmed; 4]);
         });
     }
-    page.append(&preview_card);
+    page.append(&preview_faceted.widget);
 
     // Ticks only while Breathing is selected and the page is actually on
     // screen; self-cancels once the widget is torn down, same pattern as
@@ -381,8 +387,12 @@ fn build_keyboard_section() -> gtk::Box {
     }
     page.append(&effects_row);
 
-    let (bright_row, bright_scale) =
-        labeled_scale(crate::i18n::t("brightness"), 0.0, 100.0, initial_brightness as f64);
+    let (bright_row, bright_scale) = labeled_scale(
+        crate::i18n::t("brightness"),
+        0.0,
+        100.0,
+        initial_brightness as f64,
+    );
     {
         let state = state.clone();
         bright_scale.connect_value_changed(move |s| {
@@ -465,7 +475,11 @@ fn build_keyboard_section() -> gtk::Box {
             let result_apply_btn = apply_btn.clone();
             let result_off_btn = off_btn.clone();
             background::run(
-                move || magic_rgb::set_keyboard_effect(effect, brightness, speed, reverse, color.0, color.1, color.2),
+                move || {
+                    magic_rgb::set_keyboard_effect(
+                        effect, brightness, speed, reverse, color.0, color.1, color.2,
+                    )
+                },
                 move |result| {
                     if result.is_ok() {
                         let mut cfg = crate::config::load_app_config();
@@ -605,7 +619,10 @@ fn build_logo_section() -> gtk::Box {
     status.add_css_class("status-label");
 
     let saved = crate::config::load_app_config().magic_rgb_logo;
-    let initial_effect = saved.as_ref().and_then(|s| s.effect).unwrap_or(LogoEffect::Static);
+    let initial_effect = saved
+        .as_ref()
+        .and_then(|s| s.effect)
+        .unwrap_or(LogoEffect::Static);
     let initial_brightness = saved.as_ref().map(|s| s.brightness).unwrap_or(100);
     let initial_speed = saved.as_ref().map(|s| s.speed).unwrap_or(4);
     let initial_color = saved
@@ -636,8 +653,11 @@ fn build_logo_section() -> gtk::Box {
         anim_phase: 0.0,
     }));
 
-    let preview_card = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    preview_card.add_css_class("cover-logo-preview-card");
+    let preview_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let preview_card = preview_faceted.content;
+    preview_card.set_orientation(gtk::Orientation::Vertical);
+    preview_card.set_spacing(6);
     let preview_title = gtk::Label::new(Some(crate::i18n::t("cover_logo_live_preview")));
     preview_title.add_css_class("cover-logo-section-title");
     preview_title.set_halign(gtk::Align::Start);
@@ -652,7 +672,7 @@ fn build_logo_section() -> gtk::Box {
     preview_image.set_vexpand(true);
     lid.append(&preview_image);
     preview_card.append(&lid);
-    page.append(&preview_card);
+    page.append(&preview_faceted.widget);
     update_logo_preview(&state.borrow());
 
     // Ticks only while Breathing is selected and the page is on screen;
@@ -678,7 +698,10 @@ fn build_logo_section() -> gtk::Box {
 
     let effects_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let mut buttons = Vec::new();
-    for (effect, key) in [(LogoEffect::Static, "static_mode"), (LogoEffect::Breathing, "breath")] {
+    for (effect, key) in [
+        (LogoEffect::Static, "static_mode"),
+        (LogoEffect::Breathing, "breath"),
+    ] {
         let btn = gtk::ToggleButton::with_label(crate::i18n::t(key));
         btn.add_css_class("mode-button");
         if effect == initial_effect {
@@ -714,8 +737,12 @@ fn build_logo_section() -> gtk::Box {
     }
     page.append(&effects_row);
 
-    let (bright_row, bright_scale) =
-        labeled_scale(crate::i18n::t("brightness"), 0.0, 100.0, initial_brightness as f64);
+    let (bright_row, bright_scale) = labeled_scale(
+        crate::i18n::t("brightness"),
+        0.0,
+        100.0,
+        initial_brightness as f64,
+    );
     {
         let state = state.clone();
         bright_scale.connect_value_changed(move |s| {
@@ -955,11 +982,16 @@ fn build_chicony_section() -> gtk::Box {
     }
     page.append(&colors_row);
 
-    let (bright_row, bright_scale) =
-        labeled_scale(crate::i18n::t("brightness"), 0.0, 255.0, initial_brightness as f64);
+    let (bright_row, bright_scale) = labeled_scale(
+        crate::i18n::t("brightness"),
+        0.0,
+        255.0,
+        initial_brightness as f64,
+    );
     {
         let state = state.clone();
-        bright_scale.connect_value_changed(move |s| state.borrow_mut().brightness = s.value() as u8);
+        bright_scale
+            .connect_value_changed(move |s| state.borrow_mut().brightness = s.value() as u8);
     }
     page.append(&bright_row);
 

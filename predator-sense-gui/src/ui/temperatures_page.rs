@@ -70,88 +70,108 @@ pub fn build(sensor_data: &SensorData) -> gtk::Box {
     header.append(&icons);
     page.append(&header);
 
-    let gauges_container = gtk::Box::new(gtk::Orientation::Vertical, 8);
-    gauges_container.set_halign(gtk::Align::Center);
-    gauges_container.set_valign(gtk::Align::Center);
-    gauges_container.set_vexpand(true);
-
     let custom_icons = crate::config::load_app_config().custom_icons_enabled;
     let icon = |name: &'static str| custom_icons.then_some(name);
+    let ram1_label = if sensor_data.ram1_temp.is_some() {
+        "RAM 1"
+    } else {
+        "RAM"
+    };
 
-    // Row 1: CPU, GPU, Sistema
-    let row1 = gtk::Box::new(gtk::Orientation::Horizontal, 20);
-    row1.set_halign(gtk::Align::Center);
-    row1.append(&gauge_widget::create_gauge_with_icon(
-        "CPU",
-        sensor_data.cpu_temp,
-        100.0,
-        icon("cpu.png"),
-    ));
-    row1.append(&gauge_widget::create_gauge_with_icon(
-        "GPU",
-        sensor_data.gpu_temp,
-        100.0,
-        icon("gpu.png"),
-    ));
-    row1.append(&gauge_widget::create_gauge_with_icon(
-        crate::i18n::t("system_label"),
-        sensor_data.system_temp,
-        100.0,
-        icon("linux.png"),
-    ));
-    gauges_container.append(&row1);
+    // One entry per sensor this machine actually has - each becomes its own
+    // faceted card, laid out two per row below.
+    let gauges: Vec<(&str, Option<f64>, Option<&'static str>)> = [
+        Some(("CPU", sensor_data.cpu_temp, icon("cpu.png"))),
+        Some(("GPU", sensor_data.gpu_temp, icon("gpu.png"))),
+        Some((
+            crate::i18n::t("system_label"),
+            sensor_data.system_temp,
+            icon("linux.png"),
+        )),
+        sensor_data
+            .nvme0_temp
+            .map(|t| ("SSD 1", Some(t), icon("ssd.png"))),
+        sensor_data
+            .nvme1_temp
+            .map(|t| ("SSD 2", Some(t), icon("ssd.png"))),
+        sensor_data
+            .wifi_temp
+            .map(|t| ("WiFi", Some(t), icon("internet.png"))),
+        sensor_data
+            .ram0_temp
+            .map(|t| (ram1_label, Some(t), icon("memoria-ram.png"))),
+        sensor_data
+            .ram1_temp
+            .map(|t| ("RAM 2", Some(t), icon("memoria-ram.png"))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
 
-    // Row 2: SSDs, WiFi, RAM
-    let row2 = gtk::Box::new(gtk::Orientation::Horizontal, 20);
-    row2.set_halign(gtk::Align::Center);
+    // FlowBox instead of a fixed Grid so the cards reflow to one column on
+    // their own once the window is too narrow for two - same responsive
+    // pattern already used for the storage cards in usage_page.rs.
+    let flow = gtk::FlowBox::new();
+    flow.set_halign(gtk::Align::Center);
+    flow.set_valign(gtk::Align::Start);
+    flow.set_selection_mode(gtk::SelectionMode::None);
+    flow.set_max_children_per_line(2);
+    flow.set_min_children_per_line(1);
+    flow.set_homogeneous(true);
+    flow.set_row_spacing(16);
+    flow.set_column_spacing(16);
+    flow.set_margin_top(34);
+    flow.set_margin_bottom(16);
+    let accent = crate::ui::brand_theme::accent().bright;
+    for (label, temp, icon_file) in gauges.into_iter() {
+        let card = crate::ui::faceted_card::build(accent, None);
+        card.widget.set_size_request(460, 190);
+        card.content.set_valign(gtk::Align::Center);
 
-    if sensor_data.nvme0_temp.is_some() {
-        row2.append(&gauge_widget::create_gauge_with_icon(
-            "SSD 1",
-            sensor_data.nvme0_temp,
-            100.0,
-            icon("ssd.png"),
+        // Left: icon + name + big current value - everything that used to
+        // sit inside the ring itself.
+        let info = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        info.set_valign(gtk::Align::Center);
+        info.set_hexpand(true);
+        if let Some(name) =
+            icon_file.and_then(|n| crate::ui::window::find_resource(&format!("icons/{n}")))
+        {
+            let img = gtk::Image::from_file(&name);
+            img.set_pixel_size(28);
+            img.set_halign(gtk::Align::Start);
+            img.set_margin_bottom(4);
+            info.append(&img);
+        }
+        let name_l = gtk::Label::new(Some(label));
+        name_l.add_css_class("gauge-label");
+        name_l.set_halign(gtk::Align::Start);
+        let value_l = gtk::Label::new(Some(
+            &temp
+                .map(|t| format!("{}°", t as i32))
+                .unwrap_or("--°".into()),
         ));
+        value_l.add_css_class("monitor-temp-big");
+        value_l.set_halign(gtk::Align::Start);
+        info.append(&name_l);
+        info.append(&value_l);
+
+        // Right: the ring alone, no text/icon inside it.
+        let ring = gauge_widget::create_bare_ring(temp, 100.0, 110);
+
+        card.content.append(&info);
+        card.content.append(&ring);
+
+        flow.insert(&card.widget, -1);
     }
-    if sensor_data.nvme1_temp.is_some() {
-        row2.append(&gauge_widget::create_gauge_with_icon(
-            "SSD 2",
-            sensor_data.nvme1_temp,
-            100.0,
-            icon("ssd.png"),
-        ));
-    }
-    if sensor_data.wifi_temp.is_some() {
-        row2.append(&gauge_widget::create_gauge_with_icon(
-            "WiFi",
-            sensor_data.wifi_temp,
-            100.0,
-            icon("internet.png"),
-        ));
-    }
-    if sensor_data.ram0_temp.is_some() {
-        let label = if sensor_data.ram1_temp.is_some() {
-            "RAM 1"
-        } else {
-            "RAM"
-        };
-        row2.append(&gauge_widget::create_gauge_with_icon(
-            label,
-            sensor_data.ram0_temp,
-            100.0,
-            icon("memoria-ram.png"),
-        ));
-    }
-    if sensor_data.ram1_temp.is_some() {
-        row2.append(&gauge_widget::create_gauge_with_icon(
-            "RAM 2",
-            sensor_data.ram1_temp,
-            100.0,
-            icon("memoria-ram.png"),
-        ));
-    }
-    gauges_container.append(&row2);
-    page.append(&gauges_container);
+
+    // Own scroll area for the card grid, discreet (vertical only) - the
+    // page itself no longer grows past its allotted space, and cards past
+    // the fold are one scroll away instead of clipped off.
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&flow));
+    page.append(&scroll);
 
     // Separator
     let sep = gtk::Separator::new(gtk::Orientation::Horizontal);

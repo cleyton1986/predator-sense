@@ -368,11 +368,13 @@ pub fn build() -> gtk::Box {
         page.append(&note);
     }
 
-    // Animated fan gauges with real RPM
-    let fans_box = gtk::Box::new(gtk::Orientation::Horizontal, 50);
-    fans_box.set_halign(gtk::Align::Center);
-    fans_box.set_valign(gtk::Align::Center);
-    fans_box.set_vexpand(true);
+    // Fan cards - same faceted-card shape as Temperatures: name as the
+    // card's own title, RPM + temp on the left, the animated fan gauge
+    // alone (unchanged drawing, no text baked into the canvas anymore) on
+    // the right. Stacked one above the other, not side by side.
+    let fans_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    fans_box.set_halign(gtk::Align::Fill);
+    fans_box.set_margin_top(10);
 
     let rotation = Rc::new(RefCell::new(0.0f64));
     let cpu_rpm = Rc::new(RefCell::new(0u32));
@@ -380,58 +382,31 @@ pub fn build() -> gtk::Box {
     let cpu_temp = Rc::new(RefCell::new(50.0f64));
     let gpu_temp = Rc::new(RefCell::new(45.0f64));
 
-    // CPU Fan
-    let cpu_fan_da = gtk::DrawingArea::new();
-    cpu_fan_da.set_size_request(160, 185);
+    let accent = crate::ui::brand_theme::accent().bright;
+
+    let (cpu_card, cpu_rpm_l, cpu_temp_l) = build_fan_card("CPU", accent);
     {
         let rot = rotation.clone();
         let rpm = cpu_rpm.clone();
-        let temp = cpu_temp.clone();
-        cpu_fan_da.set_draw_func(move |_a, cr, w, h| {
-            draw_animated_fan(
-                cr,
-                w as f64,
-                h as f64,
-                *rot.borrow(),
-                *rpm.borrow(),
-                *temp.borrow(),
-            );
+        cpu_card.gauge.set_draw_func(move |_a, cr, w, h| {
+            draw_animated_fan(cr, w as f64, h as f64, *rot.borrow(), *rpm.borrow());
         });
     }
-    let cpu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    cpu_box.set_halign(gtk::Align::Center);
-    cpu_box.append(&cpu_fan_da);
-    let cl = gtk::Label::new(Some("CPU"));
-    cl.add_css_class("gauge-label");
-    cpu_box.append(&cl);
 
-    // GPU Fan
-    let gpu_fan_da = gtk::DrawingArea::new();
-    gpu_fan_da.set_size_request(160, 185);
+    let (gpu_card, gpu_rpm_l, gpu_temp_l) = build_fan_card("GPU", accent);
     {
         let rot = rotation.clone();
         let rpm = gpu_rpm.clone();
-        let temp = gpu_temp.clone();
-        gpu_fan_da.set_draw_func(move |_a, cr, w, h| {
-            draw_animated_fan(
-                cr,
-                w as f64,
-                h as f64,
-                *rot.borrow(),
-                *rpm.borrow(),
-                *temp.borrow(),
-            );
+        gpu_card.gauge.set_draw_func(move |_a, cr, w, h| {
+            draw_animated_fan(cr, w as f64, h as f64, *rot.borrow(), *rpm.borrow());
         });
     }
-    let gpu_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    gpu_box.set_halign(gtk::Align::Center);
-    gpu_box.append(&gpu_fan_da);
-    let gl = gtk::Label::new(Some("GPU"));
-    gl.add_css_class("gauge-label");
-    gpu_box.append(&gl);
 
-    fans_box.append(&cpu_box);
-    fans_box.append(&gpu_box);
+    let cpu_fan_da = cpu_card.gauge.clone();
+    let gpu_fan_da = gpu_card.gauge.clone();
+
+    fans_box.append(&cpu_card.widget);
+    fans_box.append(&gpu_card.widget);
     page.append(&fans_box);
 
     // Animation timer (~30fps)
@@ -487,20 +462,79 @@ pub fn build() -> gtk::Box {
         let data = sensors::read_all_sensors();
         if let Some(r) = data.cpu_fan_rpm {
             *cr2.borrow_mut() = r;
+            cpu_rpm_l.set_text(&r.to_string());
         }
         if let Some(r) = data.gpu_fan_rpm {
             *gr2.borrow_mut() = r;
+            gpu_rpm_l.set_text(&r.to_string());
         }
         if let Some(t) = data.cpu_temp {
             *ct2.borrow_mut() = t;
+            cpu_temp_l.set_text(&format!("{}°C", t as i32));
         }
         if let Some(t) = data.gpu_temp {
             *gt2.borrow_mut() = t;
+            gpu_temp_l.set_text(&format!("{}°C", t as i32));
         }
         glib::ControlFlow::Continue
     });
 
     page
+}
+
+struct FanCard {
+    widget: gtk::Widget,
+    gauge: gtk::DrawingArea,
+}
+
+/// Builds one fan's card - same faceted-card shape as Temperatures: name +
+/// big RPM value + temp on the left, the animated gauge alone (no text
+/// baked into its own canvas anymore) on the right. Returns the card plus
+/// the two labels the caller keeps updating from the sensor timer.
+fn build_fan_card(name: &str, accent: (f64, f64, f64)) -> (FanCard, gtk::Label, gtk::Label) {
+    // `name` ("CPU"/"GPU") is the card's own built-in title now, not a
+    // label inside the content - one less line competing for space with
+    // the bigger RPM/temp text below.
+    let card = crate::ui::faceted_card::build(accent, Some(name));
+    card.widget.set_size_request(460, 230);
+    card.widget.set_hexpand(true);
+    card.content.set_valign(gtk::Align::Center);
+
+    let info = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    info.set_valign(gtk::Align::Center);
+    info.set_hexpand(true);
+
+    let rpm_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    rpm_row.set_halign(gtk::Align::Start);
+    let rpm_l = gtk::Label::new(Some("--"));
+    rpm_l.add_css_class("fan-card-value");
+    let rpm_unit = gtk::Label::new(Some("RPM"));
+    rpm_unit.add_css_class("fan-card-unit");
+    rpm_unit.set_valign(gtk::Align::End);
+    rpm_row.append(&rpm_l);
+    rpm_row.append(&rpm_unit);
+
+    let temp_l = gtk::Label::new(Some("--°C"));
+    temp_l.add_css_class("fan-card-temp");
+    temp_l.set_halign(gtk::Align::Start);
+
+    info.append(&rpm_row);
+    info.append(&temp_l);
+
+    let gauge = gtk::DrawingArea::new();
+    gauge.set_size_request(210, 210);
+
+    card.content.append(&info);
+    card.content.append(&gauge);
+
+    (
+        FanCard {
+            widget: card.widget,
+            gauge,
+        },
+        rpm_l,
+        temp_l,
+    )
 }
 
 /// Draws one ring of thin, curved slivers at `rot` - either flat-colored
@@ -583,18 +617,15 @@ fn draw_blade_ring(
 /// from scratch - Acer's icon is a single hand-authored illustration path
 /// (24 fixed slivers, exact coordinates), which is exactly the kind of
 /// copyrighted vector artwork this project does not trace or ship.
-fn draw_animated_fan(
-    cr: &gtk4::cairo::Context,
-    w: f64,
-    h: f64,
-    rotation: f64,
-    rpm: u32,
-    temp: f64,
-) {
+fn draw_animated_fan(cr: &gtk4::cairo::Context, w: f64, h: f64, rotation: f64, rpm: u32) {
     let cx = w / 2.0;
     let cy = h / 2.0;
-    let outer_r = 68.0;
-    let inner_r = 16.0;
+    // Proportional to the canvas, not fixed px - the fixed 68.0/16.0 this
+    // used to be (sized for the old 150x150 canvas) stayed that size no
+    // matter how much bigger the `DrawingArea` itself grew, which is why
+    // enlarging the gauge alone didn't enlarge the fan drawn inside it.
+    let outer_r = (w.min(h) / 2.0) * 0.85;
+    let inner_r = outer_r * (16.0 / 68.0);
     let mid_r = inner_r + (outer_r - inner_r) * 0.5;
 
     let intensity = if rpm > 0 {
@@ -650,36 +681,4 @@ fn draw_animated_fan(
         Some(&grad),
         (0.0, 0.0, 0.0, 0.0),
     );
-
-    // RPM text
-    cr.set_source_rgb(1.0, 1.0, 1.0);
-    cr.select_font_face(
-        "Sans",
-        gtk4::cairo::FontSlant::Normal,
-        gtk4::cairo::FontWeight::Bold,
-    );
-    cr.set_font_size(20.0);
-    let rpm_text = if rpm > 0 {
-        format!("{}", rpm)
-    } else {
-        "--".into()
-    };
-    let ext = cr.text_extents(&rpm_text).unwrap();
-    cr.move_to(cx - ext.width() / 2.0, cy + 2.0);
-    let _ = cr.show_text(&rpm_text);
-
-    cr.set_font_size(9.0);
-    cr.set_source_rgba(1.0, 1.0, 1.0, 0.5);
-    let ext2 = cr.text_extents("RPM").unwrap();
-    cr.move_to(cx - ext2.width() / 2.0, cy + 14.0);
-    let _ = cr.show_text("RPM");
-
-    // Temperature below
-    cr.set_font_size(11.0);
-    let (r, g, b) = crate::ui::brand_theme::accent().bright;
-    cr.set_source_rgba(r, g, b, 0.9);
-    let t = format!("{}°C", temp as i32);
-    let ext3 = cr.text_extents(&t).unwrap();
-    cr.move_to(cx - ext3.width() / 2.0, cy + outer_r + 16.0);
-    let _ = cr.show_text(&t);
 }

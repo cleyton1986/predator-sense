@@ -245,8 +245,11 @@ fn build_cpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     left_col.set_valign(gtk::Align::Start);
 
     // Gauge grande CPU%
-    let gauge_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    gauge_box.add_css_class("usage-hero-card");
+    let gauge_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let gauge_box = gauge_faceted.content;
+    gauge_box.set_orientation(gtk::Orientation::Vertical);
+    gauge_box.set_spacing(4);
     let gauge_da = gtk::DrawingArea::new();
     gauge_da.set_size_request(220, 220);
     let st_gauge = state.clone();
@@ -259,11 +262,14 @@ fn build_cpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     gauge_title.add_css_class("usage-hero-title");
     gauge_title.set_halign(gtk::Align::Center);
     gauge_box.append(&gauge_title);
-    left_col.append(&gauge_box);
+    left_col.append(&gauge_faceted.widget);
 
     // Gauge temperatura CPU com fogo
-    let temp_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    temp_box.add_css_class("usage-hero-card");
+    let temp_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let temp_box = temp_faceted.content;
+    temp_box.set_orientation(gtk::Orientation::Vertical);
+    temp_box.set_spacing(4);
     let temp_da = gtk::DrawingArea::new();
     temp_da.set_size_request(220, 170);
     let st_temp = state.clone();
@@ -276,7 +282,7 @@ fn build_cpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     temp_title.add_css_class("usage-hero-title");
     temp_title.set_halign(gtk::Align::Center);
     temp_box.append(&temp_title);
-    left_col.append(&temp_box);
+    left_col.append(&temp_faceted.widget);
 
     top_row.append(&left_col);
 
@@ -293,13 +299,21 @@ fn build_cpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     cores_da.set_hexpand(true);
     cores_da.set_vexpand(true);
     cores_da.set_size_request(-1, 420);
-    cores_da.add_css_class("usage-panel");
+    let cores_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
     let st_cores = state.clone();
     cores_da.set_draw_func(move |_a, cr, w, h| {
         let st = st_cores.borrow();
-        draw_per_core(cr, w as f64, h as f64, &st.cpu_per_core_shown, st.pulse_phase);
+        draw_per_core(
+            cr,
+            w as f64,
+            h as f64,
+            &st.cpu_per_core_shown,
+            st.pulse_phase,
+        );
     });
-    cores_box.append(&cores_da);
+    cores_faceted.content.append(&cores_da);
+    cores_box.append(&cores_faceted.widget);
     top_row.append(&cores_box);
 
     page.append(&top_row);
@@ -408,8 +422,11 @@ fn build_gpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     // Coluna esquerda: util + temp
     let left_col = gtk::Box::new(gtk::Orientation::Vertical, 12);
 
-    let util_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    util_box.add_css_class("usage-hero-card");
+    let util_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let util_box = util_faceted.content;
+    util_box.set_orientation(gtk::Orientation::Vertical);
+    util_box.set_spacing(4);
     let util_da = gtk::DrawingArea::new();
     util_da.set_size_request(220, 220);
     let st_util = state.clone();
@@ -422,10 +439,13 @@ fn build_gpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     util_title.add_css_class("usage-hero-title");
     util_title.set_halign(gtk::Align::Center);
     util_box.append(&util_title);
-    left_col.append(&util_box);
+    left_col.append(&util_faceted.widget);
 
-    let gpu_temp_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    gpu_temp_box.add_css_class("usage-hero-card");
+    let gpu_temp_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let gpu_temp_box = gpu_temp_faceted.content;
+    gpu_temp_box.set_orientation(gtk::Orientation::Vertical);
+    gpu_temp_box.set_spacing(4);
     let gpu_temp_da = gtk::DrawingArea::new();
     gpu_temp_da.set_size_request(220, 170);
     let st_gtemp = state.clone();
@@ -438,44 +458,64 @@ fn build_gpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     gpu_temp_title.add_css_class("usage-hero-title");
     gpu_temp_title.set_halign(gtk::Align::Center);
     gpu_temp_box.append(&gpu_temp_title);
-    left_col.append(&gpu_temp_box);
+    left_col.append(&gpu_temp_faceted.widget);
 
     top_row.append(&left_col);
 
     // Coluna direita: VRAM donut + Power
     let right_col = gtk::Box::new(gtk::Orientation::Vertical, 12);
 
-    let vram_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    vram_box.add_css_class("usage-hero-card");
+    let vram_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let vram_box = vram_faceted.content;
+    vram_box.set_orientation(gtk::Orientation::Vertical);
+    vram_box.set_spacing(4);
     let vram_da = gtk::DrawingArea::new();
     vram_da.set_size_request(220, 220);
     let st_vram = state.clone();
     vram_da.set_draw_func(move |_a, cr, w, h| {
         let st = st_vram.borrow();
-        draw_vram_donut(cr, w as f64, h as f64, &st.sample.gpu, st.gpu_vram_shown, st.pulse_phase);
+        draw_vram_donut(
+            cr,
+            w as f64,
+            h as f64,
+            &st.sample.gpu,
+            st.gpu_vram_shown,
+            st.pulse_phase,
+        );
     });
     vram_box.append(&vram_da);
     let vram_title = gtk::Label::new(Some("VRAM"));
     vram_title.add_css_class("usage-hero-title");
     vram_title.set_halign(gtk::Align::Center);
     vram_box.append(&vram_title);
-    right_col.append(&vram_box);
+    right_col.append(&vram_faceted.widget);
 
-    let power_box = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    power_box.add_css_class("usage-hero-card");
+    let power_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let power_box = power_faceted.content;
+    power_box.set_orientation(gtk::Orientation::Vertical);
+    power_box.set_spacing(4);
     let power_da = gtk::DrawingArea::new();
     power_da.set_size_request(220, 170);
     let st_pow = state.clone();
     power_da.set_draw_func(move |_a, cr, w, h| {
         let st = st_pow.borrow();
-        draw_power_gauge(cr, w as f64, h as f64, st.gpu_power_shown, &st.sample.gpu, st.pulse_phase);
+        draw_power_gauge(
+            cr,
+            w as f64,
+            h as f64,
+            st.gpu_power_shown,
+            &st.sample.gpu,
+            st.pulse_phase,
+        );
     });
     power_box.append(&power_da);
     let power_title = gtk::Label::new(Some(crate::i18n::t("gpu_power_label")));
     power_title.add_css_class("usage-hero-title");
     power_title.set_halign(gtk::Align::Center);
     power_box.append(&power_title);
-    right_col.append(&power_box);
+    right_col.append(&power_faceted.widget);
 
     top_row.append(&right_col);
     page.append(&top_row);
@@ -555,8 +595,11 @@ fn build_mem_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     page.set_margin_top(10);
 
     // Card principal
-    let mem_card = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    mem_card.add_css_class("usage-panel");
+    let mem_faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let mem_card = mem_faceted.content;
+    mem_card.set_orientation(gtk::Orientation::Vertical);
+    mem_card.set_spacing(6);
 
     let mem_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     let mem_title = gtk::Label::new(Some(crate::i18n::t("usage_memory")));
@@ -576,7 +619,14 @@ fn build_mem_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     let st_bar = state.clone();
     mem_bar.set_draw_func(move |_a, cr, w, h| {
         let st = st_bar.borrow();
-        draw_mem_bar(cr, w as f64, h as f64, &st.sample.mem, st.mem_used_shown, st.pulse_phase);
+        draw_mem_bar(
+            cr,
+            w as f64,
+            h as f64,
+            &st.sample.mem,
+            st.mem_used_shown,
+            st.pulse_phase,
+        );
     });
     mem_card.append(&mem_bar);
 
@@ -594,7 +644,7 @@ fn build_mem_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     stats.append(&swap_card);
     mem_card.append(&stats);
 
-    page.append(&mem_card);
+    page.append(&mem_faceted.widget);
 
     // Top processos (memória)
     let title = gtk::Label::new(Some(crate::i18n::t("top_processes_mem")));
@@ -799,11 +849,14 @@ fn build_storage_card(
     index: usize,
     expanded: bool,
     state: Rc<RefCell<AnimState>>,
-) -> gtk::Box {
-    let card = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    card.add_css_class("usage-disk-card");
-    card.set_margin_top(4);
-    card.set_margin_bottom(4);
+) -> gtk::Widget {
+    let faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let card = faceted.content;
+    card.set_orientation(gtk::Orientation::Vertical);
+    card.set_spacing(6);
+    faceted.widget.set_margin_top(4);
+    faceted.widget.set_margin_bottom(4);
 
     // Top: donut + textos
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 14);
@@ -889,7 +942,7 @@ fn build_storage_card(
         card.append(&det);
     }
 
-    card
+    faceted.widget
 }
 
 fn detail_kv(k: &str, v: &str) -> gtk::Box {
@@ -947,7 +1000,12 @@ fn build_process_row(
     name.add_css_class("proc-name");
     name.set_halign(gtk::Align::Start);
     text.append(&name);
-    let sub = gtk::Label::new(Some(&format!("PID {} · {} · {}", p.pid, p.user, state_name(&p.state))));
+    let sub = gtk::Label::new(Some(&format!(
+        "PID {} · {} · {}",
+        p.pid,
+        p.user,
+        state_name(&p.state)
+    )));
     sub.add_css_class("proc-sub");
     sub.set_halign(gtk::Align::Start);
     text.append(&sub);
@@ -1027,9 +1085,15 @@ fn build_process_row(
         }
         det.append(&detail_kv("PID", &p.pid.to_string()));
         det.append(&detail_kv(crate::i18n::t("proc_user"), &p.user));
-        det.append(&detail_kv(crate::i18n::t("proc_state"), &format!("{} ({})", p.state, state_name(&p.state))));
+        det.append(&detail_kv(
+            crate::i18n::t("proc_state"),
+            &format!("{} ({})", p.state, state_name(&p.state)),
+        ));
         det.append(&detail_kv("CPU", &format!("{:.2}%", p.cpu_pct)));
-        det.append(&detail_kv(crate::i18n::t("proc_memory_rss"), &format_kb(p.mem_kb)));
+        det.append(&detail_kv(
+            crate::i18n::t("proc_memory_rss"),
+            &format_kb(p.mem_kb),
+        ));
         row_outer.append(&det);
     }
 
@@ -1362,7 +1426,13 @@ fn draw_temp_gauge(cr: &gtk4::cairo::Context, w: f64, h: f64, temp_c: f64, phase
         // Bolha pulsante na base
         let pulse = 0.8 + 0.2 * ((phase * TAU).sin() * 0.5 + 0.5);
         cr.set_source_rgba(1.0, 0.5, 0.1, 0.6 * pulse);
-        cr.arc(tube_x + tube_w / 2.0, tube_bottom - 2.0, tube_w * 0.8, 0.0, 2.0 * PI);
+        cr.arc(
+            tube_x + tube_w / 2.0,
+            tube_bottom - 2.0,
+            tube_w * 0.8,
+            0.0,
+            2.0 * PI,
+        );
         let _ = cr.fill();
     }
 
@@ -1484,7 +1554,18 @@ fn draw_fire(cr: &gtk4::cairo::Context, w: f64, h: f64, temp_c: f64, phase: f64)
             draw_flame(cr, bcx, bcy, bw, bh, 0.8 * s, s, 0.0, bottom_col, a);
         }
         // Núcleo
-        draw_flame(cr, bcx, bcy, bw, bh, 0.8, 1.0, 0.0, bottom_col, 0.85 * intensity);
+        draw_flame(
+            cr,
+            bcx,
+            bcy,
+            bw,
+            bh,
+            0.8,
+            1.0,
+            0.0,
+            bottom_col,
+            0.85 * intensity,
+        );
     }
 
     // ===== fire-left (shake 3s) =====
@@ -1499,13 +1580,31 @@ fn draw_fire(cr: &gtk4::cairo::Context, w: f64, h: f64, temp_c: f64, phase: f64)
             let s = 1.0 + (i as f64 + 1.0) * 0.1;
             let a = (0.38 / (i as f64 + 1.0)) * intensity;
             draw_flame(
-                cr, lcx, lcy, lw, lh,
-                0.8 * s * lscale, s * lscale, lskew,
-                shadow, a,
+                cr,
+                lcx,
+                lcy,
+                lw,
+                lh,
+                0.8 * s * lscale,
+                s * lscale,
+                lskew,
+                shadow,
+                a,
             );
         }
         // corpo principal
-        draw_flame(cr, lcx, lcy, lw, lh, 0.8 * lscale, lscale, lskew, orange, intensity);
+        draw_flame(
+            cr,
+            lcx,
+            lcy,
+            lw,
+            lh,
+            0.8 * lscale,
+            lscale,
+            lskew,
+            orange,
+            intensity,
+        );
 
         // particle-fire: top:10%, left:20%, 10% size, ciclo 3s
         let px = fox + fsize * 0.2;
@@ -1524,12 +1623,30 @@ fn draw_fire(cr: &gtk4::cairo::Context, w: f64, h: f64, temp_c: f64, phase: f64)
             let s = 1.0 + (i as f64 + 1.0) * 0.1;
             let a = (0.38 / (i as f64 + 1.0)) * intensity;
             draw_flame(
-                cr, rcx, rcy, rw, rh,
-                0.8 * s * rscale, s * rscale, rskew,
-                shadow, a,
+                cr,
+                rcx,
+                rcy,
+                rw,
+                rh,
+                0.8 * s * rscale,
+                s * rscale,
+                rskew,
+                shadow,
+                a,
             );
         }
-        draw_flame(cr, rcx, rcy, rw, rh, 0.8 * rscale, rscale, rskew, orange, intensity);
+        draw_flame(
+            cr,
+            rcx,
+            rcy,
+            rw,
+            rh,
+            0.8 * rscale,
+            rscale,
+            rskew,
+            orange,
+            intensity,
+        );
 
         // particle-fire: top:45%, left:50%, 15px size, ciclo 2s
         let px = fox + fsize * 0.5;
@@ -1547,16 +1664,30 @@ fn draw_fire(cr: &gtk4::cairo::Context, w: f64, h: f64, temp_c: f64, phase: f64)
             let s = 1.0 + (i as f64 + 1.0) * 0.1;
             let a = (0.35 / (i as f64 + 1.0)) * intensity;
             draw_flame(
-                cr, ccx, ccy, fsize, fsize,
-                0.8 * s * cs_x, s * cs_y, 0.0,
-                shadow, a,
+                cr,
+                ccx,
+                ccy,
+                fsize,
+                fsize,
+                0.8 * s * cs_x,
+                s * cs_y,
+                0.0,
+                shadow,
+                a,
             );
         }
         // corpo com gradiente radial (farthest-corner at 10px 0 → d43300 a ef5a00)
         draw_flame_radial(
-            cr, ccx, ccy, fsize, fsize,
-            0.8 * cs_x, cs_y,
-            orange_dark, orange, intensity,
+            cr,
+            ccx,
+            ccy,
+            fsize,
+            fsize,
+            0.8 * cs_x,
+            cs_y,
+            orange_dark,
+            orange,
+            intensity,
         );
 
         // particle-fire: top:60%, left:45%, 10px, ciclo 2s
@@ -1619,12 +1750,7 @@ fn draw_flame_radial(
     cr.scale(scale_x, scale_y);
     flame_path(cr, w, h);
     // farthest-corner at 10px 0 (canto superior-direito da versão não-rotada)
-    let grad = gtk4::cairo::RadialGradient::new(
-        -w * 0.35, -h * 0.45,
-        1.0,
-        0.0, 0.0,
-        w.max(h),
-    );
+    let grad = gtk4::cairo::RadialGradient::new(-w * 0.35, -h * 0.45, 1.0, 0.0, 0.0, w.max(h));
     grad.add_color_stop_rgba(0.0, c0.0, c0.1, c0.2, alpha);
     grad.add_color_stop_rgba(0.95, c1.0, c1.1, c1.2, alpha);
     let _ = cr.set_source(&grad);
@@ -1825,7 +1951,11 @@ fn draw_power_gauge(
     rounded_rect(cr, 0.0, 0.0, w, h, 4.0);
     let _ = cr.fill();
 
-    let max_w = gpu.as_ref().map(|g| g.power_max_w).unwrap_or(130.0).max(1.0);
+    let max_w = gpu
+        .as_ref()
+        .map(|g| g.power_max_w)
+        .unwrap_or(130.0)
+        .max(1.0);
     let frac = (power_shown / max_w).clamp(0.0, 1.0);
 
     // Barra horizontal
@@ -1849,7 +1979,14 @@ fn draw_power_gauge(
         let _ = cr.fill();
         // Glow
         cr.set_source_rgba(0.0, 0.8, 0.95, 0.35 * pulse);
-        rounded_rect(cr, bar_x - 1.0, bar_y - 1.0, bar_w * frac + 2.0, bar_h + 2.0, bar_h / 2.0);
+        rounded_rect(
+            cr,
+            bar_x - 1.0,
+            bar_y - 1.0,
+            bar_w * frac + 2.0,
+            bar_h + 2.0,
+            bar_h / 2.0,
+        );
         let _ = cr.fill();
     }
 
@@ -1873,7 +2010,10 @@ fn draw_power_gauge(
         cr.set_font_size(11.0);
         let sub = crate::i18n::tf(
             "gpu_power_sub",
-            &[&format!("{:.0}", g.power_limit_w), &format!("{:.0}", g.power_max_w)],
+            &[
+                &format!("{:.0}", g.power_limit_w),
+                &format!("{:.0}", g.power_max_w),
+            ],
         );
         if let Ok(ext) = cr.text_extents(&sub) {
             cr.move_to(w / 2.0 - ext.width() / 2.0, bar_y + bar_h + 16.0);

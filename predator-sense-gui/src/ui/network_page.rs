@@ -80,15 +80,22 @@ pub fn build() -> gtk::Box {
     // on a placeholder like every other async-populated label in this app).
     let ip_row = gtk::Box::new(gtk::Orientation::Horizontal, 20);
     ip_row.set_margin_top(2);
-    let (local_ip_box, _local_ip_label) =
-        ip_stat(crate::i18n::t("local_ip"), local_ip().as_deref().unwrap_or("--"));
-    let (public_ip_box, public_ip_label) = ip_stat(crate::i18n::t("public_ip"), crate::i18n::t("checking"));
+    let (local_ip_box, _local_ip_label) = ip_stat(
+        crate::i18n::t("local_ip"),
+        local_ip().as_deref().unwrap_or("--"),
+    );
+    let (public_ip_box, public_ip_label) =
+        ip_stat(crate::i18n::t("public_ip"), crate::i18n::t("checking"));
     ip_row.append(&local_ip_box);
     ip_row.append(&public_ip_box);
     page.append(&ip_row);
 
     background::run(fetch_public_ip, move |result| {
-        public_ip_label.set_text(result.as_deref().unwrap_or(crate::i18n::t("public_ip_unavailable")));
+        public_ip_label.set_text(
+            result
+                .as_deref()
+                .unwrap_or(crate::i18n::t("public_ip_unavailable")),
+        );
     });
 
     // === Big numbers: download e upload ===
@@ -96,8 +103,11 @@ pub fn build() -> gtk::Box {
     big_row.set_homogeneous(true);
     big_row.set_margin_top(4);
 
-    let (dl_card, dl_value_label, dl_anim_da) =
-        create_speed_card(crate::i18n::t("download"), "↓", crate::ui::brand_theme::accent().bright);
+    let (dl_card, dl_value_label, dl_anim_da) = create_speed_card(
+        crate::i18n::t("download"),
+        "↓",
+        crate::ui::brand_theme::accent().bright,
+    );
     let (ul_card, ul_value_label, ul_anim_da) =
         create_speed_card(crate::i18n::t("upload"), "↑", (0.0, 0.9, 0.5));
 
@@ -157,7 +167,13 @@ pub fn build() -> gtk::Box {
         let s = state.clone();
         dl_graph.set_draw_func(move |_a, cr, w, h| {
             let st = s.borrow();
-            draw_net_graph(cr, w as f64, h as f64, &st.dl_history, crate::ui::brand_theme::accent().bright);
+            draw_net_graph(
+                cr,
+                w as f64,
+                h as f64,
+                &st.dl_history,
+                crate::ui::brand_theme::accent().bright,
+            );
         });
     }
     {
@@ -263,7 +279,11 @@ fn update_net_stats(
 ) {
     let iface = state.borrow().iface.clone();
     let active_iface = detect_active_interface().unwrap_or_default();
-    let iface = if active_iface.is_empty() { iface } else { active_iface };
+    let iface = if active_iface.is_empty() {
+        iface
+    } else {
+        active_iface
+    };
 
     if iface != state.borrow().iface {
         let (rx, tx) = read_bytes(&iface);
@@ -342,11 +362,17 @@ fn update_net_stats(
     ul_graph.queue_draw();
 }
 
-fn create_speed_card(title: &str, arrow: &str, _color: (f64, f64, f64)) -> (gtk::Box, gtk::Label, gtk::DrawingArea) {
-    let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    card.add_css_class("net-speed-card");
-    card.set_valign(gtk::Align::Start);
-    card.set_margin_top(4);
+fn create_speed_card(
+    title: &str,
+    arrow: &str,
+    color: (f64, f64, f64),
+) -> (gtk::Widget, gtk::Label, gtk::DrawingArea) {
+    let faceted = crate::ui::faceted_card::build_simple(color, None);
+    let card = faceted.content;
+    card.set_orientation(gtk::Orientation::Vertical);
+    card.set_spacing(4);
+    faceted.widget.set_valign(gtk::Align::Start);
+    faceted.widget.set_margin_top(4);
 
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let arrow_l = gtk::Label::new(Some(arrow));
@@ -370,12 +396,15 @@ fn create_speed_card(title: &str, arrow: &str, _color: (f64, f64, f64)) -> (gtk:
     anim_area.set_margin_top(4);
     card.append(&anim_area);
 
-    (card, value, anim_area)
+    (faceted.widget, value, anim_area)
 }
 
-fn create_total_card(title: &str) -> (gtk::Box, gtk::Label) {
-    let card = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    card.add_css_class("net-total-card");
+fn create_total_card(title: &str) -> (gtk::Widget, gtk::Label) {
+    let faceted =
+        crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let card = faceted.content;
+    card.set_orientation(gtk::Orientation::Vertical);
+    card.set_spacing(2);
     let t = gtk::Label::new(Some(title));
     t.add_css_class("stat-title");
     t.set_halign(gtk::Align::Start);
@@ -384,7 +413,7 @@ fn create_total_card(title: &str) -> (gtk::Box, gtk::Label) {
     v.set_halign(gtk::Align::Start);
     card.append(&t);
     card.append(&v);
-    (card, v)
+    (faceted.widget, v)
 }
 
 fn format_speed(kbps: f64) -> String {
@@ -439,7 +468,12 @@ const PUBLIC_IP_TIMEOUT: Duration = Duration::from_secs(4);
 /// "can't tell you right now" from the UI's point of view.
 fn fetch_public_ip() -> Option<String> {
     let agent = ureq::AgentBuilder::new().timeout(PUBLIC_IP_TIMEOUT).build();
-    let body = agent.get("https://api.ipify.org").call().ok()?.into_string().ok()?;
+    let body = agent
+        .get("https://api.ipify.org")
+        .call()
+        .ok()?
+        .into_string()
+        .ok()?;
     let ip = body.trim();
     (!ip.is_empty() && ip.parse::<std::net::IpAddr>().is_ok()).then(|| ip.to_string())
 }
@@ -461,7 +495,12 @@ fn detect_active_interface() -> Option<String> {
     let mut names: Vec<String> = entries
         .flatten()
         .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| n.starts_with("wlp") || n.starts_with("wlan") || n.starts_with("enp") || n.starts_with("eth"))
+        .filter(|n| {
+            n.starts_with("wlp")
+                || n.starts_with("wlan")
+                || n.starts_with("enp")
+                || n.starts_with("eth")
+        })
         .collect();
     names.sort_by(|a, b| {
         let aw = a.starts_with("wlp") || a.starts_with("wlan");
@@ -525,7 +564,11 @@ fn draw_net_graph(
 
     let max_val = history.iter().cloned().fold(1.0_f64, f64::max).max(100.0);
     let n = history.len();
-    let step = if n > 1 { gw / (HISTORY_SIZE as f64 - 1.0) } else { 0.0 };
+    let step = if n > 1 {
+        gw / (HISTORY_SIZE as f64 - 1.0)
+    } else {
+        0.0
+    };
     let sx = m + (HISTORY_SIZE - n) as f64 * step;
 
     cr.set_source_rgba(color.0, color.1, color.2, 0.18);
