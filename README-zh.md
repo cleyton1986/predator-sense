@@ -253,7 +253,7 @@ sudo ./predator-sense-installer
 
 选择**选项 1**（完整安装）。安装程序会自动：
 
-1. 检测你的发行版（Debian/Ubuntu/Mint、Fedora、Arch）
+1. 检测你的发行版（Debian/Ubuntu/Mint、Fedora、Arch、openSUSE）
 2. 安装系统依赖（GTK4、libadwaita、构建工具、内核头文件）
 3. 下载对应 release 的源码 + 预编译二进制文件
 4. 编译并加载 `facer` 内核模块（这部分始终在本地编译，因为内核模块无法跨不同内核版本预编译分发）
@@ -295,6 +295,14 @@ sudo dnf install gtk4-devel libadwaita-devel pkg-config gcc make \
 
 ```console
 sudo pacman -S gtk4 libadwaita pkgconf gcc make dkms curl tar linux-headers
+```
+</details>
+
+<details>
+<summary><b>openSUSE</b></summary>
+
+```console
+sudo zypper in gtk4-devel libadwaita-devel pkgconf-pkg-config gcc make dkms curl tar sudo
 ```
 </details>
 

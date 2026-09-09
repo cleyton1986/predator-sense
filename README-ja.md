@@ -253,7 +253,7 @@ sudo ./predator-sense-installer
 
 **オプション1**（完全インストール）を選択してください。インストーラーは自動的に以下を行います。
 
-1. ディストリビューションを検出（Debian/Ubuntu/Mint、Fedora、Arch）
+1. ディストリビューションを検出（Debian/Ubuntu/Mint、Fedora、Arch、openSUSE）
 2. システムの依存関係をインストール（GTK4、libadwaita、ビルドツール、カーネルヘッダー）
 3. 対応するリリースのソースコード + ビルド済みバイナリをダウンロード
 4. `facer`カーネルモジュールをコンパイルして読み込み（この部分は常にローカルでコンパイルされます — カーネルモジュールは異なるカーネルバージョン間でビルド済みとして配布できないためです）
@@ -295,6 +295,14 @@ sudo dnf install gtk4-devel libadwaita-devel pkg-config gcc make \
 
 ```console
 sudo pacman -S gtk4 libadwaita pkgconf gcc make dkms curl tar linux-headers
+```
+</details>
+
+<details>
+<summary><b>openSUSE</b></summary>
+
+```console
+sudo zypper in gtk4-devel libadwaita-devel pkgconf-pkg-config gcc make dkms curl tar sudo
 ```
 </details>
 
