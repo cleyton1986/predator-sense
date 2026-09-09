@@ -15,3 +15,14 @@ dirs = "5"
 libc = "0.2"
 predator-sense-protocol = { path = "protocol" }
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+
+# Same release profile the installer crate already uses (installer/Cargo.toml).
+# `panic = "abort"` is deliberately left out here: the installer is a small
+# root-owned helper where killing the whole process on any panic is the safer
+# choice, but this crate is the long-lived GUI - a panic on a background
+# hardware-read thread should still just take down that thread, not the
+# window, so this keeps the default unwind behavior.
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = true
