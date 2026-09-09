@@ -79,6 +79,13 @@ pub fn build() -> gtk::ScrolledWindow {
             if status_label.root().is_none() {
                 return glib::ControlFlow::Break;
             }
+            // This only reflects state (the actual game-launch detection and
+            // profile switch live in hardware/game_sync.rs, not here), so
+            // skipping the read while the tab is off-screen loses nothing -
+            // same guard as fan_page.rs/tech_gauge.rs.
+            if !crate::app_state::is_window_visible() || !status_label.is_mapped() {
+                return glib::ControlFlow::Continue;
+            }
             refresh_status(&status_dot, &status_label);
             glib::ControlFlow::Continue
         });

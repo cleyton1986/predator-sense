@@ -779,7 +779,15 @@ pub fn build() -> gtk::Box {
     // used to leave these cards showing whatever was active at launch until
     // a full app restart. Poll and reconcile instead.
     let last_known = Rc::new(Cell::new(profile::get_current_profile()));
+    let page_reconcile = page.clone();
     glib::timeout_add_seconds_local(3, move || {
+        // Same guard as fan_control_page.rs / tech_gauge.rs: this page is
+        // built once and never torn down, so without it the reconcile keeps
+        // reading hardware every 3s for the app's whole life, even while a
+        // different tab is showing.
+        if !crate::app_state::is_window_visible() || !page_reconcile.is_mapped() {
+            return glib::ControlFlow::Continue;
+        }
         let now = profile::get_current_profile();
         if now != last_known.get() {
             last_known.set(now);

@@ -364,6 +364,13 @@ pub fn build(
             if da.root().is_none() {
                 return glib::ControlFlow::Break;
             }
+            // Same guard as fan_control_page.rs's animation timer: a GTK
+            // `Stack` keeps hidden pages realized (root() still Some), so
+            // without this a gauge left on an off-screen tab keeps redrawing
+            // at 30fps for the rest of the app's life.
+            if !crate::app_state::is_window_visible() || !da.is_mapped() {
+                return glib::ControlFlow::Continue;
+            }
             phase.set(phase.get() + frame_s);
             da.queue_draw();
             glib::ControlFlow::Continue
