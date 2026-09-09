@@ -85,10 +85,29 @@ fn register_predator_font() {
 /// Re-applies the base stylesheet scaled by `scale` (see `ui::font_scale`).
 /// Safe to call at any time after startup - takes effect immediately.
 pub fn apply_font_scale(scale: f64) {
-    let scaled_css = ui::font_scale::scale_css(&ui::brand_theme::brand_css(CSS_THEME), scale);
+    reload_css(scale);
+}
+
+/// Records which mode's color the app should use from now on and
+/// re-applies the stylesheet immediately - the CSS half of a live theme
+/// change. `ui::window`'s profile watcher calls this once at startup (so a
+/// mode already active before this process existed is reflected right
+/// away, not just on the next change) and again every time the active mode
+/// changes; it then separately redraws the hand-drawn Cairo chrome
+/// (`ui::brand_theme::accent()` reads this same state, just not through
+/// CSS), which needs real widget references this module does not have.
+/// Same live-reload path `apply_font_scale` already proved out for scale
+/// changes, just recoloring instead of resizing.
+pub fn apply_active_profile_theme(profile: Option<hardware::profile::PowerProfile>) {
+    ui::brand_theme::set_active_profile(profile);
+    reload_css(config::load_app_config().font_scale);
+}
+
+fn reload_css(scale: f64) {
+    let css = ui::font_scale::scale_css(&ui::brand_theme::theme_css(CSS_THEME), scale);
     CSS_PROVIDER.with(|p| {
         if let Some(provider) = p.borrow().as_ref() {
-            provider.load_from_data(&scaled_css);
+            provider.load_from_data(&css);
         }
     });
 }
@@ -132,7 +151,7 @@ fn main() {
         let provider = gtk::CssProvider::new();
         let scale = config::load_app_config().font_scale;
         provider.load_from_data(&ui::font_scale::scale_css(
-            &ui::brand_theme::brand_css(CSS_THEME),
+            &ui::brand_theme::theme_css(CSS_THEME),
             scale,
         ));
         gtk::style_context_add_provider_for_display(

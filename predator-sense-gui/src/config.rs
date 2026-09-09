@@ -282,6 +282,18 @@ pub struct AppConfig {
     pub eco_mode_saved_volume_pct: Option<u8>,
     #[serde(default)]
     pub eco_mode_saved_brightness_pct: Option<u8>,
+    /// Opt-out for the live per-mode recolor (`ui::window`'s profile
+    /// watcher, `ui::brand_theme`): when true, switching Quiet/Balanced/
+    /// Performance/Turbo still switches the mode itself, just never
+    /// recolors the sidebar/buttons/gauges to match it - the app keeps its
+    /// plain brand accent (cyan, or Nitro's orange) regardless. Off by
+    /// default: the live recolor is the already-shipped, already-approved
+    /// behavior; this exists for someone who tries it and prefers the
+    /// original single accent back, without losing the mode-card colors and
+    /// robot art themselves (those stay - only the app-wide accent is what
+    /// this holds still).
+    #[serde(default)]
+    pub keep_default_theme_color: bool,
 }
 
 fn default_true() -> bool {
@@ -358,6 +370,7 @@ impl Default for AppConfig {
             eco_mode_enabled: false,
             eco_mode_saved_volume_pct: None,
             eco_mode_saved_brightness_pct: None,
+            keep_default_theme_color: false,
         }
     }
 }

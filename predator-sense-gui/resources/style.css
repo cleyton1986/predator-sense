@@ -5,14 +5,32 @@
 
 /* POC: official Predator brand font, recovered from the real Windows app's
    installer for reference. NOT committed/shipped until the licensing call is
-   made explicitly - see resources/fonts/README.md. Applied only to the brand
-   wordmark and page titles, never to body text, so the accessibility font
-   scale slider (Settings) keeps controlling everything that's actually read,
-   not just admired.
+   made explicitly - see resources/fonts/README.md (the .otf files themselves
+   are gitignored; a clean checkout just falls back to sans-serif everywhere
+   below, which is the point).
    GTK4's CSS engine does NOT support @font-face (confirmed: "Unknown @ rule"
    parser warning, rule silently dropped) - the font is registered instead via
    Fontconfig at startup (main.rs::register_predator_font, FcConfigAppFontAddFile),
-   which is why this stylesheet only needs the family name below, not a src. */
+   which is why this stylesheet only needs the family name below, not a src.
+   Both weights are registered under the one family name "Predator" (that is
+   each .otf's own embedded family - `fc-scan` shows style "Bold"/"Regular" on
+   the same family, confirmed by hand), so `font-weight: 700`/`400` on
+   `font-family: "Predator"` is what actually picks Predator-Bold vs
+   Predator-Regular; there is no separate family name to reference.
+
+   Typographic system (`REFERENCIA-VISUAL/index.html`'s "Tipografia" section,
+   2026-09-07 pass aligning the whole stylesheet to it) - every text rule
+   below is one of these 5, noted inline at each rule:
+     - Predator-Bold     - font-family: "Predator", sans-serif; font-weight: 700;
+     - Predator-Regular  - font-family: "Predator", sans-serif; font-weight: 400;
+     - Bold, 14px        - font-size: 14px; font-weight: 700;  (system sans)
+     - Regular, 14px     - font-size: 14px; font-weight: 400;  (system sans)
+     - Regular, 12px (label) - font-size: 12px; font-weight: 400; (system sans, usually a dim color)
+   The two Predator tokens keep each element's own size (a heading's size is
+   its own concern; the token only fixes family+weight) - only the 3 plain
+   system-sans tokens fix size too. A handful of very small (<12px) badges,
+   status dots, and monospace entries are intentionally left outside this
+   system - they read as icons/chips, not prose. */
 
 @define-color cyan #00cce6;
 @define-color cyan_dark #008899;
@@ -34,6 +52,18 @@
 .main-window {
     background-color: @bg_body;
     color: @text_main;
+}
+
+/* GtkScrolledWindow paints its own opaque theme background by default, and
+   auto-wraps a non-scrollable child (every page's own Box) in a GtkViewport,
+   which does the same - both sit between a faceted card's own translucent
+   fill and the app's real background (window.rs's `stripe_bg`), so no
+   card-level alpha value could ever let that background show through
+   without this. */
+scrolledwindow,
+scrolledwindow > viewport,
+viewport {
+    background-color: transparent;
 }
 
 /* === Header Bar === */
@@ -72,7 +102,7 @@
 .header-title-label {
     font-family: "Predator", sans-serif;
     font-size: 16px;
-    font-weight: 600;
+    font-weight: 700; /* Predator-Bold */
     letter-spacing: 1px;
     color: #cccccc;
 }
@@ -99,7 +129,7 @@
     font-family: "Predator", sans-serif;
     color: @text_label;
     font-size: 13px;
-    font-weight: 500;
+    font-weight: 400; /* Predator-Regular */
 }
 
 .nav-label-active {
@@ -115,6 +145,12 @@
 }
 
 /* === Content Panel (inner border glow) === */
+/* Dead CSS: no widget ever applies this class (confirmed by grep across
+   src/) - `.content-area`/`.page-content` are the classes actually in use,
+   both transparent, and the background actually visible behind them is a
+   Cairo DrawingArea in window.rs (build_main_content's `stripe_bg`), not
+   any CSS rule. Left as originally written; do not add a background here
+   expecting it to show. */
 .content-panel {
     background-color: @bg_dark;
     border: 1px solid rgba(0, 204, 230, 0.25);
@@ -130,22 +166,33 @@
 .section-title {
     font-family: "Predator", sans-serif;
     font-size: 16px;
-    font-weight: 600;
+    font-weight: 700; /* Predator-Bold */
     color: @text_muted;
     letter-spacing: 0.5px;
 }
 
 .section-subtitle {
     font-size: 12px;
+    font-weight: 400; /* Regular, 12px (label) */
     color: @text_muted;
 }
 
 /* === Gauge Label === */
 .gauge-label {
+    font-family: "Predator", sans-serif;
     font-size: 15px;
-    font-weight: 500;
+    font-weight: 400; /* Predator-Regular */
     color: @text_main;
     margin-top: 8px;
+}
+
+/* === Faceted Card (cut-corner panel, see ui/faceted_card.rs) === */
+.faceted-card-title {
+    font-family: "Predator", sans-serif;
+    font-size: 22px; /* Fan Control's CPU/GPU card titles - bigger, more legible */
+    font-weight: 700; /* Predator-Bold */
+    color: @text_muted;
+    letter-spacing: 0.5px;
 }
 
 /* === Fan Display === */
@@ -157,13 +204,38 @@
 }
 
 .fan-rpm {
-    font-size: 16px;
+    font-size: 14px; /* Bold, 14px */
     font-weight: 700;
     color: @cyan;
 }
 
+/* Fan Control's per-fan card (CPU/GPU): bigger, more legible than the plain
+   .fan-rpm/.info-text-dim pair used elsewhere - dedicated classes so this
+   bump doesn't also grow the AC label or other .fan-rpm/.info-text-dim
+   spots across the app. */
+.fan-card-value {
+    font-family: "Predator", sans-serif;
+    font-size: 34px;
+    font-weight: 700; /* Predator-Bold */
+    color: @cyan;
+}
+
+.fan-card-unit {
+    font-size: 16px;
+    font-weight: 400;
+    color: @text_muted;
+    margin-bottom: 4px;
+}
+
+.fan-card-temp {
+    font-size: 18px;
+    font-weight: 400;
+    color: @text_muted;
+}
+
 .fan-label {
-    font-size: 11px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: @text_muted;
     margin-top: 2px;
 }
@@ -180,14 +252,14 @@
 }
 
 .info-card-title {
-    font-size: 12px;
+    font-size: 12px; /* Regular, 12px (label) */
     color: @text_muted;
     font-weight: 400;
 }
 
 .info-card-value {
-    font-size: 15px;
-    font-weight: 500;
+    font-size: 14px; /* Bold, 14px */
+    font-weight: 700;
     color: @text_main;
     margin-top: 4px;
 }
@@ -206,8 +278,8 @@
     border: 1px solid @border_dim;
     border-radius: 0;
     padding: 8px 14px;
-    font-size: 12px;
-    font-weight: 500;
+    font-size: 14px; /* Regular, 14px - .mode-active promotes the selected one to Bold */
+    font-weight: 400;
     min-width: 85px;
 }
 
@@ -238,13 +310,16 @@
 }
 
 .cover-logo-title {
+    font-family: "Predator", sans-serif; /* Predator-Bold */
     font-size: 20px;
     font-weight: 700;
     color: @text_main;
 }
 
 .cover-logo-subtitle {
+    font-family: "Predator", sans-serif; /* Predator-Regular, pairs with the title above */
     font-size: 12px;
+    font-weight: 400;
     color: @text_muted;
 }
 
@@ -281,15 +356,15 @@
 
 .cover-logo-preview-caption {
     color: @text_muted;
-    font-size: 10px;
-    font-weight: 700;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     letter-spacing: 1px;
 }
 
 .cover-logo-section-title {
     color: @text_label;
-    font-size: 12px;
-    font-weight: 700;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
 }
 
 .cover-logo-value {
@@ -322,17 +397,18 @@
 
 /* === Control Labels === */
 .control-label {
-    font-size: 12px;
+    font-size: 12px; /* Regular, 12px (label) */
     color: @text_muted;
-    font-weight: 500;
+    font-weight: 400;
 }
 
 /* Larger labels for the Lighting tab (accessibility: RGB channel/zone labels
    were reported too small to read even on a maximized 16" display). */
 .rgb-zone-label {
+    font-family: "Predator", sans-serif; /* Predator-Bold */
     font-size: 15px;
     color: @text_muted;
-    font-weight: 600;
+    font-weight: 700;
 }
 
 .rgb-channel-label {
@@ -433,7 +509,7 @@
     border: none;
     border-radius: 0;
     padding: 8px 22px;
-    font-size: 13px;
+    font-size: 14px; /* Bold, 14px */
     font-weight: 700;
 }
 
@@ -454,8 +530,8 @@
     border-left: 2px solid @cyan_dark;
     border-radius: 0;
     padding: 8px 18px;
-    font-size: 12px;
-    font-weight: 500;
+    font-size: 14px; /* Regular, 14px */
+    font-weight: 400;
 }
 
 .secondary-button:hover {
@@ -470,7 +546,8 @@
 
 /* === Status Label === */
 .status-label {
-    font-size: 12px;
+    font-size: 14px; /* Regular, 14px */
+    font-weight: 400;
     margin-top: 10px;
     padding: 8px 14px;
     border-radius: 0;
@@ -506,7 +583,8 @@
 }
 
 .warning-text {
-    font-size: 11px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: @warning;
 }
 
@@ -548,6 +626,7 @@
 }
 
 .profile-name {
+    font-family: "Predator", sans-serif; /* Predator-Bold */
     font-size: 15px;
     font-weight: 700;
     color: @text_main;
@@ -566,7 +645,8 @@
 }
 
 .profile-description {
-    font-size: 10px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: @text_muted;
     margin-top: 4px;
     margin-bottom: 10px;
@@ -574,12 +654,14 @@
 
 /* === Sidebar Info === */
 .info-text {
-    font-size: 11px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: @text_muted;
 }
 
 .info-text-dim {
-    font-size: 10px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: #555;
 }
 
@@ -611,6 +693,7 @@ scrollbar slider:hover {
 
 /* === Setup Page === */
 .setup-title {
+    font-family: "Predator", sans-serif; /* Predator-Bold */
     font-size: 22px;
     font-weight: 700;
     color: @cyan;
@@ -618,13 +701,15 @@ scrollbar slider:hover {
 }
 
 .setup-description {
-    font-size: 13px;
+    font-size: 14px; /* Regular, 14px */
+    font-weight: 400;
     color: @text_muted;
     margin-top: 8px;
 }
 
 .setup-info {
-    font-size: 11px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: #555;
     margin-top: 4px;
 }
@@ -651,9 +736,9 @@ scrollbar slider:hover {
 .step-done { color: @success; background-color: alpha(@success, 0.15); }
 .step-failed { color: @danger; background-color: alpha(@danger, 0.15); }
 
-.step-text { font-size: 12px; color: @text_muted; }
+.step-text { font-size: 14px; font-weight: 400; color: @text_muted; } /* Regular, 14px */
 
-.setup-install-btn { padding: 10px 30px; font-size: 14px; }
+.setup-install-btn { padding: 10px 30px; font-size: 14px; font-weight: 700; } /* Bold, 14px */
 
 .flat-button {
     background: transparent;
@@ -680,8 +765,9 @@ scrollbar slider:hover {
 
 /* === Settings Page === */
 .settings-section-title {
+    font-family: "Predator", sans-serif; /* Predator-Bold */
     font-size: 14px;
-    font-weight: 600;
+    font-weight: 700;
     color: @cyan;
     letter-spacing: 0.5px;
 }
@@ -696,13 +782,14 @@ scrollbar slider:hover {
 }
 
 .settings-row-title {
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 14px; /* Regular, 14px */
+    font-weight: 400;
     color: @text_main;
 }
 
 .settings-row-desc {
-    font-size: 10px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: #555;
     margin-top: 2px;
 }
@@ -720,17 +807,20 @@ scrollbar slider:hover {
 }
 
 .model-row-name {
-    font-size: 12px;
+    font-size: 14px; /* Regular, 14px */
+    font-weight: 400;
     color: @text_main;
 }
 
 .model-row-meta {
-    font-size: 10px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: #666;
 }
 
 .about-text {
-    font-size: 11px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: @text_muted;
 }
 
@@ -744,19 +834,23 @@ scrollbar slider:hover {
 }
 
 .monitor-title {
+    font-family: "Predator", sans-serif; /* Predator-Bold */
     font-size: 17px;
     font-weight: 700;
     color: @cyan;
 }
 
 .monitor-subtitle {
-    font-size: 11px;
+    font-family: "Predator", sans-serif; /* Predator-Regular, pairs with the title above */
+    font-size: 12px;
+    font-weight: 400;
     color: #555;
     margin-left: 8px;
 }
 
 .graph-label {
-    font-size: 10px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: #555;
     margin-bottom: 4px;
 }
@@ -768,20 +862,22 @@ scrollbar slider:hover {
 }
 
 .monitor-temp-big {
+    font-family: "Predator", sans-serif;
     font-size: 34px;
     font-weight: 700;
     color: @cyan;
 }
 
 .monitor-minmax {
-    font-size: 10px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: #555;
 }
 
 .stat-widget { padding: 4px 0; }
-.stat-title { font-size: 10px; color: @text_muted; }
-.stat-value { font-size: 20px; font-weight: 700; color: @text_main; }
-.stat-unit { font-size: 11px; color: @text_muted; margin-bottom: 4px; }
+.stat-title { font-size: 12px; font-weight: 400; color: @text_muted; } /* Regular, 12px (label) */
+.stat-value { font-family: "Predator", sans-serif; font-size: 20px; font-weight: 700; color: @text_main; } /* Predator-Bold */
+.stat-unit { font-size: 12px; font-weight: 400; color: @text_muted; margin-bottom: 4px; } /* Regular, 12px (label) */
 
 /* === Pulsing green status dot ===
    Pulsed by a 5 fps opacity timer in window.rs, NOT a CSS animation: an
@@ -804,20 +900,23 @@ scrollbar slider:hover {
 }
 
 .dashboard-vendor {
-    font-size: 11px;
+    font-size: 12px; /* Regular, 12px (label) */
     letter-spacing: 3px;
     color: @cyan;
-    font-weight: 700;
+    font-weight: 400;
 }
 
 .dashboard-product {
+    font-family: "Predator", sans-serif; /* Predator-Bold */
     font-size: 26px;
     font-weight: 700;
     color: @text_main;
 }
 
 .dashboard-summary {
+    font-family: "Predator", sans-serif; /* Predator-Regular, pairs with the product name above */
     font-size: 12px;
+    font-weight: 400;
     color: @text_muted;
     margin-top: 4px;
 }
@@ -836,17 +935,17 @@ scrollbar slider:hover {
 }
 
 .spec-title {
-    font-size: 10px;
+    font-size: 12px; /* Regular, 12px (label) */
     letter-spacing: 1px;
     color: @cyan;
-    font-weight: 700;
+    font-weight: 400;
 }
 
 .spec-value {
-    font-size: 13px;
+    font-size: 14px; /* Regular, 14px */
     color: @text_main;
     margin-top: 4px;
-    font-weight: 500;
+    font-weight: 400;
 }
 
 /* === Network Page === */
@@ -859,10 +958,10 @@ scrollbar slider:hover {
 }
 
 .net-card-title {
-    font-size: 11px;
+    font-size: 12px; /* Regular, 12px (label) */
     color: @text_muted;
     letter-spacing: 1.5px;
-    font-weight: 600;
+    font-weight: 400;
 }
 
 .net-arrow {
@@ -872,8 +971,9 @@ scrollbar slider:hover {
 }
 
 .net-speed-value {
+    font-family: "Predator", sans-serif; /* Predator-Bold */
     font-size: 30px;
-    font-weight: 800;
+    font-weight: 700;
     color: @text_main;
 }
 
@@ -892,8 +992,8 @@ scrollbar slider:hover {
     border: 1px solid @border_dim;
     border-radius: 0;
     padding: 6px 18px;
-    font-size: 12px;
-    font-weight: 600;
+    font-size: 14px; /* Regular, 14px - .usage-tab-active reads as the Bold, 14px counterpart */
+    font-weight: 400;
     letter-spacing: 1px;
 }
 
@@ -906,6 +1006,7 @@ scrollbar slider:hover {
     background-color: rgba(0, 204, 230, 0.18);
     color: @cyan;
     border-color: @cyan;
+    font-weight: 700; /* Bold, 14px - the selected tab */
 }
 
 .usage-panel {
@@ -925,6 +1026,7 @@ scrollbar slider:hover {
 }
 
 .usage-hero-title {
+    font-family: "Predator", sans-serif; /* Predator-Bold */
     font-size: 12px;
     letter-spacing: 2px;
     color: @cyan;
@@ -946,6 +1048,7 @@ scrollbar slider:hover {
 }
 
 .usage-stat-value {
+    font-family: "Predator", sans-serif; /* Predator-Bold */
     font-size: 16px;
     font-weight: 700;
     color: @text_main;
@@ -968,25 +1071,26 @@ scrollbar slider:hover {
 }
 
 .proc-rank {
-    font-size: 12px;
+    font-size: 12px; /* Regular, 12px (label) */
     color: @cyan;
-    font-weight: 700;
+    font-weight: 400;
     min-width: 22px;
 }
 
 .proc-name {
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 14px; /* Bold, 14px */
+    font-weight: 700;
     color: @text_main;
 }
 
 .proc-sub {
-    font-size: 10px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: @text_muted;
 }
 
 .proc-value {
-    font-size: 13px;
+    font-size: 14px; /* Bold, 14px */
     font-weight: 700;
     color: @cyan;
 }
@@ -994,17 +1098,19 @@ scrollbar slider:hover {
 .proc-detail {
     background-color: rgba(0, 0, 0, 0.35);
     padding: 8px 10px;
-    font-size: 11px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
 }
 
 .detail-key {
-    font-size: 11px;
+    font-size: 12px; /* Regular, 12px (label) */
     color: @text_muted;
-    font-weight: 500;
+    font-weight: 400;
 }
 
 .detail-value {
-    font-size: 11px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: @text_main;
 }
 
@@ -1022,24 +1128,27 @@ scrollbar slider:hover {
 }
 
 .disk-title {
+    font-family: "Predator", sans-serif; /* Predator-Bold */
     font-size: 14px;
     font-weight: 700;
     color: @text_main;
 }
 
 .disk-pct {
-    font-size: 13px;
+    font-size: 14px; /* Bold, 14px */
     color: @cyan;
-    font-weight: 600;
+    font-weight: 700;
 }
 
 .disk-sub {
-    font-size: 11px;
+    font-size: 14px; /* Regular, 14px */
+    font-weight: 400;
     color: @text_main;
 }
 
 .disk-sub-dim {
-    font-size: 10px;
+    font-size: 12px; /* Regular, 12px (label) */
+    font-weight: 400;
     color: @text_muted;
 }
 
@@ -1050,5 +1159,5 @@ scrollbar slider:hover {
 .feature-icon { font-weight: 700; }
 .feature-on .feature-icon { color: #00c8a0; }
 .feature-off .feature-icon { color: #888; }
-.feature-label { font-size: 12px; }
-.info-note { color: #9aa0a6; font-size: 12px; }
+.feature-label { font-size: 12px; font-weight: 400; } /* Regular, 12px (label) */
+.info-note { color: #9aa0a6; font-size: 12px; font-weight: 400; } /* Regular, 12px (label) */

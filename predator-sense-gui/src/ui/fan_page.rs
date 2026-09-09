@@ -18,6 +18,21 @@ const PROFILES_ORDER: [PowerProfile; 5] = [
     PowerProfile::Eco,
 ];
 
+/// `resources/mode/*.png` path for this mode's card, relative to the
+/// resources root `find_resource` already searches. User-made artwork
+/// (not Acer's), cropped/downscaled from the originals - see the resumo for
+/// where those came from. No entry for `Eco`: only four robots exist, one
+/// per AC-side mode.
+fn profile_robot_resource(profile: PowerProfile) -> Option<&'static str> {
+    match profile {
+        PowerProfile::Quiet => Some("mode/quiet.png"),
+        PowerProfile::Balanced => Some("mode/balanced.png"),
+        PowerProfile::Performance => Some("mode/performance.png"),
+        PowerProfile::Turbo => Some("mode/turbo.png"),
+        PowerProfile::Eco => None,
+    }
+}
+
 /// Sustained/burst limits as "95 W / 160 W", or `None` when they were never
 /// readable on this machine.
 fn watts_text(measured: &Measured) -> Option<String> {
@@ -375,7 +390,7 @@ fn cpu_policy_info_text() -> String {
 /// Mains device found) - hiding a real profile because of a sysfs read
 /// failure would be a worse outcome than showing one extra card on a
 /// desktop-only machine that has no battery policy to begin with.
-fn sync_eco_card_visibility(card: &gtk::Box) {
+fn sync_eco_card_visibility(card: &gtk::Widget) {
     let visible = match crate::hardware::power_profile::ac_online() {
         Some(ac) => !ac,
         None => true,
@@ -383,55 +398,122 @@ fn sync_eco_card_visibility(card: &gtk::Box) {
     card.set_visible(visible);
 }
 
-fn apply_active_visuals(profiles_box: &gtk::Box, current: Option<PowerProfile>) {
-    let mut child = profiles_box.first_child();
-    let mut idx = 0;
-    while let Some(widget) = child {
-        if let Some(card) = widget.downcast_ref::<gtk::Box>() {
-            let is_now_active = current == Some(PROFILES_ORDER[idx]);
-            if is_now_active {
-                card.add_css_class("profile-active");
-            } else {
-                card.remove_css_class("profile-active");
-            }
-            if let Some(btn_w) = card.last_child() {
-                if let Some(btn) = btn_w.downcast_ref::<gtk::Button>() {
-                    if is_now_active {
-                        btn.set_label(crate::i18n::t("active"));
-                        btn.add_css_class("accent-button");
-                        btn.remove_css_class("secondary-button");
-                        btn.set_sensitive(false);
-                    } else {
-                        btn.set_label(crate::i18n::t("select"));
-                        btn.remove_css_class("accent-button");
-                        btn.add_css_class("secondary-button");
-                        btn.set_sensitive(true);
-                    }
-                }
-            }
-            idx += 1;
+/// Recolors each card's faceted frame (bright accent = active, dim = not)
+/// and swaps its button between "Active"/disabled and "Select"/enabled.
+/// `cards` is in `PROFILES_ORDER`, the same order the cards were built in.
+fn apply_active_visuals(
+    cards: &[(crate::ui::faceted_card::FacetedCard, gtk::Button)],
+    current: Option<PowerProfile>,
+) {
+    let accent = crate::ui::brand_theme::accent();
+    for (idx, (card, btn)) in cards.iter().enumerate() {
+        let is_now_active = current == Some(PROFILES_ORDER[idx]);
+        card.set_accent(if is_now_active {
+            accent.bright
+        } else {
+            accent.dark
+        });
+        if is_now_active {
+            btn.set_label(crate::i18n::t("active"));
+            btn.add_css_class("accent-button");
+            btn.remove_css_class("secondary-button");
+            btn.set_sensitive(false);
+        } else {
+            btn.set_label(crate::i18n::t("select"));
+            btn.remove_css_class("accent-button");
+            btn.add_css_class("secondary-button");
+            btn.set_sensitive(true);
         }
-        child = widget.next_sibling();
     }
 }
 
 /// Build the performance profile control page
+/// Two tabs, same tab-bar-over-stack shape `tools_page.rs` already uses:
+/// the 4 mode cards on their own ("Modo de Desempenho"), the firmware
+/// profile switcher/calibration/temperature ceiling together on the other
+/// ("Perfil de Energia de Firmware") - previously one long page mixing both
+/// concerns. `perf_title`/`firmware_profiles` are reused verbatim as the tab
+/// labels: both already read exactly like a tab name in every language,
+/// nothing new to translate.
 pub fn build() -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    // On the outer box, not the tab pages below: the surrounding chrome
+    // (`window.rs`'s content panel) draws its own decorative corner cut at
+    // the top-left of whatever sits inside it, assuming a margin clear of
+    // it - without this here, the tab bar rendered flush against that
+    // corner instead of past it, showing as a stray notch cut into the
+    // active tab button itself.
     page.set_margin_top(24);
     page.set_margin_bottom(24);
     page.set_margin_start(24);
     page.set_margin_end(24);
     page.add_css_class("page-content");
 
+    let tab_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    tab_bar.set_halign(gtk::Align::Start);
+
+    let stack = gtk::Stack::new();
+    stack.set_transition_type(gtk::StackTransitionType::Crossfade);
+    stack.set_transition_duration(200);
+    stack.set_hexpand(true);
+    stack.set_vexpand(true);
+    stack.set_hhomogeneous(false);
+    stack.set_vhomogeneous(false);
+
+    // No margins of their own: the outer `page` above already frames the
+    // whole tab bar + stack as one unit, and `page`'s own vertical spacing
+    // (16, from `gtk::Box::new` above) already gaps the tab bar from
+    // whichever of these is showing.
+    let tab1_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    let tab2_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
+
+    let tab_buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
+    for (i, (label, key)) in [
+        (crate::i18n::t("perf_title"), "modes"),
+        (crate::i18n::t("firmware_profiles"), "firmware"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let btn = gtk::Button::with_label(label);
+        btn.add_css_class("usage-tab");
+        if i == 0 {
+            btn.add_css_class("usage-tab-active");
+        }
+        let stack_c = stack.clone();
+        let buttons_c = tab_buttons.clone();
+        btn.connect_clicked(move |_| {
+            stack_c.set_visible_child_name(key);
+            for (j, b) in buttons_c.borrow().iter().enumerate() {
+                if j == i {
+                    b.add_css_class("usage-tab-active");
+                } else {
+                    b.remove_css_class("usage-tab-active");
+                }
+            }
+        });
+        tab_bar.append(&btn);
+        tab_buttons.borrow_mut().push(btn);
+    }
+
     let title = gtk::Label::new(Some(crate::i18n::t("perf_title")));
     title.add_css_class("section-title");
-    page.append(&title);
+    tab1_box.append(&title);
 
     let subtitle = gtk::Label::new(Some(crate::i18n::t("perf_subtitle")));
     subtitle.add_css_class("section-subtitle");
     subtitle.set_margin_top(8);
-    page.append(&subtitle);
+    tab1_box.append(&subtitle);
+
+    // Points at the opt-out (`ui::window`'s Settings page,
+    // `keep_default_theme_color`) right where the live recolor this hints
+    // at actually happens - a person who does not want the app-wide accent
+    // changing should not have to already know that setting exists, or
+    // where, to find it.
+    let theme_hint = gtk::Label::new(Some(crate::i18n::t("mode_theme_hint")));
+    theme_hint.add_css_class("info-text-dim");
+    theme_hint.set_margin_top(4);
+    tab1_box.append(&theme_hint);
 
     // Status label
     let status_label = gtk::Label::new(None);
@@ -480,7 +562,13 @@ pub fn build() -> gtk::Box {
 
     // Profile cards
     let profiles_box = gtk::Box::new(gtk::Orientation::Horizontal, 16);
-    profiles_box.set_halign(gtk::Align::Center);
+    // Homogeneous + hexpand on both the row and every card below: the row
+    // fills the page's real width and splits it evenly between whichever
+    // cards are visible (4 on AC, 5 with Eco on battery), instead of each
+    // card sitting at one fixed width with the row centered and a lot of
+    // empty margin on either side.
+    profiles_box.set_homogeneous(true);
+    profiles_box.set_hexpand(true);
     profiles_box.set_margin_top(24);
     let mut tier_labels: Vec<(PowerProfile, gtk::Label)> = Vec::new();
     // The Eco card: hidden whenever AC is connected, matching the official
@@ -488,18 +576,39 @@ pub fn build() -> gtk::Box {
     // machine with no readable power_supply Mains device - see
     // `sync_eco_card_visibility` below, which then leaves it showing rather
     // than guessing.
-    let mut eco_card: Option<gtk::Box> = None;
+    let mut eco_card: Option<gtk::Widget> = None;
+    // Filled as each card is built below; `apply_active_visuals` (called
+    // from both the click handler and the periodic reconcile timer further
+    // down) reads this instead of walking the GTK tree, since a card is now
+    // an Overlay wrapping a faceted_card, not a plain Box it could downcast.
+    let cards: Rc<RefCell<Vec<(crate::ui::faceted_card::FacetedCard, gtk::Button)>>> =
+        Rc::new(RefCell::new(Vec::new()));
 
     for (profile_val, name, description, badge) in &profile_info {
-        let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        card.add_css_class("profile-card");
-        card.set_size_request(180, 160);
-        card.set_valign(gtk::Align::Start);
-
         let is_active = current == Some(*profile_val);
-        if is_active {
-            card.add_css_class("profile-active");
-        }
+        // Each mode keeps its own color always, not just while active - the
+        // robot art below is what that color is drawn from in the first
+        // place, so a card showing Turbo's robot in Quiet's teal would look
+        // like a mismatch, not a theme.
+        let accent = crate::ui::brand_theme::accent_for_profile(*profile_val);
+        let faceted = crate::ui::faceted_card::build_simple(
+            if is_active {
+                accent.bright
+            } else {
+                accent.dark
+            },
+            None,
+        );
+        let card = faceted.content.clone();
+        card.set_orientation(gtk::Orientation::Vertical);
+        card.set_spacing(8);
+        // Height set once, uniformly, after every card is built - see
+        // below the loop. Not sized here: doing it per-card left each one
+        // as tall as only its own content needed, so a short description
+        // (English) and a long one (German/Russian, several wrapped lines)
+        // produced visibly different card heights in the same row.
+        faceted.widget.set_valign(gtk::Align::Start);
+        faceted.widget.set_hexpand(true);
 
         let badge_label = gtk::Label::new(Some(badge));
         badge_label.add_css_class("profile-badge");
@@ -510,11 +619,41 @@ pub fn build() -> gtk::Box {
 
         let name_label = gtk::Label::new(Some(name));
         name_label.add_css_class("profile-name");
+        // `max_width_chars(1)` is the standard GTK trick to make a label
+        // actually honor wrap: without it, `wrap(true)` alone has no visible
+        // effect, because the label still requests its natural (unwrapped)
+        // width and the card would just grow to fit rather than wrap - which
+        // is exactly what overflowed a fixed-width card in a longer
+        // language (German/Russian names and descriptions both run longer
+        // than the Portuguese/English text this card was sized against).
+        name_label.set_wrap(true);
+        name_label.set_justify(gtk::Justification::Center);
+        name_label.set_max_width_chars(1);
         card.append(&name_label);
 
         let desc_label = gtk::Label::new(Some(description));
         desc_label.add_css_class("profile-description");
+        desc_label.set_wrap(true);
+        desc_label.set_justify(gtk::Justification::Center);
+        desc_label.set_max_width_chars(1);
         card.append(&desc_label);
+
+        // The user's own artwork, one robot per mode, no equivalent for Eco
+        // (only four exist) - matches `accent_for_profile` falling back to
+        // Quiet's color for the same reason. Fixed height, natural width:
+        // all four keep the same portrait aspect ratio, so this alone is
+        // enough to make every robot the same size on screen.
+        if let Some(resource) = profile_robot_resource(*profile_val) {
+            if let Some(path) = crate::ui::window::find_resource(resource) {
+                let robot = gtk::Picture::for_filename(&path);
+                robot.set_can_shrink(true);
+                robot.set_content_fit(gtk::ContentFit::Contain);
+                robot.set_size_request(-1, 160);
+                robot.set_margin_top(4);
+                robot.set_margin_bottom(4);
+                card.append(&robot);
+            }
+        }
 
         // What this tier actually gets from the firmware. Without it the cards
         // only carry adjectives, and the user cannot tell them apart.
@@ -526,6 +665,15 @@ pub fn build() -> gtk::Box {
         power_label.add_css_class("info-text-dim");
         card.append(&power_label);
         tier_labels.push((*profile_val, power_label));
+
+        // Absorbs whatever room the description above did not need, so the
+        // button below sits at the same height in every card - without
+        // this, a 2-line English description and a 4-line Russian one left
+        // the button floating at a different height per card even after
+        // the cards themselves were forced to a uniform total height.
+        let footer_spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        footer_spacer.set_vexpand(true);
+        card.append(&footer_spacer);
 
         let select_btn = if is_active {
             let btn = gtk::Button::with_label(crate::i18n::t("active"));
@@ -540,7 +688,7 @@ pub fn build() -> gtk::Box {
 
         let profile_copy = *profile_val;
         let status_clone = status_label.clone();
-        let profiles_box_c = profiles_box.clone();
+        let cards_c = cards.clone();
         select_btn.connect_clicked(move |_btn| match profile::set_profile(profile_copy) {
             Ok(()) => {
                 status_clone.set_text(&format!(
@@ -550,7 +698,7 @@ pub fn build() -> gtk::Box {
                 ));
                 status_clone.remove_css_class("status-error");
                 status_clone.add_css_class("status-success");
-                apply_active_visuals(&profiles_box_c, profile::get_current_profile());
+                apply_active_visuals(&cards_c.borrow(), profile::get_current_profile());
             }
             Err(e) => {
                 status_clone.set_text(&format!("Erro: {}", e));
@@ -560,18 +708,41 @@ pub fn build() -> gtk::Box {
         });
 
         card.append(&select_btn);
-        profiles_box.append(&card);
+        profiles_box.append(&faceted.widget);
         if *profile_val == PowerProfile::Eco {
-            eco_card = Some(card);
+            eco_card = Some(faceted.widget.clone());
         }
+        cards.borrow_mut().push((faceted, select_btn));
+    }
+
+    // All cards forced to the same height: the tallest one actually needs
+    // at this width, not each one's own natural size. `Widget::measure`
+    // with `for_size` set to this reference width asks exactly "if your
+    // width is 180px, what height do you need" - the real answer for this
+    // exact font/CSS/text combination, not a guessed constant, and it stays
+    // correct on its own if a translation's length changes later. 180 is
+    // only a *floor* here (`set_size_request` below, with `hexpand` on
+    // each card and `homogeneous` on the row): actual on-screen width is
+    // usually wider once the row splits the page evenly, which only means
+    // less wrapping than measured, never more - a real card is never
+    // narrower than what this was measured against, so it never overflows.
+    const CARD_WIDTH: i32 = 180;
+    let max_card_height = cards
+        .borrow()
+        .iter()
+        .map(|(faceted, _)| faceted.widget.measure(gtk::Orientation::Vertical, CARD_WIDTH).1)
+        .max()
+        .unwrap_or(0);
+    for (faceted, _) in cards.borrow().iter() {
+        faceted.widget.set_size_request(CARD_WIDTH, max_card_height);
     }
 
     if let Some(card) = &eco_card {
         sync_eco_card_visibility(card);
     }
 
-    page.append(&profiles_box);
-    page.append(&status_label);
+    tab1_box.append(&profiles_box);
+    tab1_box.append(&status_label);
 
     // Rebuilt in place once a calibration exists, so the freshly measured
     // profiles appear right where the Calibrate button was instead of the page
@@ -579,7 +750,7 @@ pub fn build() -> gtk::Box {
     // keep tracking whichever row is currently installed.
     let firmware_row: Rc<RefCell<Option<FirmwareRow>>> = Rc::new(RefCell::new(None));
     let firmware_ui = FirmwareUi {
-        page: page.clone(),
+        page: tab2_box.clone(),
         status: status_label.clone(),
         section: Rc::new(RefCell::new(None)),
         row: firmware_row.clone(),
@@ -597,9 +768,9 @@ pub fn build() -> gtk::Box {
     info_label.add_css_class("info-text-dim");
     info_box.append(&info_label);
 
-    page.append(&info_box);
+    tab2_box.append(&info_box);
     let (temp_limit, reconcile_temp_limit) = temp_limit_section();
-    page.append(&temp_limit);
+    tab2_box.append(&temp_limit);
 
     // This page is built once at app startup and never rebuilt (unlike the
     // temperatures page, which window.rs already rebuilds live) - so a
@@ -612,7 +783,7 @@ pub fn build() -> gtk::Box {
         let now = profile::get_current_profile();
         if now != last_known.get() {
             last_known.set(now);
-            apply_active_visuals(&profiles_box, now);
+            apply_active_visuals(&cards.borrow(), now);
         }
         info_label.set_text(&cpu_policy_info_text());
         // The power source can change at any moment by unplugging the
@@ -632,6 +803,10 @@ pub fn build() -> gtk::Box {
         glib::ControlFlow::Continue
     });
 
+    stack.add_named(&tab1_box, Some("modes"));
+    stack.add_named(&tab2_box, Some("firmware"));
+    page.append(&tab_bar);
+    page.append(&stack);
     page
 }
 
@@ -976,7 +1151,9 @@ fn temp_limit_slider(
     // silicon stops at or above the floor gains nothing from the switch, and
     // showing a toggle that changes nothing is worse than not showing it.
     if let Some(unlock) = unlock {
-        row.append(&temp_limit_unlock(capability, &scale, bound, refresh, unlock));
+        row.append(&temp_limit_unlock(
+            capability, &scale, bound, refresh, unlock,
+        ));
     }
 
     row

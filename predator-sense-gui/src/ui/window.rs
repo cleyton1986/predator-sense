@@ -126,6 +126,50 @@ pub fn build(app: &adw::Application) {
     }
     sync_window_suspended(&window);
 
+    // Live app-wide recolor by active power profile (Quiet/Balanced/
+    // Performance/Turbo, each its own color - see `brand_theme.rs`):
+    // applied once immediately, so a mode already active before this
+    // launch is reflected right away and not just on the next change, then
+    // reconciled every couple seconds after - same poll-and-reconcile shape
+    // `fan_page.rs`'s own card highlighting already uses, just for the
+    // whole app's theme instead of one page's cards. A dedicated timer here
+    // rather than piggybacked on `fan_page.rs`'s own: that one only exists
+    // once Mode has been opened at least once, and a profile change from
+    // anywhere else (the AI assistant, GameSync, the physical mode key)
+    // has to recolor the app even if the user never opens that page.
+    {
+        let window_c = window.clone();
+        // Tracks the real active profile *and* the "keep default color"
+        // setting together: either one changing has to re-apply the theme
+        // right away, not just a profile switch - flipping the setting in
+        // Settings with the mode unchanged must revert (or restore) the
+        // color immediately, not silently wait for the next mode change to
+        // take effect.
+        type ThemeState = (Option<crate::hardware::profile::PowerProfile>, bool);
+        let last_state: Rc<Cell<ThemeState>> = Rc::new(Cell::new((None, false)));
+        let apply_if_changed = move || {
+            let now = crate::hardware::profile::get_current_profile();
+            let keep_default = config::load_app_config().keep_default_theme_color;
+            let state = (now, keep_default);
+            if state != last_state.get() {
+                last_state.set(state);
+                crate::apply_active_profile_theme(if keep_default { None } else { now });
+                // The CSS reload above already recolors every `@cyan`-using
+                // widget on its own (GTK re-styles reactively); this is only
+                // for the hand-drawn Cairo chrome (sidebar highlight, the
+                // Mode cards' own accent, gauges) that reads
+                // `brand_theme::accent()` directly and needs an explicit
+                // nudge to actually repaint with the new value.
+                queue_draw_recursive(window_c.upcast_ref());
+            }
+        };
+        apply_if_changed();
+        glib::timeout_add_seconds_local(2, move || {
+            apply_if_changed();
+            glib::ControlFlow::Continue
+        });
+    }
+
     // Handle ALL close events (native X button, our custom button, Alt+F4, etc.)
     let app_clone = app.clone();
     window.connect_close_request(move |win| {
@@ -139,6 +183,13 @@ pub fn build(app: &adw::Application) {
         }
     });
 
+    // Opens maximized every time: fixed pixel dimensions (the sidebar and
+    // several cards among them - see the width fixes nearby) were sized
+    // against Portuguese/English text, and a language with longer words
+    // (Russian, German) can need more room than a small window leaves.
+    // Maximized gives every language the most space the screen has, rather
+    // than papering over the same layouts at one fixed default size.
+    window.maximize();
     window.present();
     crate::startup_mark("window present called");
 }
@@ -380,7 +431,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 let _ = profile::set_profile(profile::PowerProfile::Turbo);
                 crate::hardware::applog::info("Turbo key: pressed, forced profile=Turbo fan=Max");
             } else {
-                let restore = before_turbo.get().unwrap_or(profile::PowerProfile::Balanced);
+                let restore = before_turbo
+                    .get()
+                    .unwrap_or(profile::PowerProfile::Balanced);
                 let _ = profile::set_profile(restore);
                 crate::hardware::applog::info(&format!(
                     "Turbo key: released, restored profile={} fan={}",
@@ -476,27 +529,59 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     main_overlay.set_hexpand(true);
     main_overlay.set_vexpand(true);
 
-    // Stripe texture background
+    // Background recovered from the visual-redesign POC (Claude Design
+    // canvas, 2026-09-07, our own design - discarded overall, but the user
+    // liked this specific background and asked to bring it into the real
+    // app): a near-black vertical gradient, a soft cyan glow anchored just
+    // above the top-left corner, and a faint 34px technical grid on top.
+    // This replaces the previous diagonal-stripe Cairo background - not a
+    // CSS rule, because this DrawingArea (not `.content-panel`, which turned
+    // out to be dead CSS no widget ever applied) is what actually paints
+    // behind the whole sidebar+content layout.
     let stripe_bg = gtk::DrawingArea::new();
     stripe_bg.set_hexpand(true);
     stripe_bg.set_vexpand(true);
     stripe_bg.set_draw_func(|_a, cr, w, h| {
         let wf = w as f64;
         let hf = h as f64;
-        // Base fill
-        cr.set_source_rgb(0.078, 0.078, 0.078); // #141414
+
+        // Base vertical gradient: #060a0e at top to #05070a at bottom.
+        let base = gtk4::cairo::LinearGradient::new(0.0, 0.0, 0.0, hf);
+        base.add_color_stop_rgb(0.0, 6.0 / 255.0, 10.0 / 255.0, 14.0 / 255.0);
+        base.add_color_stop_rgb(1.0, 5.0 / 255.0, 7.0 / 255.0, 10.0 / 255.0);
+        let _ = cr.set_source(&base);
         cr.rectangle(0.0, 0.0, wf, hf);
         let _ = cr.fill();
-        // Diagonal stripes
-        cr.set_source_rgba(0.09, 0.09, 0.09, 1.0); // #171717
-        cr.set_line_width(3.0);
-        let step = 6.0;
-        let mut offset = -hf;
-        while offset < wf + hf {
-            cr.move_to(offset, 0.0);
-            cr.line_to(offset - hf, hf);
+
+        // Soft cyan glow centered just above the top-left corner (18%, -8%
+        // of the panel), fading out by 60% of its own radius.
+        let cx = wf * 0.18;
+        let cy = hf * -0.08;
+        let radius = wf.max(hf) * 0.85;
+        let glow = gtk4::cairo::RadialGradient::new(cx, cy, 0.0, cx, cy, radius);
+        glow.add_color_stop_rgba(0.0, 0.0, 0.831, 0.941, 0.07);
+        glow.add_color_stop_rgba(0.6, 0.0, 0.831, 0.941, 0.0);
+        glow.add_color_stop_rgba(1.0, 0.0, 0.831, 0.941, 0.0);
+        let _ = cr.set_source(&glow);
+        cr.rectangle(0.0, 0.0, wf, hf);
+        let _ = cr.fill();
+
+        // Fine 34px grid, discreet on purpose - same alpha as the POC.
+        cr.set_source_rgba(148.0 / 255.0, 177.0 / 255.0, 184.0 / 255.0, 0.05);
+        cr.set_line_width(1.0);
+        let mut x = 0.5;
+        while x < wf {
+            cr.move_to(x, 0.0);
+            cr.line_to(x, hf);
             let _ = cr.stroke();
-            offset += step;
+            x += 34.0;
+        }
+        let mut y = 0.5;
+        while y < hf {
+            cr.move_to(0.0, y);
+            cr.line_to(wf, y);
+            let _ = cr.stroke();
+            y += 34.0;
         }
     });
     main_overlay.set_child(Some(&stripe_bg));
@@ -508,9 +593,9 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     layout.set_margin_start(40);
     layout.set_margin_end(40);
 
-    // === SIDEBAR (200px, gap 10px) ===
+    // === SIDEBAR (width set below, once the labels for the active
+    // language are known; gap 10px) ===
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    sidebar.set_size_request(200, -1);
     sidebar.set_hexpand(false);
     sidebar.set_valign(gtk::Align::Start);
 
@@ -622,6 +707,17 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
         (crate::i18n::t("settings"), "settings"),
     ];
 
+    // 200px was sized against Portuguese/English labels; a language with
+    // longer words (Russian "Управление вентиляторами" for Fan Control,
+    // nearly twice as wide as any Portuguese label here) overflowed past
+    // it. Measured for real instead of guessed at a wider fixed number,
+    // against the bold weight (the active-row state, always at least as
+    // wide as the regular one) so every label - present and any future
+    // translation - gets exactly the room its own text needs, not a number
+    // picked for today's nine languages.
+    let sidebar_width = nav_sidebar_width(&sidebar, nav_items.iter().map(|(label, _)| *label));
+    sidebar.set_size_request(sidebar_width, -1);
+
     let active_idx: Rc<RefCell<usize>> = Rc::new(RefCell::new(0));
     let nav_widgets: Rc<RefCell<Vec<(gtk::DrawingArea, gtk::Label)>>> =
         Rc::new(RefCell::new(Vec::new()));
@@ -663,7 +759,7 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
 
         // Cairo-drawn background with clip-path
         let bg = gtk::DrawingArea::new();
-        bg.set_size_request(200, 40);
+        bg.set_size_request(sidebar_width, 40);
         let active_idx_c = active_idx.clone();
         let idx = i;
         bg.set_draw_func(move |_a, cr, w, h| {
@@ -674,7 +770,13 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
         // Label overlay
         let lbl = gtk::Label::new(Some(label));
         lbl.set_halign(gtk::Align::Start);
-        lbl.set_margin_start(15);
+        lbl.set_margin_start(NAV_LABEL_START_MARGIN);
+        // Belt-and-suspenders: the sidebar is sized to fit every label's
+        // real measured width above, so this should never actually trigger
+        // - kept anyway so a future translation this was not measured
+        // against degrades to "…" instead of visibly overflowing past the
+        // item's own background.
+        lbl.set_ellipsize(gtk4::pango::EllipsizeMode::End);
         if i == 0 {
             lbl.add_css_class("nav-label-active");
         } else {
@@ -962,6 +1064,59 @@ fn rounded_rect(cr: &gtk4::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f6
     cr.close_path();
 }
 
+/// Left margin the nav label overlay already uses (`lbl.set_margin_start`),
+/// plus breathing room on the right so the widest label's text never
+/// touches the item's own right edge.
+const NAV_LABEL_START_MARGIN: i32 = 15;
+const NAV_LABEL_END_PADDING: i32 = 20;
+/// Never narrower than this, even for a hypothetical language whose longest
+/// label came out unexpectedly short - keeps the sidebar from looking
+/// cramped relative to the rest of the chrome.
+const NAV_SIDEBAR_MIN_WIDTH: i32 = 170;
+
+/// Real measured width of the widest label in `labels`, at the "Predator"
+/// font's bold weight (the active-row state - always at least as wide as
+/// the same text at the regular 400 weight `.nav-label` uses), plus this
+/// sidebar's own left/right padding. `widget` only lends its display to
+/// resolve the font; it does not need to be realized or on screen yet -
+/// `Widget::pango_context()` falls back to the default display otherwise.
+fn nav_sidebar_width<'a>(
+    widget: &impl IsA<gtk::Widget>,
+    labels: impl Iterator<Item = &'a str>,
+) -> i32 {
+    let context = widget.pango_context();
+    let mut font = gtk4::pango::FontDescription::new();
+    font.set_family("Predator");
+    font.set_size(13 * gtk4::pango::SCALE);
+    font.set_weight(gtk4::pango::Weight::Bold);
+    let widest = labels
+        .map(|label| {
+            let layout = gtk4::pango::Layout::new(&context);
+            layout.set_font_description(Some(&font));
+            layout.set_text(label);
+            layout.pixel_size().0
+        })
+        .max()
+        .unwrap_or(0);
+    (widest + NAV_LABEL_START_MARGIN + NAV_LABEL_END_PADDING).max(NAV_SIDEBAR_MIN_WIDTH)
+}
+
+/// Marks `widget` and every descendant (children, grandchildren, ...) as
+/// needing to redraw. `Widget::queue_draw` alone only invalidates the one
+/// widget it is called on - GTK4 caches each widget's own render node and
+/// reuses a child's unless something specifically told that child it
+/// changed, so recoloring the live theme needs this walk to actually reach
+/// every hand-drawn `DrawingArea` (sidebar highlight, gauges, the Mode
+/// cards) rather than just the window's own top-level surface.
+fn queue_draw_recursive(widget: &gtk::Widget) {
+    widget.queue_draw();
+    let mut child = widget.first_child();
+    while let Some(w) = child {
+        queue_draw_recursive(&w);
+        child = w.next_sibling();
+    }
+}
+
 /// Draw menu item with clip-path: polygon(10px 0, 100% 0, 100% 100%, 0 100%, 0 10px)
 fn draw_menu_item(cr: &gtk4::cairo::Context, w: f64, h: f64, is_active: bool) {
     let cut = 10.0;
@@ -1219,6 +1374,22 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     });
     icons_row.append(&icons_switch);
     page.append(&icons_row);
+
+    // Opt-out for the live per-mode recolor (see `ui::window::build`'s
+    // profile watcher) - no helper/hardware write of its own, so a plain
+    // `connect_state_set` is enough, same as `custom_icons_enabled` above.
+    let theme_row = create_setting_row(t("keep_default_theme_color"), t("keep_default_theme_color_desc"));
+    let theme_switch = gtk::Switch::new();
+    theme_switch.set_active(cfg.keep_default_theme_color);
+    theme_switch.set_valign(gtk::Align::Center);
+    theme_switch.connect_state_set(move |_, active| {
+        let mut c = config::load_app_config();
+        c.keep_default_theme_color = active;
+        let _ = config::save_app_config(&c);
+        glib::Propagation::Proceed
+    });
+    theme_row.append(&theme_switch);
+    page.append(&theme_row);
 
     // Eco Mode - caps volume/brightness at 40%, restores previous values on
     // off. Touches the privileged helper for the brightness half (see
