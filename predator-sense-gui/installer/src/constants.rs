@@ -50,6 +50,22 @@ pub(crate) mod path {
     pub const INPUT_DEVICE_DIR: &str = "/dev/input";
     pub const HIDRAW_CLASS: &str = "/sys/class/hidraw";
     pub const DEVICE_DIR: &str = "/dev";
+
+    /// GRUB's own config source, edited (never `grub.cfg` itself, which is
+    /// generated) to point `GRUB_BACKGROUND` at a custom splash image. World-
+    /// readable (0644) on every distro this was checked against, so the GUI
+    /// reads it directly; only the write needs root.
+    pub const GRUB_DEFAULTS: &str = "etc/default/grub";
+    /// One-time snapshot of `GRUB_DEFAULTS`, taken before this app's first
+    /// edit and never overwritten again - manual recovery net if a user ever
+    /// needs the exact pre-app file back, independent of `grub-splash-reset`
+    /// (which only undoes what this app itself added).
+    pub const GRUB_DEFAULTS_BACKUP: &str = "etc/default/grub.predator-sense-bak";
+    /// Where `grub.cfg` actually lives, checked in this order: Debian/Arch,
+    /// then Fedora/RHEL/openSUSE's `grub2` naming. Whichever exists first is
+    /// also where the staged splash image is written, so it always sits next
+    /// to the config that references it.
+    pub const GRUB_CFG_CANDIDATES: [&str; 2] = ["boot/grub/grub.cfg", "boot/grub2/grub.cfg"];
 }
 
 pub(crate) mod service {
@@ -76,6 +92,15 @@ pub(crate) mod command {
     pub const ENV: &str = "env";
     pub const GDBUS: &str = "gdbus";
     pub const GTK_UPDATE_ICON_CACHE: &str = "gtk-update-icon-cache";
+    /// Debian/Ubuntu convenience wrapper around `grub-mkconfig`, checked
+    /// first when present since it already knows its own output path.
+    pub const UPDATE_GRUB: &str = "update-grub";
+    /// Arch/Debian's generator, invoked with an explicit `-o` when
+    /// `update-grub` is not present.
+    pub const GRUB_MKCONFIG: &str = "grub-mkconfig";
+    /// Fedora/RHEL/openSUSE's identically-behaved generator, under its own
+    /// `grub2`-prefixed name.
+    pub const GRUB2_MKCONFIG: &str = "grub2-mkconfig";
     pub const LLD: &str = "ld.lld";
     pub const MODPROBE: &str = "modprobe";
     pub const NVIDIA_SMI: &str = "nvidia-smi";

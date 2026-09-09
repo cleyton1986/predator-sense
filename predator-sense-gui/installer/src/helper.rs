@@ -3,8 +3,11 @@ use crate::constants::hardware::{
     BATTERY_LIMIT_ENABLED, BATTERY_LIMIT_ENABLED_PERCENT,
 };
 use crate::constants::{command as external, path};
+use crate::process::command_exists;
 use crate::AppResult;
 use predator_sense_protocol::backlight;
+use predator_sense_protocol::base64_lite;
+use predator_sense_protocol::grub_splash;
 use predator_sense_protocol::battery;
 use predator_sense_protocol::helper::{
     Action as HelperAction, CpuGovernor, EnergyPreference, Switch, OPTIONAL_VALUE_SKIP,
@@ -542,6 +545,8 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
             let speed = parse_u16("speed", &args[4], 0, 255)? as u8;
             chicony_rgb_apply(effect, brightness, color, speed)
         }
+        HelperAction::GrubSplashApply => grub_splash_apply(&args[1], &args[2], sysfs),
+        HelperAction::GrubSplashReset => grub_splash_reset(sysfs),
     }
 }
 
@@ -825,8 +830,8 @@ fn temp_limit_apply(value: &str, bound: &str, sysfs: &Path) -> AppResult {
         .map_err(|_| fail(format!("temp-limit: invalid temperature '{value}'")))?;
     // Unknown spellings are refused rather than defaulted, so a typo in a
     // hand-written record cannot quietly widen the allowed range.
-    let bound = Bound::parse(bound)
-        .ok_or_else(|| fail(format!("temp-limit: invalid bound '{bound}'")))?;
+    let bound =
+        Bound::parse(bound).ok_or_else(|| fail(format!("temp-limit: invalid bound '{bound}'")))?;
 
     let _lock = CpuProfileLock::acquire(sysfs)?;
 
@@ -844,14 +849,16 @@ fn temp_limit_apply(value: &str, bound: &str, sysfs: &Path) -> AppResult {
     // floor is the safety one, which the caller has to opt out of explicitly -
     // a value below it coming from a file nobody confirmed is exactly what that
     // opt-in exists to catch.
-    let offset = capability.offset_for_within(celsius, bound).ok_or_else(|| {
-        fail(format!(
-            "temp-limit: {celsius} C is outside {}..={} C for this CPU under the {} bound",
-            capability.min_c_within(bound),
-            capability.max_c(),
-            bound.as_str()
-        ))
-    })?;
+    let offset = capability
+        .offset_for_within(celsius, bound)
+        .ok_or_else(|| {
+            fail(format!(
+                "temp-limit: {celsius} C is outside {}..={} C for this CPU under the {} bound",
+                capability.min_c_within(bound),
+                capability.max_c(),
+                bound.as_str()
+            ))
+        })?;
 
     let device = tcc_cooling_device(sysfs)?
         .ok_or_else(|| fail("temp-limit: TCC cooling device disappeared"))?;
@@ -1720,6 +1727,241 @@ fn set_gpu_power_limit(
     execute(external::NVIDIA_SMI, &["-pl", watts.as_str()])
 }
 
+/// `sysfs`'s real parent, in production and in every test fixture alike:
+/// production passes `/sys` (`path::REAL_SYSFS`), whose parent is `/` itself;
+/// a test fixture lays out `<tmp>/sys` next to `<tmp>/etc` and `<tmp>/boot`,
+/// mirroring a real root's own layout. This exists only so the GRUB actions
+/// can resolve `etc/default/grub` and `boot/grub*` without threading a
+/// second fixture-root parameter through every other action, which only
+/// ever needed `/sys`.
+///
+/// Lexical (`Path::parent`), not `.join("..")`: the latter leaves a literal
+/// `..` component in every path built from it, which would show up verbatim
+/// in `GRUB_BACKGROUND`'s value - harmless to GRUB's own path resolution,
+/// but a needless wart in a file a person may go read. Purely string
+/// manipulation either way - `sysfs` need not exist on disk for this.
+fn grub_fs_root(sysfs: &Path) -> PathBuf {
+    sysfs
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// Where GRUB lives on this system and how to regenerate it - discovered at
+/// call time rather than assumed, since both the config path and the
+/// generator's name vary by distro (Debian/Arch vs. Fedora/RHEL/openSUSE).
+struct GrubLayout {
+    cfg_path: PathBuf,
+    program: &'static str,
+    args: Vec<String>,
+}
+
+/// `command_exists` is injected (real `crate::process::command_exists` in
+/// production) so tests can simulate any of the three generators being
+/// present without depending on what is actually installed on the machine
+/// running the test suite.
+fn detect_grub(root: &Path, command_exists: impl Fn(&str) -> bool) -> AppResult<GrubLayout> {
+    let cfg_path = path::GRUB_CFG_CANDIDATES
+        .iter()
+        .copied()
+        .map(|candidate| root.join(candidate))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            fail("GRUB not detected on this system (no grub.cfg under /boot/grub or /boot/grub2)")
+        })?;
+    // update-grub already knows its own output path; the two -mkconfig
+    // generators need it spelled out with -o.
+    if command_exists(external::UPDATE_GRUB) {
+        return Ok(GrubLayout {
+            cfg_path,
+            program: external::UPDATE_GRUB,
+            args: Vec::new(),
+        });
+    }
+    let cfg_str = cfg_path.to_string_lossy().into_owned();
+    if command_exists(external::GRUB2_MKCONFIG) {
+        return Ok(GrubLayout {
+            cfg_path,
+            program: external::GRUB2_MKCONFIG,
+            args: vec!["-o".to_string(), cfg_str],
+        });
+    }
+    if command_exists(external::GRUB_MKCONFIG) {
+        return Ok(GrubLayout {
+            cfg_path,
+            program: external::GRUB_MKCONFIG,
+            args: vec!["-o".to_string(), cfg_str],
+        });
+    }
+    Err(fail(
+        "GRUB config generator not found (checked update-grub, grub2-mkconfig, grub-mkconfig)",
+    ))
+}
+
+/// Strips any `GRUB_BACKGROUND=` line - commented out or not - whose value
+/// contains `marker`, leaving every other line untouched and in order. Never
+/// touches a `GRUB_BACKGROUND` set to anything else: that is the whole
+/// reason this checks the value, not just the key, before removing a line.
+fn strip_managed_background_line(content: &str, marker: &str) -> String {
+    let mut result: String = content
+        .lines()
+        .filter(|line| {
+            let unindented = line.trim_start().trim_start_matches('#').trim_start();
+            !(unindented.starts_with("GRUB_BACKGROUND=") && line.contains(marker))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    result.push('\n');
+    result
+}
+
+fn upsert_background_line(content: &str, marker: &str, splash_path: &str) -> String {
+    let mut updated = strip_managed_background_line(content, marker);
+    updated.push_str(&format!("GRUB_BACKGROUND=\"{splash_path}\"\n"));
+    updated
+}
+
+fn grub_splash_apply(ext: &str, payload_base64: &str, sysfs: &Path) -> AppResult {
+    grub_splash_apply_with(ext, payload_base64, sysfs, command_exists, command)
+}
+
+/// `regen` is injected the same way `set_gpu_power_limit` injects its own
+/// command execution above, so the whole apply flow - including the
+/// post-generation content check - can be tested without a real GRUB
+/// installation to shell out to.
+fn grub_splash_apply_with(
+    ext: &str,
+    payload_base64: &str,
+    sysfs: &Path,
+    command_exists: impl Fn(&str) -> bool,
+    mut regen: impl FnMut(&str, &[&str]) -> AppResult,
+) -> AppResult {
+    // Exact match against the shared list only - this also doubles as the
+    // entire sanitization the staged filename's extension needs, no
+    // separators or `..`, nothing but one of these literals reaches a path.
+    if !grub_splash::EXTENSIONS.contains(&ext) {
+        return Err(fail(format!(
+            "grub-splash-apply: unsupported image extension '{ext}'"
+        )));
+    }
+    // Bounded before decoding - base64 runs ~4/3 the size of its decoded
+    // form - so an oversized payload is rejected without ever allocating the
+    // decoded buffer for it.
+    if payload_base64.len() > grub_splash::MAX_IMAGE_BYTES * 4 / 3 + 4 {
+        return Err(fail("grub-splash-apply: image too large"));
+    }
+    let image = base64_lite::decode(payload_base64)
+        .ok_or_else(|| fail("grub-splash-apply: malformed image payload"))?;
+    if image.is_empty() || image.len() > grub_splash::MAX_IMAGE_BYTES {
+        return Err(fail("grub-splash-apply: image too large or empty"));
+    }
+
+    let root = grub_fs_root(sysfs);
+    let layout = detect_grub(&root, command_exists)?;
+    let grub_dir = layout
+        .cfg_path
+        .parent()
+        .ok_or_else(|| fail("grub-splash-apply: grub.cfg has no parent directory"))?;
+    let splash_path = grub_dir.join(format!("{}.{ext}", grub_splash::MARKER));
+
+    let defaults_path = root.join(path::GRUB_DEFAULTS);
+    let previous_defaults = fs::read_to_string(&defaults_path)
+        .map_err(|error| fail(format!("cannot read {}: {error}", defaults_path.display())))?;
+
+    // One-time safety net, never overwritten again: whatever this file
+    // looked like before this app ever touched it.
+    let backup_path = root.join(path::GRUB_DEFAULTS_BACKUP);
+    if !backup_path.exists() {
+        fs::write(&backup_path, &previous_defaults).map_err(|error| {
+            fail(format!(
+                "cannot write safety backup {}: {error}",
+                backup_path.display()
+            ))
+        })?;
+    }
+
+    fs::write(&splash_path, &image)
+        .map_err(|error| fail(format!("cannot write {}: {error}", splash_path.display())))?;
+
+    let splash_path_str = splash_path.to_string_lossy().into_owned();
+    let new_defaults =
+        upsert_background_line(&previous_defaults, grub_splash::MARKER, &splash_path_str);
+    fs::write(&defaults_path, &new_defaults)
+        .map_err(|error| fail(format!("cannot write {}: {error}", defaults_path.display())))?;
+
+    let arg_refs: Vec<&str> = layout.args.iter().map(String::as_str).collect();
+    if let Err(error) = regen(layout.program, &arg_refs) {
+        // Regeneration itself failed: update-grub/grub-mkconfig only replace
+        // grub.cfg on success, so the running system's boot menu was never
+        // touched either way - but leaving /etc/default/grub edited for a
+        // change that never took effect would only confuse the next run, so
+        // put it back exactly as found.
+        let _ = fs::write(&defaults_path, &previous_defaults);
+        let _ = fs::remove_file(&splash_path);
+        return Err(error);
+    }
+
+    let generated = fs::read_to_string(&layout.cfg_path).unwrap_or_default();
+    if !generated.contains(&splash_path_str) {
+        return Err(fail(format!(
+            "grub.cfg was regenerated but does not reference the splash image - this GRUB build may be missing image support ({})",
+            splash_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn grub_splash_reset(sysfs: &Path) -> AppResult {
+    grub_splash_reset_with(sysfs, command_exists, command)
+}
+
+fn grub_splash_reset_with(
+    sysfs: &Path,
+    command_exists: impl Fn(&str) -> bool,
+    mut regen: impl FnMut(&str, &[&str]) -> AppResult,
+) -> AppResult {
+    let root = grub_fs_root(sysfs);
+    let defaults_path = root.join(path::GRUB_DEFAULTS);
+    let mut changed = false;
+
+    if let Ok(previous) = fs::read_to_string(&defaults_path) {
+        let stripped = strip_managed_background_line(&previous, grub_splash::MARKER);
+        if stripped != previous {
+            fs::write(&defaults_path, &stripped).map_err(|error| {
+                fail(format!("cannot write {}: {error}", defaults_path.display()))
+            })?;
+            changed = true;
+        }
+    }
+
+    let layout = detect_grub(&root, command_exists).ok();
+    if let Some(layout) = &layout {
+        if let Some(grub_dir) = layout.cfg_path.parent() {
+            for ext in grub_splash::EXTENSIONS {
+                let candidate = grub_dir.join(format!("{}.{ext}", grub_splash::MARKER));
+                if candidate.exists() {
+                    let _ = fs::remove_file(&candidate);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if !changed {
+        // Nothing this app ever applied - regenerating grub.cfg for no
+        // reason would just be noise (and a needless prompt for anyone
+        // watching the privileged session run).
+        return Ok(());
+    }
+    let Some(layout) = layout else {
+        // The defaults line was stripped but GRUB itself is not detected -
+        // there is nothing left to regenerate.
+        return Ok(());
+    };
+    let arg_refs: Vec<&str> = layout.args.iter().map(String::as_str).collect();
+    regen(layout.program, &arg_refs)
+}
+
 #[cfg(test)]
 mod tests {
     /// Fixtures write the in-tree driver's attribute; `health_mode_control`
@@ -2524,7 +2766,10 @@ mod tests {
 
         assert_eq!(read(&sysfs, thermal_profile::SYSFS_INDEX), "5");
         let replies: Vec<&str> = std::str::from_utf8(&output).unwrap().lines().collect();
-        assert_eq!(replies, vec![internal::HELPER_DAEMON_OK, internal::HELPER_DAEMON_OK]);
+        assert_eq!(
+            replies,
+            vec![internal::HELPER_DAEMON_OK, internal::HELPER_DAEMON_OK]
+        );
     }
 
     #[test]
@@ -2555,5 +2800,256 @@ mod tests {
         run_daemon(ec, ec, input, &mut output).unwrap();
 
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn strip_managed_background_line_leaves_a_foreign_background_line_alone() {
+        let content = "GRUB_TIMEOUT=5\nGRUB_BACKGROUND=\"/home/user/my-own-wallpaper.png\"\nGRUB_CMDLINE_LINUX=\"\"\n";
+
+        let stripped = strip_managed_background_line(content, "predator-sense-splash");
+
+        assert_eq!(stripped, content);
+    }
+
+    #[test]
+    fn strip_managed_background_line_removes_only_lines_carrying_the_marker() {
+        let content = "GRUB_TIMEOUT=5\n#GRUB_BACKGROUND=\"/boot/grub/predator-sense-splash.png\"\nGRUB_BACKGROUND=\"/boot/grub/predator-sense-splash.jpg\"\nGRUB_CMDLINE_LINUX=\"\"\n";
+
+        let stripped = strip_managed_background_line(content, "predator-sense-splash");
+
+        assert_eq!(stripped, "GRUB_TIMEOUT=5\nGRUB_CMDLINE_LINUX=\"\"\n");
+    }
+
+    #[test]
+    fn upsert_background_line_is_idempotent() {
+        let content = "GRUB_TIMEOUT=5\n";
+
+        let once = upsert_background_line(
+            content,
+            "predator-sense-splash",
+            "/boot/grub/predator-sense-splash.png",
+        );
+        let twice = upsert_background_line(
+            &once,
+            "predator-sense-splash",
+            "/boot/grub/predator-sense-splash.png",
+        );
+
+        assert_eq!(once, twice);
+        assert_eq!(
+            once,
+            "GRUB_TIMEOUT=5\nGRUB_BACKGROUND=\"/boot/grub/predator-sense-splash.png\"\n"
+        );
+    }
+
+    #[test]
+    fn detect_grub_prefers_update_grub_when_present() {
+        let fixture = TempDir::new().unwrap();
+        write(fixture.path(), "boot/grub/grub.cfg", "# generated");
+
+        let layout = detect_grub(fixture.path(), |name| name == external::UPDATE_GRUB).unwrap();
+
+        assert_eq!(layout.program, external::UPDATE_GRUB);
+        assert!(layout.args.is_empty());
+    }
+
+    #[test]
+    fn detect_grub_falls_back_to_the_mkconfig_generators_with_an_output_flag() {
+        let fixture = TempDir::new().unwrap();
+        write(fixture.path(), "boot/grub2/grub.cfg", "# generated");
+
+        let layout = detect_grub(fixture.path(), |name| name == external::GRUB2_MKCONFIG).unwrap();
+
+        assert_eq!(layout.program, external::GRUB2_MKCONFIG);
+        assert_eq!(layout.args[0], "-o");
+        assert!(layout.args[1].ends_with("boot/grub2/grub.cfg"));
+    }
+
+    #[test]
+    fn detect_grub_fails_closed_when_nothing_is_found() {
+        let fixture = TempDir::new().unwrap();
+
+        assert!(detect_grub(fixture.path(), |_| false).is_err());
+
+        // A generator on PATH does not help without a grub.cfg to point it
+        // at - this app never guesses where one belongs.
+        write(fixture.path(), "boot/grub/grub.cfg", "# generated");
+        assert!(detect_grub(fixture.path(), |_| false).is_err());
+    }
+
+    #[test]
+    fn grub_splash_apply_writes_the_image_edits_defaults_and_verifies_regeneration() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        write(fixture.path(), "boot/grub/grub.cfg", "# stock config\n");
+        write(fixture.path(), "etc/default/grub", "GRUB_TIMEOUT=5");
+        let cfg_path = fixture.path().join("boot/grub/grub.cfg");
+        let splash_path = fixture.path().join("boot/grub/predator-sense-splash.png");
+
+        let payload = base64_lite::encode(b"not a real png, just test bytes");
+        let mut regen_calls = Vec::new();
+        grub_splash_apply_with(
+            "png",
+            &payload,
+            &sysfs,
+            |name| name == "grub-mkconfig",
+            |program, args| {
+                regen_calls.push((program.to_string(), args.join(" ")));
+                fs::write(
+                    &cfg_path,
+                    format!("background_image {}\n", splash_path.display()),
+                )
+                .unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read(&splash_path).unwrap(),
+            b"not a real png, just test bytes"
+        );
+        let defaults = fs::read_to_string(fixture.path().join("etc/default/grub")).unwrap();
+        assert!(defaults.contains("GRUB_TIMEOUT=5"));
+        assert!(defaults.contains(&format!("GRUB_BACKGROUND=\"{}\"", splash_path.display())));
+        assert!(fixture
+            .path()
+            .join("etc/default/grub.predator-sense-bak")
+            .exists());
+        assert_eq!(regen_calls.len(), 1);
+        assert_eq!(regen_calls[0].0, "grub-mkconfig");
+    }
+
+    #[test]
+    fn grub_splash_apply_rolls_back_defaults_and_the_image_when_regeneration_fails() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        write(fixture.path(), "boot/grub/grub.cfg", "# stock config\n");
+        write(fixture.path(), "etc/default/grub", "GRUB_TIMEOUT=5");
+        let payload = base64_lite::encode(b"irrelevant");
+
+        let result = grub_splash_apply_with(
+            "png",
+            &payload,
+            &sysfs,
+            |name| name == "update-grub",
+            |_, _| Err(fail("simulated regeneration failure")),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(fixture.path().join("etc/default/grub")).unwrap(),
+            "GRUB_TIMEOUT=5\n"
+        );
+        assert!(!fixture
+            .path()
+            .join("boot/grub/predator-sense-splash.png")
+            .exists());
+    }
+
+    #[test]
+    fn grub_splash_apply_fails_when_the_generated_config_omits_the_splash() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        write(fixture.path(), "boot/grub/grub.cfg", "# stock config\n");
+        write(fixture.path(), "etc/default/grub", "GRUB_TIMEOUT=5");
+        let payload = base64_lite::encode(b"irrelevant");
+
+        let result = grub_splash_apply_with(
+            "png",
+            &payload,
+            &sysfs,
+            |name| name == "update-grub",
+            // Regeneration "succeeds" but never touches grub.cfg - simulates
+            // a GRUB build without the png/jpeg modules.
+            |_, _| Ok(()),
+        );
+
+        let error = result.unwrap_err();
+        assert!(
+            error.contains("does not reference the splash image"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn grub_splash_apply_rejects_an_unsupported_extension_before_touching_anything() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        write(fixture.path(), "boot/grub/grub.cfg", "# stock config\n");
+        write(fixture.path(), "etc/default/grub", "GRUB_TIMEOUT=5");
+
+        let result = grub_splash_apply_with(
+            "bmp",
+            &base64_lite::encode(b"irrelevant"),
+            &sysfs,
+            |_| true,
+            |_, _| panic!("must not shell out for a rejected extension"),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(fixture.path().join("etc/default/grub")).unwrap(),
+            "GRUB_TIMEOUT=5\n"
+        );
+    }
+
+    #[test]
+    fn grub_splash_reset_is_a_no_op_when_nothing_was_ever_applied() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        write(fixture.path(), "boot/grub/grub.cfg", "# stock config\n");
+        write(fixture.path(), "etc/default/grub", "GRUB_TIMEOUT=5");
+
+        grub_splash_reset_with(
+            &sysfs,
+            |_| true,
+            |_, _| panic!("must not regenerate when nothing changed"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(fixture.path().join("etc/default/grub")).unwrap(),
+            "GRUB_TIMEOUT=5\n"
+        );
+    }
+
+    #[test]
+    fn grub_splash_reset_strips_the_line_removes_the_image_and_regenerates() {
+        let fixture = TempDir::new().unwrap();
+        let sysfs = fixture.path().join("sys");
+        write(fixture.path(), "boot/grub/grub.cfg", "# stock config\n");
+        let splash_path = fixture.path().join("boot/grub/predator-sense-splash.jpg");
+        write(
+            fixture.path(),
+            "boot/grub/predator-sense-splash.jpg",
+            "fake",
+        );
+        write(
+            fixture.path(),
+            "etc/default/grub",
+            &format!(
+                "GRUB_TIMEOUT=5\nGRUB_BACKGROUND=\"{}\"",
+                splash_path.display()
+            ),
+        );
+
+        let mut regenerated = false;
+        grub_splash_reset_with(
+            &sysfs,
+            |name| name == "update-grub",
+            |_, _| {
+                regenerated = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(regenerated);
+        assert!(!splash_path.exists());
+        assert_eq!(
+            fs::read_to_string(fixture.path().join("etc/default/grub")).unwrap(),
+            "GRUB_TIMEOUT=5\n"
+        );
     }
 }

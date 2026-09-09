@@ -14,7 +14,7 @@ use gtk4::{self as gtk};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::ui::{ai_page, audio_eq_page, game_sync_page, macros_page};
+use crate::ui::{ai_page, audio_eq_page, game_sync_page, grub_splash_page, macros_page};
 
 pub fn build(window: &gtk::ApplicationWindow) -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
@@ -53,12 +53,14 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::Box {
     stack.add_named(&macros_page::build(window), Some("macros"));
     stack.add_named(&audio_eq_page::build(), Some("audio_eq"));
     stack.add_named(&ai_page::build(window), Some("ai"));
+    stack.add_named(&grub_splash_page::build(window), Some("grub_splash"));
 
-    let tabs: [(&str, &str, Option<&str>); 4] = [
+    let tabs: [(&str, &str, Option<&str>); 5] = [
         (crate::i18n::t("game_sync_nav"), "game_sync", None),
         (crate::i18n::t("macros_nav"), "macros", None),
         (crate::i18n::t("audio_eq_nav"), "audio_eq", None),
         (crate::i18n::t("ai_page_nav"), "ai", None),
+        (crate::i18n::t("grub_splash_nav"), "grub_splash", None),
     ];
     let buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
     for (i, (label, key, badge)) in tabs.iter().enumerate() {

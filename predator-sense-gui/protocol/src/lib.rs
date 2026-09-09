@@ -56,6 +56,132 @@ pub mod internal {
     pub const HELPER_DAEMON_ERR: &str = "__predator_sense_helper_err__";
 }
 
+/// Minimal RFC 4648 base64 (standard alphabet, padded) - just enough to move
+/// a small binary blob (the GRUB splash image) as one whitespace-free token
+/// through the helper's line-based wire protocol, without pulling in a crate
+/// for something this small and this well-specified.
+pub mod base64_lite {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    pub fn encode(data: &[u8]) -> String {
+        let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+        for chunk in data.chunks(3) {
+            let b0 = chunk[0];
+            let b1 = chunk.get(1).copied();
+            let b2 = chunk.get(2).copied();
+            out.push(ALPHABET[(b0 >> 2) as usize] as char);
+            out.push(ALPHABET[(((b0 & 0x03) << 4) | (b1.unwrap_or(0) >> 4)) as usize] as char);
+            out.push(match b1 {
+                Some(b1) => {
+                    ALPHABET[(((b1 & 0x0f) << 2) | (b2.unwrap_or(0) >> 6)) as usize] as char
+                }
+                None => '=',
+            });
+            out.push(match b2 {
+                Some(b2) => ALPHABET[(b2 & 0x3f) as usize] as char,
+                None => '=',
+            });
+        }
+        out
+    }
+
+    fn value(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    /// `None` for anything not exactly a padded, alphabet-only encoding of
+    /// this shape - a helper receiving attacker-adjacent input over the
+    /// privilege boundary should reject the whole thing on the first
+    /// irregularity rather than best-effort-decode past it.
+    pub fn decode(text: &str) -> Option<Vec<u8>> {
+        let bytes = text.as_bytes();
+        if bytes.is_empty() {
+            return Some(Vec::new());
+        }
+        if bytes.len() % 4 != 0 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+        for group in bytes.chunks(4) {
+            let pad = group.iter().filter(|&&b| b == b'=').count();
+            if pad > 2 || group[..4 - pad].contains(&b'=') {
+                return None;
+            }
+            let mut values = [0u8; 4];
+            for (index, &byte) in group.iter().enumerate() {
+                values[index] = if byte == b'=' { 0 } else { value(byte)? };
+            }
+            out.push((values[0] << 2) | (values[1] >> 4));
+            if pad < 2 {
+                out.push((values[1] << 4) | (values[2] >> 2));
+            }
+            if pad < 1 {
+                out.push((values[2] << 6) | values[3]);
+            }
+        }
+        Some(out)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn round_trips_arbitrary_lengths() {
+            for length in 0..40 {
+                let data: Vec<u8> = (0..length).map(|i| (i * 37 + 5) as u8).collect();
+                let encoded = encode(&data);
+                assert_eq!(decode(&encoded).unwrap(), data, "length {length}");
+            }
+        }
+
+        #[test]
+        fn matches_known_vectors() {
+            assert_eq!(encode(b""), "");
+            assert_eq!(encode(b"f"), "Zg==");
+            assert_eq!(encode(b"fo"), "Zm8=");
+            assert_eq!(encode(b"foo"), "Zm9v");
+            assert_eq!(encode(b"foobar"), "Zm9vYmFy");
+            assert_eq!(decode("Zm9vYmFy").unwrap(), b"foobar");
+        }
+
+        #[test]
+        fn rejects_malformed_input() {
+            assert_eq!(decode("Zg"), None); // wrong length
+            assert_eq!(decode("Z g="), None); // stray whitespace
+            assert!(decode("Z===").is_none()); // over-padded
+            assert_eq!(decode("!g=="), None); // outside the alphabet
+        }
+    }
+}
+
+/// Values the GUI and the privileged helper must agree on for GRUB splash
+/// customization - the GUI pre-checks a picked file against these so a bad
+/// one fails fast with a clear message, instead of only after paying for a
+/// `pkexec` round trip; the helper (`grub_splash_apply`/`_reset`) enforces
+/// them again itself, since it must never trust the other side of a
+/// privilege boundary to have checked anything.
+pub mod grub_splash {
+    /// Generous for a boot-menu background (these are typically well under
+    /// 1 MiB) while still bounding how much a single line on the helper's
+    /// wire protocol can make it allocate.
+    pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+    /// Extensions GRUB's own `png`/`jpeg`/`tga` loader modules understand.
+    pub const EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "tga"];
+    /// Identifies this app's own staged file and its own `GRUB_BACKGROUND`
+    /// line - both the filename stem and the substring apply/reset look for
+    /// before ever touching a line, so a value the user set some other way
+    /// is never mistaken for one of these.
+    pub const MARKER: &str = "predator-sense-splash";
+}
+
 pub mod installer {
     pub const INSTALL_ARGUMENT: &str = "--install";
     pub const UNINSTALL_ARGUMENT: &str = "--uninstall";
@@ -279,10 +405,30 @@ pub mod helper {
         /// as Windows: a successful write here does not mean the running
         /// session's GPU state changed at all.
         DiscreteGpuMode,
+        /// Installs a custom GRUB menu background: writes the decoded image
+        /// next to whatever `grub.cfg` this system already uses, points
+        /// `GRUB_BACKGROUND` at it in `/etc/default/grub` (backing that file
+        /// up first, once, the first time this ever runs), and regenerates
+        /// the config with the system's own `update-grub`/`grub-mkconfig`.
+        /// Privileged for the obvious reason (writes under `/boot` and
+        /// `/etc`), and root-only regardless of `sysfs` fixture wiring - see
+        /// `grub_splash` in the helper for why this does not take a `sysfs`
+        /// parameter the way EC/sysfs actions do.
+        ///
+        /// Args: an image extension (`png`/`jpg`/`jpeg`/`tga` - what GRUB's
+        /// own loader modules understand) and the image itself, base64
+        /// (`base64_lite`) - the only way to move an arbitrary-sized blob
+        /// through this protocol's one-line wire format unambiguously.
+        GrubSplashApply,
+        /// Undoes `GrubSplashApply`: drops the `GRUB_BACKGROUND` line this
+        /// app added (never one the user set some other way - only a value
+        /// pointing at this app's own staged file is touched), removes the
+        /// staged image, and regenerates `grub.cfg` again.
+        GrubSplashReset,
     }
 
     impl Action {
-        pub const ALL: [Self; 43] = [
+        pub const ALL: [Self; 45] = [
             Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
@@ -326,6 +472,8 @@ pub mod helper {
             Self::TempLimit,
             Self::BootReapplyTempLimit,
             Self::DiscreteGpuMode,
+            Self::GrubSplashApply,
+            Self::GrubSplashReset,
         ];
 
         pub fn parse(value: &str) -> Option<Self> {
@@ -373,6 +521,8 @@ pub mod helper {
                 "temp-limit" => Some(Self::TempLimit),
                 "boot-reapply-temp-limit" => Some(Self::BootReapplyTempLimit),
                 "discrete-gpu-mode" => Some(Self::DiscreteGpuMode),
+                "grub-splash-apply" => Some(Self::GrubSplashApply),
+                "grub-splash-reset" => Some(Self::GrubSplashReset),
                 _ => None,
             }
         }
@@ -422,6 +572,8 @@ pub mod helper {
                 Self::TempLimit => "temp-limit",
                 Self::BootReapplyTempLimit => "boot-reapply-temp-limit",
                 Self::DiscreteGpuMode => "discrete-gpu-mode",
+                Self::GrubSplashApply => "grub-splash-apply",
+                Self::GrubSplashReset => "grub-splash-reset",
             }
         }
 
@@ -470,6 +622,8 @@ pub mod helper {
                 Self::TempLimit => 2,
                 Self::BootReapplyTempLimit => 1,
                 Self::DiscreteGpuMode => 1,
+                Self::GrubSplashApply => 2,
+                Self::GrubSplashReset => 0,
             }
         }
 
@@ -520,6 +674,8 @@ pub mod helper {
                 Self::TempLimit => "temp-limit CELSIUS BOUND",
                 Self::BootReapplyTempLimit => "boot-reapply-temp-limit USER_HOME",
                 Self::DiscreteGpuMode => "discrete-gpu-mode 1|2",
+                Self::GrubSplashApply => "grub-splash-apply EXT BASE64",
+                Self::GrubSplashReset => "grub-splash-reset",
             }
         }
     }
@@ -2058,7 +2214,10 @@ mod temp_limit_tests {
         assert_eq!(cap.tjmax_c, 105);
         assert_eq!(cap.current_c, 100);
         assert_eq!(cap.max_c(), 100, "restore default must not go above 100");
-        assert!(!cap.accepts(105), "raising past the factory ceiling is refused");
+        assert!(
+            !cap.accepts(105),
+            "raising past the factory ceiling is refused"
+        );
         assert_eq!(cap.offset_for(101), None);
         assert_eq!(cap.offset_for(100), Some(5));
     }
@@ -2102,7 +2261,10 @@ mod temp_limit_tests {
 
         assert_eq!(super::temp_limit::remembered(&path), None);
         super::temp_limit::remember(&path, 85, Bound::Safe).expect("remember");
-        assert_eq!(super::temp_limit::remembered(&path), Some((85, Bound::Safe)));
+        assert_eq!(
+            super::temp_limit::remembered(&path),
+            Some((85, Bound::Safe))
+        );
 
         super::temp_limit::remember(&path, 40, Bound::Hardware).expect("remember");
         assert_eq!(
@@ -2113,7 +2275,10 @@ mod temp_limit_tests {
         // A bare number - the older format, or something hand-written - reads
         // as the safe bound, so it cannot authorise itself past the floor.
         std::fs::write(&path, "40\n").expect("write");
-        assert_eq!(super::temp_limit::remembered(&path), Some((40, Bound::Safe)));
+        assert_eq!(
+            super::temp_limit::remembered(&path),
+            Some((40, Bound::Safe))
+        );
 
         // A bound field that is present but unrecognised invalidates the whole
         // record. Defaulting it to Safe here would be the one path that lets a
