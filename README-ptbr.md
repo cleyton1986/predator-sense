@@ -35,6 +35,9 @@
 > **Nota**
 > Todas as marcas registradas, nomes de produtos e logotipos mencionados (Acer, Predator, PredatorSense, Helios, Nitro, AeroBlade, CoolBoost) são propriedade de seus respectivos donos (Acer Inc.). Este projeto não é afiliado, endossado ou patrocinado pela Acer Inc. de nenhuma forma.
 
+> **Nota — identificação de CPU/GPU**
+> O app informa a CPU e a GPU reais instaladas na sua máquina (ex: "Intel Core i7-11800H", "NVIDIA GeForce RTX 3070") lendo isso ao vivo do sistema (`/proc/cpuinfo`, o driver da GPU), unicamente pra identificar seu próprio hardware pra você (uso nominativo) — "Intel", "Core", "NVIDIA" e "GeForce" são marcas registradas da Intel Corporation e da NVIDIA Corporation respectivamente, e este projeto não é afiliado, endossado ou patrocinado por nenhuma das duas empresas. Nenhuma arte de logotipo da Intel ou da NVIDIA é distribuída com este app nem exibida por ele; as seções de CPU/GPU usam um ícone genérico, sem marca, no lugar.
+
 > **Imagens dos produtos**
 > As fotos de notebooks em `predator-sense-gui/resources/models/` retratam produtos oficiais Acer Predator/Nitro e são usadas exclusivamente para permitir que o aplicativo identifique visualmente o modelo detectado na máquina do próprio usuário (comparando com o `product_name` informado pela DMI/BIOS do sistema). Essas imagens **não estão licenciadas sob a licença GPLv3 deste projeto** — os direitos de autor sobre as fotografias dos produtos pertencem à Acer Inc. e/ou seus criadores originais. Elas estão incluídas aqui de boa-fé, sem finalidade comercial, com propósito puramente informativo (uso nominativo/de identificação de produto), sem qualquer reivindicação de propriedade por parte deste projeto. Se você é o titular dos direitos e deseja a remoção de alguma imagem, abra uma issue que ela será removida prontamente.
 
@@ -64,8 +67,8 @@ Se este app/projeto te ajudou e/ou gostou de alguma forma, considere deixar uma 
 <p align="center"><b>Modos</b> — Perfis de desempenho: Silencioso, Balanceado, Performance e Turbo, mais um Eco exclusivo de bateria (CPU governor + Intel EPP + limite de potência da GPU).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modos"></p>
 
-<p align="center"><b>GameSync</b> — Cadastre um jogo e o perfil desejado; o app troca automaticamente enquanto o jogo está rodando e restaura o que estava ativo antes assim que ele fecha.</p>
-<p align="center"><img src="assets/psense-15.png" width="800" alt="GameSync"></p>
+<p align="center"><b>Ferramentas</b> — GameSync, Macros, Equalizador de áudio, o assistente de IA (beta) e GRUB Splash moram aqui agora, agrupados em abas pra sidebar não crescer sem limite. Mostrado aqui: GameSync, que cadastra um jogo e o perfil desejado pro app trocar automaticamente enquanto o jogo está rodando e restaurar o que estava ativo antes assim que ele fecha.</p>
+<p align="center"><img src="assets/psense-15.png" width="800" alt="Ferramentas"></p>
 
 <p align="center"><b>Controle de Ventoinha</b> — RPM ao vivo com animação girando, toggle do CoolBoost e modos Auto/Max.</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Controle de Ventoinha"></p>
@@ -78,9 +81,6 @@ Se este app/projeto te ajudou e/ou gostou de alguma forma, considere deixar uma 
 
 <p align="center"><b>Gráficos</b> — Histórico detalhado de CPU e GPU com tracking de mínimas e máximas.</p>
 <p align="center"><img src="assets/psense-10.png" width="800" alt="Gráficos"></p>
-
-<p align="center"><b>Assistente de IA (beta)</b> — Assistente de IA local via Ollama: chat, gerenciador de modelos (listar instalados, baixar novos, escolher qual roda), consumo de recurso/VRAM ao vivo enquanto ele pensa, e log de ações persistente.</p>
-<p align="center"><img src="assets/psense-11.png" width="800" alt="Assistente de IA"></p>
 
 <p align="center"><b>Drivers e manuais</b> — Mostra o número de série (com botão de copiar) e um link direto pra página oficial de drivers e manuais da Acer, além de uma ilustração de onde achar a etiqueta do número de série no notebook.</p>
 <p align="center"><img src="assets/psense-16.png" width="800" alt="Drivers e manuais"></p>

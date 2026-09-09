@@ -35,6 +35,9 @@
 > **Note**
 > All trademarks, product names, and logos mentioned (Acer, Predator, PredatorSense, Helios, Nitro, AeroBlade, CoolBoost) are the property of their respective owners (Acer Inc.). This project is not affiliated with, endorsed by, or sponsored by Acer Inc. in any way.
 
+> **Note — CPU/GPU identification**
+> The app reports the real CPU and GPU installed in your machine (e.g. "Intel Core i7-11800H", "NVIDIA GeForce RTX 3070") by reading it live from the system (`/proc/cpuinfo`, the GPU driver) purely to identify your own hardware to you (nominative use) — "Intel", "Core", "NVIDIA", and "GeForce" are trademarks of Intel Corporation and NVIDIA Corporation respectively, and this project is not affiliated with, endorsed by, or sponsored by either company. No Intel or NVIDIA logo artwork is bundled with or displayed by this app; the CPU/GPU sections use a generic, non-branded icon instead.
+
 > **Product images**
 > The laptop photos under `predator-sense-gui/resources/models/` depict official Acer Predator/Nitro products and are used solely to let the app visually identify the model detected on the user's own machine (matched against the `product_name` reported by the system's DMI/BIOS). These images are **not licensed under this project's GPLv3 license** — copyright in the underlying product photography belongs to Acer Inc. and/or its original creators. They are included here on a good-faith, non-commercial, purely informational basis (nominative/product-identification use), with no claim of ownership by this project. If you are the rights holder and would like an image removed, please open an issue and it will be taken down promptly.
 
@@ -64,8 +67,8 @@ If this app/project helped you and/or you liked it in some way, consider leaving
 <p align="center"><b>Modes</b> — Performance profiles: Quiet, Balanced, Performance and Turbo, plus a battery-only Eco tier (CPU governor + Intel EPP + GPU power limit).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modes"></p>
 
-<p align="center"><b>GameSync</b> — Register a game and its profile; the app switches to it automatically while the game is running and restores whatever was active before once it exits.</p>
-<p align="center"><img src="assets/psense-15.png" width="800" alt="GameSync"></p>
+<p align="center"><b>Tools</b> — GameSync, Macros, Audio EQ, the AI assistant (beta) and GRUB Splash live here now, grouped into tabs so the sidebar doesn't grow without limit. Shown here: GameSync, which registers a game and its profile so the app switches to it automatically while the game is running and restores whatever was active before once it exits.</p>
+<p align="center"><img src="assets/psense-15.png" width="800" alt="Tools"></p>
 
 <p align="center"><b>Fan Control</b> — Live RPM with animated spinning fans, CoolBoost toggle and Auto/Max modes.</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Fan Control"></p>
@@ -78,9 +81,6 @@ If this app/project helped you and/or you liked it in some way, consider leaving
 
 <p align="center"><b>Graphs</b> — Detailed CPU and GPU history charts with min/max tracking.</p>
 <p align="center"><img src="assets/psense-10.png" width="800" alt="Graphs"></p>
-
-<p align="center"><b>AI Assistant (beta)</b> — Local AI assistant powered by Ollama: chat, model manager (list installed models, download new ones, pick which one runs), live VRAM/GPU resource usage while it's thinking, and a persistent action log.</p>
-<p align="center"><img src="assets/psense-11.png" width="800" alt="AI Assistant"></p>
 
 <p align="center"><b>Drivers and manuals</b> — Shows the serial number (with a copy button) and a direct link to Acer's official drivers-and-manuals page, plus an illustration of where to find the serial number sticker on the laptop.</p>
 <p align="center"><img src="assets/psense-16.png" width="800" alt="Drivers and manuals"></p>

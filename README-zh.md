@@ -35,6 +35,9 @@
 > **注意**
 > 文中提到的所有商标、产品名称和标志（Acer、Predator、PredatorSense、Helios、Nitro、AeroBlade、CoolBoost）均属于其各自所有者（Acer Inc.）所有。本项目与 Acer Inc. 没有任何形式的关联、认可或赞助关系。
 
+> **注意 — CPU/GPU 识别**
+> 应用会显示你机器上实际安装的 CPU 和 GPU（例如 "Intel Core i7-11800H"、"NVIDIA GeForce RTX 3070"），这些信息是实时从系统读取的（`/proc/cpuinfo`、GPU 驱动），目的仅仅是向你展示你自己的硬件（指称性使用）——"Intel"、"Core"、"NVIDIA" 和 "GeForce" 分别是 Intel Corporation 和 NVIDIA Corporation 的商标，本项目与这两家公司均无任何关联、认可或赞助关系。本应用不包含也不显示任何 Intel 或 NVIDIA 的标志；CPU/GPU 部分使用的是通用的、不带品牌标识的图标。
+
 > **产品图片**
 > `predator-sense-gui/resources/models/` 目录下的笔记本照片展示的是官方 Acer Predator/Nitro 产品，其唯一用途是让应用能够以图片形式识别出用户自己机器上检测到的型号（与系统 DMI/BIOS 报告的 `product_name` 进行匹配）。这些图片**不受本项目 GPLv3 许可覆盖**：底层产品摄影作品的版权归 Acer Inc. 和/或其原始创作者所有。收录这些图片完全出于善意，属于非商业性质、纯粹信息性的用途（指称性/产品识别用途），本项目对这些图片不主张任何所有权。如果你是版权所有者并希望移除某张图片，请提交一个 issue，图片会被尽快下架。
 
@@ -64,8 +67,8 @@
 <p align="center"><b>模式</b>：性能模式，静音、均衡、性能和 Turbo，另外还有一个仅限电池模式下使用的 Eco 档位（CPU governor + Intel EPP + GPU 功耗限制）。</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="模式"></p>
 
-<p align="center"><b>GameSync</b>：为某个游戏注册一个专属模式，游戏运行时应用会自动切换到该模式，游戏退出后再恢复之前生效的模式。</p>
-<p align="center"><img src="assets/psense-15.png" width="800" alt="GameSync"></p>
+<p align="center"><b>工具</b>：GameSync、宏、音频均衡器、AI 助手（beta）和 GRUB Splash 现在都归到这里，以标签页分组，这样侧边栏就不会无限增长。这里展示的是 GameSync：为某个游戏注册一个专属模式，游戏运行时应用会自动切换到该模式，游戏退出后再恢复之前生效的模式。</p>
+<p align="center"><img src="assets/psense-15.png" width="800" alt="工具"></p>
 
 <p align="center"><b>风扇控制</b>：实时转速显示，带有动画旋转的风扇、CoolBoost 开关以及 Auto/Max 模式。</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="风扇控制"></p>
@@ -78,9 +81,6 @@
 
 <p align="center"><b>图表</b>：详细的 CPU 和 GPU 历史图表，带有最小值/最大值追踪。</p>
 <p align="center"><img src="assets/psense-10.png" width="800" alt="图表"></p>
-
-<p align="center"><b>AI 助手 (beta)</b>：由 Ollama 驱动的本地 AI 助手，聊天、模型管理器（列出已安装模型、下载新模型、选择运行哪一个）、思考过程中的实时 VRAM/GPU 资源占用，以及持久化的操作日志。</p>
-<p align="center"><img src="assets/psense-11.png" width="800" alt="AI 助手"></p>
 
 <p align="center"><b>驱动与手册</b>：显示序列号（带复制按钮）和指向 Acer 官方驱动与手册页面的直接链接，另外还有一张图示，标出笔记本上序列号贴纸的位置。</p>
 <p align="center"><img src="assets/psense-16.png" width="800" alt="驱动与手册"></p>

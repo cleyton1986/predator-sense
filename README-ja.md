@@ -35,6 +35,9 @@
 > **注記**
 > 記載されているすべての商標、製品名、ロゴ（Acer、Predator、PredatorSense、Helios、Nitro、AeroBlade、CoolBoost）は、それぞれの所有者（Acer Inc.）の財産です。このプロジェクトは、いかなる形でもAcer Inc.と提携、承認、後援されているものではありません。
 
+> **注記 — CPU/GPU の識別について**
+> 本アプリは、お使いのマシンに実際に搭載されている CPU と GPU（例:「Intel Core i7-11800H」「NVIDIA GeForce RTX 3070」）を、システムから直接読み取って表示します（`/proc/cpuinfo`、GPU ドライバー）。これはあくまでご自身のハードウェアをご本人に示すためのものです（名称的使用）。「Intel」「Core」「NVIDIA」「GeForce」はそれぞれ Intel Corporation および NVIDIA Corporation の商標であり、本プロジェクトはいずれの企業とも提携、承認、後援の関係にありません。本アプリには Intel または NVIDIA のロゴ画像は一切含まれておらず、表示もされません。CPU/GPU セクションには、ブランドに依存しない汎用アイコンを使用しています。
+
 > **製品画像について**
 > `predator-sense-gui/resources/models/`にあるノートパソコンの写真は、Acer Predator/Nitroの正規製品を写したものであり、ユーザー自身のマシンで検出された機種を（システムのDMI/BIOSが報告する`product_name`と照合して）アプリが視覚的に識別できるようにするためだけに使用されています。これらの画像は**このプロジェクトのGPLv3ライセンスの対象ではありません**。製品写真そのものの著作権はAcer Inc.および/または元の制作者に帰属します。これらの画像は、善意に基づき、非営利かつ純粋に情報提供の目的（名称的/製品識別のための利用）で、このプロジェクトによる所有権の主張なしに掲載されています。あなたが権利者であり、画像の削除を希望する場合は、issueを開いてください。速やかに削除します。
 
@@ -64,8 +67,8 @@
 <p align="center"><b>モード</b> — パフォーマンスプロファイル：Quiet、Balanced、Performance、Turbo、さらにバッテリー駆動時専用のEco階層（CPUガバナー + Intel EPP + GPU電力制限）です。</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modes"></p>
 
-<p align="center"><b>GameSync</b> — ゲームとそのプロファイルを登録すると、ゲームの実行中はアプリが自動的にそのプロファイルへ切り替え、終了すると直前まで有効だったプロファイルに復元します。</p>
-<p align="center"><img src="assets/psense-15.png" width="800" alt="GameSync"></p>
+<p align="center"><b>ツール</b> — GameSync、マクロ、オーディオEQ、AIアシスタント（ベータ版)、GRUB Splashは今はここにまとめられ、サイドバーが際限なく増えないようタブとしてグループ化されています。ここに表示されているのはGameSync：ゲームとそのプロファイルを登録すると、ゲームの実行中はアプリが自動的にそのプロファイルへ切り替え、終了すると直前まで有効だったプロファイルに復元します。</p>
+<p align="center"><img src="assets/psense-15.png" width="800" alt="ツール"></p>
 
 <p align="center"><b>ファン制御</b> — アニメーションで回転するファンによるライブRPM表示、CoolBoostの切り替え、Auto/Maxモードです。</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Fan Control"></p>
@@ -78,9 +81,6 @@
 
 <p align="center"><b>グラフ</b> — 最小値/最大値の追跡を備えた、詳細なCPUおよびGPUの履歴チャートです。</p>
 <p align="center"><img src="assets/psense-10.png" width="800" alt="Graphs"></p>
-
-<p align="center"><b>AIアシスタント（ベータ版）</b> — Ollamaを利用したローカルAIアシスタント：チャット、モデルマネージャー（インストール済みモデルの一覧表示、新規モデルのダウンロード、実行するモデルの選択）、思考中のライブVRAM/GPUリソース使用状況、そして永続的なアクションログです。</p>
-<p align="center"><img src="assets/psense-11.png" width="800" alt="AI Assistant"></p>
 
 <p align="center"><b>ドライバーとマニュアル</b> — シリアル番号（コピー用ボタン付き）と、Acer公式のドライバー・マニュアルページへの直接リンクを表示し、さらにノートパソコン上のシリアル番号ステッカーの場所を示す図も表示します。</p>
 <p align="center"><img src="assets/psense-16.png" width="800" alt="Drivers and manuals"></p>

@@ -35,6 +35,9 @@
 > **Nota**
 > Todas las marcas comerciales, nombres de productos y logotipos mencionados (Acer, Predator, PredatorSense, Helios, Nitro, AeroBlade, CoolBoost) son propiedad de sus respectivos titulares (Acer Inc.). Este proyecto no está afiliado, avalado ni patrocinado por Acer Inc. de ninguna manera.
 
+> **Nota — identificación de CPU/GPU**
+> La app informa la CPU y la GPU reales instaladas en tu máquina (p. ej. "Intel Core i7-11800H", "NVIDIA GeForce RTX 3070") leyéndolo en vivo desde el sistema (`/proc/cpuinfo`, el controlador de la GPU), únicamente para identificar tu propio hardware (uso nominativo) — "Intel", "Core", "NVIDIA" y "GeForce" son marcas registradas de Intel Corporation y NVIDIA Corporation respectivamente, y este proyecto no está afiliado, avalado ni patrocinado por ninguna de las dos empresas. Esta app no incluye ni muestra ningún logotipo de Intel o NVIDIA; las secciones de CPU/GPU usan un icono genérico, sin marca, en su lugar.
+
 > **Imágenes de productos**
 > Las fotos de los portátiles en `predator-sense-gui/resources/models/` muestran productos oficiales de Acer Predator/Nitro y se usan únicamente para que la app identifique visualmente el modelo detectado en la propia máquina del usuario (comparándolo con el `product_name` reportado por la DMI/BIOS del sistema). Estas imágenes **no están cubiertas por la licencia GPLv3 de este proyecto** — los derechos de autor de las fotografías del producto pertenecen a Acer Inc. y/o sus creadores originales. Se incluyen aquí de buena fe, sobre una base no comercial y puramente informativa (uso nominativo/de identificación de producto), sin ninguna reivindicación de propiedad por parte de este proyecto. Si eres el titular de los derechos y deseas que se elimine una imagen, abre un issue y se retirará con prontitud.
 
@@ -64,8 +67,8 @@ Si esta app/proyecto te ayudó y/o te gustó de alguna manera, considera dejar u
 <p align="center"><b>Modos</b> — Perfiles de rendimiento: Silencioso, Equilibrado, Rendimiento y Turbo, más un nivel Eco exclusivo para batería (CPU governor + Intel EPP + límite de potencia de la GPU).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modos"></p>
 
-<p align="center"><b>GameSync</b> — Registra un juego y su perfil; la app cambia a él automáticamente mientras el juego está en ejecución y restaura lo que estuviera activo antes en cuanto se cierra.</p>
-<p align="center"><img src="assets/psense-15.png" width="800" alt="GameSync"></p>
+<p align="center"><b>Herramientas</b> — GameSync, Macros, Ecualizador de audio, el asistente de IA (beta) y GRUB Splash viven aquí ahora, agrupados en pestañas para que la barra lateral no crezca sin límite. Se muestra aquí: GameSync, que registra un juego y su perfil para que la app cambie a él automáticamente mientras el juego está en ejecución y restaure lo que estuviera activo antes en cuanto se cierra.</p>
+<p align="center"><img src="assets/psense-15.png" width="800" alt="Herramientas"></p>
 
 <p align="center"><b>Control de Ventiladores</b> — RPM en tiempo real con ventiladores animados girando, interruptor de CoolBoost y modos Auto/Max.</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Control de Ventiladores"></p>
@@ -78,9 +81,6 @@ Si esta app/proyecto te ayudó y/o te gustó de alguna manera, considera dejar u
 
 <p align="center"><b>Gráficos</b> — Gráficos históricos detallados de CPU y GPU con seguimiento de mínimos/máximos.</p>
 <p align="center"><img src="assets/psense-10.png" width="800" alt="Gráficos"></p>
-
-<p align="center"><b>Asistente de IA (beta)</b> — Asistente de IA local basado en Ollama: chat, gestor de modelos (lista los modelos instalados, descarga nuevos, elige cuál se ejecuta), uso de recursos VRAM/GPU en tiempo real mientras piensa, y un registro de acciones persistente.</p>
-<p align="center"><img src="assets/psense-11.png" width="800" alt="Asistente de IA"></p>
 
 <p align="center"><b>Controladores y manuales</b> — Muestra el número de serie (con un botón para copiarlo) y un enlace directo a la página oficial de controladores y manuales de Acer, además de una ilustración de dónde encontrar la etiqueta del número de serie en el portátil.</p>
 <p align="center"><img src="assets/psense-16.png" width="800" alt="Controladores y manuales"></p>

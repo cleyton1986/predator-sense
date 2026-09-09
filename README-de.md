@@ -35,6 +35,9 @@
 > **Hinweis**
 > Alle genannten Marken, Produktnamen und Logos (Acer, Predator, PredatorSense, Helios, Nitro, AeroBlade, CoolBoost) sind Eigentum ihrer jeweiligen Inhaber (Acer Inc.). Dieses Projekt steht in keiner Weise mit Acer Inc. in Verbindung und wird von Acer Inc. weder unterstützt noch gesponsert.
 
+> **Hinweis — CPU/GPU-Erkennung**
+> Die App zeigt die tatsächlich in Ihrem Gerät verbaute CPU und GPU an (z. B. „Intel Core i7-11800H", „NVIDIA GeForce RTX 3070"), indem sie diese live vom System ausliest (`/proc/cpuinfo`, der GPU-Treiber) — ausschließlich um Ihnen Ihre eigene Hardware anzuzeigen (nominative Verwendung). „Intel", „Core", „NVIDIA" und „GeForce" sind Marken der Intel Corporation bzw. der NVIDIA Corporation, und dieses Projekt steht in keiner Verbindung zu einem der beiden Unternehmen und wird von keinem der beiden unterstützt oder gesponsert. Diese App enthält oder zeigt keine Intel- oder NVIDIA-Logos; die CPU/GPU-Bereiche verwenden stattdessen ein generisches, markenneutrales Symbol.
+
 > **Produktbilder**
 > Die Notebook-Fotos unter `predator-sense-gui/resources/models/` zeigen offizielle Acer-Predator-/Nitro-Produkte und dienen ausschließlich dazu, der App die visuelle Identifikation des auf dem eigenen Gerät des Nutzers erkannten Modells zu ermöglichen (abgeglichen mit dem `product_name`, den DMI/BIOS des Systems melden). Diese Bilder sind **nicht durch die GPLv3-Lizenz dieses Projekts abgedeckt**: Das Copyright an den zugrunde liegenden Produktfotos liegt bei Acer Inc. und/oder deren ursprünglichen Urhebern. Sie werden hier in gutem Glauben, auf nicht kommerzieller, rein informativer Grundlage (nominative Verwendung zur Produktidentifikation) bereitgestellt, ohne dass dieses Projekt einen Eigentumsanspruch erhebt. Falls Sie Rechteinhaber sind und die Entfernung eines Bildes wünschen, eröffnen Sie bitte ein Issue, es wird umgehend entfernt.
 
@@ -64,8 +67,8 @@ Wenn diese App/dieses Projekt Ihnen geholfen hat und/oder Ihnen auf irgendeine W
 <p align="center"><b>Modi</b>: Leistungsprofile: Quiet, Balanced, Performance und Turbo, dazu eine nur im Akkubetrieb verfügbare Eco-Stufe (CPU-Governor + Intel EPP + GPU-Leistungslimit).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modes"></p>
 
-<p align="center"><b>GameSync</b>: Registrieren Sie ein Spiel und sein Profil; die App wechselt automatisch dazu, während das Spiel läuft, und stellt beim Beenden wieder her, was zuvor aktiv war.</p>
-<p align="center"><img src="assets/psense-15.png" width="800" alt="GameSync"></p>
+<p align="center"><b>Werkzeuge</b>: GameSync, Makros, Audio-EQ, der KI-Assistent (beta) und GRUB Splash leben jetzt hier, als Tabs gruppiert, damit die Seitenleiste nicht unbegrenzt wächst. Hier gezeigt: GameSync, das ein Spiel und sein Profil registriert, damit die App automatisch dazu wechselt, während das Spiel läuft, und beim Beenden wiederherstellt, was zuvor aktiv war.</p>
+<p align="center"><img src="assets/psense-15.png" width="800" alt="Werkzeuge"></p>
 
 <p align="center"><b>Lüftersteuerung</b>: Live-Drehzahl mit animierten, rotierenden Lüftern, CoolBoost-Schalter und Auto-/Max-Modi.</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Fan Control"></p>
@@ -78,9 +81,6 @@ Wenn diese App/dieses Projekt Ihnen geholfen hat und/oder Ihnen auf irgendeine W
 
 <p align="center"><b>Diagramme</b>: Detaillierte CPU- und GPU-Verlaufsdiagramme mit Min./Max.-Verfolgung.</p>
 <p align="center"><img src="assets/psense-10.png" width="800" alt="Graphs"></p>
-
-<p align="center"><b>KI-Assistent (beta)</b>: Lokaler KI-Assistent auf Basis von Ollama: Chat, Modellverwaltung (installierte Modelle auflisten, neue herunterladen, auswählen, welches ausgeführt wird), Live-VRAM-/GPU-Ressourcennutzung während der Verarbeitung und ein dauerhaftes Aktionsprotokoll.</p>
-<p align="center"><img src="assets/psense-11.png" width="800" alt="AI Assistant"></p>
 
 <p align="center"><b>Treiber und Handbücher</b>: Zeigt die Seriennummer (mit Kopierschaltfläche) und einen direkten Link zur offiziellen Treiber-und-Handbücher-Seite von Acer, dazu eine Abbildung, wo sich der Seriennummer-Aufkleber am Notebook befindet.</p>
 <p align="center"><img src="assets/psense-16.png" width="800" alt="Drivers and manuals"></p>

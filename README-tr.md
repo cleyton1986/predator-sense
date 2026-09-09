@@ -35,6 +35,9 @@
 > **Not**
 > Bahsi geçen tüm ticari markalar, ürün adları ve logolar (Acer, Predator, PredatorSense, Helios, Nitro, AeroBlade, CoolBoost) kendi sahiplerinin (Acer Inc.) mülkiyetindedir. Bu proje, Acer Inc. ile hiçbir şekilde bağlantılı, onaylı veya sponsorlu değildir.
 
+> **Not — CPU/GPU tanımlama**
+> Uygulama, cihazınızda gerçekten takılı olan CPU ve GPU'yu (ör. "Intel Core i7-11800H", "NVIDIA GeForce RTX 3070") sistemden canlı olarak okuyarak (`/proc/cpuinfo`, GPU sürücüsü) gösterir; bu yalnızca kendi donanımınızı size tanımlamak içindir (isimlendirme amaçlı kullanım) — "Intel", "Core", "NVIDIA" ve "GeForce" sırasıyla Intel Corporation ve NVIDIA Corporation'ın ticari markalarıdır ve bu proje bu şirketlerin hiçbiriyle bağlantılı, onaylı veya sponsorlu değildir. Bu uygulamada Intel veya NVIDIA logosu bulunmaz ve gösterilmez; CPU/GPU bölümlerinde bunun yerine markasız, genel bir simge kullanılır.
+
 > **Ürün görselleri**
 > `predator-sense-gui/resources/models/` altındaki dizüstü fotoğrafları, resmi Acer Predator/Nitro ürünlerini gösterir ve yalnızca uygulamanın, kullanıcının kendi makinesinde algılanan modeli görsel olarak tanımlayabilmesi için kullanılır (sistemin DMI/BIOS'unun bildirdiği `product_name` ile eşleştirilerek). Bu görseller **bu projenin GPLv3 lisansı kapsamında değildir** — ürün fotoğraflarının telif hakkı Acer Inc.'e ve/veya orijinal yaratıcılarına aittir. Bu görseller, iyi niyetle, ticari olmayan, tamamen bilgilendirme amaçlı bir temelde (isimlendirme/ürün tanımlama amaçlı kullanım) ve bu proje adına herhangi bir mülkiyet iddiası olmaksızın burada yer almaktadır. Hak sahibiyseniz ve bir görselin kaldırılmasını istiyorsanız lütfen bir issue açın, derhal kaldırılacaktır.
 
@@ -64,8 +67,8 @@ Bu uygulama/proje işinize yaradıysa ve/veya bir şekilde beğendiyseniz, bir y
 <p align="center"><b>Modlar</b> — Performans profilleri: Sessiz, Dengeli, Performans ve Turbo, artı yalnızca pilde kullanılabilen bir Eco katmanı (CPU governor + Intel EPP + GPU güç limiti).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modlar"></p>
 
-<p align="center"><b>GameSync</b> — Bir oyun ve profilini kaydedin; oyun çalışırken uygulama otomatik olarak o profile geçer, oyun kapandığında önceki profili geri yükler.</p>
-<p align="center"><img src="assets/psense-15.png" width="800" alt="GameSync"></p>
+<p align="center"><b>Araçlar</b> — GameSync, Makrolar, Ses Ekolayzırı, yapay zeka asistanı (beta) ve GRUB Splash artık burada, kenar çubuğu sınırsız büyümesin diye sekmeler halinde gruplanmış. Burada gösterilen: GameSync — bir oyun ve profilini kaydedin, oyun çalışırken uygulama otomatik olarak o profile geçer, oyun kapandığında önceki profili geri yükler.</p>
+<p align="center"><img src="assets/psense-15.png" width="800" alt="Araçlar"></p>
 
 <p align="center"><b>Fan Kontrolü</b> — Animasyonlu dönen fanlarla canlı RPM, CoolBoost anahtarı ve Auto/Max modları.</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Fan Kontrolü"></p>
@@ -78,9 +81,6 @@ Bu uygulama/proje işinize yaradıysa ve/veya bir şekilde beğendiyseniz, bir y
 
 <p align="center"><b>Grafikler</b> — Min/maks takibiyle detaylı CPU ve GPU geçmiş grafikleri.</p>
 <p align="center"><img src="assets/psense-10.png" width="800" alt="Grafikler"></p>
-
-<p align="center"><b>Yapay Zeka Asistanı (beta)</b> — Ollama destekli yerel yapay zeka asistanı: sohbet, model yöneticisi (yüklü modelleri listele, yenilerini indir, hangisinin çalışacağını seç), düşünürken canlı VRAM/GPU kaynak kullanımı ve kalıcı bir eylem günlüğü.</p>
-<p align="center"><img src="assets/psense-11.png" width="800" alt="Yapay Zeka Asistanı"></p>
 
 <p align="center"><b>Sürücüler ve kılavuzlar</b> — Seri numarasını (kopyalama düğmesiyle) ve Acer'ın resmi sürücüler-ve-kılavuzlar sayfasına doğrudan bir bağlantıyı gösterir, ayrıca dizüstünde seri numarası etiketinin nerede olduğunu gösteren bir çizim içerir.</p>
 <p align="center"><img src="assets/psense-16.png" width="800" alt="Sürücüler ve kılavuzlar"></p>
