@@ -79,18 +79,18 @@ pub fn execute_checked(action: Action, arguments: &[&str]) -> Result<(), Failure
     }
 }
 
+/// Goes through the unprivileged persistent session (see [`READ_SESSION`])
+/// rather than spawning the helper fresh for this one call: this is the app's
+/// hot path (every sensor poll, on every page, several times a second across
+/// the whole app), so the fork+exec a one-shot call pays each time is real,
+/// constant background cost - amortized here the same way [`invoke_session`]
+/// already amortizes `pkexec` for privileged calls.
 pub fn read(action: Action) -> Option<String> {
     if action.argument_count() != 0 {
         return None;
     }
-    let output = Command::new(path::HELPER)
-        .arg(action.as_str())
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let reply = invoke_read_session(action).ok()?;
+    reply.success.then_some(reply.stdout)
 }
 
 /// Like `read`, but goes through the persistent session (pkexec-elevated
@@ -262,9 +262,26 @@ type RealSession = Session<ChildStdin, BufReader<ChildStdout>>;
 /// commands in flight at once would interleave on the wire).
 static SESSION: Mutex<Option<(Child, RealSession)>> = Mutex::new(None);
 
+/// The persistent *unprivileged* helper `read()` talks to - see its doc
+/// comment. Separate from [`SESSION`] on purpose: that one is root (spawned
+/// through `pkexec`), and handing a read-only sensor poll to the root process
+/// just because it happens to already be running would make every read
+/// depend on the privileged session's authorization state for no reason.
+static READ_SESSION: Mutex<Option<(Child, RealSession)>> = Mutex::new(None);
+
 fn spawn_session() -> Result<(Child, RealSession), String> {
-    let mut child = Command::new(PRIVILEGE_BROKER)
-        .arg(path::HELPER)
+    spawn_daemon(Command::new(PRIVILEGE_BROKER).arg(path::HELPER))
+}
+
+/// Like [`spawn_session`], but launches the helper directly - no `pkexec` -
+/// since the actions `read()` sends it never need elevation (same sysfs
+/// permissions `read`'s one-shot predecessor relied on).
+fn spawn_read_session() -> Result<(Child, RealSession), String> {
+    spawn_daemon(&mut Command::new(path::HELPER))
+}
+
+fn spawn_daemon(command: &mut Command) -> Result<(Child, RealSession), String> {
+    let mut child = command
         .arg(internal::HELPER_DAEMON_ARGUMENT)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -292,10 +309,32 @@ fn invoke_session(action: Action, arguments: &[&str]) -> Result<Reply, String> {
             .map_err(|error| format!("Failed to launch hardware helper: {error}"))?;
         return Ok(Reply::from_output(&output));
     }
+    call_session(&SESSION, spawn_session, action, arguments)
+}
 
-    let mut guard = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+/// Like [`invoke_session`], but for `read()`'s unprivileged hot path: always
+/// goes through [`READ_SESSION`], even as root. The root special case in
+/// [`invoke_session`] exists because there is nothing to amortize when
+/// `pkexec` was never going to run anyway; here the cost being amortized is
+/// the fork+exec itself, which happens whether or not the caller is root.
+fn invoke_read_session(action: Action) -> Result<Reply, String> {
+    validate_arity(action, &[])?;
+    call_session(&READ_SESSION, spawn_read_session, action, &[])
+}
+
+/// Shared by [`invoke_session`] and [`invoke_read_session`]: send one call
+/// down whichever persistent session `slot` names, spawning it first if
+/// this is the first call, and respawning it exactly once if the pipe turns
+/// out to be broken.
+fn call_session(
+    slot: &Mutex<Option<(Child, RealSession)>>,
+    spawn: fn() -> Result<(Child, RealSession), String>,
+    action: Action,
+    arguments: &[&str],
+) -> Result<Reply, String> {
+    let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if guard.is_none() {
-        *guard = Some(spawn_session()?);
+        *guard = Some(spawn()?);
     }
     let (_, session) = guard.as_mut().expect("just populated above");
     match session.call(action, arguments) {
@@ -304,14 +343,15 @@ fn invoke_session(action: Action, arguments: &[&str]) -> Result<Reply, String> {
             // The session is dead - authorization refused, or the process
             // crashed. Reap it (the pipe closing means it is exiting, if it
             // has not already) instead of leaving a zombie around until this
-            // process itself exits, then pay for exactly one more `pkexec`
-            // prompt before giving up, rather than leaving every future call
+            // process itself exits, then pay for exactly one more respawn
+            // (and, for the privileged session, one more `pkexec` prompt)
+            // before giving up, rather than leaving every future call
             // failing forever because of a session that will never recover
             // on its own.
             if let Some((mut dead_child, _)) = guard.take() {
                 let _ = dead_child.wait();
             }
-            let (mut child, mut session) = spawn_session()?;
+            let (mut child, mut session) = spawn()?;
             match session.call(action, arguments) {
                 Ok(reply) => {
                     *guard = Some((child, session));
@@ -320,9 +360,8 @@ fn invoke_session(action: Action, arguments: &[&str]) -> Result<Reply, String> {
                 Err(SessionBroken) => {
                     // The fresh session died too (e.g. authorization refused
                     // again). Reap it here - nothing else holds this child,
-                    // and dropping it unreaped would leak an unwaited
-                    // root-owned zombie process for the rest of this GUI's
-                    // lifetime.
+                    // and dropping it unreaped would leak an unwaited zombie
+                    // process for the rest of this GUI's lifetime.
                     let _ = child.wait();
                     Err(
                         "Hardware helper daemon closed the connection immediately after starting"
