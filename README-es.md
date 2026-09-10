@@ -253,7 +253,7 @@ sudo ./predator-sense-installer
 
 Selecciona la **opción 1** (Instalación Completa). El instalador automáticamente:
 
-1. Detecta tu distribución (Debian/Ubuntu/Mint, Fedora, Arch)
+1. Detecta tu distribución (Debian/Ubuntu/Mint, Fedora, Arch, openSUSE)
 2. Instala las dependencias del sistema (GTK4, libadwaita, herramientas de compilación, headers del kernel)
 3. Descarga el código fuente + binario precompilado de la release correspondiente
 4. Compila y carga el módulo del kernel `facer` (esta parte siempre se compila localmente — los módulos del kernel no se pueden distribuir precompilados entre distintas versiones del kernel)
@@ -295,6 +295,14 @@ sudo dnf install gtk4-devel libadwaita-devel pkg-config gcc make \
 
 ```console
 sudo pacman -S gtk4 libadwaita pkgconf gcc make dkms curl tar linux-headers
+```
+</details>
+
+<details>
+<summary><b>openSUSE</b></summary>
+
+```console
+sudo zypper in gtk4-devel libadwaita-devel pkgconf-pkg-config gcc make dkms curl tar sudo
 ```
 </details>
 

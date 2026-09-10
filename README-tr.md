@@ -253,7 +253,7 @@ sudo ./predator-sense-installer
 
 **1. seçeneği** (Tam Kurulum) seçin. Yükleyici otomatik olarak:
 
-1. Dağıtımınızı algılar (Debian/Ubuntu/Mint, Fedora, Arch)
+1. Dağıtımınızı algılar (Debian/Ubuntu/Mint, Fedora, Arch, openSUSE)
 2. Sistem bağımlılıklarını kurar (GTK4, libadwaita, derleme araçları, çekirdek başlıkları)
 3. Eşleşen release'in kaynağını + hazır release binary'sini indirir
 4. `facer` çekirdek modülünü derler ve yükler (bu kısım her zaman yerel olarak derlenir — çekirdek modülleri farklı çekirdek sürümleri arasında hazır olarak dağıtılamaz)
@@ -295,6 +295,14 @@ sudo dnf install gtk4-devel libadwaita-devel pkg-config gcc make \
 
 ```console
 sudo pacman -S gtk4 libadwaita pkgconf gcc make dkms curl tar linux-headers
+```
+</details>
+
+<details>
+<summary><b>openSUSE</b></summary>
+
+```console
+sudo zypper in gtk4-devel libadwaita-devel pkgconf-pkg-config gcc make dkms curl tar sudo
 ```
 </details>
 

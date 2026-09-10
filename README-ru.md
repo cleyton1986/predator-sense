@@ -253,7 +253,7 @@ sudo ./predator-sense-installer
 
 Выберите **опцию 1** (Полная установка). Установщик автоматически:
 
-1. Определит ваш дистрибутив (Debian/Ubuntu/Mint, Fedora, Arch)
+1. Определит ваш дистрибутив (Debian/Ubuntu/Mint, Fedora, Arch, openSUSE)
 2. Установит системные зависимости (GTK4, libadwaita, инструменты сборки, заголовки ядра)
 3. Скачает исходный код + готовый бинарник соответствующего релиза
 4. Скомпилирует и загрузит модуль ядра `facer` (эта часть всегда компилируется локально — модули ядра нельзя распространять в готовом виде между разными версиями ядра)
@@ -295,6 +295,14 @@ sudo dnf install gtk4-devel libadwaita-devel pkg-config gcc make \
 
 ```console
 sudo pacman -S gtk4 libadwaita pkgconf gcc make dkms curl tar linux-headers
+```
+</details>
+
+<details>
+<summary><b>openSUSE</b></summary>
+
+```console
+sudo zypper in gtk4-devel libadwaita-devel pkgconf-pkg-config gcc make dkms curl tar sudo
 ```
 </details>
 

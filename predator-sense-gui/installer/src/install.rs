@@ -799,7 +799,7 @@ impl Installer {
                     "install",
                     "gtk4-devel",
                     "libadwaita-devel",
-                    "pkg-config",
+                    "pkgconf-pkg-config",
                     "gcc",
                     "make",
                     "dkms",
