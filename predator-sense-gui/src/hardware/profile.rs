@@ -23,6 +23,25 @@ pub fn keep_fan_auto_in_performance() -> bool {
     KEEP_FAN_AUTO_IN_PERFORMANCE.load(Ordering::Relaxed)
 }
 
+// Issue #57 (dathide): some users run a separate CPU tuning tool (e.g.
+// `tuned` with a custom profile) that writes the exact same sysfs files a
+// profile switch does here (scaling_governor, energy_performance_preference,
+// intel_pstate/no_turbo, intel_pstate/min_perf_pct) - whichever tool writes
+// last wins, so the two fight every time either one applies a change. On by
+// default (preserves existing behavior); turning it off leaves CPU governor/
+// EPP/turbo/min_perf entirely to whatever else is managing them, while every
+// other effect of a profile switch (firmware thermal profile, fan mode, GPU
+// wattage) keeps working exactly as before.
+static MANAGE_CPU_POWER: AtomicBool = AtomicBool::new(true);
+
+pub fn set_manage_cpu_power(v: bool) {
+    MANAGE_CPU_POWER.store(v, Ordering::Relaxed);
+}
+
+pub fn manage_cpu_power() -> bool {
+    MANAGE_CPU_POWER.load(Ordering::Relaxed)
+}
+
 /// Pure so it's directly testable without touching hardware - see
 /// `fan_mode_for_tests` below.
 fn fan_mode_for(profile: PowerProfile, keep_auto: bool) -> crate::hardware::fan::FanMode {
@@ -644,11 +663,36 @@ pub fn policy_view() -> PolicyView {
 /// it as one would let the policy call a machine compliant while the CPU sits
 /// somewhere else entirely.
 fn cpu_belief() -> Option<PowerProfile> {
-    match read_cpu_reading_at(Path::new(SYSFS_ROOT)) {
+    cpu_belief_for(
+        manage_cpu_power(),
+        || read_cpu_reading_at(Path::new(SYSFS_ROOT)),
+        cached_selection,
+    )
+}
+
+/// The decision behind [`cpu_belief`], split out to be testable without real
+/// sysfs or the global [`MANAGE_CPU_POWER`] flag. `reading`/`cached` are
+/// lazy: the disabled-management branch (issue #57) never needs a live sysfs
+/// read at all, so a test double for it should never be called in that case.
+fn cpu_belief_for(
+    managed: bool,
+    reading: impl FnOnce() -> CpuReading,
+    cached: impl FnOnce() -> Option<PowerProfile>,
+) -> Option<PowerProfile> {
+    if !managed {
+        // Issue #57: this app deliberately never touches governor/EPP/turbo/
+        // min_perf while this is off, so reading them back would only ever
+        // observe whatever the other tool (tuned, etc.) last set - not
+        // something this app can agree or disagree with. Treating that as
+        // "incoherent" would make the AC/battery policy and GameSync's
+        // restore-on-exit logic fight the other tool forever, reapplying a
+        // CPU state this setting exists specifically to leave alone. The
+        // only meaningful belief left is what this app itself last selected.
+        return cached();
+    }
+    match reading() {
         CpuReading::Matched(profile) => Some(profile),
-        CpuReading::Ambiguous(candidates) => {
-            cached_selection().filter(|cached| candidates.contains(cached))
-        }
+        CpuReading::Ambiguous(candidates) => cached().filter(|c| candidates.contains(c)),
         // Unreadable, or readable and matching no preset. Either way there is
         // nothing here to check the firmware tier against.
         CpuReading::NoMatch | CpuReading::Unreadable => None,
@@ -794,50 +838,64 @@ fn read_cpu_reading_at(sysfs_root: &Path) -> CpuReading {
 
 pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     let s = settings_for(profile);
-    let sysfs_root = Path::new(SYSFS_ROOT);
-    let capabilities = detect_cpu_capabilities_at(sysfs_root);
-    if capabilities.policy_dirs.is_empty() {
-        return Err("No CPU frequency policies were found in sysfs".into());
-    }
-    let plan = plan_for(profile, &capabilities);
-    let epp = plan
-        .epp
-        .map(EnergyPreference::as_str)
-        .unwrap_or(OPTIONAL_VALUE_SKIP);
-    let no_turbo = plan
-        .no_turbo
-        .map(|disabled| Switch::from(disabled).as_str())
-        .unwrap_or(OPTIONAL_VALUE_SKIP);
-    let min_perf = plan
-        .min_perf_pct
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| OPTIONAL_VALUE_SKIP.into());
 
-    crate::hardware::applog::info(&format!(
-        "Applying CPU profile {}: governor={}, epp={}, no_turbo={}, min_perf_pct={}, intel_pstate_hwp={}",
-        profile.to_id(),
-        plan.governor.as_str(),
-        epp,
-        no_turbo,
-        min_perf,
-        capabilities.intel_pstate_hwp_active,
-    ));
+    if manage_cpu_power() {
+        let sysfs_root = Path::new(SYSFS_ROOT);
+        let capabilities = detect_cpu_capabilities_at(sysfs_root);
+        if capabilities.policy_dirs.is_empty() {
+            return Err("No CPU frequency policies were found in sysfs".into());
+        }
+        let plan = plan_for(profile, &capabilities);
+        let epp = plan
+            .epp
+            .map(EnergyPreference::as_str)
+            .unwrap_or(OPTIONAL_VALUE_SKIP);
+        let no_turbo = plan
+            .no_turbo
+            .map(|disabled| Switch::from(disabled).as_str())
+            .unwrap_or(OPTIONAL_VALUE_SKIP);
+        let min_perf = plan
+            .min_perf_pct
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| OPTIONAL_VALUE_SKIP.into());
 
-    // One privileged transaction performs preflight, ordered writes,
-    // verification and best-effort rollback.  Root executions use the exact
-    // same helper path without pkexec, avoiding a second implementation.
-    crate::hardware::helper::execute(
-        HelperAction::ApplyCpuProfile,
-        &[plan.governor.as_str(), epp, no_turbo, min_perf.as_str()],
-    )?;
+        crate::hardware::applog::info(&format!(
+            "Applying CPU profile {}: governor={}, epp={}, no_turbo={}, min_perf_pct={}, intel_pstate_hwp={}",
+            profile.to_id(),
+            plan.governor.as_str(),
+            epp,
+            no_turbo,
+            min_perf,
+            capabilities.intel_pstate_hwp_active,
+        ));
 
-    let state = read_cpu_state_at(sysfs_root, &capabilities).ok_or_else(|| {
-        "CPU profile was applied but its state could not be read back".to_string()
-    })?;
-    if !write_took_effect(&state, &plan, &capabilities) {
-        return Err(format!(
-            "CPU profile verification failed after helper success: expected {:?}, got {:?}",
-            plan, state
+        // One privileged transaction performs preflight, ordered writes,
+        // verification and best-effort rollback.  Root executions use the exact
+        // same helper path without pkexec, avoiding a second implementation.
+        crate::hardware::helper::execute(
+            HelperAction::ApplyCpuProfile,
+            &[plan.governor.as_str(), epp, no_turbo, min_perf.as_str()],
+        )?;
+
+        let state = read_cpu_state_at(sysfs_root, &capabilities).ok_or_else(|| {
+            "CPU profile was applied but its state could not be read back".to_string()
+        })?;
+        if !write_took_effect(&state, &plan, &capabilities) {
+            return Err(format!(
+                "CPU profile verification failed after helper success: expected {:?}, got {:?}",
+                plan, state
+            ));
+        }
+    } else {
+        // Issue #57: CPU governor/EPP/turbo/min_perf management is turned
+        // off in Settings, left entirely to whatever else manages it (e.g.
+        // tuned). Everything below this - firmware thermal profile, fan
+        // mode, GPU wattage, the remembered selection - still applies
+        // normally; only the CPU sysfs writes and their verification are
+        // skipped.
+        crate::hardware::applog::info(&format!(
+            "CPU governor/EPP/turbo/min_perf management is disabled in Settings; leaving CPU controls untouched for profile {}",
+            profile.to_id()
         ));
     }
 
@@ -1176,6 +1234,57 @@ mod tests {
             Some(PowerProfile::Balanced)
         );
         assert_eq!(reconcile(FirmwareReading::NotApplicable, None), None);
+    }
+
+    #[test]
+    fn disabled_cpu_management_trusts_the_cached_selection_without_reading_sysfs() {
+        // Issue #57: with CPU management turned off, a live sysfs read would
+        // only ever observe another tool's settings, not something this app
+        // should compare itself against - so it must not even be attempted.
+        let reading = || -> CpuReading { panic!("must not read live CPU state while disabled") };
+        assert_eq!(
+            cpu_belief_for(false, reading, || Some(PowerProfile::Turbo)),
+            Some(PowerProfile::Turbo)
+        );
+        assert_eq!(cpu_belief_for(false, reading, || None), None);
+    }
+
+    #[test]
+    fn enabled_cpu_management_matches_prior_behavior() {
+        assert_eq!(
+            cpu_belief_for(
+                true,
+                || CpuReading::Matched(PowerProfile::Quiet),
+                || None
+            ),
+            Some(PowerProfile::Quiet)
+        );
+        assert_eq!(
+            cpu_belief_for(
+                true,
+                || CpuReading::Ambiguous(vec![PowerProfile::Quiet, PowerProfile::Balanced]),
+                || Some(PowerProfile::Balanced)
+            ),
+            Some(PowerProfile::Balanced),
+            "a cached selection among the ambiguous candidates breaks the tie"
+        );
+        assert_eq!(
+            cpu_belief_for(
+                true,
+                || CpuReading::Ambiguous(vec![PowerProfile::Quiet, PowerProfile::Balanced]),
+                || Some(PowerProfile::Turbo)
+            ),
+            None,
+            "a cached selection outside the ambiguous candidates settles nothing"
+        );
+        assert_eq!(
+            cpu_belief_for(true, || CpuReading::NoMatch, || Some(PowerProfile::Turbo)),
+            None
+        );
+        assert_eq!(
+            cpu_belief_for(true, || CpuReading::Unreadable, || Some(PowerProfile::Turbo)),
+            None
+        );
     }
 
     #[test]

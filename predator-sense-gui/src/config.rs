@@ -294,6 +294,16 @@ pub struct AppConfig {
     /// this holds still).
     #[serde(default)]
     pub keep_default_theme_color: bool,
+    /// Opt-out for CPU governor/EPP/turbo/min_perf_pct management (issue #57,
+    /// dathide): some users run a separate CPU tuning tool (e.g. `tuned`
+    /// with a custom profile) that writes those exact same sysfs files, so
+    /// every profile switch here fights whatever that tool last set. On by
+    /// default (preserves existing behavior); turning it off leaves those
+    /// controls entirely to the other tool while every other effect of a
+    /// profile switch (firmware thermal profile, fan mode, GPU wattage)
+    /// keeps working as before.
+    #[serde(default = "default_true")]
+    pub manage_cpu_power: bool,
 }
 
 fn default_true() -> bool {
@@ -371,6 +381,7 @@ impl Default for AppConfig {
             eco_mode_saved_volume_pct: None,
             eco_mode_saved_brightness_pct: None,
             keep_default_theme_color: false,
+            manage_cpu_power: true,
         }
     }
 }

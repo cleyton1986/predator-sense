@@ -273,6 +273,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         crate::hardware::profile::set_keep_fan_auto_in_performance(
             cfg.keep_fan_auto_in_performance,
         );
+        crate::hardware::profile::set_manage_cpu_power(cfg.manage_cpu_power);
         crate::hardware::game_sync::set_enabled(cfg.game_sync_enabled);
 
         // Fan Control page (ui::fan_control_page): CoolBoost and fan mode
@@ -1617,6 +1618,27 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     });
     fan_auto_row.append(&fan_auto_switch);
     page.append(&fan_auto_row);
+
+    // CPU power management opt-out (issue #57, dathide) - some users run a
+    // separate CPU tuning tool (e.g. `tuned` with a custom profile) that
+    // writes the same governor/EPP/turbo/min_perf sysfs files a profile
+    // switch does here, so the two fight over the same knobs. Same
+    // no-daemon-restart-needed reasoning as fan_auto_row above: set_profile()
+    // reads this in-memory flag directly, so it takes effect on the very
+    // next profile switch.
+    let cpu_power_row = create_setting_row(t("manage_cpu_power"), t("manage_cpu_power_desc"));
+    let cpu_power_switch = gtk::Switch::new();
+    cpu_power_switch.set_active(cfg.manage_cpu_power);
+    cpu_power_switch.set_valign(gtk::Align::Center);
+    cpu_power_switch.connect_state_set(move |_, active| {
+        let mut c = config::load_app_config();
+        c.manage_cpu_power = active;
+        let _ = config::save_app_config(&c);
+        crate::hardware::profile::set_manage_cpu_power(active);
+        glib::Propagation::Proceed
+    });
+    cpu_power_row.append(&cpu_power_switch);
+    page.append(&cpu_power_row);
 
     // === Accessibility Section ===
     let acc_title = gtk::Label::new(Some(t("accessibility")));
