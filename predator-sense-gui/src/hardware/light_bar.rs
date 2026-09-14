@@ -165,6 +165,15 @@ pub fn apply(state: &LightBarState, wake: bool) -> Result<(), String> {
     if !is_available() {
         return Err(tf("rgb_err_device_not_found", &[DEVICE]));
     }
+    // `Off` is expressed as zero brightness - see `blank()` for why the mode id
+    // cannot do it.
+    if state.mode == LightBarMode::Off {
+        return write_frame(&LightBarState {
+            mode: LightBarMode::Static,
+            brightness: 0,
+            ..*state
+        });
+    }
     if wake && state.mode != LightBarMode::Breathing && state.mode != LightBarMode::Off {
         write_frame(&LightBarState {
             mode: LightBarMode::Breathing,
@@ -177,26 +186,41 @@ pub fn apply(state: &LightBarState, wake: bool) -> Result<(), String> {
 
 /// Blanks the bar without touching the saved state, so the idle watcher can
 /// put back exactly what was showing.
+///
+/// Brightness 0 rather than mode `0x00`: that id is *Static*, not Off. The
+/// firmware reports mode `0x00` after being sent Static's `0xFF` while the bar
+/// is still visibly lit, so the "off" id inherited from the Windows-derived
+/// mode tables does not blank anything on this firmware.
 pub fn blank() -> Result<(), String> {
     let saved = crate::config::load_app_config()
         .light_bar
         .unwrap_or_default();
     write_frame(&LightBarState {
-        mode: LightBarMode::Off,
+        brightness: 0,
         ..saved
     })
 }
 
-/// Puts back whatever the user last applied. Used when the idle watcher sees
-/// input again, and when idle-off is switched off (which must not leave the
-/// bar dark).
+/// Puts back whatever the user last applied. Used when idle-off is switched
+/// off, which must not leave the bar dark.
 pub fn restore_from_config() {
     let Some(saved) = crate::config::load_app_config().light_bar else {
         return;
     };
-    // `wake`: coming back from Off, the firmware needs one Breathing frame
-    // before any other mode is visible.
+    // `wake`: coming back from a real Off, the firmware needs one Breathing
+    // frame before any other mode is visible.
     let _ = apply(&saved, true);
+}
+
+/// Undoes [`blank`]. Blanking only zeroes brightness and leaves the mode
+/// alone, so this is a single frame with no wake step - and therefore no
+/// 300 ms sleep, which matters because the idle watcher calls it from the UI
+/// thread the moment a key is pressed.
+pub fn unblank() {
+    let Some(saved) = crate::config::load_app_config().light_bar else {
+        return;
+    };
+    let _ = write_frame(&saved);
 }
 
 #[cfg(test)]
@@ -217,6 +241,17 @@ mod tests {
             f,
             [0x01, 0x03, 0x64, 0x00, 0x01, 0x80, 0x00, 0xff, 0x03, 0x02, 0, 0, 0, 0, 0, 0]
         );
+    }
+
+    #[test]
+    fn blanking_uses_zero_brightness_not_the_off_mode_id() {
+        // Mode 0x00 is Static on this firmware: it is what comes back after
+        // sending 0xFF while the bar is still lit. Only brightness blanks.
+        let f = frame(&LightBarState {
+            brightness: 0,
+            ..LightBarState::default()
+        });
+        assert_eq!(f[2], 0, "brightness byte must be zero to blank");
     }
 
     #[test]

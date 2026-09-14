@@ -389,27 +389,35 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 }
             }
 
-            let cfg = config::load_app_config();
-            if cfg.light_bar_idle_enabled {
+            glib::ControlFlow::Continue
+        });
+
+        // Idle handling runs on its own 1s timer rather than the 5s tick
+        // above: the keyboard's firmware timeout is ~30s, and checking only
+        // every 5s made the bar blank and wake visibly out of step with it.
+        {
+            let bar_blanked = Rc::new(std::cell::Cell::new(false));
+            glib::timeout_add_seconds_local(1, move || {
+                let enabled = config::load_app_config().light_bar_idle_enabled;
                 match crate::hardware::idle::idle_seconds() {
-                    Some(idle) if idle >= crate::hardware::light_bar::IDLE_SECONDS => {
+                    Some(idle) if enabled && idle >= crate::hardware::light_bar::IDLE_SECONDS => {
                         if !bar_blanked.get() {
                             bar_blanked.set(true);
                             let _ = crate::hardware::light_bar::blank();
                         }
                     }
-                    Some(_) => {
+                    _ => {
                         if bar_blanked.get() {
                             bar_blanked.set(false);
-                            crate::hardware::light_bar::restore_from_config();
+                            crate::hardware::light_bar::unblank();
                         }
                     }
-                    None => {}
                 }
-            } else if bar_blanked.get() {
-                bar_blanked.set(false);
-                crate::hardware::light_bar::restore_from_config();
-            }
+                glib::ControlFlow::Continue
+            });
+        }
+
+        glib::timeout_add_seconds_local(5, move || {
             // Re-reads the game list from config every tick (cheap: a small
             // Vec clone), same reasoning as re-reading `ai_check_interval_min`
             // below - editing the list in the UI takes effect on the next

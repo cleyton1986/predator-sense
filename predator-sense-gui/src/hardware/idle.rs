@@ -16,6 +16,7 @@
 
 use std::fs::{self, File};
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
@@ -69,7 +70,15 @@ fn open_input_devices() -> Vec<File> {
         if !is_event_node {
             continue;
         }
-        if let Ok(file) = File::open(&path) {
+        // O_NONBLOCK matters: the drain below reads until the device is
+        // empty, and on a blocking fd that final read parks the thread
+        // forever. The watcher would then stop updating activity entirely -
+        // which is why the light bar blanked but never came back.
+        if let Ok(file) = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+        {
             devices.push(file);
         }
     }
