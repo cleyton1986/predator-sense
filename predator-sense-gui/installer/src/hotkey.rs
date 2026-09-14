@@ -81,6 +81,13 @@ struct Config {
     rgb_dynamic_last: Option<SavedLightingConfig>,
     #[serde(default)]
     cover_logo: Option<CoverLogoConfig>,
+    /// Which modes the mode key steps through, per power source, as
+    /// `PowerProfile::to_id()` values. Empty means "whatever the firmware
+    /// offers", which is what this did before the lists existed.
+    #[serde(default)]
+    mode_cycle_ac: Vec<String>,
+    #[serde(default)]
+    mode_cycle_battery: Vec<String>,
 }
 
 impl Default for Config {
@@ -92,6 +99,8 @@ impl Default for Config {
             rgb_is_static: true,
             rgb_dynamic_last: None,
             cover_logo: None,
+            mode_cycle_ac: Vec::new(),
+            mode_cycle_battery: Vec::new(),
         }
     }
 }
@@ -465,7 +474,7 @@ pub(crate) fn run() -> AppResult {
                             > Duration::from_secs(timing::HOTKEY_DEBOUNCE_SECS)
                         {
                             last_mode_activation = Instant::now();
-                            cycle_thermal_profile(&mut logger);
+                            cycle_thermal_profile(&mut logger, &config_path);
                         }
                     }
                     Ok(false) => {}
@@ -718,6 +727,62 @@ fn read_firmware_profiles() -> Option<FirmwareProfiles> {
 /// cycling by bit position jumps around instead of stepping up as the key is
 /// meant to. A calibration that no longer matches what the firmware accepts
 /// (BIOS update) is discarded rather than used to write a rejected index.
+/// App tier for a `PowerProfile::to_id()` value. The GUI crate owns the enum,
+/// so the daemon maps the ids by hand rather than depending on it.
+fn tier_for_profile_id(id: &str) -> Option<u8> {
+    match id {
+        "eco" => Some(0),
+        "quiet" => Some(1),
+        "balanced" => Some(2),
+        "performance" => Some(3),
+        "turbo" => Some(4),
+        _ => None,
+    }
+}
+
+fn on_ac_power() -> Option<bool> {
+    let entries = fs::read_dir(Path::new(battery::SYSFS_ROOT).join("class/power_supply")).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if fs::read_to_string(path.join("type")).ok()?.trim() == "Mains" {
+            return Some(fs::read_to_string(path.join("online")).ok()?.trim() == "1");
+        }
+    }
+    None
+}
+
+/// The user's own cycle for the current power source, as firmware indices.
+///
+/// `None` when no list is configured, or when none of the listed modes map to
+/// a profile this firmware actually supports - in either case the caller falls
+/// back to the firmware's full order rather than leaving the key doing nothing.
+fn custom_cycle_order(config: &Config, on_ac: bool, supported: &[u8]) -> Option<Vec<u8>> {
+    let ids = if on_ac {
+        &config.mode_cycle_ac
+    } else {
+        &config.mode_cycle_battery
+    };
+    if ids.is_empty() {
+        return None;
+    }
+    let calibration = thermal_profile::calibration_path()
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|data| serde_json::from_slice::<thermal_profile::Calibration>(&data).ok())?;
+    let mut order = Vec::new();
+    for id in ids {
+        let Some(tier) = tier_for_profile_id(id) else {
+            continue;
+        };
+        let Some(index) = calibration.index_for_tier(tier) else {
+            continue;
+        };
+        if supported.contains(&index) && !order.contains(&index) {
+            order.push(index);
+        }
+    }
+    (!order.is_empty()).then_some(order)
+}
+
 fn cycle_order(supported: &[u8]) -> Vec<u8> {
     let calibration = thermal_profile::calibration_path()
         .and_then(|path| fs::read(path).ok())
@@ -754,7 +819,7 @@ fn cycle_order_from(
 /// The manual notes mode switching only works with the battery at 40% or above;
 /// below that the firmware silently refuses, so say so instead of leaving the
 /// user wondering why the key did nothing.
-fn cycle_thermal_profile(logger: &mut Logger) {
+fn cycle_thermal_profile(logger: &mut Logger, config_path: &Path) {
     let Some(firmware) = read_firmware_profiles() else {
         logger.debug("Tecla de modo: firmware não expõe thermal_profile");
         return;
@@ -780,14 +845,21 @@ fn cycle_thermal_profile(logger: &mut Logger) {
         }
     }
 
-    let order = cycle_order(&firmware.supported);
+    // Re-read per press rather than caching: the lists are edited in the GUI,
+    // and a mode key that needed a daemon restart to pick up a setting change
+    // would feel broken.
+    let config = load_config(config_path);
+    let on_ac = on_ac_power().unwrap_or(true);
+    let order = custom_cycle_order(&config, on_ac, &firmware.supported)
+        .unwrap_or_else(|| cycle_order(&firmware.supported));
     let next = match firmware
         .current
         .and_then(|current| order.iter().position(|index| *index == current))
     {
         Some(position) => order[(position + 1) % order.len()],
-        // The firmware boots into an index it then refuses to accept back, so
-        // the current one may not be in the list at all.
+        // Either the firmware booted into an index it refuses to accept back,
+        // or the user picked a mode outside their own cycle in the app. Both
+        // resolve the same way: step back onto the start of the cycle.
         None => order[0],
     };
 

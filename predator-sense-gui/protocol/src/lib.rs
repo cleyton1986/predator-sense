@@ -400,6 +400,12 @@ pub mod helper {
         /// controller's own ranges by the helper. Opcode is this keyboard's
         /// effect id - see `hardware::keyboard_rgb::Effect`.
         ChiconyEffect,
+        /// Mode-key cycles, as comma-separated WMI profile indices, written to
+        /// facer's `mode_cycle_ac`/`mode_cycle_battery`. Args: AC BATTERY,
+        /// either of which may be `skip` to leave that list alone. The key is
+        /// handled entirely in the kernel on this hardware, so the cycle has
+        /// to live there too.
+        ModeCycle,
         /// Raw firmware thermal-profile index (facer's `thermal_profile`).
         /// Write-only here: both that attribute and `thermal_profile_supported`
         /// are world-readable, so the app reads them directly.
@@ -450,7 +456,7 @@ pub mod helper {
     }
 
     impl Action {
-        pub const ALL: [Self; 48] = [
+        pub const ALL: [Self; 49] = [
             Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
@@ -491,6 +497,7 @@ pub mod helper {
             Self::ChiconyColor,
             Self::ChiconySeq,
             Self::ChiconyEffect,
+            Self::ModeCycle,
             Self::ThermalProfile,
             Self::BootReapplyThermal,
             Self::TempLimitCaps,
@@ -543,6 +550,7 @@ pub mod helper {
                 "chicony-color" => Some(Self::ChiconyColor),
                 "chicony-seq" => Some(Self::ChiconySeq),
                 "chicony-effect" => Some(Self::ChiconyEffect),
+                "mode-cycle" => Some(Self::ModeCycle),
                 "thermal-profile" => Some(Self::ThermalProfile),
                 "boot-reapply-thermal" => Some(Self::BootReapplyThermal),
                 "temp-limit-caps" => Some(Self::TempLimitCaps),
@@ -597,6 +605,7 @@ pub mod helper {
                 Self::ChiconyColor => "chicony-color",
                 Self::ChiconySeq => "chicony-seq",
                 Self::ChiconyEffect => "chicony-effect",
+                Self::ModeCycle => "mode-cycle",
                 Self::ThermalProfile => "thermal-profile",
                 Self::BootReapplyThermal => "boot-reapply-thermal",
                 Self::TempLimitCaps => "temp-limit-caps",
@@ -649,6 +658,7 @@ pub mod helper {
                 Self::ChiconyRgb => 4,
                 Self::ChiconyColor => 4,
                 Self::ChiconyEffect => 7,
+                Self::ModeCycle => 2,
                 Self::ChiconySeq => 1,
                 Self::ThermalProfile => 1,
                 Self::BootReapplyThermal => 1,
@@ -704,6 +714,7 @@ pub mod helper {
                 Self::ChiconyRgb => "chicony-rgb EFFECT BRIGHTNESS COLOR SPEED",
                 Self::ChiconyColor => "chicony-color RED GREEN BLUE BRIGHTNESS",
                 Self::ChiconyEffect => "chicony-effect OPCODE SPEED BRIGHTNESS RED GREEN BLUE DIRECTION",
+                Self::ModeCycle => "mode-cycle AC|skip BATTERY|skip",
                 Self::ChiconySeq => "chicony-seq HEXPACKETS",
                 Self::ThermalProfile => "thermal-profile INDEX",
                 Self::BootReapplyThermal => "boot-reapply-thermal USER_HOME",

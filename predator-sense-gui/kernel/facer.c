@@ -3642,6 +3642,135 @@ static int acer_platform_profile_setup(void)
 }
 #endif
 
+/*
+ * User-defined mode-key cycles, in WMI profile indices (Quiet 0, Balanced 1,
+ * Performance 4, Turbo 5, Eco 6 - see enum
+ * acer_predator_v4_thermal_profile_wmi_index).
+ *
+ * The built-in cycle below is a fixed ladder through every profile the
+ * firmware has. That is rarely what anyone wants: Turbo is pointless on
+ * battery, Eco is pointless on AC, and which of the middle three matter is a
+ * matter of taste. These let userspace say exactly which profiles the key
+ * visits and in what order, per power source. Empty (the default) keeps the
+ * original behaviour untouched.
+ */
+#define ACER_MODE_CYCLE_MAX 8
+
+static u8 mode_cycle_ac[ACER_MODE_CYCLE_MAX];
+static u8 mode_cycle_ac_len;
+static u8 mode_cycle_battery[ACER_MODE_CYCLE_MAX];
+static u8 mode_cycle_battery_len;
+static DEFINE_MUTEX(mode_cycle_lock);
+
+static ssize_t mode_cycle_format(char *buf, const u8 *cycle, u8 len)
+{
+	ssize_t written = 0;
+	u8 i;
+
+	mutex_lock(&mode_cycle_lock);
+	for (i = 0; i < len; i++)
+		written += sysfs_emit_at(buf, written, i ? ",%u" : "%u", cycle[i]);
+	written += sysfs_emit_at(buf, written, "\n");
+	mutex_unlock(&mode_cycle_lock);
+	return written;
+}
+
+static ssize_t mode_cycle_parse(const char *buf, size_t count, u8 *cycle, u8 *len)
+{
+	u8 parsed[ACER_MODE_CYCLE_MAX];
+	u8 parsed_len = 0;
+	const char *cursor = buf;
+
+	while (*cursor && cursor < buf + count) {
+		unsigned int value;
+		int consumed;
+
+		while (*cursor == ',' || *cursor == ' ' || *cursor == '\t' ||
+		       *cursor == '\n')
+			cursor++;
+		if (!*cursor || cursor >= buf + count)
+			break;
+		if (sscanf(cursor, "%u%n", &value, &consumed) != 1)
+			return -EINVAL;
+		if (value > U8_MAX)
+			return -EINVAL;
+		if (parsed_len >= ACER_MODE_CYCLE_MAX)
+			return -E2BIG;
+		parsed[parsed_len++] = (u8)value;
+		cursor += consumed;
+	}
+
+	mutex_lock(&mode_cycle_lock);
+	memcpy(cycle, parsed, parsed_len);
+	*len = parsed_len;
+	mutex_unlock(&mode_cycle_lock);
+	return count;
+}
+
+static ssize_t mode_cycle_ac_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	return mode_cycle_format(buf, mode_cycle_ac, mode_cycle_ac_len);
+}
+
+static ssize_t mode_cycle_ac_store(struct device *dev,
+				   struct device_attribute *attr,
+				   const char *buf, size_t count)
+{
+	return mode_cycle_parse(buf, count, mode_cycle_ac, &mode_cycle_ac_len);
+}
+
+static ssize_t mode_cycle_battery_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	return mode_cycle_format(buf, mode_cycle_battery,
+				 mode_cycle_battery_len);
+}
+
+static ssize_t mode_cycle_battery_store(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf, size_t count)
+{
+	return mode_cycle_parse(buf, count, mode_cycle_battery,
+				&mode_cycle_battery_len);
+}
+
+static DEVICE_ATTR_RW(mode_cycle_ac);
+static DEVICE_ATTR_RW(mode_cycle_battery);
+
+/*
+ * Next profile in the user's cycle, or -1 when no cycle applies.
+ *
+ * A current profile outside the cycle - the user picked something else in an
+ * app - resolves to the first entry rather than being refused, so the key
+ * always lands back on a profile the user asked for.
+ */
+static int acer_mode_cycle_next(bool on_ac)
+{
+	const u8 *cycle = on_ac ? mode_cycle_ac : mode_cycle_battery;
+	u8 len = on_ac ? mode_cycle_ac_len : mode_cycle_battery_len;
+	int next = -1;
+	u8 current_index;
+	u8 i;
+
+	if (!len)
+		return -1;
+	if (WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_PLATFORM_PROFILE,
+					 &current_index))
+		return -1;
+
+	mutex_lock(&mode_cycle_lock);
+	next = cycle[0];
+	for (i = 0; i < len; i++) {
+		if (cycle[i] == current_index) {
+			next = cycle[(i + 1) % len];
+			break;
+		}
+	}
+	mutex_unlock(&mode_cycle_lock);
+	return next;
+}
+
 static int acer_thermal_profile_change(void)
 {
 	/*
@@ -3651,6 +3780,7 @@ static int acer_thermal_profile_change(void)
 	if (quirks->predator_v4) {
 		u8 current_tp;
 		int tp, err;
+		int next_in_cycle;
 		u64 on_AC;
 		acpi_status status;
 
@@ -3667,6 +3797,18 @@ static int acer_thermal_profile_change(void)
 
 		if (ACPI_FAILURE(status))
 			return -EIO;
+
+		/*
+		 * A user-defined cycle replaces the fixed ladder below entirely,
+		 * including its battery special-case: if someone lists Turbo on
+		 * battery that is their call, not the driver's.
+		 */
+		next_in_cycle = acer_mode_cycle_next(on_AC != 0);
+		if (next_in_cycle >= 0) {
+			tp = ((u32)next_in_cycle << 8) |
+			     ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET_WMI;
+			goto apply;
+		}
 
 		switch (current_tp) {
 		case ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO:
@@ -3711,6 +3853,7 @@ static int acer_thermal_profile_change(void)
 			return -EOPNOTSUPP;
 		}
 
+apply:
 		status = WMI_gaming_execute_u64(
 			ACER_WMID_SET_GAMING_MISC_SETTING_METHODID, tp, NULL);
 
@@ -4356,6 +4499,12 @@ static int acer_platform_probe(struct platform_device *device)
 		if (device_create_file(&device->dev, &dev_attr_thermal_profile_supported))
 			dev_warn(&device->dev,
 				 "failed to create thermal_profile_supported sysfs attribute\n");
+		if (device_create_file(&device->dev, &dev_attr_mode_cycle_ac))
+			dev_warn(&device->dev,
+				 "failed to create mode_cycle_ac sysfs attribute\n");
+		if (device_create_file(&device->dev, &dev_attr_mode_cycle_battery))
+			dev_warn(&device->dev,
+				 "failed to create mode_cycle_battery sysfs attribute\n");
 	}
 
 	return 0;

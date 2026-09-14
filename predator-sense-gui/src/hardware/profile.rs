@@ -123,7 +123,7 @@ impl PowerProfile {
         }
     }
 
-    fn from_id(id: &str) -> Option<Self> {
+    pub fn from_id(id: &str) -> Option<Self> {
         match id.trim() {
             "quiet" => Some(Self::Quiet),
             "balanced" => Some(Self::Balanced),
@@ -159,6 +159,33 @@ impl PowerProfile {
             _ => Self::Balanced,
         }
     }
+}
+
+/// Pushes the user's mode-key cycles down to the driver.
+///
+/// The mode key is handled inside the kernel on this hardware - no input event
+/// reaches userspace at all - so the cycle has to be installed in facer rather
+/// than acted on here. Config stores profile ids; facer speaks raw WMI profile
+/// indices, and which index a tier maps to is per-machine, so the measured
+/// calibration is what translates between them.
+pub fn push_mode_cycles(ac: &[String], battery: &[String]) -> Result<(), String> {
+    let Some(calibration) = crate::hardware::thermal_profile::load() else {
+        // Nothing measured yet: leaving the driver's own ladder in place is
+        // better than installing a cycle built on guessed indices.
+        return Ok(());
+    };
+    let encode = |ids: &[String]| {
+        ids.iter()
+            .filter_map(|id| PowerProfile::from_id(id))
+            .filter_map(|profile| calibration.index_for_tier(profile.index() as u8))
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    crate::hardware::helper::execute(
+        HelperAction::ModeCycle,
+        &[&encode(ac), &encode(battery)],
+    )
 }
 
 #[derive(Debug, Clone, Copy)]

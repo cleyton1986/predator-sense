@@ -269,6 +269,45 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         crate::hardware::alerts::set_enabled(cfg.temp_alerts);
         crate::hardware::power_profile::set_auto(cfg.auto_profile_ac);
         crate::hardware::power_profile::set_target_profiles(cfg.profile_ac, cfg.profile_battery);
+        crate::hardware::power_profile::set_auto_eco(cfg.auto_eco_enabled, cfg.auto_eco_threshold);
+
+        // The cycles live in the kernel module, which forgets them on every
+        // reload and every boot, so they are pushed back on each start.
+        {
+            let ac = cfg.mode_cycle_ac.clone();
+            let battery = cfg.mode_cycle_battery.clone();
+            background::run(
+                move || crate::hardware::profile::push_mode_cycles(&ac, &battery),
+                |result| {
+                    if let Err(error) = result {
+                        crate::hardware::applog::error(&format!(
+                            "startup: mode-key cycle not installed: {error}"
+                        ));
+                    }
+                },
+            );
+        }
+
+        // Startup mode. Applied once, off-thread: the firmware picks its own
+        // index on every power cycle, so without this the machine comes back
+        // wherever the EC left it rather than where the user actually wants to
+        // start.
+        if let Some(default_mode) = cfg
+            .mode_default
+            .as_deref()
+            .and_then(crate::hardware::profile::PowerProfile::from_id)
+        {
+            background::run(
+                move || crate::hardware::profile::set_profile(default_mode),
+                |result| {
+                    if let Err(error) = result {
+                        crate::hardware::applog::error(&format!(
+                            "startup: default mode not applied: {error}"
+                        ));
+                    }
+                },
+            );
+        }
         crate::hardware::applog::set_enabled(cfg.debug_logging);
         crate::hardware::profile::set_keep_fan_auto_in_performance(
             cfg.keep_fan_auto_in_performance,

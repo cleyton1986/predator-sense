@@ -281,6 +281,25 @@ pub struct AppConfig {
     /// a click is as deliberate as a keystroke - this is only about motion.
     #[serde(default = "default_true")]
     pub idle_mouse_wakes: bool,
+
+    /// Which modes the physical mode key steps through, in order, as
+    /// `PowerProfile::to_id()` values. Separate lists per power source: the
+    /// useful set genuinely differs (nobody wants Turbo on battery, and Eco is
+    /// pointless on AC). Empty means "use the firmware's own full order",
+    /// which is what happened before this existed.
+    #[serde(default)]
+    pub mode_cycle_ac: Vec<String>,
+    #[serde(default)]
+    pub mode_cycle_battery: Vec<String>,
+    /// Mode applied at startup. `None` leaves whatever the firmware booted into.
+    #[serde(default)]
+    pub mode_default: Option<String>,
+    /// Drop to Eco automatically below `auto_eco_threshold` percent, and come
+    /// back to the normal battery profile above it.
+    #[serde(default)]
+    pub auto_eco_enabled: bool,
+    #[serde(default = "default_auto_eco_threshold")]
+    pub auto_eco_threshold: u32,
     /// None means the user has never applied a cover-logo setting, so automatic
     /// restoration must leave the controller's firmware default untouched.
     #[serde(default)]
@@ -408,6 +427,10 @@ fn default_idle_secs() -> u32 {
     30
 }
 
+fn default_auto_eco_threshold() -> u32 {
+    30
+}
+
 fn default_rgb_brightness() -> u8 {
     100
 }
@@ -468,6 +491,11 @@ impl Default for AppConfig {
             idle_bar_enabled: true,
             idle_bar_secs: default_idle_secs(),
             idle_mouse_wakes: true,
+            mode_cycle_ac: Vec::new(),
+            mode_cycle_battery: Vec::new(),
+            mode_default: None,
+            auto_eco_enabled: false,
+            auto_eco_threshold: default_auto_eco_threshold(),
             cover_logo: None,
             battery_limiter: false,
             battery_health_mode: false,

@@ -163,6 +163,27 @@ fn chicony_effect_apply(
     ])
 }
 
+/// Writes one mode-key cycle to facer. `skip` leaves the list untouched; an
+/// empty value clears it, which returns the key to the driver's built-in
+/// ladder. Values are validated as plain u8s here so a malformed config can
+/// never push junk at a kernel interface.
+fn write_mode_cycle(sysfs: &Path, attribute: &str, value: &str) -> AppResult {
+    if value == "skip" {
+        return Ok(());
+    }
+    let mut indices = Vec::new();
+    for field in value.split(',').filter(|field| !field.trim().is_empty()) {
+        let index: u8 = field
+            .trim()
+            .parse()
+            .map_err(|_| fail(format!("mode-cycle: '{field}' is not a profile index")))?;
+        indices.push(index.to_string());
+    }
+    let path = sysfs.join("devices/platform/acer-wmi").join(attribute);
+    fs::write(&path, format!("{}\n", indices.join(",")))
+        .map_err(|error| fail(format!("mode-cycle: writing {}: {error}", path.display())))
+}
+
 fn chicony_send(payload: &[u8; 8]) -> AppResult {
     chicony_send_many(&[*payload])
 }
@@ -662,6 +683,10 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
             let blue = parse_u16("blue", &args[3], 0, 255)? as u8;
             let brightness = parse_u16("brightness", &args[4], 0, 100)? as u8;
             chicony_color_apply(red, green, blue, brightness)
+        }
+        HelperAction::ModeCycle => {
+            write_mode_cycle(sysfs, "mode_cycle_ac", &args[1])?;
+            write_mode_cycle(sysfs, "mode_cycle_battery", &args[2])
         }
         HelperAction::ChiconyEffect => {
             let opcode = parse_u16("opcode", &args[1], 0, 255)? as u8;
