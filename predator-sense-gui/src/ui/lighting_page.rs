@@ -32,6 +32,14 @@ const APPLY_DEBOUNCE_MS: u32 = 120;
 struct LightingState {
     keyboard: KeyboardState,
     light_bar: LightBarState,
+    /// The scheme being edited, if any. While set, every live change is
+    /// written into it as well as to the hardware - selecting a scheme is how
+    /// you edit it, rather than having to re-save it by name afterwards.
+    editing: Option<String>,
+    /// Set while widgets are being refreshed from state (selecting a scheme,
+    /// say). Their change handlers fire during that, and without this they
+    /// would write the half-updated widget values straight back out.
+    suppress: bool,
 }
 
 pub fn build() -> gtk::ScrolledWindow {
@@ -49,6 +57,8 @@ pub fn build() -> gtk::ScrolledWindow {
     let state = Rc::new(RefCell::new(LightingState {
         keyboard: cfg.keyboard_rgb.unwrap_or_default(),
         light_bar: cfg.light_bar.unwrap_or_default(),
+        editing: None,
+        suppress: false,
     }));
 
     let have_keyboard = keyboard_rgb::is_available();
@@ -63,14 +73,34 @@ pub fn build() -> gtk::ScrolledWindow {
         return scroll;
     }
 
-    shell.append(&build_scheme_bar(&state));
-    if have_keyboard {
+    // Sections are built first so the scheme bar can be handed a way to push a
+    // selected scheme back into their widgets, even though it is shown above
+    // them.
+    let mut refreshers: Vec<Rc<dyn Fn()>> = Vec::new();
+    let keyboard_section = have_keyboard.then(|| {
+        let (section, refresh) = build_keyboard_section(&state);
+        refreshers.push(refresh);
+        section
+    });
+    let bar_section = have_bar.then(|| {
+        let (section, refresh) = build_light_bar_section(&state);
+        refreshers.push(refresh);
+        section
+    });
+    let refresh_all: Rc<dyn Fn()> = Rc::new(move || {
+        for refresh in &refreshers {
+            refresh();
+        }
+    });
+
+    shell.append(&build_scheme_bar(&state, refresh_all));
+    if let Some(section) = keyboard_section {
         shell.append(&section_separator());
-        shell.append(&build_keyboard_section(&state));
+        shell.append(&section);
     }
-    if have_bar {
+    if let Some(section) = bar_section {
         shell.append(&section_separator());
-        shell.append(&build_light_bar_section(&state));
+        shell.append(&section);
     }
     shell.append(&section_separator());
     shell.append(&build_idle_section(have_keyboard, have_bar));
@@ -274,7 +304,9 @@ fn build_color_control(
     (column, set_color)
 }
 
-fn build_keyboard_section(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
+fn build_keyboard_section(
+    state: &Rc<RefCell<LightingState>>,
+) -> (gtk::Box, Rc<dyn Fn()>) {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
     page.append(&section_title(crate::i18n::t("lighting_keyboard")));
 
@@ -287,6 +319,9 @@ fn build_keyboard_section(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
         let state = state.clone();
         let status = status.clone();
         Rc::new(move || {
+            if state.borrow().suppress {
+                return;
+            }
             let keyboard = state.borrow().keyboard;
             let result = keyboard_rgb::apply(&keyboard);
             if result.is_ok() {
@@ -294,6 +329,7 @@ fn build_keyboard_section(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
                 cfg.keyboard_rgb = Some(keyboard);
                 let _ = config::save_app_config(&cfg);
                 crate::hardware::idle::mark_active();
+                store_into_edited_scheme(&state, |scheme| scheme.keyboard = Some(keyboard));
                 store_into_bound_scheme(|scheme| scheme.keyboard = Some(keyboard));
             }
             show_error(&status, result);
@@ -358,7 +394,7 @@ fn build_keyboard_section(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
             commit();
         })
     };
-    let (color_column, _set_color) =
+    let (color_column, set_color) =
         build_color_control((initial.red, initial.green, initial.blue), on_pick);
 
     let sync_visibility = {
@@ -436,10 +472,50 @@ fn build_keyboard_section(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
     }
 
     page.append(&status);
-    page
+
+    // Pushes `state.keyboard` back out into the widgets. Selecting a scheme
+    // has to move the controls, not just the hardware, or there is nothing to
+    // edit against.
+    let refresh: Rc<dyn Fn()> = {
+        let state = state.clone();
+        let buttons = buttons.clone();
+        let bright_scale = bright_scale.clone();
+        let speed_scale = speed_scale.clone();
+        let dir_a = dir_a.clone();
+        let dir_b = dir_b.clone();
+        let set_color = set_color.clone();
+        let sync_visibility = sync_visibility.clone();
+        Rc::new(move || {
+            let keyboard = state.borrow().keyboard;
+            state.borrow_mut().suppress = true;
+            for (effect, button) in buttons.iter() {
+                let selected = *effect == keyboard.effect;
+                button.set_active(selected);
+                if selected {
+                    button.add_css_class("mode-active");
+                } else {
+                    button.remove_css_class("mode-active");
+                }
+            }
+            bright_scale.set_value(keyboard.brightness as f64);
+            speed_scale.set_value(keyboard.speed as f64);
+            if keyboard.direction == 2 {
+                dir_b.set_active(true);
+            } else {
+                dir_a.set_active(true);
+            }
+            set_color((keyboard.red, keyboard.green, keyboard.blue));
+            sync_visibility(keyboard.effect);
+            state.borrow_mut().suppress = false;
+        })
+    };
+
+    (page, refresh)
 }
 
-fn build_light_bar_section(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
+fn build_light_bar_section(
+    state: &Rc<RefCell<LightingState>>,
+) -> (gtk::Box, Rc<dyn Fn()>) {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
     page.append(&section_title(crate::i18n::t("light_bar_section")));
     page.append(&hint(crate::i18n::t("light_bar_note")));
@@ -451,6 +527,9 @@ fn build_light_bar_section(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
         let state = state.clone();
         let status = status.clone();
         Rc::new(move || {
+            if state.borrow().suppress {
+                return;
+            }
             let bar = state.borrow().light_bar;
             let cfg = config::load_app_config();
             let wake = cfg
@@ -463,6 +542,7 @@ fn build_light_bar_section(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
                 cfg.light_bar = Some(bar);
                 let _ = config::save_app_config(&cfg);
                 crate::hardware::idle::mark_active();
+                store_into_edited_scheme(&state, |scheme| scheme.light_bar = Some(bar));
                 store_into_bound_scheme(|scheme| scheme.light_bar = Some(bar));
             }
             show_error(&status, result);
@@ -504,7 +584,7 @@ fn build_light_bar_section(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
             commit();
         })
     };
-    let (color_column, _set_color) =
+    let (color_column, set_color) =
         build_color_control((initial.red, initial.green, initial.blue), on_pick);
 
     let sync_visibility = {
@@ -579,87 +659,252 @@ fn build_light_bar_section(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
     }
 
     page.append(&status);
-    page
+
+    let refresh: Rc<dyn Fn()> = {
+        let state = state.clone();
+        let buttons = buttons.clone();
+        let bright_scale = bright_scale.clone();
+        let speed_scale = speed_scale.clone();
+        let set_color = set_color.clone();
+        let sync_visibility = sync_visibility.clone();
+        Rc::new(move || {
+            let bar = state.borrow().light_bar;
+            state.borrow_mut().suppress = true;
+            for (mode, button) in buttons.iter() {
+                let selected = *mode == bar.mode;
+                button.set_active(selected);
+                if selected {
+                    button.add_css_class("mode-active");
+                } else {
+                    button.remove_css_class("mode-active");
+                }
+            }
+            bright_scale.set_value(bar.brightness as f64);
+            speed_scale.set_value(bar.speed as f64);
+            set_color((bar.red, bar.green, bar.blue));
+            sync_visibility(bar.mode);
+            state.borrow_mut().suppress = false;
+        })
+    };
+
+    (page, refresh)
 }
 
-/// One idle switch covering both devices.
+/// Idle settings for both devices.
 ///
-/// The keyboard's timeout is a firmware function; the light bar has none, so
-/// the app blanks it from the same input-activity signal at the same interval.
-/// Keeping them on one switch is the point - two independent timers on one
-/// chassis just means the bar and the keys go dark at different moments.
+/// One timer owns both. The keyboard has a firmware timeout of its own, but it
+/// only watches key presses - it cannot see the mouse - and it runs on its own
+/// clock, so with it in charge the two devices went dark about a second apart
+/// and moving the mouse woke only the light bar. Enabling idle here turns that
+/// firmware timer off and drives both from the app instead, which is the only
+/// way they can actually agree.
 fn build_idle_section(have_keyboard: bool, have_bar: bool) -> gtk::Box {
-    let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
     page.append(&section_title(crate::i18n::t("lighting_idle")));
 
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    let switch = gtk::Switch::new();
-    switch.set_valign(gtk::Align::Center);
-    switch.set_sensitive(!have_keyboard);
-    let label = gtk::Label::new(Some(crate::i18n::t("lighting_idle_switch")));
-    label.set_halign(gtk::Align::Start);
-    row.append(&switch);
-    row.append(&label);
-    page.append(&row);
+    let cfg = config::load_app_config();
+
+    let master_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let master = gtk::Switch::new();
+    master.set_valign(gtk::Align::Center);
+    master.set_active(cfg.idle_enabled);
+    let master_label = gtk::Label::new(Some(crate::i18n::t("lighting_idle_switch")));
+    master_label.set_halign(gtk::Align::Start);
+    master_row.append(&master);
+    master_row.append(&master_label);
+    page.append(&master_row);
     page.append(&hint(crate::i18n::t("lighting_idle_desc")));
 
-    let cfg = config::load_app_config();
+    // Everything below is meaningless while the master switch is off.
+    let details = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    details.set_margin_start(12);
+    details.set_sensitive(cfg.idle_enabled);
+    page.append(&details);
+
+    let delays: [(u32, &str); 6] = [
+        (10, "idle_10s"),
+        (30, "idle_30s"),
+        (60, "idle_1m"),
+        (300, "idle_5m"),
+        (600, "idle_10m"),
+        (1800, "idle_30m"),
+    ];
+    let delay_index = |secs: u32| {
+        delays
+            .iter()
+            .position(|(value, _)| *value == secs)
+            .unwrap_or(1) as u32
+    };
+    let delay_model = || {
+        gtk::StringList::new(
+            &delays
+                .iter()
+                .map(|(_, key)| crate::i18n::t(key))
+                .collect::<Vec<_>>(),
+        )
+    };
+
+    // --- sync toggle ---
+    let sync_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let sync_switch = gtk::Switch::new();
+    sync_switch.set_valign(gtk::Align::Center);
+    sync_switch.set_active(cfg.idle_synced);
+    let sync_label = gtk::Label::new(Some(crate::i18n::t("idle_sync")));
+    sync_label.set_halign(gtk::Align::Start);
+    sync_row.append(&sync_switch);
+    sync_row.append(&sync_label);
+    details.append(&sync_row);
+    details.append(&hint(crate::i18n::t("idle_sync_desc")));
+
+    // --- per-device rows ---
+    let device_row = |label_key: &str,
+                      enabled: bool,
+                      secs: u32|
+     -> (gtk::Box, gtk::CheckButton, gtk::DropDown) {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        let check = gtk::CheckButton::with_label(crate::i18n::t(label_key));
+        check.set_active(enabled);
+        let after = gtk::Label::new(Some(crate::i18n::t("idle_after")));
+        let drop = gtk::DropDown::new(Some(delay_model()), gtk::Expression::NONE);
+        drop.set_selected(delay_index(secs));
+        drop.set_valign(gtk::Align::Center);
+        row.append(&check);
+        row.append(&after);
+        row.append(&drop);
+        (row, check, drop)
+    };
+
+    let (kb_row, kb_check, kb_delay) = device_row(
+        "lighting_keyboard",
+        cfg.idle_keyboard_enabled,
+        cfg.idle_keyboard_secs,
+    );
+    let (bar_row, bar_check, bar_delay) =
+        device_row("light_bar_section", cfg.idle_bar_enabled, cfg.idle_bar_secs);
     if have_keyboard {
-        // The firmware state is the source of truth for the keyboard half, and
-        // reading it goes through the EC helper, so seed off-thread and only
-        // then wire the handler.
-        let switch = switch.clone();
-        background::run(
-            || crate::hardware::extras::get_backlight_timeout(),
-            move |firmware_enabled| {
-                let cfg = config::load_app_config();
-                let active = firmware_enabled || cfg.light_bar_idle_enabled;
-                switch.set_active(active);
-                // Reconcile rather than just display: the keyboard's firmware
-                // timeout is frequently already on from the factory, which
-                // rendered this switch ON while the light bar half had never
-                // been enabled - so the bar never blanked and the switch gave
-                // no hint that half of it was inert.
-                if active != cfg.light_bar_idle_enabled {
-                    apply_idle_setting(active, false, have_bar);
-                }
-                switch.connect_state_set(move |_, active| {
-                    apply_idle_setting(active, true, have_bar);
-                    glib::Propagation::Proceed
-                });
-                switch.set_sensitive(true);
-            },
-        );
-    } else {
-        switch.set_active(cfg.light_bar_idle_enabled);
-        switch.connect_state_set(move |_, active| {
-            apply_idle_setting(active, false, have_bar);
+        details.append(&kb_row);
+    }
+    if have_bar {
+        details.append(&bar_row);
+    }
+
+    // While synced, the keyboard's delay is the shared one and the bar's own
+    // control would be a lie, so it is disabled rather than silently ignored.
+    let apply_sync_visibility = {
+        let bar_delay = bar_delay.clone();
+        move |synced: bool| bar_delay.set_sensitive(!synced)
+    };
+    apply_sync_visibility(cfg.idle_synced);
+
+    // --- mouse ---
+    let mouse_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let mouse_check = gtk::CheckButton::with_label(crate::i18n::t("idle_mouse"));
+    mouse_check.set_active(cfg.idle_mouse_wakes);
+    mouse_row.append(&mouse_check);
+    details.append(&mouse_row);
+    details.append(&hint(crate::i18n::t("idle_mouse_desc")));
+
+    // --- wiring ---
+    {
+        let details = details.clone();
+        master.connect_state_set(move |_, active| {
+            details.set_sensitive(active);
+            let mut cfg = config::load_app_config();
+            cfg.idle_enabled = active;
+            // Keep the legacy flag in step so an older build reading this
+            // config does not disagree with the new one.
+            cfg.light_bar_idle_enabled = active && cfg.idle_bar_enabled;
+            let _ = config::save_app_config(&cfg);
+            if active {
+                // One owner - see this function's doc comment.
+                let _ = crate::hardware::extras::set_backlight_timeout(false);
+                crate::hardware::idle::start();
+                crate::hardware::idle::mark_active();
+            } else {
+                crate::hardware::keyboard_rgb::unblank();
+                crate::hardware::light_bar::unblank();
+            }
             glib::Propagation::Proceed
         });
     }
+    {
+        let apply_sync_visibility = apply_sync_visibility.clone();
+        sync_switch.connect_state_set(move |_, active| {
+            let mut cfg = config::load_app_config();
+            cfg.idle_synced = active;
+            let _ = config::save_app_config(&cfg);
+            apply_sync_visibility(active);
+            glib::Propagation::Proceed
+        });
+    }
+    kb_check.connect_toggled(|check| {
+        let mut cfg = config::load_app_config();
+        cfg.idle_keyboard_enabled = check.is_active();
+        let _ = config::save_app_config(&cfg);
+        if !check.is_active() {
+            crate::hardware::keyboard_rgb::unblank();
+        }
+    });
+    bar_check.connect_toggled(|check| {
+        let mut cfg = config::load_app_config();
+        cfg.idle_bar_enabled = check.is_active();
+        cfg.light_bar_idle_enabled = cfg.idle_enabled && check.is_active();
+        let _ = config::save_app_config(&cfg);
+        if !check.is_active() {
+            crate::hardware::light_bar::unblank();
+        }
+    });
+    kb_delay.connect_selected_notify(move |drop| {
+        let mut cfg = config::load_app_config();
+        cfg.idle_keyboard_secs = delays
+            .get(drop.selected() as usize)
+            .map(|(secs, _)| *secs)
+            .unwrap_or(30);
+        let _ = config::save_app_config(&cfg);
+        crate::hardware::idle::mark_active();
+    });
+    bar_delay.connect_selected_notify(move |drop| {
+        let mut cfg = config::load_app_config();
+        cfg.idle_bar_secs = delays
+            .get(drop.selected() as usize)
+            .map(|(secs, _)| *secs)
+            .unwrap_or(30);
+        let _ = config::save_app_config(&cfg);
+        crate::hardware::idle::mark_active();
+    });
+    mouse_check.connect_toggled(|check| {
+        let mut cfg = config::load_app_config();
+        cfg.idle_mouse_wakes = check.is_active();
+        let _ = config::save_app_config(&cfg);
+        crate::hardware::idle::mark_active();
+    });
 
     page
-}
-
-fn apply_idle_setting(active: bool, touch_firmware: bool, have_bar: bool) {
-    if touch_firmware {
-        let _ = crate::hardware::extras::set_backlight_timeout(active);
-    }
-    let mut cfg = config::load_app_config();
-    cfg.light_bar_idle_enabled = active && have_bar;
-    let _ = config::save_app_config(&cfg);
-    if active {
-        crate::hardware::idle::start();
-        crate::hardware::idle::mark_active();
-    } else if have_bar {
-        // Switching the feature off must never leave the bar dark.
-        light_bar::restore_from_config();
-    }
 }
 
 /// Writes the just-applied half into whichever scheme is bound to the mode the
 /// machine is in right now, so a hand-picked colour sticks rather than being
 /// reverted the next time that mode is re-entered.
+/// Writes the just-applied half into the scheme currently being edited.
+fn store_into_edited_scheme(
+    state: &Rc<RefCell<LightingState>>,
+    edit: impl Fn(&mut LightingScheme),
+) {
+    let Some(name) = state.borrow().editing.clone() else {
+        return;
+    };
+    let mut cfg = config::load_app_config();
+    let Some(scheme) = cfg
+        .lighting_schemes
+        .iter_mut()
+        .find(|scheme| scheme.name == name)
+    else {
+        return;
+    };
+    edit(scheme);
+    let _ = config::save_app_config(&cfg);
+}
+
 fn store_into_bound_scheme(edit: impl Fn(&mut LightingScheme)) {
     let Some(current) = crate::hardware::profile::get_current_profile() else {
         return;
@@ -691,7 +936,10 @@ fn scheme_names(cfg: &AppConfig) -> Vec<String> {
         .collect()
 }
 
-fn build_scheme_bar(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
+fn build_scheme_bar(
+    state: &Rc<RefCell<LightingState>>,
+    refresh_all: Rc<dyn Fn()>,
+) -> gtk::Box {
     let box_ = gtk::Box::new(gtk::Orientation::Vertical, 10);
     box_.append(&section_title(crate::i18n::t("lighting_schemes")));
     box_.append(&hint(crate::i18n::t("lighting_schemes_desc")));
@@ -714,6 +962,19 @@ fn build_scheme_bar(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
     list.set_halign(gtk::Align::Start);
     box_.append(&list);
 
+    // Says which scheme the controls below are currently editing. Without it
+    // there is no way to tell whether a colour change is going into a scheme
+    // or just into the live state.
+    let editing_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let editing_label = gtk::Label::new(None);
+    editing_label.add_css_class("status-success");
+    editing_label.set_halign(gtk::Align::Start);
+    let stop_editing = gtk::Button::with_label(crate::i18n::t("scheme_stop_editing"));
+    editing_row.append(&editing_label);
+    editing_row.append(&stop_editing);
+    editing_row.set_visible(false);
+    box_.append(&editing_row);
+
     let bindings_title = gtk::Label::new(Some(crate::i18n::t("mode_bindings")));
     bindings_title.add_css_class("cover-logo-section-title");
     bindings_title.set_halign(gtk::Align::Start);
@@ -729,6 +990,9 @@ fn build_scheme_bar(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
         let bindings_box = bindings_box.clone();
         let state = state.clone();
         let rebuild_inner = rebuild.clone();
+        let editing_row = editing_row.clone();
+        let editing_label = editing_label.clone();
+        let refresh_all = refresh_all.clone();
         let build: Box<dyn Fn()> = Box::new(move || {
             let cfg = config::load_app_config();
             let names = scheme_names(&cfg);
@@ -736,10 +1000,14 @@ fn build_scheme_bar(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
             while let Some(child) = list.first_child() {
                 list.remove(&child);
             }
+            let editing = state.borrow().editing.clone();
             for name in &names {
                 let chip = gtk::Box::new(gtk::Orientation::Horizontal, 2);
                 let apply = gtk::Button::with_label(name);
                 apply.add_css_class("mode-button");
+                if editing.as_deref() == Some(name.as_str()) {
+                    apply.add_css_class("mode-active");
+                }
                 apply.set_tooltip_text(Some(crate::i18n::t("scheme_apply_tooltip")));
                 let delete = gtk::Button::from_icon_name("user-trash-symbolic");
                 delete.set_tooltip_text(Some(crate::i18n::t("scheme_delete_tooltip")));
@@ -748,24 +1016,46 @@ fn build_scheme_bar(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
                 {
                     let name = name.clone();
                     let state = state.clone();
+                    let refresh_all = refresh_all.clone();
+                    let rebuild_inner = rebuild_inner.clone();
                     apply.connect_clicked(move |_| {
+                        // Selecting a scheme both applies it and makes it the
+                        // edit target, so the controls below now edit it in
+                        // place rather than some separate "current" state.
                         apply_scheme_by_name(&name, Some(&state));
+                        state.borrow_mut().editing = Some(name.clone());
+                        refresh_all();
+                        if let Some(rebuild) = rebuild_inner.borrow().as_ref() {
+                            rebuild();
+                        }
                     });
                 }
                 {
                     let name = name.clone();
                     let rebuild_inner = rebuild_inner.clone();
+                    let state = state.clone();
                     delete.connect_clicked(move |_| {
                         let mut cfg = config::load_app_config();
                         cfg.lighting_schemes.retain(|scheme| scheme.name != name);
                         cfg.mode_bindings.retain(|binding| binding.scheme != name);
                         let _ = config::save_app_config(&cfg);
+                        if state.borrow().editing.as_deref() == Some(name.as_str()) {
+                            state.borrow_mut().editing = None;
+                        }
                         if let Some(rebuild) = rebuild_inner.borrow().as_ref() {
                             rebuild();
                         }
                     });
                 }
                 list.insert(&chip, -1);
+            }
+
+            match &editing {
+                Some(name) => {
+                    editing_label.set_text(&crate::i18n::tf("scheme_editing", &[name]));
+                    editing_row.set_visible(true);
+                }
+                None => editing_row.set_visible(false),
             }
 
             while let Some(child) = bindings_box.first_child() {
@@ -825,6 +1115,17 @@ fn build_scheme_bar(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
 
     {
         let state = state.clone();
+        let rebuild = rebuild.clone();
+        stop_editing.connect_clicked(move |_| {
+            state.borrow_mut().editing = None;
+            if let Some(rebuild) = rebuild.borrow().as_ref() {
+                rebuild();
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
         let name_entry = name_entry.clone();
         let rebuild = rebuild.clone();
         save.connect_clicked(move |_| {
@@ -851,6 +1152,10 @@ fn build_scheme_bar(state: &Rc<RefCell<LightingState>>) -> gtk::Box {
             }
             let _ = config::save_app_config(&cfg);
             name_entry.set_text("");
+            drop(live);
+            // A scheme you just saved is the one you are most likely to keep
+            // tweaking, so it becomes the edit target immediately.
+            state.borrow_mut().editing = Some(name);
             if let Some(rebuild) = rebuild.borrow().as_ref() {
                 rebuild();
             }

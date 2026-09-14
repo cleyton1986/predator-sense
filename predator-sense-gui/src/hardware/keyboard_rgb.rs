@@ -161,13 +161,33 @@ pub fn apply(state: &KeyboardState) -> Result<(), String> {
     )
 }
 
+static BLANKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True while the idle watcher is holding the backlight off.
+pub fn is_blanked() -> bool {
+    BLANKED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Turns the backlight off without disturbing the stored effect/colour, so the
 /// idle watcher can restore exactly what was showing.
-pub fn set_off() -> Result<(), String> {
+pub fn blank() -> Result<(), String> {
+    let saved = crate::config::load_app_config()
+        .keyboard_rgb
+        .unwrap_or_default();
+    BLANKED.store(true, std::sync::atomic::Ordering::Relaxed);
     apply(&KeyboardState {
         effect: Effect::Off,
-        ..Default::default()
+        ..saved
     })
+}
+
+/// Restores whatever the user last applied.
+pub fn unblank() {
+    BLANKED.store(false, std::sync::atomic::Ordering::Relaxed);
+    let saved = crate::config::load_app_config()
+        .keyboard_rgb
+        .unwrap_or_default();
+    let _ = apply(&saved);
 }
 
 #[cfg(test)]

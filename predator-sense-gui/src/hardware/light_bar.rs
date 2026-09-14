@@ -42,6 +42,8 @@ pub const BRIGHTNESS_MAX: u8 = 100;
 /// and the bar switch off seconds apart.
 pub const IDLE_SECONDS: u64 = 30;
 
+static BLANKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LightBarMode {
     Off,
@@ -195,6 +197,7 @@ pub fn blank() -> Result<(), String> {
     let saved = crate::config::load_app_config()
         .light_bar
         .unwrap_or_default();
+    BLANKED.store(true, std::sync::atomic::Ordering::Relaxed);
     write_frame(&LightBarState {
         brightness: 0,
         ..saved
@@ -212,11 +215,17 @@ pub fn restore_from_config() {
     let _ = apply(&saved, true);
 }
 
+/// True when the bar is currently blanked by the idle watcher.
+pub fn is_blanked() -> bool {
+    BLANKED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Undoes [`blank`]. Blanking only zeroes brightness and leaves the mode
 /// alone, so this is a single frame with no wake step - and therefore no
 /// 300 ms sleep, which matters because the idle watcher calls it from the UI
 /// thread the moment a key is pressed.
 pub fn unblank() {
+    BLANKED.store(false, std::sync::atomic::Ordering::Relaxed);
     let Some(saved) = crate::config::load_app_config().light_bar else {
         return;
     };

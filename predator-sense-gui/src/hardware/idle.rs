@@ -22,8 +22,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
-static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
+/// Key presses and pointer motion are tracked separately so "moving the mouse
+/// wakes the lights" can be a setting rather than an assumption - some people
+/// want the lights to stay off while only the cursor drifts.
+static LAST_KEY_ACTIVITY: AtomicU64 = AtomicU64::new(0);
+static LAST_POINTER_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 static WATCHING: AtomicBool = AtomicBool::new(false);
+
+/// `struct input_event` on 64-bit Linux: two 8-byte timeval fields, then
+/// `u16 type`, `u16 code`, `i32 value`.
+const INPUT_EVENT_SIZE: usize = 24;
+const INPUT_EVENT_TYPE_OFFSET: usize = 16;
+const EV_KEY: u16 = 0x01;
+const EV_REL: u16 = 0x02;
+const EV_ABS: u16 = 0x03;
 
 fn monotonic_secs() -> u64 {
     let mut value = libc::timespec {
@@ -39,13 +51,20 @@ fn monotonic_secs() -> u64 {
     value.tv_sec as u64
 }
 
-/// Seconds since the last key press or pointer movement, or `None` when the
-/// watcher never managed to open any input device.
-pub fn idle_seconds() -> Option<u64> {
+/// Seconds since the last input, or `None` when the watcher never managed to
+/// open any input device.
+///
+/// `pointer_counts` decides whether cursor movement counts as activity; mouse
+/// *buttons* arrive as `EV_KEY` and always count, since a click is as
+/// deliberate as a keystroke.
+pub fn idle_seconds(pointer_counts: bool) -> Option<u64> {
     if !WATCHING.load(Ordering::Relaxed) {
         return None;
     }
-    let last = LAST_ACTIVITY.load(Ordering::Relaxed);
+    let mut last = LAST_KEY_ACTIVITY.load(Ordering::Relaxed);
+    if pointer_counts {
+        last = last.max(LAST_POINTER_ACTIVITY.load(Ordering::Relaxed));
+    }
     Some(monotonic_secs().saturating_sub(last))
 }
 
@@ -53,7 +72,9 @@ pub fn idle_seconds() -> Option<u64> {
 /// lighting, so a fresh apply is never immediately blanked by a stale idle
 /// reading.
 pub fn mark_active() {
-    LAST_ACTIVITY.store(monotonic_secs(), Ordering::Relaxed);
+    let now = monotonic_secs();
+    LAST_KEY_ACTIVITY.store(now, Ordering::Relaxed);
+    LAST_POINTER_ACTIVITY.store(now, Ordering::Relaxed);
 }
 
 fn open_input_devices() -> Vec<File> {
@@ -117,12 +138,30 @@ pub fn start() {
             // descriptors are owned by `devices` and outlive this call.
             let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 1000) };
             if ready > 0 {
-                mark_active();
-                let mut scratch = [0u8; 256];
+                let now = monotonic_secs();
+                let mut scratch = [0u8; 24 * 32];
                 for (index, fd) in fds.iter().enumerate() {
-                    if fd.revents & libc::POLLIN != 0 {
-                        // Drain, or poll would report the same event forever.
-                        while devices[index].read(&mut scratch).is_ok_and(|n| n > 0) {}
+                    if fd.revents & libc::POLLIN == 0 {
+                        continue;
+                    }
+                    // Drain, or poll would report the same event forever.
+                    while let Ok(read) = devices[index].read(&mut scratch) {
+                        if read == 0 {
+                            break;
+                        }
+                        for record in scratch[..read].chunks_exact(INPUT_EVENT_SIZE) {
+                            let kind = u16::from_ne_bytes([
+                                record[INPUT_EVENT_TYPE_OFFSET],
+                                record[INPUT_EVENT_TYPE_OFFSET + 1],
+                            ]);
+                            match kind {
+                                EV_KEY => LAST_KEY_ACTIVITY.store(now, Ordering::Relaxed),
+                                EV_REL | EV_ABS => {
+                                    LAST_POINTER_ACTIVITY.store(now, Ordering::Relaxed)
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
             }

@@ -262,6 +262,25 @@ pub struct AppConfig {
     pub light_bar_idle_enabled: bool,
     #[serde(default = "default_light_bar_idle_secs")]
     pub light_bar_idle_secs: u32,
+    /// Master switch for idle blanking. The per-device switches below only
+    /// matter while this is on.
+    #[serde(default)]
+    pub idle_enabled: bool,
+    /// One timing for both devices. The keyboard's value is the shared one.
+    #[serde(default = "default_true")]
+    pub idle_synced: bool,
+    #[serde(default = "default_true")]
+    pub idle_keyboard_enabled: bool,
+    #[serde(default = "default_idle_secs")]
+    pub idle_keyboard_secs: u32,
+    #[serde(default = "default_true")]
+    pub idle_bar_enabled: bool,
+    #[serde(default = "default_idle_secs")]
+    pub idle_bar_secs: u32,
+    /// Whether cursor movement counts as activity. Mouse *buttons* always do -
+    /// a click is as deliberate as a keystroke - this is only about motion.
+    #[serde(default = "default_true")]
+    pub idle_mouse_wakes: bool,
     /// None means the user has never applied a cover-logo setting, so automatic
     /// restoration must leave the controller's firmware default untouched.
     #[serde(default)]
@@ -384,6 +403,11 @@ fn default_light_bar_idle_secs() -> u32 {
     30
 }
 
+/// Matches the keyboard backlight's factory firmware timeout.
+fn default_idle_secs() -> u32 {
+    30
+}
+
 fn default_rgb_brightness() -> u8 {
     100
 }
@@ -437,6 +461,13 @@ impl Default for AppConfig {
             mode_bindings: Vec::new(),
             light_bar_idle_enabled: false,
             light_bar_idle_secs: default_light_bar_idle_secs(),
+            idle_enabled: false,
+            idle_synced: true,
+            idle_keyboard_enabled: true,
+            idle_keyboard_secs: default_idle_secs(),
+            idle_bar_enabled: true,
+            idle_bar_secs: default_idle_secs(),
+            idle_mouse_wakes: true,
             cover_logo: None,
             battery_limiter: false,
             battery_health_mode: false,

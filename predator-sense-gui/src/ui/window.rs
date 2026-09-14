@@ -350,32 +350,34 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // firmware setting even when the user never opens the Lighting page -
         // pages here are built lazily, and doing this only in the page meant a
         // machine with the firmware timeout already on never blanked its bar.
-        if crate::hardware::light_bar::is_available() {
-            background::run(
-                || crate::hardware::extras::get_backlight_timeout(),
-                |firmware_enabled| {
-                    let mut cfg = config::load_app_config();
-                    if cfg.light_bar_idle_enabled != firmware_enabled {
-                        cfg.light_bar_idle_enabled = firmware_enabled;
-                        let _ = config::save_app_config(&cfg);
+        background::run(
+            || crate::hardware::extras::get_backlight_timeout(),
+            |firmware_enabled| {
+                let mut cfg = config::load_app_config();
+                // Inherit the old single light-bar flag, or the firmware
+                // timeout, the first time this runs.
+                if !cfg.idle_enabled && (cfg.light_bar_idle_enabled || firmware_enabled) {
+                    cfg.idle_enabled = true;
+                    let _ = config::save_app_config(&cfg);
+                }
+                if cfg.idle_enabled {
+                    // One owner: the firmware's own timer cannot see the mouse
+                    // and runs on its own clock, so it has to be off for the
+                    // two devices to blank together.
+                    if firmware_enabled && cfg.idle_keyboard_enabled {
+                        let _ = crate::hardware::extras::set_backlight_timeout(false);
                     }
-                    if firmware_enabled {
-                        crate::hardware::idle::start();
-                        crate::hardware::idle::mark_active();
-                    }
-                },
-            );
-        } else if config::load_app_config().light_bar_idle_enabled {
-            crate::hardware::idle::start();
-        }
+                    crate::hardware::idle::start();
+                    crate::hardware::idle::mark_active();
+                }
+            },
+        );
 
-        // Lighting follows the power mode, and the light bar blanks when the
-        // machine goes idle. Both live on the existing 5s tick: the idle
-        // timeout is minutes, and a mode change only needs to be noticed
-        // promptly, not instantly.
+        // Lighting follows the power mode. Idle blanking is separate, on a
+        // much shorter timer further down - a mode change only needs noticing
+        // promptly, whereas the lights going dark has to look deliberate.
         let last_mode: Rc<std::cell::RefCell<Option<crate::hardware::profile::PowerProfile>>> =
             Rc::new(std::cell::RefCell::new(crate::hardware::profile::get_current_profile()));
-        let bar_blanked = Rc::new(std::cell::Cell::new(false));
         glib::timeout_add_seconds_local(5, move || {
             let (cpu, gpu) = sensors::read_critical_temps();
             crate::hardware::alerts::check(cpu, gpu);
@@ -392,30 +394,56 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             glib::ControlFlow::Continue
         });
 
-        // Idle handling runs on its own 1s timer rather than the 5s tick
-        // above: the keyboard's firmware timeout is ~30s, and checking only
-        // every 5s made the bar blank and wake visibly out of step with it.
+        // Idle blanking for BOTH devices from one timer.
+        //
+        // The keyboard has a firmware timeout of its own, but it only watches
+        // key presses - it cannot see the mouse - and it runs on its own clock,
+        // so the two devices went dark about a second apart and mouse movement
+        // woke only the bar. Driving both from here is the only way they can
+        // actually agree; the firmware timeout is therefore turned off while
+        // this owns the keyboard (see `apply_idle_setting`).
         {
-            let bar_blanked = Rc::new(std::cell::Cell::new(false));
-            glib::timeout_add_seconds_local(1, move || {
-                let enabled = config::load_app_config().light_bar_idle_enabled;
-                match crate::hardware::idle::idle_seconds() {
-                    Some(idle) if enabled && idle >= crate::hardware::light_bar::IDLE_SECONDS => {
-                        if !bar_blanked.get() {
-                            bar_blanked.set(true);
-                            let _ = crate::hardware::light_bar::blank();
-                        }
+            glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+                let cfg = config::load_app_config();
+                let idle = crate::hardware::idle::idle_seconds(cfg.idle_mouse_wakes);
+                let Some(idle) = idle else {
+                    return glib::ControlFlow::Continue;
+                };
+
+                let keyboard_limit = cfg.idle_keyboard_secs as u64;
+                let bar_limit = if cfg.idle_synced {
+                    keyboard_limit
+                } else {
+                    cfg.idle_bar_secs as u64
+                };
+
+                let want_keyboard_off = cfg.idle_enabled
+                    && cfg.idle_keyboard_enabled
+                    && crate::hardware::keyboard_rgb::is_available()
+                    && idle >= keyboard_limit;
+                let want_bar_off = cfg.idle_enabled
+                    && cfg.idle_bar_enabled
+                    && crate::hardware::light_bar::is_available()
+                    && idle >= bar_limit;
+
+                if want_keyboard_off != crate::hardware::keyboard_rgb::is_blanked() {
+                    if want_keyboard_off {
+                        let _ = crate::hardware::keyboard_rgb::blank();
+                    } else {
+                        crate::hardware::keyboard_rgb::unblank();
                     }
-                    _ => {
-                        if bar_blanked.get() {
-                            bar_blanked.set(false);
-                            crate::hardware::light_bar::unblank();
-                        }
+                }
+                if want_bar_off != crate::hardware::light_bar::is_blanked() {
+                    if want_bar_off {
+                        let _ = crate::hardware::light_bar::blank();
+                    } else {
+                        crate::hardware::light_bar::unblank();
                     }
                 }
                 glib::ControlFlow::Continue
             });
         }
+
 
         glib::timeout_add_seconds_local(5, move || {
             // Re-reads the game list from config every tick (cheap: a small
