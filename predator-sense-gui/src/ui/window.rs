@@ -363,34 +363,10 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // hotkey service only replays the ENEK5130 HID path. Restore both
         // here; the Chicony write goes through the same privileged helper
         // session the fan-mode reapply above already opened.
-        let chicony_saved = cfg.chicony_rgb.clone();
-        let lighting_cfg = cfg.clone();
+        // `wake: true` - after a power cycle the light bar's firmware needs
+        // one Breathing frame before any other mode becomes visible.
         background::run(
-            move || {
-                if let Some(saved) = chicony_saved {
-                    if crate::hardware::chicony_rgb::is_available() {
-                        if let Err(e) = crate::hardware::chicony_rgb::set_effect(
-                            saved.effect,
-                            saved.brightness,
-                            saved.color,
-                            saved.speed,
-                        ) {
-                            crate::hardware::applog::error(&format!(
-                                "startup: Chicony keyboard lighting not restored: {e}"
-                            ));
-                        }
-                    }
-                }
-                if let Some(saved) = lighting_cfg.light_bar {
-                    // `wake`: after a power cycle the firmware needs one
-                    // Breathing frame before any other mode shows.
-                    if let Err(e) = crate::hardware::light_bar::apply(&saved, true) {
-                        crate::hardware::applog::error(&format!(
-                            "startup: light bar not restored: {e}"
-                        ));
-                    }
-                }
-            },
+            || crate::hardware::lighting::restore_saved(true, "startup"),
             |()| {},
         );
 
@@ -463,6 +439,34 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // this owns the keyboard (see `apply_idle_setting`).
         {
             glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+                // Resume from suspend, checked before anything else in here:
+                // the early return below fires whenever idle tracking is off,
+                // and lighting still has to come back on those machines.
+                //
+                // The controllers do not necessarily hold their state across a
+                // suspend cycle, and nothing else would notice - the hotkey
+                // daemon replays only the ENEK5130 HID path on resume, which
+                // is not the hardware this chassis has.
+                if crate::hardware::resume::resumed() {
+                    crate::hardware::applog::info(
+                        "resume from suspend: restoring keyboard and light bar",
+                    );
+                    // Waking the machine is activity. Without this the idle
+                    // watcher still holds whatever it measured before the
+                    // suspend and would blank again immediately; it also lets
+                    // the blanking logic below undo a blank that was in place
+                    // when the lid closed.
+                    crate::hardware::idle::mark_active();
+                    // `wake: false` - the light bar's controller stayed
+                    // powered, so it does not need the Breathing priming frame
+                    // a cold boot does, and skipping it avoids a visible
+                    // flicker and 300 ms of sleeping.
+                    background::run(
+                        || crate::hardware::lighting::restore_saved(false, "resume"),
+                        |()| {},
+                    );
+                }
+
                 let cfg = config::load_app_config();
                 let idle = crate::hardware::idle::idle_seconds(cfg.idle_mouse_wakes);
                 let Some(idle) = idle else {
