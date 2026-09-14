@@ -20,7 +20,6 @@ use crate::config::{self, AppConfig, LightingScheme};
 use crate::hardware::keyboard_rgb::{self, Effect, KeyboardState};
 use crate::hardware::light_bar::{self, LightBarMode, LightBarState};
 use crate::hardware::profile::PowerProfile;
-use crate::ui::background;
 use crate::ui::color_picker;
 
 const NO_SCHEME: &str = "—";

@@ -36,12 +36,6 @@ pub const SPEED_MIN: u8 = 1;
 pub const SPEED_MAX: u8 = 5;
 /// Brightness is a percentage in the official app's capture (`0..100`).
 pub const BRIGHTNESS_MAX: u8 = 100;
-/// Idle delay before the bar blanks, matching the keyboard backlight's own
-/// firmware timeout so both devices go dark at the same moment. Deliberately
-/// not user-tunable: two independent timers on one chassis just means the keys
-/// and the bar switch off seconds apart.
-pub const IDLE_SECONDS: u64 = 30;
-
 static BLANKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -132,8 +126,21 @@ impl Default for LightBarState {
     }
 }
 
+/// Chassis confirmed to actually have a chassis light bar behind WMI target
+/// `0x02`.
+///
+/// `/dev/acer-gkbbl-0` alone is not evidence of one: facer creates that node
+/// on every model with `ACER_CAP_GAMINGKB` (GUID3 + GUID4), most of which
+/// drive only a keyboard through it. Without this gate a Light bar section
+/// and capability chip appear on chassis that have no bar, where target
+/// `0x02` means nothing.
+const LIGHT_BAR_MODELS: &[&str] = &["PH16-71"];
+
+/// The WMI lighting node *and* a chassis known to have the bar.
+///
+/// `PREDATOR_SENSE_FORCE_MODEL=PH16-71` opts an unlisted chassis in.
 pub fn is_available() -> bool {
-    Path::new(DEVICE).exists()
+    Path::new(DEVICE).exists() && crate::hardware::sysinfo::product_matches(LIGHT_BAR_MODELS)
 }
 
 fn frame(state: &LightBarState) -> [u8; 16] {
@@ -202,17 +209,6 @@ pub fn blank() -> Result<(), String> {
         brightness: 0,
         ..saved
     })
-}
-
-/// Puts back whatever the user last applied. Used when idle-off is switched
-/// off, which must not leave the bar dark.
-pub fn restore_from_config() {
-    let Some(saved) = crate::config::load_app_config().light_bar else {
-        return;
-    };
-    // `wake`: coming back from a real Off, the firmware needs one Breathing
-    // frame before any other mode is visible.
-    let _ = apply(&saved, true);
 }
 
 /// True when the bar is currently blanked by the idle watcher.
