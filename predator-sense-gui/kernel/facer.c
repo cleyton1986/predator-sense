@@ -607,6 +607,14 @@ static struct quirk_entry quirk_acer_predator_ph315_52 = {
 	.gpu_fans = 1,
 };
 
+/*
+ * PH16-71 (Helios 16, 2023): mainline acer-wmi marks it predator_v4. The
+ * fan "preset" EC bytes (0x21/0x22, PH315-54 values) are accepted and read
+ * back on this EC but change nothing - fan RPM stays put through a Max write
+ * - so fan control has to go through the predator_v4 WMI PWM methods (14/16),
+ * the same ones the PH16-72/PHN16-72 sibling already uses. Firmware-gated
+ * like every other WMI call here: rejected means no-op, not a bad write.
+ */
 static struct quirk_entry quirk_acer_predator_ph16_71 = {
 	.turbo = 1,
 	.cpu_fans = 1,
