@@ -32,6 +32,14 @@ pub mod internal {
     pub const HOTKEY_ARGUMENT: &str = "--internal-hotkey";
     pub const TRAY_ARGUMENT: &str = "--internal-tray";
     pub const DELAYED_APPLICATION_START_ARGUMENT: &str = "--internal-delayed-start";
+    /// Start without showing the window.
+    ///
+    /// Most of the app's continuous behaviour - idle blanking, lighting that
+    /// follows the power mode, automatic Eco, GameSync, the software fan curve
+    /// - lives on timers inside this process, not in the daemon. So it has to
+    /// be running for any of that to happen, which makes "start on login"
+    /// really mean "start in the background", not "open a window at login".
+    pub const BACKGROUND_START_ARGUMENT: &str = "--background";
     pub const APPLICATION_RESTART_DELAY_MS: u64 = 500;
 
     /// Puts the privileged helper into daemon mode: instead of running one

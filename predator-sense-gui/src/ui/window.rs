@@ -211,6 +211,16 @@ pub fn sync_window_suspended(window: &impl IsA<gtk::Window>) {
 
 /// Esconde a janela e garante que o tray helper está rodando.
 /// Unifica o comportamento do botão ✕ custom e do close request do WM.
+/// Starts the app with no window on screen: the timers that do the real work
+/// run either way, and the window is built only so activating later is
+/// instant. Same path the tray uses, so there is one definition of "running
+/// without a window".
+pub fn start_in_background(app: &adw::Application) {
+    if let Some(window) = app.active_window() {
+        hide_to_tray(&window, app);
+    }
+}
+
 fn hide_to_tray<W: IsA<gtk::Widget>>(win: &W, app: &adw::Application) {
     crate::app_state::set_window_visible(false);
     win.set_visible(false);

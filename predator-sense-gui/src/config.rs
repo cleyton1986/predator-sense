@@ -471,7 +471,11 @@ impl Default for AppConfig {
         Self {
             last_profile: None,
             auto_apply_on_start: false,
-            minimize_on_close: false,
+            // Default on: the timers that do the continuous work (idle
+            // blanking, lighting per power mode, automatic Eco, GameSync, the
+            // software fan curve) live in this process, so quitting on close
+            // silently turns all of them off.
+            minimize_on_close: true,
             start_on_boot: false,
             temp_alerts: true,
             auto_profile_ac: true,
@@ -549,7 +553,7 @@ pub fn set_autostart(enabled: bool) {
         let app_desktop = "[Desktop Entry]\n\
 Type=Application\n\
 Name=Predator Sense\n\
-Exec=/opt/predator-sense/predator-sense\n\
+Exec=/opt/predator-sense/predator-sense --background\n\
 Hidden=false\n\
 NoDisplay=true\n\
 X-GNOME-Autostart-enabled=true\n\

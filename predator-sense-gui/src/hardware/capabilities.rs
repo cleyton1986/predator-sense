@@ -24,6 +24,11 @@ pub struct Capabilities {
     pub rgb: bool,
     /// Independently addressable RGB logo on the display lid (ENE target 0x83).
     pub cover_logo: bool,
+    /// Chassis light bar over the firmware's WMI lighting channel
+    /// (`hardware::light_bar`). A separate device from `cover_logo` above:
+    /// that one is the badge on the outside of the lid, this is the bar across
+    /// the chassis, and a machine can have either, both or neither.
+    pub light_bar: bool,
     /// Raw EC access (/dev/ec) — needed for CoolBoost / LCD overdrive / etc.
     pub ec: bool,
     /// NVIDIA GPU monitoring available without waking the dGPU during detection.
@@ -97,6 +102,7 @@ impl Capabilities {
                 || crate::hardware::chicony_rgb::is_available(),
             cover_logo: crate::hardware::hid_rgb::has_cover_logo()
                 || crate::hardware::magic_rgb::is_logo_available(),
+            light_bar: crate::hardware::light_bar::is_available(),
             ec: Path::new("/dev/ec").exists(),
             nvidia_gpu: crate::hardware::nvidia::is_available(),
             battery_limit: battery_charge_limit().is_some(),

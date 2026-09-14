@@ -213,6 +213,16 @@ fn main() {
         }
 
         ui::window::build(app);
+
+        // Launched for the background (autostart): the window is built so a
+        // later activation is instant, but never shown. Without this, every
+        // login threw a maximised window in the user's face.
+        if std::env::args().any(|argument| {
+            argument == predator_sense_protocol::internal::BACKGROUND_START_ARGUMENT
+        }) {
+            ui::window::start_in_background(app);
+            startup_mark("started in background");
+        }
         startup_mark("window build returned");
     });
 
