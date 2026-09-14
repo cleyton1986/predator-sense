@@ -69,6 +69,25 @@ pub fn is_available() -> bool {
     false
 }
 
+/// Solid 24-bit colour on the whole keyboard.
+///
+/// [`set_effect`] can only name a colour by index into [`COLORS`], which is a
+/// limit of that controller command rather than of the hardware: the same
+/// device also takes a `0x14` packet carrying a real RGB triple, which is how
+/// the per-key generation (PH16-71) sets a solid colour. Verified on real
+/// hardware; see the helper's `chicony_color_apply` for the wire format and
+/// the two independent implementations it was cross-checked against.
+pub fn set_static_color(red: u8, green: u8, blue: u8) -> Result<(), String> {
+    crate::hardware::helper::execute(
+        predator_sense_protocol::helper::Action::ChiconyColor,
+        &[
+            &red.to_string(),
+            &green.to_string(),
+            &blue.to_string(),
+        ],
+    )
+}
+
 /// `effect`/`color` are 1-based indices into `EFFECTS`/`COLORS`.
 pub fn set_effect(effect: usize, brightness: u8, color: usize, speed: u8) -> Result<(), String> {
     if !(1..=EFFECTS.len()).contains(&effect) {

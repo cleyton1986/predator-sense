@@ -123,6 +123,29 @@ impl Default for CoverLogoSettings {
     }
 }
 
+/// A named keyboard + light bar combination, applied as one unit.
+///
+/// The pre-existing `LightingProfile` covers only the WMI keyboard path, which
+/// is not what drives either device on this generation, and it has no light bar
+/// half at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LightingScheme {
+    pub name: String,
+    #[serde(default)]
+    pub keyboard: Option<crate::hardware::keyboard_rgb::KeyboardState>,
+    #[serde(default)]
+    pub light_bar: Option<crate::hardware::light_bar::LightBarState>,
+}
+
+/// Binds a power mode to a lighting scheme, so the lighting follows the mode
+/// key. `mode` is a `PowerProfile::to_id()` value rather than the enum itself
+/// so the map stays readable in config.json and survives an unknown mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeBinding {
+    pub mode: String,
+    pub scheme: String,
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -218,6 +241,27 @@ pub struct AppConfig {
     /// generation). None means never applied through this app.
     #[serde(default)]
     pub light_bar: Option<crate::hardware::light_bar::LightBarState>,
+    /// Last-applied keyboard lighting on the arbitrary-colour path
+    /// (`hardware::keyboard_rgb`).
+    #[serde(default)]
+    pub keyboard_rgb: Option<crate::hardware::keyboard_rgb::KeyboardState>,
+    /// User's saved colour swatches, as `#rrggbb`. Shared by both devices so a
+    /// colour picked for one is one click away on the other.
+    #[serde(default)]
+    pub saved_colors: Vec<String>,
+    /// Named keyboard + light bar combinations.
+    #[serde(default)]
+    pub lighting_schemes: Vec<LightingScheme>,
+    /// Power mode -> scheme name.
+    #[serde(default)]
+    pub mode_bindings: Vec<ModeBinding>,
+    /// Turn the light bar off after `light_bar_idle_secs` without input. The
+    /// firmware has no timeout for the bar (unlike the keyboard backlight), so
+    /// this is measured by the app - see `hardware::idle`.
+    #[serde(default)]
+    pub light_bar_idle_enabled: bool,
+    #[serde(default = "default_light_bar_idle_secs")]
+    pub light_bar_idle_secs: u32,
     /// None means the user has never applied a cover-logo setting, so automatic
     /// restoration must leave the controller's firmware default untouched.
     #[serde(default)]
@@ -334,6 +378,12 @@ fn default_font_scale() -> f64 {
     1.0
 }
 
+/// Matches the keyboard backlight's own firmware timeout, so both devices go
+/// dark at the same moment rather than on two unrelated timers.
+fn default_light_bar_idle_secs() -> u32 {
+    30
+}
+
 fn default_rgb_brightness() -> u8 {
     100
 }
@@ -381,6 +431,12 @@ impl Default for AppConfig {
             magic_rgb_logo: None,
             chicony_rgb: None,
             light_bar: None,
+            keyboard_rgb: None,
+            saved_colors: Vec::new(),
+            lighting_schemes: Vec::new(),
+            mode_bindings: Vec::new(),
+            light_bar_idle_enabled: false,
+            light_bar_idle_secs: default_light_bar_idle_secs(),
             cover_logo: None,
             battery_limiter: false,
             battery_health_mode: false,

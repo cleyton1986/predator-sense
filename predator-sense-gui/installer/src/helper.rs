@@ -67,6 +67,7 @@ const DMI_SERIAL: &str = "class/dmi/id/product_serial";
 const CHICONY_VENDOR_ID: u16 = 0x04F2;
 const CHICONY_PRODUCT_ID: u16 = 0x0117;
 const CHICONY_INTERFACE: u8 = 3;
+const CHICONY_ENDPOINT: u8 = 0x04;
 const CHICONY_TERMINATOR: u8 = 0xBE;
 /// bmRequestType: host-to-device, class, interface recipient.
 const CHICONY_REQUEST_TYPE: u8 = 0x21;
@@ -77,7 +78,7 @@ const CHICONY_SET_REPORT: u8 = 0x09;
 const CHICONY_REPORT_VALUE: u16 = 0x0300;
 
 fn chicony_rgb_apply(effect: u8, brightness: u8, color: u8, speed: u8) -> AppResult {
-    let payload = [
+    chicony_send(&[
         0x08,
         0x00,
         effect,
@@ -86,7 +87,90 @@ fn chicony_rgb_apply(effect: u8, brightness: u8, color: u8, speed: u8) -> AppRes
         color,
         0x00,
         CHICONY_TERMINATOR,
-    ];
+    ])
+}
+
+/// Preamble this controller expects before a colour/effect packet.
+const CHICONY_PREAMBLE: [u8; 8] = [0xB1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4E];
+/// Terminator of the effect packet in the per-key generation's command family.
+const CHICONY_EFFECT_TERMINATOR: u8 = 0x9B;
+/// The controller's own brightness ceiling (percentages are scaled to this).
+const CHICONY_BRIGHT_MAX: u8 = 0x32;
+/// Speed runs 1 (fastest) to 9 (slowest) on the wire.
+const CHICONY_SPEED_FAST: u8 = 1;
+const CHICONY_SPEED_SLOW: u8 = 9;
+/// Effect opcode for a solid colour.
+const CHICONY_EFFECT_STATIC: u8 = 0x01;
+/// Colour source: 0x01 = the colour staged by the 0x14 packet, 0x08 = random.
+const CHICONY_COLOR_FROM_PACKET: u8 = 0x01;
+
+fn chicony_scale_brightness(percent: u8) -> u8 {
+    ((percent.min(100) as u16 * CHICONY_BRIGHT_MAX as u16) / 100) as u8
+}
+
+fn chicony_scale_speed(percent: u8) -> u8 {
+    if percent >= 100 {
+        return CHICONY_SPEED_FAST;
+    }
+    let range = (CHICONY_SPEED_SLOW - CHICONY_SPEED_FAST) as u16;
+    (CHICONY_SPEED_SLOW - ((percent as u16 * range) / 100) as u8).max(CHICONY_SPEED_FAST)
+}
+
+/// Solid 24-bit colour on the whole keyboard.
+///
+/// The `0x08` effect packet can only name a colour by index into a fixed
+/// 7-entry palette - a limit of that command, not of the hardware. A `0x14`
+/// packet stages a real RGB triple, but on its own it changes nothing: the
+/// controller needs a preamble first and an effect packet afterwards to apply
+/// what was staged, all inside one claimed USB session. Confirmed on real
+/// hardware (PH16-71): colours outside the 7-entry palette render correctly.
+/// Wire format cross-checked against CPT-Dawn/Arch-Sense and
+/// Order52/ph16-71-rgb, which target this exact keyboard.
+fn chicony_color_apply(red: u8, green: u8, blue: u8, brightness: u8) -> AppResult {
+    chicony_effect_apply(
+        CHICONY_EFFECT_STATIC,
+        0,
+        brightness,
+        red,
+        green,
+        blue,
+        1,
+    )
+}
+
+fn chicony_effect_apply(
+    opcode: u8,
+    speed: u8,
+    brightness: u8,
+    red: u8,
+    green: u8,
+    blue: u8,
+    direction: u8,
+) -> AppResult {
+    chicony_send_many(&[
+        CHICONY_PREAMBLE,
+        [0x14, 0x00, 0x00, red, green, blue, 0x00, 0x00],
+        [
+            0x08,
+            0x02,
+            opcode,
+            chicony_scale_speed(speed),
+            chicony_scale_brightness(brightness),
+            CHICONY_COLOR_FROM_PACKET,
+            direction.clamp(1, 2),
+            CHICONY_EFFECT_TERMINATOR,
+        ],
+    ])
+}
+
+fn chicony_send(payload: &[u8; 8]) -> AppResult {
+    chicony_send_many(&[*payload])
+}
+
+/// Every packet in one claimed session: this controller expects a preamble and
+/// an apply packet around a colour packet, and splitting them across separate
+/// claim/release cycles does not take effect.
+fn chicony_send_many(packets: &[[u8; 8]]) -> AppResult {
     let devices =
         rusb::devices().map_err(|error| fail(format!("cannot list USB devices: {error}")))?;
     for device in devices.iter() {
@@ -112,14 +196,21 @@ fn chicony_rgb_apply(effect: u8, brightness: u8, color: u8, speed: u8) -> AppRes
         handle
             .claim_interface(CHICONY_INTERFACE)
             .map_err(|error| fail(format!("cannot claim USB interface: {error}")))?;
-        let result = handle.write_control(
-            CHICONY_REQUEST_TYPE,
-            CHICONY_SET_REPORT,
-            CHICONY_REPORT_VALUE,
-            CHICONY_INTERFACE as u16,
-            &payload,
-            Duration::from_millis(1000),
-        );
+        let _ = handle.clear_halt(CHICONY_ENDPOINT);
+        let mut result = Ok(0);
+        for packet in packets {
+            result = handle.write_control(
+                CHICONY_REQUEST_TYPE,
+                CHICONY_SET_REPORT,
+                CHICONY_REPORT_VALUE,
+                CHICONY_INTERFACE as u16,
+                packet,
+                Duration::from_millis(1000),
+            );
+            if result.is_err() {
+                break;
+            }
+        }
         let _ = handle.release_interface(CHICONY_INTERFACE);
         if had_kernel_driver {
             let _ = handle.attach_kernel_driver(CHICONY_INTERFACE);
@@ -544,6 +635,43 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
             let color = parse_u16("color", &args[3], 1, 7)? as u8;
             let speed = parse_u16("speed", &args[4], 0, 255)? as u8;
             chicony_rgb_apply(effect, brightness, color, speed)
+        }
+        HelperAction::ChiconySeq => {
+            let text = args[1].trim();
+            if text.len() % 16 != 0 || text.is_empty() {
+                return Err(fail(
+                    "chicony-seq needs whole 8-byte packets (16 hex chars each)".to_string(),
+                ));
+            }
+            let mut packets = Vec::new();
+            for chunk in text.as_bytes().chunks(16) {
+                let mut packet = [0u8; 8];
+                for (index, pair) in chunk.chunks(2).enumerate() {
+                    let pair = std::str::from_utf8(pair)
+                        .map_err(|_| fail("chicony-seq: not valid hex".to_string()))?;
+                    packet[index] = u8::from_str_radix(pair, 16)
+                        .map_err(|_| fail(format!("chicony-seq: bad hex byte '{pair}'")))?;
+                }
+                packets.push(packet);
+            }
+            chicony_send_many(&packets)
+        }
+        HelperAction::ChiconyColor => {
+            let red = parse_u16("red", &args[1], 0, 255)? as u8;
+            let green = parse_u16("green", &args[2], 0, 255)? as u8;
+            let blue = parse_u16("blue", &args[3], 0, 255)? as u8;
+            let brightness = parse_u16("brightness", &args[4], 0, 100)? as u8;
+            chicony_color_apply(red, green, blue, brightness)
+        }
+        HelperAction::ChiconyEffect => {
+            let opcode = parse_u16("opcode", &args[1], 0, 255)? as u8;
+            let speed = parse_u16("speed", &args[2], 0, 100)? as u8;
+            let brightness = parse_u16("brightness", &args[3], 0, 100)? as u8;
+            let red = parse_u16("red", &args[4], 0, 255)? as u8;
+            let green = parse_u16("green", &args[5], 0, 255)? as u8;
+            let blue = parse_u16("blue", &args[6], 0, 255)? as u8;
+            let direction = parse_u16("direction", &args[7], 1, 2)? as u8;
+            chicony_effect_apply(opcode, speed, brightness, red, green, blue, direction)
         }
         HelperAction::GrubSplashApply => grub_splash_apply(&args[1], &args[2], sysfs),
         HelperAction::GrubSplashReset => grub_splash_reset(sysfs),

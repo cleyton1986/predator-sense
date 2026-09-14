@@ -18,6 +18,8 @@ pub mod grub_splash;
 pub mod helper;
 pub mod hid_rgb;
 pub mod hwmon;
+pub mod idle;
+pub mod keyboard_rgb;
 pub mod light_bar;
 pub mod macro_player;
 pub mod magic_rgb;

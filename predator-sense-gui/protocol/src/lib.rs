@@ -378,6 +378,28 @@ pub mod helper {
         BootReapplyBattery,
         SerialNumberRead,
         ChiconyRgb,
+        /// Arbitrary 24-bit colour on the Chicony USB keyboard.
+        ///
+        /// `ChiconyRgb` above drives this controller's effect engine, which
+        /// only takes a colour *index* into a fixed 7-entry palette - a real
+        /// limit of that command, not of the hardware. The same device also
+        /// accepts a `0x14` packet carrying a full RGB triple, which is what
+        /// the per-key generation (PH16-71 and similar) uses for solid
+        /// colour. Args: RED GREEN BLUE, each 0-255.
+        ChiconyColor,
+        /// Raw packet sequence to the Chicony keyboard: one hex string, 8
+        /// bytes (16 hex chars) per packet, all sent inside a single claimed
+        /// USB session. This controller needs a preamble and an apply packet
+        /// around a colour packet, so the sequence has to be atomic; it is
+        /// also how new packet layouts get confirmed on real hardware.
+        ChiconySeq,
+        /// Effect on the Chicony keyboard carrying a real RGB colour.
+        ///
+        /// Args: OPCODE SPEED BRIGHTNESS RED GREEN BLUE DIRECTION. Speed and
+        /// brightness are percentages (0-100) and are mapped to the
+        /// controller's own ranges by the helper. Opcode is this keyboard's
+        /// effect id - see `hardware::keyboard_rgb::Effect`.
+        ChiconyEffect,
         /// Raw firmware thermal-profile index (facer's `thermal_profile`).
         /// Write-only here: both that attribute and `thermal_profile_supported`
         /// are world-readable, so the app reads them directly.
@@ -428,7 +450,7 @@ pub mod helper {
     }
 
     impl Action {
-        pub const ALL: [Self; 45] = [
+        pub const ALL: [Self; 48] = [
             Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
@@ -466,6 +488,9 @@ pub mod helper {
             Self::BootReapplyBattery,
             Self::SerialNumberRead,
             Self::ChiconyRgb,
+            Self::ChiconyColor,
+            Self::ChiconySeq,
+            Self::ChiconyEffect,
             Self::ThermalProfile,
             Self::BootReapplyThermal,
             Self::TempLimitCaps,
@@ -515,6 +540,9 @@ pub mod helper {
                 "boot-reapply-battery" => Some(Self::BootReapplyBattery),
                 "serial-number-read" => Some(Self::SerialNumberRead),
                 "chicony-rgb" => Some(Self::ChiconyRgb),
+                "chicony-color" => Some(Self::ChiconyColor),
+                "chicony-seq" => Some(Self::ChiconySeq),
+                "chicony-effect" => Some(Self::ChiconyEffect),
                 "thermal-profile" => Some(Self::ThermalProfile),
                 "boot-reapply-thermal" => Some(Self::BootReapplyThermal),
                 "temp-limit-caps" => Some(Self::TempLimitCaps),
@@ -566,6 +594,9 @@ pub mod helper {
                 Self::BootReapplyBattery => "boot-reapply-battery",
                 Self::SerialNumberRead => "serial-number-read",
                 Self::ChiconyRgb => "chicony-rgb",
+                Self::ChiconyColor => "chicony-color",
+                Self::ChiconySeq => "chicony-seq",
+                Self::ChiconyEffect => "chicony-effect",
                 Self::ThermalProfile => "thermal-profile",
                 Self::BootReapplyThermal => "boot-reapply-thermal",
                 Self::TempLimitCaps => "temp-limit-caps",
@@ -616,6 +647,9 @@ pub mod helper {
                 | Self::PwmGpuEnableRead
                 | Self::SerialNumberRead => 0,
                 Self::ChiconyRgb => 4,
+                Self::ChiconyColor => 4,
+                Self::ChiconyEffect => 7,
+                Self::ChiconySeq => 1,
                 Self::ThermalProfile => 1,
                 Self::BootReapplyThermal => 1,
                 Self::TempLimitCaps => 0,
@@ -668,6 +702,9 @@ pub mod helper {
                 Self::BootReapplyBattery => "boot-reapply-battery USER_HOME",
                 Self::SerialNumberRead => "serial-number-read",
                 Self::ChiconyRgb => "chicony-rgb EFFECT BRIGHTNESS COLOR SPEED",
+                Self::ChiconyColor => "chicony-color RED GREEN BLUE BRIGHTNESS",
+                Self::ChiconyEffect => "chicony-effect OPCODE SPEED BRIGHTNESS RED GREEN BLUE DIRECTION",
+                Self::ChiconySeq => "chicony-seq HEXPACKETS",
                 Self::ThermalProfile => "thermal-profile INDEX",
                 Self::BootReapplyThermal => "boot-reapply-thermal USER_HOME",
                 Self::TempLimitCaps => "temp-limit-caps",

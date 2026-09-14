@@ -36,6 +36,11 @@ pub const SPEED_MIN: u8 = 1;
 pub const SPEED_MAX: u8 = 5;
 /// Brightness is a percentage in the official app's capture (`0..100`).
 pub const BRIGHTNESS_MAX: u8 = 100;
+/// Idle delay before the bar blanks, matching the keyboard backlight's own
+/// firmware timeout so both devices go dark at the same moment. Deliberately
+/// not user-tunable: two independent timers on one chassis just means the keys
+/// and the bar switch off seconds apart.
+pub const IDLE_SECONDS: u64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LightBarMode {
@@ -168,6 +173,30 @@ pub fn apply(state: &LightBarState, wake: bool) -> Result<(), String> {
         thread::sleep(Duration::from_millis(300));
     }
     write_frame(state)
+}
+
+/// Blanks the bar without touching the saved state, so the idle watcher can
+/// put back exactly what was showing.
+pub fn blank() -> Result<(), String> {
+    let saved = crate::config::load_app_config()
+        .light_bar
+        .unwrap_or_default();
+    write_frame(&LightBarState {
+        mode: LightBarMode::Off,
+        ..saved
+    })
+}
+
+/// Puts back whatever the user last applied. Used when the idle watcher sees
+/// input again, and when idle-off is switched off (which must not leave the
+/// bar dark).
+pub fn restore_from_config() {
+    let Some(saved) = crate::config::load_app_config().light_bar else {
+        return;
+    };
+    // `wake`: coming back from Off, the firmware needs one Breathing frame
+    // before any other mode is visible.
+    let _ = apply(&saved, true);
 }
 
 #[cfg(test)]

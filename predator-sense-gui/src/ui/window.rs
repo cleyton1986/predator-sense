@@ -345,10 +345,71 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             |()| {},
         );
 
-        glib::timeout_add_seconds_local(5, || {
+        // Idle-off covers the keyboard (firmware timer) and the light bar
+        // (measured by us) as one feature, so the bar half has to follow the
+        // firmware setting even when the user never opens the Lighting page -
+        // pages here are built lazily, and doing this only in the page meant a
+        // machine with the firmware timeout already on never blanked its bar.
+        if crate::hardware::light_bar::is_available() {
+            background::run(
+                || crate::hardware::extras::get_backlight_timeout(),
+                |firmware_enabled| {
+                    let mut cfg = config::load_app_config();
+                    if cfg.light_bar_idle_enabled != firmware_enabled {
+                        cfg.light_bar_idle_enabled = firmware_enabled;
+                        let _ = config::save_app_config(&cfg);
+                    }
+                    if firmware_enabled {
+                        crate::hardware::idle::start();
+                        crate::hardware::idle::mark_active();
+                    }
+                },
+            );
+        } else if config::load_app_config().light_bar_idle_enabled {
+            crate::hardware::idle::start();
+        }
+
+        // Lighting follows the power mode, and the light bar blanks when the
+        // machine goes idle. Both live on the existing 5s tick: the idle
+        // timeout is minutes, and a mode change only needs to be noticed
+        // promptly, not instantly.
+        let last_mode: Rc<std::cell::RefCell<Option<crate::hardware::profile::PowerProfile>>> =
+            Rc::new(std::cell::RefCell::new(crate::hardware::profile::get_current_profile()));
+        let bar_blanked = Rc::new(std::cell::Cell::new(false));
+        glib::timeout_add_seconds_local(5, move || {
             let (cpu, gpu) = sensors::read_critical_temps();
             crate::hardware::alerts::check(cpu, gpu);
             crate::hardware::power_profile::check();
+
+            if let Some(now) = crate::hardware::profile::get_current_profile() {
+                let changed = last_mode.borrow().map(|previous| previous != now).unwrap_or(true);
+                if changed {
+                    *last_mode.borrow_mut() = Some(now);
+                    crate::ui::lighting_page::apply_scheme_for_mode(now);
+                }
+            }
+
+            let cfg = config::load_app_config();
+            if cfg.light_bar_idle_enabled {
+                match crate::hardware::idle::idle_seconds() {
+                    Some(idle) if idle >= crate::hardware::light_bar::IDLE_SECONDS => {
+                        if !bar_blanked.get() {
+                            bar_blanked.set(true);
+                            let _ = crate::hardware::light_bar::blank();
+                        }
+                    }
+                    Some(_) => {
+                        if bar_blanked.get() {
+                            bar_blanked.set(false);
+                            crate::hardware::light_bar::restore_from_config();
+                        }
+                    }
+                    None => {}
+                }
+            } else if bar_blanked.get() {
+                bar_blanked.set(false);
+                crate::hardware::light_bar::restore_from_config();
+            }
             // Re-reads the game list from config every tick (cheap: a small
             // Vec clone), same reasoning as re-reading `ai_check_interval_min`
             // below - editing the list in the UI takes effect on the next
@@ -1839,14 +1900,9 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
         usb_row.append(&usb_switch);
         page.append(&usb_row);
 
-        // Keyboard backlight auto-off timer
-        let backlight_timeout_row =
-            create_setting_row(t("backlight_timeout"), t("backlight_timeout_desc"));
-        let backlight_timeout_switch = gtk::Switch::new();
-        backlight_timeout_switch.set_valign(gtk::Align::Center);
-        backlight_timeout_switch.set_sensitive(false);
-        backlight_timeout_row.append(&backlight_timeout_switch);
-        page.append(&backlight_timeout_row);
+        // The keyboard backlight auto-off switch used to live here. It is a
+        // lighting control, so it now sits on the Lighting page next to the
+        // light bar's equivalent (ui::lighting_page).
 
         // These reads each launch the EC helper and can take ~150 ms. Keep
         // the switches disabled until all states arrive off-thread, then
@@ -1857,10 +1913,9 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
                     crate::hardware::extras::get_lcd_overdrive(),
                     crate::hardware::extras::get_boot_animation(),
                     crate::hardware::extras::get_usb_charging(),
-                    crate::hardware::extras::get_backlight_timeout(),
                 )
             },
-            move |(lcd_enabled, boot_enabled, usb_enabled, backlight_timeout_enabled)| {
+            move |(lcd_enabled, boot_enabled, usb_enabled)| {
                 lcd_switch.set_active(lcd_enabled);
                 lcd_switch.connect_state_set(|_, active| {
                     let _ = crate::hardware::extras::set_lcd_overdrive(active);
@@ -1881,13 +1936,6 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
                     glib::Propagation::Proceed
                 });
                 usb_switch.set_sensitive(true);
-
-                backlight_timeout_switch.set_active(backlight_timeout_enabled);
-                backlight_timeout_switch.connect_state_set(|_, active| {
-                    let _ = crate::hardware::extras::set_backlight_timeout(active);
-                    glib::Propagation::Proceed
-                });
-                backlight_timeout_switch.set_sensitive(true);
             },
         );
     }

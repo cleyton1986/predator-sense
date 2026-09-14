@@ -44,6 +44,7 @@
 #include <linux/rfkill.h>
 #include <linux/workqueue.h>
 #include <linux/debugfs.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/cdev.h>
@@ -4462,6 +4463,130 @@ static struct platform_driver acer_platform_driver = {
 
 static struct platform_device *acer_platform_device;
 
+/*
+ * Root-only probe for the gaming backlight methods (20 set / 21 get).
+ *
+ * Method 21 (GetGamingKBBacklight) is declared by the firmware - the WMBH
+ * dispatcher's Case(0x15) returns the 16-byte BHLK buffer - but no driver has
+ * ever called it, so the field layout of method 20's payload has only ever
+ * been inferred from Windows DLLs. Everything behind WMBH runs in SMM, so the
+ * ACPI tables cannot answer it either; writing a frame and reading back what
+ * the firmware actually stored is the only way to see the real layout.
+ *
+ * `gkbbl_set`: write 16 space/comma-separated hex bytes -> method 20.
+ * `gkbbl_get`: write a u64 selector to choose the argument, then read the
+ *              method-21 reply as hex.
+ * Both are 0600 under debugfs (root only) and only reach firmware-validated
+ * WMI methods - the same method 20 the RGB paths already use - never a raw
+ * EC offset write.
+ */
+#define GKBBL_PROBE_MAX 64
+
+static u8 gkbbl_probe_out[GKBBL_PROBE_MAX];
+static size_t gkbbl_probe_out_len;
+static u64 gkbbl_probe_get_arg;
+static acpi_status gkbbl_probe_status = AE_OK;
+/*
+ * Which WMI method the probe files talk to. Defaults to the gaming backlight
+ * pair (20 set / 21 get); the light bar has three zones and per-zone control
+ * is not in method 20's frame, so reaching methods 6/7 (SetGamingRgbKb /
+ * GetGamingRgbKb) and friends has to be possible without a rebuild.
+ */
+static u32 gkbbl_probe_method = ACER_WMID_SET_GAMINGKBBL_METHODID;
+static u32 gkbbl_probe_get_method = ACER_WMID_GET_GAMINGKBBL_METHODID;
+
+static acpi_status WMI_gaming_execute_buffer_out(u32 method_id, u64 in)
+{
+	struct acpi_buffer input = { (acpi_size)sizeof(in), (void *)(&in) };
+	struct acpi_buffer result = { ACPI_ALLOCATE_BUFFER, NULL };
+	union acpi_object *obj;
+	acpi_status status;
+
+	status = wmi_evaluate_method(WMID_GUID4, 0, method_id, &input, &result);
+	gkbbl_probe_out_len = 0;
+	if (ACPI_FAILURE(status))
+		return status;
+
+	obj = result.pointer;
+	if (obj && obj->type == ACPI_TYPE_BUFFER && obj->buffer.pointer) {
+		gkbbl_probe_out_len = min_t(size_t, obj->buffer.length,
+					    GKBBL_PROBE_MAX);
+		memcpy(gkbbl_probe_out, obj->buffer.pointer,
+		       gkbbl_probe_out_len);
+	} else if (obj && obj->type == ACPI_TYPE_INTEGER) {
+		u64 value = obj->integer.value;
+
+		gkbbl_probe_out_len = sizeof(value);
+		memcpy(gkbbl_probe_out, &value, sizeof(value));
+	}
+	kfree(result.pointer);
+	return status;
+}
+
+static ssize_t gkbbl_probe_set_write(struct file *file,
+				     const char __user *buf, size_t count,
+				     loff_t *ppos)
+{
+	u8 payload[GKBBL_PROBE_MAX] = {0};
+	char line[256];
+	char *cursor, *token;
+	unsigned int index = 0;
+	u32 result = 0;
+	acpi_status status;
+
+	if (count >= sizeof(line))
+		return -EINVAL;
+	if (copy_from_user(line, buf, count))
+		return -EFAULT;
+	line[count] = '\0';
+
+	cursor = line;
+	while ((token = strsep(&cursor, " ,\t\n")) != NULL) {
+		u8 value;
+
+		if (!*token)
+			continue;
+		if (index >= GKBBL_PROBE_MAX)
+			return -E2BIG;
+		if (kstrtou8(token, 16, &value))
+			return -EINVAL;
+		payload[index++] = value;
+	}
+	if (!index)
+		return -EINVAL;
+
+	status = WMI_gaming_execute_u8_array(gkbbl_probe_method, payload,
+					     index, &result);
+	gkbbl_probe_status = status;
+	pr_info("gkbbl_probe method=%u len=%u payload=%*ph -> %s ret=0x%x\n",
+		gkbbl_probe_method, index, index, payload,
+		acpi_format_exception(status), result);
+	return ACPI_FAILURE(status) ? -EIO : count;
+}
+
+static const struct file_operations gkbbl_probe_set_fops = {
+	.owner = THIS_MODULE,
+	.write = gkbbl_probe_set_write,
+};
+
+static int gkbbl_probe_get_show(struct seq_file *s, void *data)
+{
+	acpi_status status;
+	size_t i;
+
+	status = WMI_gaming_execute_buffer_out(gkbbl_probe_get_method,
+					       gkbbl_probe_get_arg);
+	seq_printf(s, "method=%u arg=0x%llx status=%s len=%zu\n",
+		   gkbbl_probe_get_method, gkbbl_probe_get_arg,
+		   acpi_format_exception(status), gkbbl_probe_out_len);
+	for (i = 0; i < gkbbl_probe_out_len; i++)
+		seq_printf(s, "%02x%s", gkbbl_probe_out[i],
+			   (i + 1 == gkbbl_probe_out_len) ? "\n" : " ");
+	return 0;
+}
+
+DEFINE_SHOW_ATTRIBUTE(gkbbl_probe_get);
+
 static void remove_debugfs(void)
 {
 	debugfs_remove_recursive(interface->debug.root);
@@ -4473,6 +4598,17 @@ static void __init create_debugfs(void)
 
 	debugfs_create_u32("devices", S_IRUGO, interface->debug.root,
 			   &interface->debug.wmid_devices);
+
+	debugfs_create_file("gkbbl_set", 0200, interface->debug.root, NULL,
+			    &gkbbl_probe_set_fops);
+	debugfs_create_file("gkbbl_get", 0400, interface->debug.root, NULL,
+			    &gkbbl_probe_get_fops);
+	debugfs_create_x64("gkbbl_get_arg", 0600, interface->debug.root,
+			   &gkbbl_probe_get_arg);
+	debugfs_create_u32("gkbbl_method", 0600, interface->debug.root,
+			   &gkbbl_probe_method);
+	debugfs_create_u32("gkbbl_get_method", 0600, interface->debug.root,
+			   &gkbbl_probe_get_method);
 }
 
 #if RTLNX_VER_MIN(6, 14, 0)
@@ -4825,10 +4961,15 @@ static int __init acer_wmi_init(void)
 	if (err)
 		goto error_device_add;
 
-	if (wmi_has_guid(WMID_GUID2)) {
+	/*
+	 * The debugfs root used to be created only alongside the WMID_GUID2
+	 * "devices" dump, so on a machine without that GUID (PH16-71) nothing
+	 * under debugfs existed at all - including the gaming-backlight probe,
+	 * which depends on WMID_GUID4 instead.
+	 */
+	if (wmi_has_guid(WMID_GUID2))
 		interface->debug.wmid_devices = get_wmid_devices();
-		create_debugfs();
-	}
+	create_debugfs();
 
 	/* Override any initial settings with values from the commandline */
 	acer_commandline_init();
