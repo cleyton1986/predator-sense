@@ -308,6 +308,39 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             );
         }
 
+        // Lighting has the same "forgot on power cycle" gap: neither the
+        // Chicony USB keyboard nor the WMI channel (the chassis light bar on
+        // the PH16-71 generation) remembers anything across a reboot, and the
+        // hotkey service only replays the ENEK5130 HID path. Restore both
+        // here; the Chicony write goes through the same privileged helper
+        // session the fan-mode reapply above already opened.
+        let chicony_saved = cfg.chicony_rgb.clone();
+        let lighting_cfg = cfg.clone();
+        background::run(
+            move || {
+                if let Some(saved) = chicony_saved {
+                    if crate::hardware::chicony_rgb::is_available() {
+                        if let Err(e) = crate::hardware::chicony_rgb::set_effect(
+                            saved.effect,
+                            saved.brightness,
+                            saved.color,
+                            saved.speed,
+                        ) {
+                            crate::hardware::applog::error(&format!(
+                                "startup: Chicony keyboard lighting not restored: {e}"
+                            ));
+                        }
+                    }
+                }
+                if let Some(Err(e)) = crate::hardware::rgb::reapply_saved(&lighting_cfg) {
+                    crate::hardware::applog::error(&format!(
+                        "startup: WMI lighting (light bar) not restored: {e}"
+                    ));
+                }
+            },
+            |()| {},
+        );
+
         glib::timeout_add_seconds_local(5, || {
             let (cpu, gpu) = sensors::read_critical_temps();
             crate::hardware::alerts::check(cpu, gpu);

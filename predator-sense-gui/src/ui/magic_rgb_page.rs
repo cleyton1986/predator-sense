@@ -17,6 +17,7 @@ use std::rc::Rc;
 
 use crate::hardware::chicony_rgb;
 use crate::hardware::magic_rgb::{self, KeyboardEffect, LogoEffect};
+use crate::hardware::rgb::{self, Direction, RgbConfig, RgbMode};
 use crate::ui::background;
 
 pub fn build() -> gtk::ScrolledWindow {
@@ -63,6 +64,20 @@ pub fn build() -> gtk::ScrolledWindow {
             "chicony",
             crate::i18n::t("chicony_rgb_section").to_string(),
             build_chicony_section().upcast(),
+        ));
+    }
+    // A USB keyboard does not make the firmware's WMI lighting channel go
+    // away: on the PH16-71 generation it drives the chassis light bar (the
+    // captures in Order52/ph16-71-rgb's Rear-RGB show the light bar taking
+    // exactly the WMI effect set - Breathing=1, Neon=2, Wave=3, Twinkling=7,
+    // speed 1-5, brightness 0-100 - and a write to /dev/acer-gkbbl-0 moves
+    // it). rgb_page.rs never gets a chance to show its WMI panel once any USB
+    // backend exists, so the bar was simply unreachable from the app.
+    if rgb::is_module_loaded() && !sections.is_empty() {
+        sections.push((
+            "light_bar",
+            crate::i18n::t("light_bar_section").to_string(),
+            build_light_bar_section().upcast(),
         ));
     }
 
@@ -849,6 +864,283 @@ fn build_logo_section() -> gtk::Box {
         });
     }
     btn_row.append(&off_btn);
+    page.append(&btn_row);
+    page.append(&status);
+
+    page
+}
+
+struct LightBarState {
+    mode: RgbMode,
+    speed: u8,
+    brightness: u8,
+    direction: Direction,
+    color: (u8, u8, u8),
+    status: gtk::Label,
+}
+
+fn light_bar_mode_options() -> [(RgbMode, &'static str); 8] {
+    [
+        (RgbMode::Static, "static_mode"),
+        (RgbMode::Breath, "breath"),
+        (RgbMode::Neon, "neon"),
+        (RgbMode::Wave, "wave"),
+        (RgbMode::Shifting, "shifting"),
+        (RgbMode::Zoom, "zoom"),
+        (RgbMode::Meteor, "meteor"),
+        (RgbMode::Twinkling, "twinkling"),
+    ]
+}
+
+/// Chassis light bar over the firmware's WMI lighting channel
+/// (`hardware::rgb`): one color for the whole bar, the firmware's own effect
+/// list, speed 1-9, brightness 0-100. State is persisted in the same
+/// `rgb_*` config fields the WMI keyboard page uses, so `rgb::reapply_saved`
+/// restores it at startup.
+fn build_light_bar_section() -> gtk::Box {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    page.set_margin_top(6);
+
+    page.append(&section_title(crate::i18n::t("light_bar_section")));
+
+    let note = gtk::Label::new(Some(crate::i18n::t("light_bar_note")));
+    note.add_css_class("cover-logo-hint");
+    note.set_wrap(true);
+    note.set_halign(gtk::Align::Start);
+    page.append(&note);
+
+    let status = gtk::Label::new(None);
+    status.add_css_class("status-label");
+
+    let saved = crate::config::load_app_config();
+    let saved_dynamic = saved.rgb_dynamic_last.clone().unwrap_or_default();
+    let saved_static = saved
+        .rgb_static_zones
+        .as_ref()
+        .and_then(|zones| zones.first())
+        .map(|z| (z.red, z.green, z.blue));
+    let (initial_mode, initial_color, initial_brightness) = if saved.rgb_is_static {
+        (
+            RgbMode::Static,
+            saved_static.unwrap_or((0, 200, 230)),
+            saved.rgb_brightness,
+        )
+    } else {
+        (
+            saved_dynamic.mode,
+            (saved_dynamic.red, saved_dynamic.green, saved_dynamic.blue),
+            saved_dynamic.brightness,
+        )
+    };
+
+    let state = Rc::new(RefCell::new(LightBarState {
+        mode: initial_mode,
+        speed: saved_dynamic.speed.clamp(1, 9),
+        brightness: initial_brightness.min(100),
+        direction: saved_dynamic.direction,
+        color: initial_color,
+        status: status.clone(),
+    }));
+
+    let modes_row = gtk::FlowBox::new();
+    modes_row.set_selection_mode(gtk::SelectionMode::None);
+    modes_row.set_max_children_per_line(4);
+    modes_row.set_min_children_per_line(2);
+    modes_row.set_row_spacing(6);
+    modes_row.set_column_spacing(6);
+    modes_row.set_homogeneous(true);
+
+    let (speed_row, speed_scale) = labeled_scale(
+        crate::i18n::t("speed"),
+        1.0,
+        9.0,
+        state.borrow().speed as f64,
+    );
+    let (bright_row, bright_scale) = labeled_scale(
+        crate::i18n::t("brightness"),
+        0.0,
+        100.0,
+        state.borrow().brightness as f64,
+    );
+
+    let direction_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let direction_label = gtk::Label::new(Some(crate::i18n::t("direction")));
+    direction_label.add_css_class("rgb-channel-label");
+    direction_row.append(&direction_label);
+    let dir_rtl = gtk::ToggleButton::with_label(crate::i18n::t("right_to_left"));
+    let dir_ltr = gtk::ToggleButton::with_label(crate::i18n::t("left_to_right"));
+    for b in [&dir_rtl, &dir_ltr] {
+        b.add_css_class("mode-button");
+    }
+    dir_ltr.set_group(Some(&dir_rtl));
+    match state.borrow().direction {
+        Direction::RightToLeft => dir_rtl.set_active(true),
+        Direction::LeftToRight => dir_ltr.set_active(true),
+    }
+    {
+        let state = state.clone();
+        dir_rtl.connect_toggled(move |b| {
+            if b.is_active() {
+                state.borrow_mut().direction = Direction::RightToLeft;
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        dir_ltr.connect_toggled(move |b| {
+            if b.is_active() {
+                state.borrow_mut().direction = Direction::LeftToRight;
+            }
+        });
+    }
+    direction_row.append(&dir_rtl);
+    direction_row.append(&dir_ltr);
+
+    let (color_column, color_scales) = color_row((
+        initial_color.0 as f64,
+        initial_color.1 as f64,
+        initial_color.2 as f64,
+    ));
+    for scale in &color_scales {
+        let state = state.clone();
+        let scales = color_scales.clone();
+        scale.connect_value_changed(move |_| {
+            state.borrow_mut().color = (
+                scales[0].value() as u8,
+                scales[1].value() as u8,
+                scales[2].value() as u8,
+            );
+        });
+    }
+
+    // Only the controls an effect actually uses are shown, mirroring the
+    // WMI keyboard page (`RgbMode::needs_*`).
+    let sync_visibility = {
+        let speed_row = speed_row.clone();
+        let direction_row = direction_row.clone();
+        let color_column = color_column.clone();
+        move |mode: RgbMode| {
+            speed_row.set_visible(mode.needs_speed());
+            direction_row.set_visible(mode.needs_direction());
+            color_column.set_visible(mode.needs_color());
+        }
+    };
+    sync_visibility(initial_mode);
+
+    let mut mode_buttons = Vec::new();
+    for (mode, key) in light_bar_mode_options() {
+        let btn = gtk::ToggleButton::with_label(crate::i18n::t(key));
+        btn.add_css_class("mode-button");
+        if mode == initial_mode {
+            btn.set_active(true);
+            btn.add_css_class("mode-active");
+        }
+        modes_row.insert(&btn, -1);
+        mode_buttons.push((mode, btn));
+    }
+    let mode_buttons = Rc::new(mode_buttons);
+    for (mode, btn) in mode_buttons.iter() {
+        let mode = *mode;
+        let state = state.clone();
+        let mode_buttons = mode_buttons.clone();
+        let sync_visibility = sync_visibility.clone();
+        btn.connect_toggled(move |b| {
+            if !b.is_active() {
+                if mode_buttons.iter().all(|(_, other)| !other.is_active()) {
+                    b.set_active(true);
+                }
+                return;
+            }
+            for (_, other) in mode_buttons.iter() {
+                if other != b {
+                    other.set_active(false);
+                    other.remove_css_class("mode-active");
+                }
+            }
+            b.add_css_class("mode-active");
+            state.borrow_mut().mode = mode;
+            sync_visibility(mode);
+        });
+    }
+    page.append(&modes_row);
+
+    {
+        let state = state.clone();
+        speed_scale.connect_value_changed(move |s| state.borrow_mut().speed = s.value() as u8);
+    }
+    {
+        let state = state.clone();
+        bright_scale
+            .connect_value_changed(move |s| state.borrow_mut().brightness = s.value() as u8);
+    }
+    page.append(&bright_row);
+    page.append(&speed_row);
+    page.append(&direction_row);
+    page.append(&color_column);
+
+    let btn_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    btn_row.set_halign(gtk::Align::Center);
+    btn_row.set_margin_top(6);
+
+    let apply_btn = gtk::Button::with_label(crate::i18n::t("apply"));
+    apply_btn.add_css_class("accent-button");
+    {
+        let state = state.clone();
+        apply_btn.connect_clicked(move |_| {
+            let st = state.borrow();
+            let (r, g, b) = st.color;
+            let result = if st.mode == RgbMode::Static {
+                rgb::apply_static_color(r, g, b, st.brightness)
+            } else {
+                rgb::apply_dynamic_effect(&RgbConfig {
+                    mode: st.mode,
+                    speed: st.speed,
+                    brightness: st.brightness,
+                    direction: st.direction,
+                    red: r,
+                    green: g,
+                    blue: b,
+                })
+            };
+            if result.is_ok() {
+                let mut cfg = crate::config::load_app_config();
+                cfg.rgb_is_static = st.mode == RgbMode::Static;
+                cfg.rgb_brightness = st.brightness;
+                if cfg.rgb_is_static {
+                    cfg.rgb_static_zones = Some(
+                        (1..=4u8)
+                            .map(|zone| crate::config::ZoneColor {
+                                zone,
+                                red: r,
+                                green: g,
+                                blue: b,
+                            })
+                            .collect(),
+                    );
+                } else {
+                    cfg.rgb_dynamic_last = Some(RgbConfig {
+                        mode: st.mode,
+                        speed: st.speed,
+                        brightness: st.brightness,
+                        direction: st.direction,
+                        red: r,
+                        green: g,
+                        blue: b,
+                    });
+                    cfg.rgb_dynamic_effects.insert(
+                        st.mode,
+                        rgb::EffectParams {
+                            speed: st.speed,
+                            direction: Some(st.direction),
+                        },
+                    );
+                }
+                let _ = crate::config::save_app_config(&cfg);
+            }
+            apply_result(&st.status, result);
+        });
+    }
+    btn_row.append(&apply_btn);
     page.append(&btn_row);
     page.append(&status);
 
