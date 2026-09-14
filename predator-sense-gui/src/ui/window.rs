@@ -332,10 +332,14 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         }
                     }
                 }
-                if let Some(Err(e)) = crate::hardware::rgb::reapply_saved(&lighting_cfg) {
-                    crate::hardware::applog::error(&format!(
-                        "startup: WMI lighting (light bar) not restored: {e}"
-                    ));
+                if let Some(saved) = lighting_cfg.light_bar {
+                    // `wake`: after a power cycle the firmware needs one
+                    // Breathing frame before any other mode shows.
+                    if let Err(e) = crate::hardware::light_bar::apply(&saved, true) {
+                        crate::hardware::applog::error(&format!(
+                            "startup: light bar not restored: {e}"
+                        ));
+                    }
                 }
             },
             |()| {},

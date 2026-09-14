@@ -214,6 +214,10 @@ pub struct AppConfig {
     pub magic_rgb_logo: Option<MagicRgbLogoState>,
     #[serde(default)]
     pub chicony_rgb: Option<ChiconyRgbState>,
+    /// Last-applied chassis light bar state (`hardware::light_bar`, PH16-71
+    /// generation). None means never applied through this app.
+    #[serde(default)]
+    pub light_bar: Option<crate::hardware::light_bar::LightBarState>,
     /// None means the user has never applied a cover-logo setting, so automatic
     /// restoration must leave the controller's firmware default untouched.
     #[serde(default)]
@@ -376,6 +380,7 @@ impl Default for AppConfig {
             magic_rgb_keyboard: None,
             magic_rgb_logo: None,
             chicony_rgb: None,
+            light_bar: None,
             cover_logo: None,
             battery_limiter: false,
             battery_health_mode: false,
