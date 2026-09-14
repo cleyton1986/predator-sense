@@ -233,68 +233,6 @@ pub fn apply_static_all_zones(red: u8, green: u8, blue: u8) -> Result<(), String
     Ok(())
 }
 
-/// One solid color on every zone at the given brightness: the static-zone
-/// write per zone, each followed by the WMI "static" commit that carries the
-/// brightness (the static device's 4-byte payload has no brightness of its
-/// own) - the same two-step sequence the Lighting page's Static apply uses.
-pub fn apply_static_color(red: u8, green: u8, blue: u8, brightness: u8) -> Result<(), String> {
-    for zone in 1..=4 {
-        apply_static_zone(&StaticZoneConfig {
-            zone,
-            red,
-            green,
-            blue,
-        })?;
-        apply_dynamic_effect(&RgbConfig {
-            mode: RgbMode::Static,
-            speed: 0,
-            brightness,
-            direction: Direction::RightToLeft,
-            red: 0,
-            green: 0,
-            blue: 0,
-        })?;
-    }
-    Ok(())
-}
-
-/// Puts the WMI lighting back to whatever the app last applied, from the
-/// saved config. `None` when nothing was ever applied through this path (so
-/// the firmware default is left alone) or the device is not present.
-///
-/// On the PH16-71 generation this WMI channel is the chassis light bar, not
-/// the keyboard (the keyboard is a USB Chicony device there): the firmware
-/// forgets it on every power cycle and the hotkey service only replays the
-/// ENEK5130 HID path, so without this the bar came back dark on every boot.
-pub fn reapply_saved(cfg: &crate::config::AppConfig) -> Option<Result<(), String>> {
-    if !is_module_loaded() {
-        return None;
-    }
-    if cfg.rgb_is_static {
-        let zones = cfg.rgb_static_zones.as_ref()?;
-        let first = zones.first()?;
-        let uniform = zones
-            .iter()
-            .all(|z| (z.red, z.green, z.blue) == (first.red, first.green, first.blue));
-        if uniform {
-            return Some(apply_static_color(first.red, first.green, first.blue, cfg.rgb_brightness));
-        }
-        for zone in zones {
-            if let Err(e) = apply_static_zone(&StaticZoneConfig {
-                zone: zone.zone,
-                red: zone.red,
-                green: zone.green,
-                blue: zone.blue,
-            }) {
-                return Some(Err(e));
-            }
-        }
-        return Some(apply_brightness_only(cfg.rgb_brightness));
-    }
-    let dynamic = cfg.rgb_dynamic_last.as_ref()?;
-    Some(apply_dynamic_effect(dynamic))
-}
-
 /// Write binary data to a character device safely
 fn write_to_device(device_path: &str, data: &[u8]) -> Result<(), String> {
     let mut file = OpenOptions::new()
