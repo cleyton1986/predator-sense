@@ -77,13 +77,15 @@ pub fn is_available() -> bool {
 /// the per-key generation (PH16-71) sets a solid colour. Verified on real
 /// hardware; see the helper's `chicony_color_apply` for the wire format and
 /// the two independent implementations it was cross-checked against.
-pub fn set_static_color(red: u8, green: u8, blue: u8) -> Result<(), String> {
+/// `brightness` is a percentage, `0..=100`.
+pub fn set_static_color(red: u8, green: u8, blue: u8, brightness: u8) -> Result<(), String> {
     crate::hardware::helper::execute(
         predator_sense_protocol::helper::Action::ChiconyColor,
         &[
             &red.to_string(),
             &green.to_string(),
             &blue.to_string(),
+            &brightness.min(100).to_string(),
         ],
     )
 }

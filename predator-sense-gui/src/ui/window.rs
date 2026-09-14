@@ -402,6 +402,16 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         background::run(
             || crate::hardware::extras::get_backlight_timeout(),
             |firmware_enabled| {
+                // Only take this feature over on a machine whose lighting this
+                // app can actually blank. The two writes below are otherwise a
+                // one-way trade: the firmware timeout goes off, and the timer
+                // meant to replace it declines to blank anything, leaving the
+                // backlight lit for good on a chassis that was working fine.
+                let can_blank_keyboard = crate::hardware::keyboard_rgb::is_available();
+                let can_blank_bar = crate::hardware::light_bar::is_available();
+                if !can_blank_keyboard && !can_blank_bar {
+                    return;
+                }
                 let mut cfg = config::load_app_config();
                 // Inherit the old single light-bar flag, or the firmware
                 // timeout, the first time this runs.
@@ -413,7 +423,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     // One owner: the firmware's own timer cannot see the mouse
                     // and runs on its own clock, so it has to be off for the
                     // two devices to blank together.
-                    if firmware_enabled && cfg.idle_keyboard_enabled {
+                    if firmware_enabled && cfg.idle_keyboard_enabled && can_blank_keyboard {
                         let _ = crate::hardware::extras::set_backlight_timeout(false);
                     }
                     crate::hardware::idle::start();
@@ -1985,9 +1995,31 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
         usb_row.append(&usb_switch);
         page.append(&usb_row);
 
-        // The keyboard backlight auto-off switch used to live here. It is a
-        // lighting control, so it now sits on the Lighting page next to the
-        // light bar's equivalent (ui::lighting_page).
+        // The keyboard backlight auto-off switch moved to the Lighting page,
+        // next to the light bar's equivalent, on the chassis that page serves
+        // (ui::lighting_page). Every other machine still needs it here: that
+        // page is not built for them, and without this row the firmware
+        // timeout would have no control anywhere in the app.
+        if !crate::hardware::keyboard_rgb::is_available() {
+            let backlight_timeout_row =
+                create_setting_row(t("backlight_timeout"), t("backlight_timeout_desc"));
+            let backlight_timeout_switch = gtk::Switch::new();
+            backlight_timeout_switch.set_valign(gtk::Align::Center);
+            backlight_timeout_switch.set_sensitive(false);
+            backlight_timeout_row.append(&backlight_timeout_switch);
+            page.append(&backlight_timeout_row);
+            background::run(
+                || crate::hardware::extras::get_backlight_timeout(),
+                move |enabled| {
+                    backlight_timeout_switch.set_active(enabled);
+                    backlight_timeout_switch.connect_state_set(|_, active| {
+                        let _ = crate::hardware::extras::set_backlight_timeout(active);
+                        glib::Propagation::Proceed
+                    });
+                    backlight_timeout_switch.set_sensitive(true);
+                },
+            );
+        }
 
         // These reads each launch the EC helper and can take ~150 ms. Keep
         // the switches disabled until all states arrive off-thread, then

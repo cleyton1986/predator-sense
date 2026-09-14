@@ -18,6 +18,11 @@ use std::rc::Rc;
 
 use crate::ui::{ai_page, audio_eq_page, game_sync_page, grub_splash_page, macros_page};
 
+/// Chassis with the dedicated PredatorSense key. Kept in step with
+/// `PREDATOR_KEY_MODELS` in the daemon (`installer/src/hotkey.rs`), which is
+/// what actually watches the key.
+const PREDATOR_KEY_MODELS: &[&str] = &["PH16-71"];
+
 pub fn build(window: &gtk::ApplicationWindow) -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
     page.set_margin_top(10);
@@ -56,16 +61,23 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::Box {
     stack.add_named(&audio_eq_page::build(), Some("audio_eq"));
     stack.add_named(&ai_page::build(window), Some("ai"));
     stack.add_named(&grub_splash_page::build(window), Some("grub_splash"));
-    stack.add_named(&build_predator_key_page(), Some("predator_key"));
+    // The dedicated PredatorSense key beside NumLock exists on this chassis
+    // generation only. Offering a binding editor for a key the machine does
+    // not have would be a tab that can never do anything.
+    let has_predator_key =
+        crate::hardware::sysinfo::product_matches(PREDATOR_KEY_MODELS);
 
-    let tabs: [(&str, &str, Option<&str>); 6] = [
+    let mut tabs: Vec<(&str, &str, Option<&str>)> = vec![
         (crate::i18n::t("game_sync_nav"), "game_sync", None),
         (crate::i18n::t("macros_nav"), "macros", None),
         (crate::i18n::t("audio_eq_nav"), "audio_eq", None),
         (crate::i18n::t("ai_page_nav"), "ai", None),
         (crate::i18n::t("grub_splash_nav"), "grub_splash", None),
-        (crate::i18n::t("predator_key_nav"), "predator_key", None),
     ];
+    if has_predator_key {
+        stack.add_named(&build_predator_key_page(), Some("predator_key"));
+        tabs.push((crate::i18n::t("predator_key_nav"), "predator_key", None));
+    }
     let buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
     for (i, (label, key, badge)) in tabs.iter().enumerate() {
         // Same overlay-with-badge trick `tool_card` used before this page

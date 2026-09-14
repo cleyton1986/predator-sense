@@ -815,11 +815,18 @@ fn build_idle_section(have_keyboard: bool, have_bar: bool) -> gtk::Box {
             cfg.light_bar_idle_enabled = active && cfg.idle_bar_enabled;
             let _ = config::save_app_config(&cfg);
             if active {
-                // One owner - see this function's doc comment.
-                let _ = crate::hardware::extras::set_backlight_timeout(false);
+                // One owner - see this function's doc comment. Only worth
+                // taking if this app can blank the keyboard itself.
+                if crate::hardware::keyboard_rgb::is_available() {
+                    let _ = crate::hardware::extras::set_backlight_timeout(false);
+                }
                 crate::hardware::idle::start();
                 crate::hardware::idle::mark_active();
             } else {
+                // The firmware timeout deliberately stays off. This switch
+                // reads "Turn lighting off when idle" - handing the keyboard
+                // back to its own timer here would re-enable the very
+                // behaviour the user just switched off.
                 crate::hardware::keyboard_rgb::unblank();
                 crate::hardware::light_bar::unblank();
             }

@@ -76,8 +76,21 @@ pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
 /// is a bonus wake-up, not the fan mode change itself. Logs if the bounce
 /// left the profile somewhere other than where it started, since that *is* a
 /// real, visible side effect a caller did not ask for.
+/// Chassis where the post-`pwm_enable=2` fan stall was actually observed.
+///
+/// The bounce is a workaround for that EC quirk, not a general improvement:
+/// it drives the firmware power profile to a neighbouring value and back,
+/// which the user sees as the mode-key LED blinking, and if the restoring
+/// write fails the machine is left in the wrong profile. Somewhere the stall
+/// does not happen, that is all cost and no benefit - so it is opt-in by
+/// model rather than applied to every `.pwm = 1` board.
+const FAN_CURVE_STALL_MODELS: &[&str] = &["PH16-71"];
+
 pub fn wake_dynamic_fan_curve() {
     use crate::hardware::thermal_profile;
+    if !crate::hardware::sysinfo::product_matches(FAN_CURVE_STALL_MODELS) {
+        return;
+    }
     if !thermal_profile::is_available() {
         return;
     }

@@ -169,6 +169,13 @@ impl PowerProfile {
 /// indices, and which index a tier maps to is per-machine, so the measured
 /// calibration is what translates between them.
 pub fn push_mode_cycles(ac: &[String], battery: &[String]) -> Result<(), String> {
+    // facer only creates these on a predator_v4 chassis, and the stock
+    // in-tree acer_wmi has never had them. Without this check every launch on
+    // such a machine spends a privileged helper round-trip to fail, and logs
+    // the failure as an error.
+    if !std::path::Path::new("/sys/devices/platform/acer-wmi/mode_cycle_ac").exists() {
+        return Ok(());
+    }
     let Some(calibration) = crate::hardware::thermal_profile::load() else {
         // Nothing measured yet: leaving the driver's own ladder in place is
         // better than installing a cycle built on guessed indices.

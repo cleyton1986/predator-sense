@@ -3753,6 +3753,13 @@ static int acer_mode_cycle_next(bool on_ac)
 	u8 current_index;
 	u8 i;
 
+	/*
+	 * Unlocked fast path: with no cycle configured this must return
+	 * before the WMI call below, so an unconfigured machine keeps the
+	 * driver's original behaviour with no added firmware traffic. A
+	 * concurrent write can only make this read stale, never invalid; the
+	 * authoritative length is re-read under the lock.
+	 */
 	if (!len)
 		return -1;
 	if (WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_PLATFORM_PROFILE,
@@ -3760,6 +3767,11 @@ static int acer_mode_cycle_next(bool on_ac)
 		return -1;
 
 	mutex_lock(&mode_cycle_lock);
+	len = on_ac ? mode_cycle_ac_len : mode_cycle_battery_len;
+	if (!len) {
+		mutex_unlock(&mode_cycle_lock);
+		return -1;
+	}
 	next = cycle[0];
 	for (i = 0; i < len; i++) {
 		if (cycle[i] == current_index) {
@@ -4499,12 +4511,22 @@ static int acer_platform_probe(struct platform_device *device)
 		if (device_create_file(&device->dev, &dev_attr_thermal_profile_supported))
 			dev_warn(&device->dev,
 				 "failed to create thermal_profile_supported sysfs attribute\n");
-		if (device_create_file(&device->dev, &dev_attr_mode_cycle_ac))
-			dev_warn(&device->dev,
-				 "failed to create mode_cycle_ac sysfs attribute\n");
-		if (device_create_file(&device->dev, &dev_attr_mode_cycle_battery))
-			dev_warn(&device->dev,
-				 "failed to create mode_cycle_battery sysfs attribute\n");
+		/*
+		 * Only the predator_v4 path in acer_thermal_profile_change()
+		 * consults a user-defined cycle, so exposing these anywhere
+		 * else would accept a cycle the mode key then ignores. Their
+		 * presence is also what userspace checks before offering the
+		 * editor at all.
+		 */
+		if (quirks->predator_v4) {
+			if (device_create_file(&device->dev, &dev_attr_mode_cycle_ac))
+				dev_warn(&device->dev,
+					 "failed to create mode_cycle_ac sysfs attribute\n");
+			if (device_create_file(&device->dev,
+					       &dev_attr_mode_cycle_battery))
+				dev_warn(&device->dev,
+					 "failed to create mode_cycle_battery sysfs attribute\n");
+		}
 	}
 
 	return 0;
@@ -4528,6 +4550,9 @@ static void acer_platform_remove(struct platform_device *device)
 	device_remove_file(&device->dev, &dev_attr_backlight_timeout);
 	device_remove_file(&device->dev, &dev_attr_thermal_profile);
 	device_remove_file(&device->dev, &dev_attr_thermal_profile_supported);
+	/* No-ops when predator_v4 was false and these were never created. */
+	device_remove_file(&device->dev, &dev_attr_mode_cycle_ac);
+	device_remove_file(&device->dev, &dev_attr_mode_cycle_battery);
 
 	if (has_cap(ACER_CAP_MAILLED))
 		acer_led_exit();
@@ -4748,16 +4773,30 @@ static void __init create_debugfs(void)
 	debugfs_create_u32("devices", S_IRUGO, interface->debug.root,
 			   &interface->debug.wmid_devices);
 
-	debugfs_create_file("gkbbl_set", 0200, interface->debug.root, NULL,
-			    &gkbbl_probe_set_fops);
-	debugfs_create_file("gkbbl_get", 0400, interface->debug.root, NULL,
-			    &gkbbl_probe_get_fops);
-	debugfs_create_x64("gkbbl_get_arg", 0600, interface->debug.root,
-			   &gkbbl_probe_get_arg);
-	debugfs_create_u32("gkbbl_method", 0600, interface->debug.root,
-			   &gkbbl_probe_method);
-	debugfs_create_u32("gkbbl_get_method", 0600, interface->debug.root,
-			   &gkbbl_probe_get_method);
+	/*
+	 * Gaming-lighting probe. Root-only (debugfs itself is 0700), and
+	 * only where WMID_GUID4 exists at all - on any other Acer these
+	 * would be five files whose every method call can only fail.
+	 *
+	 * Note that reading gkbbl_get is not passive: it evaluates a WMI
+	 * method, which traps to SMM. That is deliberate for a probe, but it
+	 * means a root process that walks all of debugfs (a diagnostic
+	 * collector, a fuzzer) triggers firmware calls. Kept behind the GUID
+	 * check so that surface does not exist on hardware it cannot serve.
+	 */
+	if (wmi_has_guid(WMID_GUID4)) {
+		debugfs_create_file("gkbbl_set", 0200, interface->debug.root,
+				    NULL, &gkbbl_probe_set_fops);
+		debugfs_create_file("gkbbl_get", 0400, interface->debug.root,
+				    NULL, &gkbbl_probe_get_fops);
+		debugfs_create_x64("gkbbl_get_arg", 0600, interface->debug.root,
+				   &gkbbl_probe_get_arg);
+		debugfs_create_u32("gkbbl_method", 0600, interface->debug.root,
+				   &gkbbl_probe_method);
+		debugfs_create_u32("gkbbl_get_method", 0600,
+				   interface->debug.root,
+				   &gkbbl_probe_get_method);
+	}
 }
 
 #if RTLNX_VER_MIN(6, 14, 0)

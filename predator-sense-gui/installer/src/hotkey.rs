@@ -759,9 +759,32 @@ const PREDATOR_KEY_HID_VENDOR: &str = "04F2";
 const PREDATOR_KEY_HID_PRODUCT: &str = "0117";
 const PREDATOR_KEY_HID_INTERFACE: &str = "02";
 
-/// Locates that node. `None` when the keyboard is absent or the udev rule
-/// granting group access was never installed.
+/// Chassis this report was confirmed on.
+///
+/// `04F2:0117` is not unique to it - the same Chicony controller ships on the
+/// Helios 300 / PH317-56 generation. Without this gate the daemon would open
+/// interface 2 there too and treat any report starting `04 81 FF` as the
+/// PredatorSense key, launching the app (or, if the user bound a command,
+/// running it) when some ordinary consumer key is pressed.
+const PREDATOR_KEY_MODELS: &[&str] = &["PH16-71"];
+
+/// True when DMI names one of [`PREDATOR_KEY_MODELS`], compared as whole
+/// whitespace-separated words so `PH16-71` does not match `PH16-71X`.
+fn chassis_has_predator_key() -> bool {
+    let Ok(name) = fs::read_to_string(path::PRODUCT_NAME) else {
+        return false;
+    };
+    name.split_whitespace()
+        .any(|part| PREDATOR_KEY_MODELS.iter().any(|m| part.eq_ignore_ascii_case(m)))
+}
+
+/// Locates that node. `None` when this is not a chassis with the key, when
+/// the keyboard is absent, or when the udev rule granting group access was
+/// never installed.
 fn find_predator_key_hid() -> Option<PathBuf> {
+    if !chassis_has_predator_key() {
+        return None;
+    }
     let entries = fs::read_dir("/sys/class/hidraw").ok()?;
     for entry in entries.flatten() {
         let base = entry.path();
@@ -878,9 +901,21 @@ fn on_ac_power() -> Option<bool> {
     let entries = fs::read_dir(Path::new(battery::SYSFS_ROOT).join("class/power_supply")).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if fs::read_to_string(path.join("type")).ok()?.trim() == "Mains" {
-            return Some(fs::read_to_string(path.join("online")).ok()?.trim() == "1");
+        // Skip an entry that will not answer rather than abandoning the scan:
+        // a wireless mouse, a headset or a UPS shows up here too, and `?` on
+        // its unreadable `type` used to return None for the whole function
+        // before the real Mains supply was ever reached. The caller defaults
+        // to AC on None, so that silently ran the AC cycle while on battery.
+        let Ok(kind) = fs::read_to_string(path.join("type")) else {
+            continue;
+        };
+        if kind.trim() != "Mains" {
+            continue;
         }
+        let Ok(online) = fs::read_to_string(path.join("online")) else {
+            continue;
+        };
+        return Some(online.trim() == "1");
     }
     None
 }
