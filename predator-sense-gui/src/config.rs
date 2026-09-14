@@ -300,6 +300,17 @@ pub struct AppConfig {
     pub auto_eco_enabled: bool,
     #[serde(default = "default_auto_eco_threshold")]
     pub auto_eco_threshold: u32,
+
+    /// What the dedicated PredatorSense key does: `app` (open Predator Sense,
+    /// the default), `command` (run `predator_key_command`), or `none`.
+    ///
+    /// The key produces no input event at all - the kernel maps neither of the
+    /// HID usages it reports - so the daemon watches its raw HID report
+    /// directly and runs this.
+    #[serde(default = "default_predator_key_action")]
+    pub predator_key_action: String,
+    #[serde(default)]
+    pub predator_key_command: String,
     /// None means the user has never applied a cover-logo setting, so automatic
     /// restoration must leave the controller's firmware default untouched.
     #[serde(default)]
@@ -431,6 +442,10 @@ fn default_auto_eco_threshold() -> u32 {
     30
 }
 
+fn default_predator_key_action() -> String {
+    "app".to_string()
+}
+
 fn default_rgb_brightness() -> u8 {
     100
 }
@@ -496,6 +511,8 @@ impl Default for AppConfig {
             mode_default: None,
             auto_eco_enabled: false,
             auto_eco_threshold: default_auto_eco_threshold(),
+            predator_key_action: default_predator_key_action(),
+            predator_key_command: String::new(),
             cover_logo: None,
             battery_limiter: false,
             battery_health_mode: false,

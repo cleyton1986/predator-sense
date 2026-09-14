@@ -88,6 +88,16 @@ struct Config {
     mode_cycle_ac: Vec<String>,
     #[serde(default)]
     mode_cycle_battery: Vec<String>,
+    /// What the PredatorSense key does: "app" (open Predator Sense, the
+    /// default), "command" (run `predator_key_command`), or "none".
+    #[serde(default = "default_predator_key_action")]
+    predator_key_action: String,
+    #[serde(default)]
+    predator_key_command: String,
+}
+
+fn default_predator_key_action() -> String {
+    "app".to_string()
 }
 
 impl Default for Config {
@@ -101,6 +111,8 @@ impl Default for Config {
             cover_logo: None,
             mode_cycle_ac: Vec::new(),
             mode_cycle_battery: Vec::new(),
+            predator_key_action: default_predator_key_action(),
+            predator_key_command: String::new(),
         }
     }
 }
@@ -346,10 +358,10 @@ pub(crate) fn run() -> AppResult {
     // O terceiro campo marca o EC HID. Guardar um indice separado seria um bug:
     // devices sao removidos quando desconectam, e os indices dos seguintes
     // deslizam - fazendo o "indice do EC" apontar para um teclado.
-    let mut devices: Vec<(PathBuf, File, bool)> = Vec::new();
+    let mut devices: Vec<(PathBuf, File, DeviceKind)> = Vec::new();
     for path in paths {
         match File::open(&path) {
-            Ok(file) => devices.push((path, file, false)),
+            Ok(file) => devices.push((path, file, DeviceKind::Input)),
             Err(error) => logger.error(format!("Falha ao abrir {}: {error}", path.display())),
         }
     }
@@ -357,13 +369,29 @@ pub(crate) fn run() -> AppResult {
     // produces no input-subsystem event - so it is polled alongside the
     // keyboards but parsed differently. Optional: older models have no such
     // key, and without the udev rule the node stays root-only.
+    match find_predator_key_hid() {
+        Some(path) => match File::open(&path) {
+            Ok(file) => {
+                logger.info(format!("Tecla PredatorSense: monitorando {}", path.display()));
+                devices.push((path, file, DeviceKind::PredatorKey));
+            }
+            Err(error) => logger.error(format!(
+                "Tecla PredatorSense: {} não pôde ser aberto: {error}",
+                path.display()
+            )),
+        },
+        None => logger.info(
+            "Tecla PredatorSense: nenhum nó HID acessível (regra udev ausente?)".to_string(),
+        ),
+    }
+
     let mode_key = ModeKey::load(&home);
     let (ec_hid, ec_candidates) = find_ec_hid(&mode_key);
     match ec_hid {
         Some(path) => match File::open(&path) {
             Ok(file) => {
                 logger.info(format!("Tecla de modo: monitorando {}", path.display()));
-                devices.push((path, file, true));
+                devices.push((path, file, DeviceKind::ModeKey));
             }
             Err(error) => logger.info(format!(
                 "Tecla de modo indisponível ({error}); confira o grupo input"
@@ -467,7 +495,26 @@ pub(crate) fn run() -> AppResult {
             if events & libc::POLLIN == 0 {
                 continue;
             }
-            if devices[index].2 {
+            if devices[index].2 == DeviceKind::PredatorKey {
+                match read_predator_key(&mut devices[index].1) {
+                    Ok(true) => {
+                        if last_activation.elapsed()
+                            > Duration::from_secs(timing::HOTKEY_DEBOUNCE_SECS)
+                        {
+                            last_activation = Instant::now();
+                            let config = load_config(&config_path);
+                            run_predator_key_action(&mut logger, &config);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        logger.error(format!("Tecla PredatorSense: leitura falhou: {error}"));
+                        devices.remove(index);
+                    }
+                }
+                continue;
+            }
+            if devices[index].2 == DeviceKind::ModeKey {
                 match read_mode_key(&mut devices[index].1, &mode_key) {
                     Ok(true) => {
                         if last_mode_activation.elapsed()
@@ -688,6 +735,93 @@ fn find_ec_hid(mode_key: &ModeKey) -> (Option<PathBuf>, Vec<String>) {
 }
 
 /// Reads one input report and reports whether it is the mode-switch key.
+/// What a watched node reports, so one loop can serve three sources.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeviceKind {
+    /// evdev node carrying `PREDATOR_KEY_CODE`.
+    Input,
+    /// Raw HID node the mode-switch key reports on (older/other models).
+    ModeKey,
+    /// Raw HID node the PredatorSense key reports on.
+    PredatorKey,
+}
+
+/// The PredatorSense key's HID report on the Chicony keyboard's consumer
+/// interface.
+///
+/// The key reports usage 0xC9 on the keyboard interface and this vendor
+/// consumer usage on interface 2, and the kernel maps neither - it produces no
+/// input event whatsoever, which is why the key appears dead. Interface 2
+/// carries consumer controls rather than the keystroke stream, so watching it
+/// does not mean watching what is typed.
+const PREDATOR_KEY_HID_REPORT: [u8; 3] = [0x04, 0x81, 0xFF];
+const PREDATOR_KEY_HID_VENDOR: &str = "04F2";
+const PREDATOR_KEY_HID_PRODUCT: &str = "0117";
+const PREDATOR_KEY_HID_INTERFACE: &str = "02";
+
+/// Locates that node. `None` when the keyboard is absent or the udev rule
+/// granting group access was never installed.
+fn find_predator_key_hid() -> Option<PathBuf> {
+    let entries = fs::read_dir("/sys/class/hidraw").ok()?;
+    for entry in entries.flatten() {
+        let base = entry.path();
+        let Ok(uevent) = fs::read_to_string(base.join("device/uevent")) else {
+            continue;
+        };
+        let matches_device = uevent.lines().any(|line| {
+            line.strip_prefix("HID_ID=").is_some_and(|id| {
+                let id = id.to_ascii_uppercase();
+                id.contains(PREDATOR_KEY_HID_VENDOR) && id.contains(PREDATOR_KEY_HID_PRODUCT)
+            })
+        });
+        if !matches_device {
+            continue;
+        }
+        let interface = fs::read_to_string(base.join("device/../bInterfaceNumber"))
+            .unwrap_or_default();
+        if interface.trim() != PREDATOR_KEY_HID_INTERFACE {
+            continue;
+        }
+        let node = PathBuf::from("/dev").join(entry.file_name());
+        if node.exists() {
+            return Some(node);
+        }
+    }
+    None
+}
+
+fn read_predator_key(file: &mut File) -> Result<bool, std::io::Error> {
+    let mut buffer = [0u8; 64];
+    let read = file.read(&mut buffer)?;
+    Ok(buffer[..read].starts_with(&PREDATOR_KEY_HID_REPORT))
+}
+
+/// Runs whatever the user bound the PredatorSense key to.
+fn run_predator_key_action(logger: &mut Logger, config: &Config) {
+    match config.predator_key_action.as_str() {
+        "none" => {}
+        "command" => {
+            let command = config.predator_key_command.trim();
+            if command.is_empty() {
+                logger.error("Tecla PredatorSense: nenhum comando configurado".to_string());
+                return;
+            }
+            let mut shell = Command::new("/bin/sh");
+            shell
+                .arg("-c")
+                .arg(command)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            ensure_display(&mut shell);
+            if let Err(error) = spawn_reaped(&mut shell) {
+                logger.error(format!("Tecla PredatorSense: '{command}' falhou: {error}"));
+            }
+        }
+        // "app" and anything unrecognised: open the app, the default.
+        _ => activate_app(logger),
+    }
+}
+
 fn read_mode_key(file: &mut File, mode_key: &ModeKey) -> Result<bool, std::io::Error> {
     let mut buffer = [0u8; 64];
     let read = file.read(&mut buffer)?;
