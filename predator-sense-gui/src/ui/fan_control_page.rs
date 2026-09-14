@@ -355,6 +355,13 @@ pub fn build() -> gtk::Box {
             let mut c = config::load_app_config();
             c.fan_auto_curve_enabled = active;
             let _ = config::save_app_config(&c);
+            // The curve drives the fans in manual PWM mode; switching it off
+            // used to leave them pinned at the last percentage until the
+            // user also pressed Auto. Hand the fans back to the firmware
+            // curve right away instead.
+            if !active {
+                crate::ui::background::run(|| fan::set_pwm_auto(), |_| {});
+            }
             glib::Propagation::Proceed
         });
 
