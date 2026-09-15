@@ -31,9 +31,10 @@ use std::time::Duration;
 /// activity whatever the pointer setting says - a click is as deliberate as a
 /// keystroke - but they are not what the keyboard's own controller counts.
 /// That controller sleeps its backlight after ~30 s without a press on its own
-/// matrix and cannot see a USB mouse or the I2C touchpad, so its clock has to
-/// be countable on its own: on a touchpad every finger-down is a `BTN_TOUCH`,
-/// which otherwise reads as continuous typing to anything asking about keys.
+/// matrix and cannot see a USB mouse or the I2C touchpad, so
+/// [`key_idle_seconds`] has to report real keys alone: on a touchpad every
+/// finger-down is a `BTN_TOUCH`, which would otherwise keep resetting the very
+/// clock the keepalive watches while the controller quietly slept anyway.
 static LAST_KEY_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 static LAST_BUTTON_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 static LAST_POINTER_ACTIVITY: AtomicU64 = AtomicU64::new(0);
@@ -104,6 +105,20 @@ pub fn idle_seconds(pointer_counts: bool) -> Option<u64> {
         last = last.max(LAST_POINTER_ACTIVITY.load(Ordering::Relaxed));
     }
     Some(monotonic_secs().saturating_sub(last))
+}
+
+/// Seconds since the last press on a keyboard matrix, ignoring mouse buttons
+/// and the touchpad, or `None` when the watcher never opened a device.
+///
+/// This is the keyboard controller's own view of the machine, and the only
+/// clock its sleep timer runs on. Measured on PH16-71: mouse-only use blanks
+/// the backlight at ~30 s no matter what the rest of the system is doing, and
+/// the WMI `backlight_timeout` function does not govern it (CHANGELOG §24).
+pub fn key_idle_seconds() -> Option<u64> {
+    if !WATCHING.load(Ordering::Relaxed) {
+        return None;
+    }
+    Some(monotonic_secs().saturating_sub(LAST_KEY_ACTIVITY.load(Ordering::Relaxed)))
 }
 
 /// Marks the machine as active right now. Called after the app itself changes

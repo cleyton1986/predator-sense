@@ -204,6 +204,29 @@ pub fn unblank() {
     let _ = apply(&saved);
 }
 
+/// Re-sends the saved state purely to restart the controller's own sleep
+/// timer.
+///
+/// That timer is not this app's and not the firmware's: the controller blanks
+/// its backlight after ~30 s without a press on its own matrix, and it cannot
+/// see a USB mouse or the I2C touchpad, so an hour of mouse-only work went
+/// dark at 30 s while the light bar - which the idle watcher does own - stayed
+/// lit. `extras::set_backlight_timeout(false)` does not reach it: measured on
+/// PH16-71 with that function written off and read back off, the backlight
+/// still blanked on schedule.
+///
+/// Any write restarts the timer. Deliberately does not touch [`is_blanked`],
+/// because nothing about the blanked-or-lit state is changing. Confirmed on
+/// hardware: ten of these 8 s apart held the backlight through 80 s of
+/// mouse-only use that blanks it at ~30 s otherwise (CHANGELOG §24).
+pub fn refresh() -> Result<(), String> {
+    apply(
+        &crate::config::load_app_config()
+            .keyboard_rgb
+            .unwrap_or_default(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

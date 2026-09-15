@@ -714,6 +714,37 @@ fn build_idle_section(have_keyboard: bool, have_bar: bool) -> gtk::Box {
     page.append(&master_row);
     page.append(&hint(crate::i18n::t("lighting_idle_desc")));
 
+    // Deliberately outside `details`, which is greyed out with the master
+    // switch: this setting still has an effect there. The keyboard
+    // controller's own sleep timer runs whether or not this app blanks
+    // anything, so someone who turned idle blanking off and still watched the
+    // backlight die is exactly the person who needs to reach this.
+    if have_keyboard {
+        let keepalive_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        let keepalive_check = gtk::CheckButton::with_label(crate::i18n::t("idle_keepalive"));
+        keepalive_check.set_active(cfg.idle_keyboard_keepalive);
+        keepalive_check.connect_toggled(|check| {
+            let mut cfg = config::load_app_config();
+            cfg.idle_keyboard_keepalive = check.is_active();
+            let _ = config::save_app_config(&cfg);
+            // Live, like everything else on this page: switching it on while
+            // the controller has already slept lights the keyboard now rather
+            // than up to 20 s later. Switching it off changes nothing until
+            // that controller's own timer next expires, which is the point.
+            if check.is_active() {
+                // Same reason as the startup path: with idle blanking off the
+                // watcher is not running yet, and the keepalive needs it.
+                crate::hardware::idle::start();
+                if !keyboard_rgb::is_blanked() {
+                    let _ = keyboard_rgb::refresh();
+                }
+            }
+        });
+        keepalive_row.append(&keepalive_check);
+        page.append(&keepalive_row);
+        page.append(&hint(crate::i18n::t("idle_keepalive_desc")));
+    }
+
     // Everything below is meaningless while the master switch is off.
     let details = gtk::Box::new(gtk::Orientation::Vertical, 10);
     details.set_margin_start(12);

@@ -281,6 +281,17 @@ pub struct AppConfig {
     /// a click is as deliberate as a keystroke - this is only about motion.
     #[serde(default = "default_true")]
     pub idle_mouse_wakes: bool,
+    /// Hold the keyboard backlight awake against the controller's own sleep
+    /// timer (CHANGELOG §24).
+    ///
+    /// Deliberately not under `idle_enabled`: this is what the controller does
+    /// on its own, so it applies whether or not this app blanks anything -
+    /// and it matters most to someone who turned idle blanking off and still
+    /// found the keyboard going dark. Defaults on, because a keyboard that
+    /// blanks while the light bar stays lit is the two devices disagreeing;
+    /// off restores the factory behaviour for anyone who prefers it.
+    #[serde(default = "default_true")]
+    pub idle_keyboard_keepalive: bool,
 
     /// Which modes the physical mode key steps through, in order, as
     /// `PowerProfile::to_id()` values. Separate lists per power source: the
@@ -510,6 +521,7 @@ impl Default for AppConfig {
             idle_bar_enabled: true,
             idle_bar_secs: default_idle_secs(),
             idle_mouse_wakes: true,
+            idle_keyboard_keepalive: true,
             mode_cycle_ac: Vec::new(),
             mode_cycle_battery: Vec::new(),
             mode_default: None,
