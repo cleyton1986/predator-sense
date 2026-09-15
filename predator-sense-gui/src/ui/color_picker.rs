@@ -206,6 +206,7 @@ pub fn build(
         scale.set_draw_value(true);
         scale.set_value_pos(gtk::PositionType::Right);
         scale.add_css_class("accent-scale");
+        crate::ui::scroll_guard::redirect_scroll_to_page(&scale);
         row.append(&label);
         row.append(&scale);
         (row, scale)
