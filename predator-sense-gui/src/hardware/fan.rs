@@ -195,7 +195,7 @@ pub fn curve_input_temp(cpu: Option<f64>, gpu: Option<f64>) -> Option<f64> {
 /// The 6 fixed temperature breakpoints (<45/<55/<65/<75/<85/85+ °C) the
 /// software auto-curve steps through. Not user-editable, only the percent
 /// each step applies is (see `config::fan_curve_points`, issue #59).
-const FAN_CURVE_BREAKPOINTS_C: [f64; 5] = [45.0, 55.0, 65.0, 75.0, 85.0];
+pub const FAN_CURVE_BREAKPOINTS_C: [f64; 5] = [45.0, 55.0, 65.0, 75.0, 85.0];
 
 /// Original hardcoded curve, kept as the default for anyone who never opens
 /// the new per-step editor in Fan Control.
@@ -233,7 +233,7 @@ pub fn fan_curve_pct(temp_c: f64, steps: &[u8; 6]) -> u8 {
 /// them until the temperature falls back under 45 C. At idle the firmware
 /// simply holds the temperature inside that band and nothing cycles; under a
 /// real load the temperature crosses the top in seconds.
-fn curve_resume_c(steps: &[u8; 6]) -> Option<f64> {
+pub fn curve_resume_c(steps: &[u8; 6]) -> Option<f64> {
     let first_active = steps.iter().position(|&pct| pct != 0)?;
     // A curve whose only non-zero step is the top one resumes at that step's
     // own boundary: there is no band above it to defer to.
@@ -340,7 +340,7 @@ pub fn curve_action(temp_c: f64, steps: &[u8; 6], handed_off: bool) -> CurveActi
     // setting being ignored.
     if handed_off
         && steps[0] == 0
-        && curve_resume_c(steps).is_none_or(|resume| temp_c < resume)
+        && curve_resume_c(steps).map_or(true, |resume| temp_c < resume)
     {
         return CurveAction::Hold;
     }
