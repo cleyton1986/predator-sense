@@ -614,7 +614,13 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // temperature near the boundary is left alone or taken back. It
         // only advances on a write that actually succeeded.
         let fan_state = Rc::new(Cell::new(crate::hardware::fan::FanState::Unknown));
-        glib::timeout_add_seconds_local(3, move || {
+        // Consecutive failed writes, and how many ticks have passed since the
+        // last attempt. See `fan::may_attempt_write`: without this a write
+        // that can never succeed costs a privileged call, and on an
+        // unreachable helper a polkit dialog, every three seconds forever.
+        let failures = Rc::new(Cell::new(0u32));
+        let ticks_since_attempt = Rc::new(Cell::new(0u32));
+        glib::timeout_add_seconds_local(crate::hardware::fan::RECONCILE_TICK_S, move || {
             use crate::hardware::fan::{CurveAction, FanState};
 
             let cfg = config::load_app_config();
@@ -664,9 +670,18 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             let Some(write) = crate::hardware::fan::write_for(target, pwm) else {
                 return glib::ControlFlow::Continue;
             };
+            if !crate::hardware::fan::may_attempt_write(
+                failures.get(),
+                ticks_since_attempt.get(),
+            ) {
+                ticks_since_attempt.set(ticks_since_attempt.get().saturating_add(1));
+                return glib::ControlFlow::Continue;
+            }
+            ticks_since_attempt.set(0);
             applying.set(true);
             let applying_done = applying.clone();
             let state = fan_state.clone();
+            let failed = failures.clone();
             let intended = target;
             background::run(
                 move || match write {
@@ -689,12 +704,16 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         // FanState tracks the target, not the call: a
                         // preset Auto and a pwm_enable=2 are both "the
                         // firmware has them" as far as needs_write cares.
-                        Ok(()) => state.set(match intended {
-                            CurveAction::Firmware => FanState::Firmware,
-                            CurveAction::Manual(percent) => FanState::Manual(percent),
-                            CurveAction::Hold => FanState::Unknown,
-                        }),
+                        Ok(()) => {
+                            failed.set(0);
+                            state.set(match intended {
+                                CurveAction::Firmware => FanState::Firmware,
+                                CurveAction::Manual(percent) => FanState::Manual(percent),
+                                CurveAction::Hold => FanState::Unknown,
+                            });
+                        }
                         Err(error) => {
+                            failed.set(failed.get().saturating_add(1));
                             state.set(FanState::Unknown);
                             crate::hardware::applog::error(&format!(
                                 "fan: {write:?} not applied: {error}"

@@ -318,6 +318,31 @@ pub fn needs_write(action: CurveAction, applied: FanState) -> bool {
     }
 }
 
+/// How often the reconciler tick runs. Shared with the back-off below so the
+/// two cannot drift apart if one of them is ever retuned.
+pub const RECONCILE_TICK_S: u32 = 3;
+
+/// Consecutive failed writes after which the reconciler stops trying on every
+/// tick.
+pub const BACKOFF_AFTER_FAILURES: u32 = 3;
+
+/// Ticks between attempts once backed off, i.e. 30 s.
+pub const BACKOFF_TICKS: u32 = 30 / RECONCILE_TICK_S;
+
+/// Whether the reconciler may attempt a hardware write on this tick.
+///
+/// Some failures never clear on their own, and the reconciler cannot tell
+/// those apart from a transient one: a model whose EC refuses the preset bytes
+/// rejects every attempt, and an unreachable privileged helper means each
+/// attempt spawns a fresh pkexec, so a fresh authentication dialog, for a fan
+/// write the user never asked for. Retrying that every three seconds for the
+/// life of the session is the harm; slowing to one attempt every 30 s keeps
+/// the retry without the cost. Only a write that actually succeeded resets the
+/// counter, since anything else would restart the storm.
+pub fn may_attempt_write(consecutive_failures: u32, ticks_since_attempt: u32) -> bool {
+    consecutive_failures < BACKOFF_AFTER_FAILURES || ticks_since_attempt >= BACKOFF_TICKS
+}
+
 /// Decides between the firmware curve and a manual percentage, given where the
 /// temperature is and whether the firmware currently has control.
 ///
@@ -932,5 +957,30 @@ mod tests {
     fn hold_writes_nothing_on_either_kind_of_hardware() {
         assert_eq!(write_for(CurveAction::Hold, true), None);
         assert_eq!(write_for(CurveAction::Hold, false), None);
+    }
+
+    #[test]
+    fn the_first_three_failures_still_retry_on_the_next_tick() {
+        assert!(may_attempt_write(0, 0));
+        assert!(may_attempt_write(1, 0));
+        assert!(may_attempt_write(2, 0));
+    }
+
+    #[test]
+    fn a_fourth_attempt_waits_thirty_seconds() {
+        assert_eq!(BACKOFF_TICKS * RECONCILE_TICK_S, 30);
+        assert!(!may_attempt_write(BACKOFF_AFTER_FAILURES, 0));
+        assert!(!may_attempt_write(BACKOFF_AFTER_FAILURES, BACKOFF_TICKS - 1));
+        assert!(may_attempt_write(BACKOFF_AFTER_FAILURES, BACKOFF_TICKS));
+    }
+
+    #[test]
+    fn a_permanently_failing_write_never_goes_back_to_every_tick() {
+        // The counter only resets on success, so a helper that can never be
+        // reached stays at one attempt per back-off window however long the
+        // session runs.
+        assert!(!may_attempt_write(500, 0));
+        assert!(!may_attempt_write(500, BACKOFF_TICKS - 1));
+        assert!(may_attempt_write(500, BACKOFF_TICKS));
     }
 }
