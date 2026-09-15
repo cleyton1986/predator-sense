@@ -160,20 +160,24 @@ fn draw(
     // The band the firmware owns, drawn under the bars: a zero step does not
     // mean "off until the next breakpoint", it means the firmware keeps the
     // fans until the whole first non-zero band is cleared.
-    if let Some(end) = geo::firmware_region_end_x(plot, fan::curve_resume_c(&steps)) {
-        if steps[0] == 0 {
-            cr.set_source_rgba(0.55, 0.62, 0.72, 0.16);
-            cr.rectangle(plot.x, plot.y, end - plot.x, plot.h);
-            let _ = cr.fill();
-            cr.set_source_rgba(0.75, 0.80, 0.88, 0.75);
-            label(
-                cr,
-                plot.x + 4.0,
-                plot.y + 12.0,
-                crate::i18n::t("fan_curve_firmware_band"),
-                9.0,
-            );
-        }
+    if steps[0] == 0 {
+        // A curve with a zero first step leaves the fans to the firmware up
+        // to the top of the first non-zero band, and an all-zero curve leaves
+        // them to the firmware everywhere - `curve_resume_c` has no boundary
+        // to report for that one, so the band runs to the edge of the axis.
+        let end = geo::firmware_region_end_x(plot, fan::curve_resume_c(&steps))
+            .unwrap_or(plot.x + plot.w);
+        cr.set_source_rgba(0.55, 0.62, 0.72, 0.16);
+        cr.rectangle(plot.x, plot.y, end - plot.x, plot.h);
+        let _ = cr.fill();
+        cr.set_source_rgba(0.75, 0.80, 0.88, 0.75);
+        label(
+            cr,
+            plot.x + 4.0,
+            plot.y + 12.0,
+            crate::i18n::t("fan_curve_firmware_band"),
+            9.0,
+        );
     }
 
     // Percent gridlines.
@@ -214,7 +218,6 @@ fn draw(
     }
 
     // Column boundaries and their temperatures.
-    cr.set_source_rgba(0.72, 0.76, 0.82, 0.8);
     for (i, &c) in fan::FAN_CURVE_BREAKPOINTS_C.iter().enumerate() {
         let x = geo::x_for_temp(plot, c);
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.07);
