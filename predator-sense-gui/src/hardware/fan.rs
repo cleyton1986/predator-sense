@@ -452,25 +452,6 @@ pub fn plan_for_id(
         .map(|binding| binding.plan)
 }
 
-/// The plan to store after the user edits the curve steps, or `None` when the
-/// active mode is not following a curve.
-///
-/// The reconciler reads the steps held inside the active mode's
-/// `FanPlan::Curve`, not `config::fan_curve_points`, so an edit that stops at
-/// the points never reaches the fans: it would sit there until the curve
-/// switch was toggled off and on, which is how the per-step editor came to be
-/// inert. When the mode is on something else the edit is still worth saving to
-/// the points, it just has no plan to update yet.
-pub fn plan_with_steps(
-    current: crate::config::FanPlan,
-    steps: [u8; 6],
-) -> Option<crate::config::FanPlan> {
-    match current {
-        crate::config::FanPlan::Curve { .. } => Some(crate::config::FanPlan::Curve { steps }),
-        _ => None,
-    }
-}
-
 /// `plans` with `mode` bound to `plan`, adding the binding if it is new.
 pub fn with_plan(
     plans: &[crate::config::FanBinding],
@@ -1187,26 +1168,5 @@ mod tests {
         assert!(!may_attempt_write(500, 0));
         assert!(!may_attempt_write(500, BACKOFF_TICKS - 1));
         assert!(may_attempt_write(500, BACKOFF_TICKS));
-    }
-
-    #[test]
-    fn editing_the_steps_updates_a_curve_plan() {
-        use crate::config::FanPlan;
-        let edited = [10, 20, 30, 40, 50, 60];
-        assert_eq!(
-            plan_with_steps(FanPlan::Curve { steps: DEFAULT_FAN_CURVE }, edited),
-            Some(FanPlan::Curve { steps: edited })
-        );
-    }
-
-    #[test]
-    fn editing_the_steps_leaves_a_non_curve_plan_alone() {
-        use crate::config::FanPlan;
-        // The edit is still remembered in fan_curve_points for the next time
-        // the curve is switched on; it just has nothing to apply to now.
-        let edited = [10, 20, 30, 40, 50, 60];
-        assert_eq!(plan_with_steps(FanPlan::Automatic, edited), None);
-        assert_eq!(plan_with_steps(FanPlan::Max, edited), None);
-        assert_eq!(plan_with_steps(FanPlan::Fixed { percent: 40 }, edited), None);
     }
 }
