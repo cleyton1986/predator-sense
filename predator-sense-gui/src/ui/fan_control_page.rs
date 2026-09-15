@@ -358,7 +358,7 @@ fn report(page: &Rc<Page>, result: Result<(), String>) {
     }
 }
 
-pub fn build() -> gtk::Box {
+pub fn build() -> gtk::ScrolledWindow {
     let page_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
     page_box.set_margin_top(14);
     page_box.set_margin_bottom(10);
@@ -894,7 +894,15 @@ pub fn build() -> gtk::Box {
         glib::ControlFlow::Continue
     });
 
-    page_box
+    // Same problem the Modes tab already had (`fan_page.rs`): the fan cards
+    // alone fill the page, so the CoolBoost section and the GPU card below
+    // them were clipped off with no way to reach them once the window was
+    // made shorter. The content keeps its natural height and scrolls.
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_vexpand(true);
+    scroll.set_child(Some(&page_box));
+    scroll
 }
 
 struct FanCard {
