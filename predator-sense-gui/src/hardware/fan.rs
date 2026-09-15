@@ -419,6 +419,43 @@ pub fn plan_for(
     plan_for_id(plans, profile.to_id()).unwrap_or(crate::config::FanPlan::Automatic)
 }
 
+/// Builds the initial per-mode plans from the pre-existing global fan
+/// settings, so migrating changes nothing about how the machine behaves until
+/// a mode is deliberately given its own plan.
+///
+/// This is the only remaining reader of `fan_auto_curve_enabled`,
+/// `fan_curve_points` and `fan_mode`. Every other consumer uses `fan_plans`,
+/// or the two would drift into exactly the disagreement this design removes.
+pub fn migrate_plans(cfg: &crate::config::AppConfig) -> Vec<crate::config::FanBinding> {
+    use crate::config::{FanBinding, FanPlan};
+    use crate::hardware::profile::PowerProfile;
+
+    let plan = if cfg.fan_auto_curve_enabled {
+        FanPlan::Curve { steps: cfg.fan_curve_points }
+    } else {
+        match cfg.fan_mode.as_deref() {
+            Some("max") => FanPlan::Max,
+            // "auto", anything unrecognised, and never-set all mean the
+            // firmware was in charge, which is Automatic.
+            _ => FanPlan::Automatic,
+        }
+    };
+
+    [
+        PowerProfile::Eco,
+        PowerProfile::Quiet,
+        PowerProfile::Balanced,
+        PowerProfile::Performance,
+        PowerProfile::Turbo,
+    ]
+    .into_iter()
+    .map(|profile| FanBinding {
+        mode: profile.to_id().to_string(),
+        plan,
+    })
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,5 +722,56 @@ mod tests {
         let plans = vec![FanBinding { mode: "turbo".into(), plan: FanPlan::Max }];
         assert_eq!(plan_for_id(&plans, "turbo"), Some(FanPlan::Max));
         assert_eq!(plan_for_id(&plans, "eco"), None);
+    }
+
+    #[test]
+    fn the_curve_migrates_to_every_mode() {
+        use crate::config::{AppConfig, FanPlan};
+        let mut cfg = AppConfig::default();
+        cfg.fan_auto_curve_enabled = true;
+        cfg.fan_curve_points = [0, 35, 50, 65, 80, 100];
+        let plans = migrate_plans(&cfg);
+        assert_eq!(plans.len(), 5);
+        for binding in &plans {
+            assert_eq!(binding.plan, FanPlan::Curve { steps: [0, 35, 50, 65, 80, 100] });
+        }
+    }
+
+    #[test]
+    fn a_disabled_curve_migrates_to_the_saved_fan_mode() {
+        use crate::config::{AppConfig, FanPlan};
+        let mut cfg = AppConfig::default();
+        cfg.fan_auto_curve_enabled = false;
+        cfg.fan_mode = Some("max".into());
+        for binding in migrate_plans(&cfg) {
+            assert_eq!(binding.plan, FanPlan::Max);
+        }
+
+        let mut cfg = AppConfig::default();
+        cfg.fan_auto_curve_enabled = false;
+        cfg.fan_mode = Some("auto".into());
+        for binding in migrate_plans(&cfg) {
+            assert_eq!(binding.plan, FanPlan::Automatic);
+        }
+    }
+
+    #[test]
+    fn nothing_configured_migrates_to_automatic() {
+        use crate::config::{AppConfig, FanPlan};
+        let cfg = AppConfig::default();
+        let plans = migrate_plans(&cfg);
+        assert_eq!(plans.len(), 5);
+        for binding in &plans {
+            assert_eq!(binding.plan, FanPlan::Automatic);
+        }
+    }
+
+    #[test]
+    fn migration_covers_every_mode_exactly_once() {
+        use crate::config::AppConfig;
+        let plans = migrate_plans(&AppConfig::default());
+        let mut modes: Vec<&str> = plans.iter().map(|b| b.mode.as_str()).collect();
+        modes.sort_unstable();
+        assert_eq!(modes, vec!["balanced", "eco", "performance", "quiet", "turbo"]);
     }
 }
