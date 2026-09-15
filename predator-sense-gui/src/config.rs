@@ -3,7 +3,8 @@ use crate::hardware::profile::PowerProfile;
 use crate::hardware::rgb::{EffectParams, RgbConfig, RgbMode};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Last-applied 2024+ HID keyboard lighting state (`hardware::magic_rgb`,
 /// issues #25/#26) - same "the app forgets which effect was last applied and
@@ -669,12 +670,60 @@ pub fn list_profiles() -> Vec<String> {
         .collect()
 }
 
+/// What reading `config.json` actually found.
+///
+/// `load_app_config` collapses every failure into the default config, which is
+/// indistinguishable from a fresh install. Any background writer holding that
+/// default is one save away from replacing every lighting scheme, game
+/// profile, macro and setting the file still holds, so a caller that writes
+/// without the user asking has to be able to tell the two apart.
+pub enum AppConfigSource {
+    /// No config file yet: a fresh install, and the only state where writing
+    /// a default config back loses nothing.
+    Missing,
+    Loaded(AppConfig),
+    /// The file is there but could not be read or parsed. The user's settings
+    /// are still in it, so nothing may be written over them unasked.
+    Unreadable(String),
+}
+
+pub fn read_app_config_at(path: &Path) -> AppConfigSource {
+    let json = match fs::read_to_string(path) {
+        Ok(json) => json,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return AppConfigSource::Missing,
+        // Unreadable for any other reason (permissions, I/O) is still a file
+        // that exists and holds the user's settings.
+        Err(e) => return AppConfigSource::Unreadable(e.to_string()),
+    };
+    match serde_json::from_str(&json) {
+        Ok(config) => AppConfigSource::Loaded(config),
+        Err(e) => AppConfigSource::Unreadable(e.to_string()),
+    }
+}
+
+/// Logged at most once per session: the callers below run on timers a few
+/// seconds apart, and a damaged config stays damaged.
+static CONFIG_UNREADABLE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// `load_app_config`, but saying where the config came from.
+pub fn load_app_config_source() -> AppConfigSource {
+    let source = read_app_config_at(&config_dir().join("config.json"));
+    if let AppConfigSource::Unreadable(error) = &source {
+        if !CONFIG_UNREADABLE_LOGGED.swap(true, Ordering::Relaxed) {
+            crate::hardware::applog::error(&format!(
+                "config: config.json exists but could not be loaded, running on defaults \
+                 without overwriting it: {error}"
+            ));
+        }
+    }
+    source
+}
+
 /// Load app config
 pub fn load_app_config() -> AppConfig {
-    let path = config_dir().join("config.json");
-    match fs::read_to_string(&path) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
-        Err(_) => AppConfig::default(),
+    match load_app_config_source() {
+        AppConfigSource::Loaded(config) => config,
+        AppConfigSource::Missing | AppConfigSource::Unreadable(_) => AppConfig::default(),
     }
 }
 
@@ -743,6 +792,40 @@ fn sanitize_filename(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unparseable config used to be indistinguishable from a fresh
+    /// install: both handed the caller `AppConfig::default()`, with an empty
+    /// `fan_plans`, which is exactly what makes the reconciler migrate and
+    /// save. That saved the defaults over a file still holding every lighting
+    /// scheme, game profile, macro and setting the user had.
+    #[test]
+    fn an_unreadable_config_is_not_reported_as_a_fresh_install() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-config-source-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.json");
+        let _ = fs::remove_file(&path);
+
+        assert!(
+            matches!(read_app_config_at(&path), AppConfigSource::Missing),
+            "no file at all is the one case where writing defaults back is safe"
+        );
+
+        let saved = serde_json::to_string(&AppConfig::default()).expect("serialize");
+        fs::write(&path, &saved).expect("write");
+        assert!(matches!(read_app_config_at(&path), AppConfigSource::Loaded(_)));
+
+        fs::write(&path, "{ not json at all").expect("write");
+        match read_app_config_at(&path) {
+            AppConfigSource::Unreadable(error) => assert!(!error.is_empty()),
+            _ => panic!("a present but unparseable file must not read as Missing or Loaded"),
+        }
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
 
     /// A macro saved before `MacroStep::delay_only` existed has no such key
     /// in its JSON at all - `#[serde(default)]` must still load it, not

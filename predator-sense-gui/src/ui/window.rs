@@ -617,23 +617,53 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // unreachable helper a polkit dialog, every three seconds forever.
         let failures = Rc::new(Cell::new(0u32));
         let ticks_since_attempt = Rc::new(Cell::new(0u32));
+        // Whether the "could not save the migrated plans" line has been
+        // logged, so a config that can never be written says so once instead
+        // of on every tick.
+        let migration_warned = Rc::new(Cell::new(false));
         glib::timeout_add_seconds_local(crate::hardware::fan::RECONCILE_TICK_S, move || {
             use crate::hardware::fan::{CurveAction, FanState};
 
-            let cfg = config::load_app_config();
+            // An unparseable config.json hands back the same defaults a fresh
+            // install does, empty `fan_plans` included, which is exactly the
+            // migration trigger below. Persisting that would replace every
+            // lighting scheme, game profile, macro and setting still in the
+            // file, unasked, within three seconds of launch. So the tick runs
+            // on the defaults but is not allowed to write them back.
+            let (mut cfg, may_persist) = match config::load_app_config_source() {
+                config::AppConfigSource::Loaded(cfg) => (cfg, true),
+                config::AppConfigSource::Missing => (config::AppConfig::default(), true),
+                config::AppConfigSource::Unreadable(_) => (config::AppConfig::default(), false),
+            };
             // Migrate on first sight, then use plans only. An empty list
             // means either a fresh install or a config from before this
             // feature, and both want the pre-existing global settings
             // carried forward unchanged rather than reset to Automatic.
             if cfg.fan_plans.is_empty() {
-                let mut migrated = cfg.clone();
-                migrated.fan_plans = crate::hardware::fan::migrate_plans(&cfg);
-                if config::save_app_config(&migrated).is_ok() {
-                    crate::hardware::applog::info(
-                        "fan: migrated the global fan settings to per-mode plans",
-                    );
+                cfg.fan_plans = crate::hardware::fan::migrate_plans(&cfg);
+                if may_persist {
+                    match config::save_app_config(&cfg) {
+                        Ok(()) => crate::hardware::applog::info(
+                            "fan: migrated the global fan settings to per-mode plans",
+                        ),
+                        // Fan control must not depend on a successful config
+                        // write. A config dir left owned by root, a full disk
+                        // or an immutable home would otherwise make Max,
+                        // Fixed and Curve permanently inert on every later
+                        // tick too. Logged once, since the tick would
+                        // otherwise repeat it every three seconds.
+                        Err(error) => {
+                            if !migration_warned.replace(true) {
+                                crate::hardware::applog::error(&format!(
+                                    "fan: per-mode plans could not be saved, applying them \
+                                     from memory instead: {error}"
+                                ));
+                            }
+                        }
+                    }
                 }
-                return glib::ControlFlow::Continue;
+                // Fall through with the migrated plans in hand: this tick
+                // applies them either way.
             }
 
             if applying.get() {
