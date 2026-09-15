@@ -240,6 +240,30 @@ pub fn curve_resume_c(steps: &[u8; 6]) -> Option<f64> {
     Some(FAN_CURVE_BREAKPOINTS_C[first_active.min(FAN_CURVE_BREAKPOINTS_C.len() - 1)])
 }
 
+/// The temperature below which this curve leaves the fans to the firmware
+/// whatever state they are already in.
+///
+/// Not the same as [`curve_resume_c`], and anything that draws a curve
+/// needs the difference. Below the value returned here `fan_curve_pct` is
+/// zero, so `curve_action` hands the fans over however they are running.
+/// Between here and `curve_resume_c` the firmware keeps them only if it
+/// already has them; otherwise the curve drives its first non-zero step.
+///
+/// `None` both when the first step is not zero and when every step is
+/// zero. A caller that cares must tell those apart: an all-zero curve is
+/// the firmware's at every temperature.
+pub fn curve_zero_region_top_c(steps: &[u8; 6]) -> Option<f64> {
+    if steps[0] != 0 {
+        return None;
+    }
+    // `steps[0] == 0` puts the first non-zero step at index 1 or later, so
+    // the subtraction cannot underflow.
+    steps
+        .iter()
+        .position(|&pct| pct != 0)
+        .map(|first| FAN_CURVE_BREAKPOINTS_C[first - 1])
+}
+
 /// What the software curve should do on this tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CurveAction {
@@ -508,9 +532,11 @@ pub fn plan_for(
 /// comment in the body for why that is the honest reading.
 ///
 /// The only writer of `fan_plans` that reads the legacy global fields, so the
-/// reconciler itself never has to consult two sources. `fan_auto_curve_enabled`
-/// and `fan_curve_points` still have one other reader, the Fan Control page,
-/// which shows the switch and the per-step editor from them.
+/// reconciler itself never has to consult two sources. `fan_curve_points` has
+/// one other reader, the Fan Control page, which uses it as the seed for a
+/// mode that has never had a curve; `fan_auto_curve_enabled` has no reader
+/// outside this function and nothing writes it but the tests below, so it is
+/// only ever whatever an older config.json already held.
 pub fn migrate_plans(cfg: &crate::config::AppConfig) -> Vec<crate::config::FanBinding> {
     use crate::config::{FanBinding, FanPlan};
     use crate::hardware::profile::PowerProfile;
@@ -1168,5 +1194,30 @@ mod tests {
         assert!(!may_attempt_write(500, 0));
         assert!(!may_attempt_write(500, BACKOFF_TICKS - 1));
         assert!(may_attempt_write(500, BACKOFF_TICKS));
+    }
+
+    #[test]
+    fn the_unconditional_firmware_region_ends_where_the_zero_steps_do() {
+        assert_eq!(curve_zero_region_top_c(&[0, 35, 50, 65, 80, 100]), Some(45.0));
+        assert_eq!(curve_zero_region_top_c(&[0, 0, 30, 45, 65, 100]), Some(55.0));
+    }
+
+    #[test]
+    fn a_curve_that_starts_above_zero_leaves_the_firmware_nothing() {
+        assert_eq!(curve_zero_region_top_c(&DEFAULT_FAN_CURVE), None);
+    }
+
+    #[test]
+    fn an_all_zero_curve_reports_no_boundary() {
+        assert_eq!(curve_zero_region_top_c(&[0; 6]), None);
+    }
+
+    #[test]
+    fn the_band_below_the_resume_point_is_the_firmwares_only_once_it_has_the_fans() {
+        // The band a chart must not draw as plain firmware ownership: same
+        // temperature, opposite answers depending on who holds the fans.
+        let steps = [0, 35, 50, 65, 80, 100];
+        assert_eq!(curve_action(50.0, &steps, true), CurveAction::Hold);
+        assert_eq!(curve_action(50.0, &steps, false), CurveAction::Manual(35));
     }
 }

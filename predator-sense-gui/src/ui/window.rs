@@ -589,13 +589,14 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             glib::ControlFlow::Continue
         });
 
-        // Software auto fan-curve (fan_control_page.rs "fan_auto_curve"
-        // switch): runs globally rather than only while that page is open,
-        // since pages here are built lazily on first navigation - a
-        // page-local timer would never restart the curve after a fresh
-        // launch until the user visited Fan Control again. Re-reads the
-        // config every tick, same as the game list above: toggling the
-        // switch takes effect on the next tick, no restart needed.
+        // The fan reconciler: the one owner of the fan hardware, applying the
+        // active power mode's `FanPlan` from config. It runs globally rather
+        // than only while the Fan Control page is open, since pages here are
+        // built lazily on first navigation - a page-local timer would never
+        // reapply a plan after a fresh launch until the user visited Fan
+        // Control again. Re-reads the config every tick, same as the game
+        // list above: a plan written by the page, by the AI assistant or by a
+        // settings change takes effect on the next tick, no restart needed.
         // The write goes through the persistent privileged helper (see
         // hardware::helper), which holds a mutex shared with every other
         // privileged caller in the app - calling it straight from this

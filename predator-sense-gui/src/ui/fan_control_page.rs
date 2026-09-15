@@ -20,10 +20,11 @@ const MODES: [PowerProfile; 5] = [
     PowerProfile::Turbo,
 ];
 
-/// Starting points for someone who does not want to drag six bars. Silent
-/// leans on the firmware below 65 C, which is where the reconciler hands
-/// the fans back with this curve's two leading zeros (see
-/// `fan::curve_resume_c`).
+/// Starting points for someone who does not want to drag six bars. With
+/// Silent's two leading zeros the fans are the firmware's below 55 C
+/// whatever state they are in (`fan::curve_zero_region_top_c`), and they
+/// stay the firmware's up to 65 C once the firmware already has them
+/// (`fan::curve_resume_c`).
 const PRESET_SILENT: [u8; 6] = [0, 0, 30, 45, 65, 100];
 const PRESET_AGGRESSIVE: [u8; 6] = [40, 55, 70, 85, 100, 100];
 
@@ -77,7 +78,10 @@ struct Page {
     /// Mode id whose plan the controls below are editing.
     editing: RefCell<String>,
     /// While false the chips follow the machine's active mode, so opening the
-    /// page always edits what is running. A chip click pins it.
+    /// page always edits what is running. A chip click pins it, and leaving
+    /// the page unpins it again: the pin is for the visit, so the next one
+    /// starts by following the machine rather than on whatever mode was last
+    /// inspected.
     pinned: Cell<bool>,
     /// Set while a refresh is pushing config into widgets whose handlers
     /// would otherwise write it straight back.
@@ -99,6 +103,12 @@ struct Page {
     /// this only has to cover the window where the mode is parked on another
     /// plan and its own steps exist nowhere else.
     curve_memory: RefCell<Vec<(String, [u8; 6])>>,
+    /// The steps a drag has reached but not yet saved, and whether a save is
+    /// already scheduled. A drag crosses a 5% snap many times a second and
+    /// `save_app_config` rewrites the whole file, so writing on each one both
+    /// wastes work and widens the window where a crash truncates the config.
+    pending_curve: RefCell<Option<[u8; 6]>>,
+    commit_queued: Cell<bool>,
     chips: Vec<(gtk::Button, String)>,
     active_label: gtk::Label,
     plan_buttons: Vec<(gtk::Button, PlanKind)>,
@@ -136,9 +146,23 @@ fn recall_curve(page: &Rc<Page>, mode_id: &str) -> Option<[u8; 6]> {
         .map(|(_, steps)| *steps)
 }
 
+/// The config to modify, or an error when it exists but could not be read.
+///
+/// `load_app_config` answers `Unreadable` with defaults, and saving those
+/// back would replace every lighting scheme, game profile and macro still
+/// in the file. The reconciler already refuses to do that (see the comment
+/// on its migration branch); a plan button must refuse too.
+fn config_to_modify() -> Result<config::AppConfig, String> {
+    match config::load_app_config_source() {
+        config::AppConfigSource::Loaded(cfg) => Ok(cfg),
+        config::AppConfigSource::Missing => Ok(config::AppConfig::default()),
+        config::AppConfigSource::Unreadable(error) => Err(error),
+    }
+}
+
 /// Binds `plan` to `mode_id`. Intent only: the reconciler applies it.
 fn write_plan(mode_id: &str, plan: FanPlan) -> Result<(), String> {
-    let mut cfg = config::load_app_config();
+    let mut cfg = config_to_modify()?;
     cfg.fan_plans = fan::with_plan(&cfg.fan_plans, mode_id, plan);
     config::save_app_config(&cfg)
 }
@@ -150,7 +174,7 @@ fn write_plan(mode_id: &str, plan: FanPlan) -> Result<(), String> {
 /// never had a curve, so the last curve edited anywhere is where the next
 /// mode starts rather than the hardcoded default.
 fn write_curve(mode_id: &str, steps: [u8; 6]) -> Result<(), String> {
-    let mut cfg = config::load_app_config();
+    let mut cfg = config_to_modify()?;
     cfg.fan_plans = fan::with_plan(&cfg.fan_plans, mode_id, FanPlan::Curve { steps });
     cfg.fan_curve_points = steps;
     config::save_app_config(&cfg)
@@ -483,6 +507,8 @@ pub fn build() -> gtk::Box {
         syncing: Cell::new(false),
         shown: RefCell::new(None),
         curve_memory: RefCell::new(Vec::new()),
+        pending_curve: RefCell::new(None),
+        commit_queued: Cell::new(false),
         chips,
         active_label,
         plan_buttons,
@@ -495,6 +521,17 @@ pub fn build() -> gtk::Box {
         spins,
         status,
     });
+
+    // Leaving the page releases the pin, so the next visit edits the mode the
+    // machine is actually in. Without this the first chip click stopped the
+    // page following the machine for the rest of the process, with no way back.
+    {
+        let weak: Weak<Page> = Rc::downgrade(&page);
+        page_box.connect_unmap(move |_| {
+            let Some(page) = weak.upgrade() else { return };
+            page.pinned.set(false);
+        });
+    }
 
     for (button, mode_id) in &page.chips {
         let weak: Weak<Page> = Rc::downgrade(&page);
@@ -576,14 +613,33 @@ pub fn build() -> gtk::Box {
                 "the chart fired on_change during a refresh: fan_curve_widget::set_steps \
                  must never invoke the callback"
             );
-            let mode_id = page.editing.borrow().clone();
-            let result = write_curve(&mode_id, steps);
+            // The numbers keep tracking the drag; only the save waits.
             page.syncing.set(true);
             for (spin, &pct) in page.spins.iter().zip(steps.iter()) {
                 spin.set_value(f64::from(pct));
             }
             page.syncing.set(false);
-            report(&page, result);
+
+            // One save when the drag settles, not one per 5% it crosses. The
+            // last steps win: a later snap overwrites `pending_curve` while
+            // the single scheduled commit is still waiting.
+            *page.pending_curve.borrow_mut() = Some(steps);
+            if page.commit_queued.get() {
+                return;
+            }
+            page.commit_queued.set(true);
+            let weak: Weak<Page> = Rc::downgrade(&page);
+            glib::timeout_add_local_once(std::time::Duration::from_millis(250), move || {
+                let Some(page) = weak.upgrade() else { return };
+                // Taken out and the borrow dropped before `write_curve`, which
+                // saves config, and `report`, which reaches back into the page.
+                let pending = page.pending_curve.borrow_mut().take();
+                page.commit_queued.set(false);
+                let Some(steps) = pending else { return };
+                let mode_id = page.editing.borrow().clone();
+                let result = write_curve(&mode_id, steps);
+                report(&page, result);
+            });
         });
     }
 
