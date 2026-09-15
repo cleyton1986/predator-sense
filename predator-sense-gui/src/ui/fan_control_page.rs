@@ -26,6 +26,12 @@ const MODES: [PowerProfile; 5] = [
 const PRESET_SILENT: [u8; 6] = [0, 0, 30, 45, 65, 100];
 const PRESET_AGGRESSIVE: [u8; 6] = [40, 55, 70, 85, 100, 100];
 
+/// Where the Fixed spin starts for a mode that has no fixed speed yet.
+/// The old custom slider's default, and deliberately not 0: a fixed 0 is a
+/// firmware handoff (see `fan::plan_target`), so landing there by default
+/// would label a firmware-driven machine as running one fixed speed.
+const DEFAULT_FIXED_PERCENT: u8 = 50;
+
 /// Which of the four plan buttons a plan lights up.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PlanKind {
@@ -75,7 +81,14 @@ struct Page {
     /// Set while a refresh is pushing config into widgets whose handlers
     /// would otherwise write it straight back.
     syncing: Cell<bool>,
+    /// What refresh last put on screen: the mode being edited, its plan, and
+    /// the machine's active mode. A tick that matches this changes nothing, so
+    /// it must not rewrite widget state - a refresh that fires regardless is
+    /// how a page ends up overwriting a value the user is in the middle of
+    /// entering.
+    shown: RefCell<Option<(String, FanPlan, Option<String>)>>,
     chips: Vec<(gtk::Button, String)>,
+    active_label: gtk::Label,
     plan_buttons: Vec<(gtk::Button, PlanKind)>,
     plan_title: gtk::Label,
     plan_desc: gtk::Label,
@@ -130,6 +143,17 @@ fn refresh(page: &Rc<Page>) {
     let editing = page.editing.borrow().clone();
     let plan = plan_of(&cfg, &editing);
     let kind = PlanKind::of(plan);
+    let active_id = crate::hardware::profile::get_current_profile().map(|p| p.to_id().to_string());
+
+    // Nothing to do when the screen already says this. The follow timer calls
+    // in every three seconds whether anything moved or not, and pushing values
+    // back into the spin buttons on each of those ticks would fight the user's
+    // hands. Any real change - a chip, a plan button, a step edit, the mode
+    // key - lands in one of these three, so the comparison lets it through.
+    let state = (editing.clone(), plan, active_id.clone());
+    if page.shown.borrow().as_ref() == Some(&state) {
+        return;
+    }
 
     for (button, id) in &page.chips {
         button.remove_css_class("accent-button");
@@ -153,6 +177,12 @@ fn refresh(page: &Rc<Page>) {
     let editing_label = mode_label(&editing);
     page.plan_title
         .set_text(&crate::i18n::tf("fan_plan_for", &[&editing_label]));
+    // Which mode the reconciler is actually driving, which is not necessarily
+    // the one the controls below are editing.
+    page.active_label.set_text(&match active_id.as_deref() {
+        Some(id) => crate::i18n::tf("fan_active_mode_is", &[&mode_label(id)]),
+        None => String::new(),
+    });
     page.plan_desc.set_text(kind.description());
     page.fixed_box.set_visible(kind == PlanKind::Fixed);
     page.curve_box.set_visible(kind == PlanKind::Curve);
@@ -162,14 +192,20 @@ fn refresh(page: &Rc<Page>) {
         _ => cfg.fan_curve_points,
     };
     page.syncing.set(true);
-    if let FanPlan::Fixed { percent } = plan {
-        page.fixed_spin.set_value(f64::from(percent));
-    }
+    // Unconditional, and never left at the spin's own 0 minimum: a click on
+    // Fixed reads this value straight back out, and `FanPlan::Fixed` with a
+    // percent of 0 is a firmware handoff, not one fixed speed.
+    page.fixed_spin.set_value(f64::from(match plan {
+        FanPlan::Fixed { percent } => percent,
+        _ => DEFAULT_FIXED_PERCENT,
+    }));
     page.curve_view.set_steps(steps);
     for (spin, &pct) in page.spins.iter().zip(steps.iter()) {
         spin.set_value(f64::from(pct));
     }
     page.syncing.set(false);
+
+    *page.shown.borrow_mut() = Some(state);
 }
 
 /// Says what a write did, including the case that confuses people most:
@@ -231,6 +267,13 @@ pub fn build() -> gtk::Box {
         editing_row.append(&button);
         chips.push((button, profile.to_id().to_string()));
     }
+    // Which mode is running, at the end of the row the chips are in, because
+    // the two are easy to confuse: a chip click changes what is being edited,
+    // never what the machine is doing.
+    let active_label = gtk::Label::new(None);
+    active_label.add_css_class("info-text-dim");
+    active_label.set_margin_start(6);
+    editing_row.append(&active_label);
     page_box.append(&editing_row);
 
     // ---- plan selector ----
@@ -398,7 +441,9 @@ pub fn build() -> gtk::Box {
         editing: RefCell::new(initial),
         pinned: Cell::new(false),
         syncing: Cell::new(false),
+        shown: RefCell::new(None),
         chips,
+        active_label,
         plan_buttons,
         plan_title,
         plan_desc,
