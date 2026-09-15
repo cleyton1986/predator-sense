@@ -759,14 +759,14 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     // Without the EC dynamic-curve wake: from here it would
                     // bounce the same firmware profile index this tick reads
                     // to pick a plan, so a fan write would move the user's
-                    // visible power mode. See fan::set_fan_mode_without_wake.
+                    // visible power mode. See fan::set_fan_mode.
                     crate::hardware::fan::FanWrite::PresetAuto => {
-                        crate::hardware::fan::set_fan_mode_without_wake(
+                        crate::hardware::fan::set_fan_mode(
                             crate::hardware::fan::FanMode::Auto,
                         )
                     }
                     crate::hardware::fan::FanWrite::PresetMax => {
-                        crate::hardware::fan::set_fan_mode_without_wake(
+                        crate::hardware::fan::set_fan_mode(
                             crate::hardware::fan::FanMode::Max,
                         )
                     }

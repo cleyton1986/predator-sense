@@ -10,32 +10,24 @@ pub enum FanMode {
     Custom(u8, u8), // cpu_percent, gpu_percent
 }
 
-/// Set fan mode using the predator-sense-helper (requires pkexec)
-/// Auto and Max use firmware modes (safe). Custom is disabled for safety.
+/// Sets the EC's own fan preset through the privileged helper.
+///
+/// Auto and Max are firmware modes and safe; Custom is refused, see
+/// `set_fan_mode_inner`.
+///
+/// This used to have a waking sibling that bounced the WMI ThermalProfile
+/// index to kick the EC's dynamic curve into life. That wake is gone. It was a
+/// workaround for a fan stall this project measured and then retracted (0 RPM
+/// at idle is the firmware curve working, not a stall), and the only caller
+/// that still used it was the reconciler, where bouncing the index would have
+/// moved the user's visible power mode as a side effect of a background fan
+/// write, and a failed restore would have left the machine in a different
+/// mode whose different plan the next tick would then apply.
 pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
-    set_fan_mode_inner(mode, true)
+    set_fan_mode_inner(mode)
 }
 
-/// `set_fan_mode` without the EC dynamic-curve wake, for the reconciler.
-///
-/// The wake bounces the WMI `ThermalProfile` index, and that is the same index
-/// `profile::get_current_profile` reads to decide which mode's plan to apply.
-/// From a three-second background timer that means the user's visible power
-/// mode moves as a side effect of a fan write, and if the restore leg fails
-/// (which `wake_dynamic_fan_curve` logs) the machine is left in a different
-/// power mode, whose different plan the next tick then applies. Every caller
-/// that does keep the wake is an explicit user action, where one bounce is
-/// bounded by the action that asked for it.
-///
-/// The trade is that on a model needing the wake, a reconciled Auto reaches
-/// only the EC's static preset rather than its load-following curve. What that
-/// leaves the fans doing is unmeasured: only models without per-fan PWM take
-/// this path, and the machine available for testing has PWM.
-pub fn set_fan_mode_without_wake(mode: FanMode) -> Result<(), String> {
-    set_fan_mode_inner(mode, false)
-}
-
-fn set_fan_mode_inner(mode: FanMode, wake: bool) -> Result<(), String> {
+fn set_fan_mode_inner(mode: FanMode) -> Result<(), String> {
     crate::hardware::applog::info(&format!("fan: mode {mode:?}"));
     use crate::hardware::capabilities::FanPresetStatus;
 
@@ -94,55 +86,9 @@ fn set_fan_mode_inner(mode: FanMode, wake: bool) -> Result<(), String> {
     // is a real transition on the WMI `ThermalProfile` index - confirmed by
     // hand, see `PROTOCOLO-HARDWARE.md` §9.2. Only Auto needs this: Max is
     // supposed to sit at its fixed setpoint, not follow a curve.
-    if wake && mode == FanMode::Auto {
-        wake_dynamic_fan_curve();
-    }
     crate::hardware::helper::execute(action, &[])
 }
 
-/// Bounces the firmware thermal-profile index off itself through another
-/// supported one and back, as a side effect that wakes the EC's real fan
-/// curve - see `set_fan_mode`'s doc comment. Round-trips back to the same
-/// index so the "Mode" page's firmware profile never actually changes from
-/// the user's point of view.
-///
-/// Best-effort and silent on the common failure paths (unavailable, or only
-/// one supported index to begin with - nothing to bounce through) since this
-/// is a bonus wake-up, not the fan mode change itself. Logs if the bounce
-/// left the profile somewhere other than where it started, since that *is* a
-/// real, visible side effect a caller did not ask for.
-/// Only reached from the EC-preset path in `set_fan_mode`, which a PH16-71
-/// never takes - it is `KnownIncompatible` there, so Auto/Max route through
-/// PWM instead. Never reached from the reconciler, which uses
-/// `set_fan_mode_without_wake`: see there for why a background timer must not
-/// move the profile index this reads and writes. The PWM path's own use of
-/// this was removed after the stall it worked around turned out not to exist;
-/// that measurement does not cover the EC path on the models that do use it,
-/// so this is left alone rather than deleted on a guess.
-pub fn wake_dynamic_fan_curve() {
-    use crate::hardware::thermal_profile;
-    if !thermal_profile::is_available() {
-        return;
-    }
-    let Some(current) = thermal_profile::current() else {
-        return;
-    };
-    let Some(&other) = thermal_profile::supported().iter().find(|&&i| i != current) else {
-        return;
-    };
-    if let Err(e) = thermal_profile::set(other) {
-        crate::hardware::applog::info(&format!(
-            "fan auto-curve wake skipped: could not set thermal profile {other}: {e}"
-        ));
-        return;
-    }
-    if let Err(e) = thermal_profile::set(current) {
-        crate::hardware::applog::error(&format!(
-            "fan auto-curve wake left the firmware power profile at {other} instead of \
-             restoring {current}: {e}"
-        ));
-    }
-}
 
 /// Reads back the firmware fan mode actually active right now (EC offsets
 /// 0x21/0x22, the same ones `set_fan_mode`'s Auto/Max write) - `None` if
