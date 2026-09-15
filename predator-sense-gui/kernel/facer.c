@@ -44,6 +44,7 @@
 #include <linux/rfkill.h>
 #include <linux/workqueue.h>
 #include <linux/debugfs.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/cdev.h>
@@ -607,6 +608,14 @@ static struct quirk_entry quirk_acer_predator_ph315_52 = {
 	.gpu_fans = 1,
 };
 
+/*
+ * PH16-71 (Helios 16, 2023): mainline acer-wmi marks it predator_v4. The
+ * fan "preset" EC bytes (0x21/0x22, PH315-54 values) are accepted and read
+ * back on this EC but change nothing - fan RPM stays put through a Max write
+ * - so fan control has to go through the predator_v4 WMI PWM methods (14/16),
+ * the same ones the PH16-72/PHN16-72 sibling already uses. Firmware-gated
+ * like every other WMI call here: rejected means no-op, not a bad write.
+ */
 static struct quirk_entry quirk_acer_predator_ph16_71 = {
 	.turbo = 1,
 	.cpu_fans = 1,
@@ -3633,6 +3642,147 @@ static int acer_platform_profile_setup(void)
 }
 #endif
 
+/*
+ * User-defined mode-key cycles, in WMI profile indices (Quiet 0, Balanced 1,
+ * Performance 4, Turbo 5, Eco 6 - see enum
+ * acer_predator_v4_thermal_profile_wmi_index).
+ *
+ * The built-in cycle below is a fixed ladder through every profile the
+ * firmware has. That is rarely what anyone wants: Turbo is pointless on
+ * battery, Eco is pointless on AC, and which of the middle three matter is a
+ * matter of taste. These let userspace say exactly which profiles the key
+ * visits and in what order, per power source. Empty (the default) keeps the
+ * original behaviour untouched.
+ */
+#define ACER_MODE_CYCLE_MAX 8
+
+static u8 mode_cycle_ac[ACER_MODE_CYCLE_MAX];
+static u8 mode_cycle_ac_len;
+static u8 mode_cycle_battery[ACER_MODE_CYCLE_MAX];
+static u8 mode_cycle_battery_len;
+static DEFINE_MUTEX(mode_cycle_lock);
+
+static ssize_t mode_cycle_format(char *buf, const u8 *cycle, u8 len)
+{
+	ssize_t written = 0;
+	u8 i;
+
+	mutex_lock(&mode_cycle_lock);
+	for (i = 0; i < len; i++)
+		written += sysfs_emit_at(buf, written, i ? ",%u" : "%u", cycle[i]);
+	written += sysfs_emit_at(buf, written, "\n");
+	mutex_unlock(&mode_cycle_lock);
+	return written;
+}
+
+static ssize_t mode_cycle_parse(const char *buf, size_t count, u8 *cycle, u8 *len)
+{
+	u8 parsed[ACER_MODE_CYCLE_MAX];
+	u8 parsed_len = 0;
+	const char *cursor = buf;
+
+	while (*cursor && cursor < buf + count) {
+		unsigned int value;
+		int consumed;
+
+		while (*cursor == ',' || *cursor == ' ' || *cursor == '\t' ||
+		       *cursor == '\n')
+			cursor++;
+		if (!*cursor || cursor >= buf + count)
+			break;
+		if (sscanf(cursor, "%u%n", &value, &consumed) != 1)
+			return -EINVAL;
+		if (value > U8_MAX)
+			return -EINVAL;
+		if (parsed_len >= ACER_MODE_CYCLE_MAX)
+			return -E2BIG;
+		parsed[parsed_len++] = (u8)value;
+		cursor += consumed;
+	}
+
+	mutex_lock(&mode_cycle_lock);
+	memcpy(cycle, parsed, parsed_len);
+	*len = parsed_len;
+	mutex_unlock(&mode_cycle_lock);
+	return count;
+}
+
+static ssize_t mode_cycle_ac_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	return mode_cycle_format(buf, mode_cycle_ac, mode_cycle_ac_len);
+}
+
+static ssize_t mode_cycle_ac_store(struct device *dev,
+				   struct device_attribute *attr,
+				   const char *buf, size_t count)
+{
+	return mode_cycle_parse(buf, count, mode_cycle_ac, &mode_cycle_ac_len);
+}
+
+static ssize_t mode_cycle_battery_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	return mode_cycle_format(buf, mode_cycle_battery,
+				 mode_cycle_battery_len);
+}
+
+static ssize_t mode_cycle_battery_store(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf, size_t count)
+{
+	return mode_cycle_parse(buf, count, mode_cycle_battery,
+				&mode_cycle_battery_len);
+}
+
+static DEVICE_ATTR_RW(mode_cycle_ac);
+static DEVICE_ATTR_RW(mode_cycle_battery);
+
+/*
+ * Next profile in the user's cycle, or -1 when no cycle applies.
+ *
+ * A current profile outside the cycle - the user picked something else in an
+ * app - resolves to the first entry rather than being refused, so the key
+ * always lands back on a profile the user asked for.
+ */
+static int acer_mode_cycle_next(bool on_ac)
+{
+	const u8 *cycle = on_ac ? mode_cycle_ac : mode_cycle_battery;
+	u8 len = on_ac ? mode_cycle_ac_len : mode_cycle_battery_len;
+	int next = -1;
+	u8 current_index;
+	u8 i;
+
+	/*
+	 * Unlocked fast path: with no cycle configured this must return
+	 * before the WMI call below, so an unconfigured machine keeps the
+	 * driver's original behaviour with no added firmware traffic. A
+	 * concurrent write can only make this read stale, never invalid; the
+	 * authoritative length is re-read under the lock.
+	 */
+	if (!len)
+		return -1;
+	if (WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_PLATFORM_PROFILE,
+					 &current_index))
+		return -1;
+
+	mutex_lock(&mode_cycle_lock);
+	len = on_ac ? mode_cycle_ac_len : mode_cycle_battery_len;
+	if (!len) {
+		mutex_unlock(&mode_cycle_lock);
+		return -1;
+	}
+	next = cycle[0];
+	for (i = 0; i < len; i++) {
+		if (cycle[i] == current_index) {
+			next = cycle[(i + 1) % len];
+			break;
+		}
+	}
+	mutex_unlock(&mode_cycle_lock);
+	return next;
+}
+
 static int acer_thermal_profile_change(void)
 {
 	/*
@@ -3642,6 +3792,7 @@ static int acer_thermal_profile_change(void)
 	if (quirks->predator_v4) {
 		u8 current_tp;
 		int tp, err;
+		int next_in_cycle;
 		u64 on_AC;
 		acpi_status status;
 
@@ -3658,6 +3809,18 @@ static int acer_thermal_profile_change(void)
 
 		if (ACPI_FAILURE(status))
 			return -EIO;
+
+		/*
+		 * A user-defined cycle replaces the fixed ladder below entirely,
+		 * including its battery special-case: if someone lists Turbo on
+		 * battery that is their call, not the driver's.
+		 */
+		next_in_cycle = acer_mode_cycle_next(on_AC != 0);
+		if (next_in_cycle >= 0) {
+			tp = ((u32)next_in_cycle << 8) |
+			     ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET_WMI;
+			goto apply;
+		}
 
 		switch (current_tp) {
 		case ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO:
@@ -3702,6 +3865,7 @@ static int acer_thermal_profile_change(void)
 			return -EOPNOTSUPP;
 		}
 
+apply:
 		status = WMI_gaming_execute_u64(
 			ACER_WMID_SET_GAMING_MISC_SETTING_METHODID, tp, NULL);
 
@@ -4347,6 +4511,22 @@ static int acer_platform_probe(struct platform_device *device)
 		if (device_create_file(&device->dev, &dev_attr_thermal_profile_supported))
 			dev_warn(&device->dev,
 				 "failed to create thermal_profile_supported sysfs attribute\n");
+		/*
+		 * Only the predator_v4 path in acer_thermal_profile_change()
+		 * consults a user-defined cycle, so exposing these anywhere
+		 * else would accept a cycle the mode key then ignores. Their
+		 * presence is also what userspace checks before offering the
+		 * editor at all.
+		 */
+		if (quirks->predator_v4) {
+			if (device_create_file(&device->dev, &dev_attr_mode_cycle_ac))
+				dev_warn(&device->dev,
+					 "failed to create mode_cycle_ac sysfs attribute\n");
+			if (device_create_file(&device->dev,
+					       &dev_attr_mode_cycle_battery))
+				dev_warn(&device->dev,
+					 "failed to create mode_cycle_battery sysfs attribute\n");
+		}
 	}
 
 	return 0;
@@ -4370,6 +4550,9 @@ static void acer_platform_remove(struct platform_device *device)
 	device_remove_file(&device->dev, &dev_attr_backlight_timeout);
 	device_remove_file(&device->dev, &dev_attr_thermal_profile);
 	device_remove_file(&device->dev, &dev_attr_thermal_profile_supported);
+	/* No-ops when predator_v4 was false and these were never created. */
+	device_remove_file(&device->dev, &dev_attr_mode_cycle_ac);
+	device_remove_file(&device->dev, &dev_attr_mode_cycle_battery);
 
 	if (has_cap(ACER_CAP_MAILLED))
 		acer_led_exit();
@@ -4454,6 +4637,130 @@ static struct platform_driver acer_platform_driver = {
 
 static struct platform_device *acer_platform_device;
 
+/*
+ * Root-only probe for the gaming backlight methods (20 set / 21 get).
+ *
+ * Method 21 (GetGamingKBBacklight) is declared by the firmware - the WMBH
+ * dispatcher's Case(0x15) returns the 16-byte BHLK buffer - but no driver has
+ * ever called it, so the field layout of method 20's payload has only ever
+ * been inferred from Windows DLLs. Everything behind WMBH runs in SMM, so the
+ * ACPI tables cannot answer it either; writing a frame and reading back what
+ * the firmware actually stored is the only way to see the real layout.
+ *
+ * `gkbbl_set`: write 16 space/comma-separated hex bytes -> method 20.
+ * `gkbbl_get`: write a u64 selector to choose the argument, then read the
+ *              method-21 reply as hex.
+ * Both are 0600 under debugfs (root only) and only reach firmware-validated
+ * WMI methods - the same method 20 the RGB paths already use - never a raw
+ * EC offset write.
+ */
+#define GKBBL_PROBE_MAX 64
+
+static u8 gkbbl_probe_out[GKBBL_PROBE_MAX];
+static size_t gkbbl_probe_out_len;
+static u64 gkbbl_probe_get_arg;
+static acpi_status gkbbl_probe_status = AE_OK;
+/*
+ * Which WMI method the probe files talk to. Defaults to the gaming backlight
+ * pair (20 set / 21 get); the light bar has three zones and per-zone control
+ * is not in method 20's frame, so reaching methods 6/7 (SetGamingRgbKb /
+ * GetGamingRgbKb) and friends has to be possible without a rebuild.
+ */
+static u32 gkbbl_probe_method = ACER_WMID_SET_GAMINGKBBL_METHODID;
+static u32 gkbbl_probe_get_method = ACER_WMID_GET_GAMINGKBBL_METHODID;
+
+static acpi_status WMI_gaming_execute_buffer_out(u32 method_id, u64 in)
+{
+	struct acpi_buffer input = { (acpi_size)sizeof(in), (void *)(&in) };
+	struct acpi_buffer result = { ACPI_ALLOCATE_BUFFER, NULL };
+	union acpi_object *obj;
+	acpi_status status;
+
+	status = wmi_evaluate_method(WMID_GUID4, 0, method_id, &input, &result);
+	gkbbl_probe_out_len = 0;
+	if (ACPI_FAILURE(status))
+		return status;
+
+	obj = result.pointer;
+	if (obj && obj->type == ACPI_TYPE_BUFFER && obj->buffer.pointer) {
+		gkbbl_probe_out_len = min_t(size_t, obj->buffer.length,
+					    GKBBL_PROBE_MAX);
+		memcpy(gkbbl_probe_out, obj->buffer.pointer,
+		       gkbbl_probe_out_len);
+	} else if (obj && obj->type == ACPI_TYPE_INTEGER) {
+		u64 value = obj->integer.value;
+
+		gkbbl_probe_out_len = sizeof(value);
+		memcpy(gkbbl_probe_out, &value, sizeof(value));
+	}
+	kfree(result.pointer);
+	return status;
+}
+
+static ssize_t gkbbl_probe_set_write(struct file *file,
+				     const char __user *buf, size_t count,
+				     loff_t *ppos)
+{
+	u8 payload[GKBBL_PROBE_MAX] = {0};
+	char line[256];
+	char *cursor, *token;
+	unsigned int index = 0;
+	u32 result = 0;
+	acpi_status status;
+
+	if (count >= sizeof(line))
+		return -EINVAL;
+	if (copy_from_user(line, buf, count))
+		return -EFAULT;
+	line[count] = '\0';
+
+	cursor = line;
+	while ((token = strsep(&cursor, " ,\t\n")) != NULL) {
+		u8 value;
+
+		if (!*token)
+			continue;
+		if (index >= GKBBL_PROBE_MAX)
+			return -E2BIG;
+		if (kstrtou8(token, 16, &value))
+			return -EINVAL;
+		payload[index++] = value;
+	}
+	if (!index)
+		return -EINVAL;
+
+	status = WMI_gaming_execute_u8_array(gkbbl_probe_method, payload,
+					     index, &result);
+	gkbbl_probe_status = status;
+	pr_info("gkbbl_probe method=%u len=%u payload=%*ph -> %s ret=0x%x\n",
+		gkbbl_probe_method, index, index, payload,
+		acpi_format_exception(status), result);
+	return ACPI_FAILURE(status) ? -EIO : count;
+}
+
+static const struct file_operations gkbbl_probe_set_fops = {
+	.owner = THIS_MODULE,
+	.write = gkbbl_probe_set_write,
+};
+
+static int gkbbl_probe_get_show(struct seq_file *s, void *data)
+{
+	acpi_status status;
+	size_t i;
+
+	status = WMI_gaming_execute_buffer_out(gkbbl_probe_get_method,
+					       gkbbl_probe_get_arg);
+	seq_printf(s, "method=%u arg=0x%llx status=%s len=%zu\n",
+		   gkbbl_probe_get_method, gkbbl_probe_get_arg,
+		   acpi_format_exception(status), gkbbl_probe_out_len);
+	for (i = 0; i < gkbbl_probe_out_len; i++)
+		seq_printf(s, "%02x%s", gkbbl_probe_out[i],
+			   (i + 1 == gkbbl_probe_out_len) ? "\n" : " ");
+	return 0;
+}
+
+DEFINE_SHOW_ATTRIBUTE(gkbbl_probe_get);
+
 static void remove_debugfs(void)
 {
 	debugfs_remove_recursive(interface->debug.root);
@@ -4465,6 +4772,31 @@ static void __init create_debugfs(void)
 
 	debugfs_create_u32("devices", S_IRUGO, interface->debug.root,
 			   &interface->debug.wmid_devices);
+
+	/*
+	 * Gaming-lighting probe. Root-only (debugfs itself is 0700), and
+	 * only where WMID_GUID4 exists at all - on any other Acer these
+	 * would be five files whose every method call can only fail.
+	 *
+	 * Note that reading gkbbl_get is not passive: it evaluates a WMI
+	 * method, which traps to SMM. That is deliberate for a probe, but it
+	 * means a root process that walks all of debugfs (a diagnostic
+	 * collector, a fuzzer) triggers firmware calls. Kept behind the GUID
+	 * check so that surface does not exist on hardware it cannot serve.
+	 */
+	if (wmi_has_guid(WMID_GUID4)) {
+		debugfs_create_file("gkbbl_set", 0200, interface->debug.root,
+				    NULL, &gkbbl_probe_set_fops);
+		debugfs_create_file("gkbbl_get", 0400, interface->debug.root,
+				    NULL, &gkbbl_probe_get_fops);
+		debugfs_create_x64("gkbbl_get_arg", 0600, interface->debug.root,
+				   &gkbbl_probe_get_arg);
+		debugfs_create_u32("gkbbl_method", 0600, interface->debug.root,
+				   &gkbbl_probe_method);
+		debugfs_create_u32("gkbbl_get_method", 0600,
+				   interface->debug.root,
+				   &gkbbl_probe_get_method);
+	}
 }
 
 #if RTLNX_VER_MIN(6, 14, 0)
@@ -4817,10 +5149,15 @@ static int __init acer_wmi_init(void)
 	if (err)
 		goto error_device_add;
 
-	if (wmi_has_guid(WMID_GUID2)) {
+	/*
+	 * The debugfs root used to be created only alongside the WMID_GUID2
+	 * "devices" dump, so on a machine without that GUID (PH16-71) nothing
+	 * under debugfs existed at all - including the gaming-backlight probe,
+	 * which depends on WMID_GUID4 instead.
+	 */
+	if (wmi_has_guid(WMID_GUID2))
 		interface->debug.wmid_devices = get_wmid_devices();
-		create_debugfs();
-	}
+	create_debugfs();
 
 	/* Override any initial settings with values from the commandline */
 	acer_commandline_init();

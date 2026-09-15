@@ -123,6 +123,29 @@ impl Default for CoverLogoSettings {
     }
 }
 
+/// A named keyboard + light bar combination, applied as one unit.
+///
+/// The pre-existing `LightingProfile` covers only the WMI keyboard path, which
+/// is not what drives either device on this generation, and it has no light bar
+/// half at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LightingScheme {
+    pub name: String,
+    #[serde(default)]
+    pub keyboard: Option<crate::hardware::keyboard_rgb::KeyboardState>,
+    #[serde(default)]
+    pub light_bar: Option<crate::hardware::light_bar::LightBarState>,
+}
+
+/// Binds a power mode to a lighting scheme, so the lighting follows the mode
+/// key. `mode` is a `PowerProfile::to_id()` value rather than the enum itself
+/// so the map stays readable in config.json and survives an unknown mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModeBinding {
+    pub mode: String,
+    pub scheme: String,
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -214,6 +237,91 @@ pub struct AppConfig {
     pub magic_rgb_logo: Option<MagicRgbLogoState>,
     #[serde(default)]
     pub chicony_rgb: Option<ChiconyRgbState>,
+    /// Last-applied chassis light bar state (`hardware::light_bar`, PH16-71
+    /// generation). None means never applied through this app.
+    #[serde(default)]
+    pub light_bar: Option<crate::hardware::light_bar::LightBarState>,
+    /// Last-applied keyboard lighting on the arbitrary-colour path
+    /// (`hardware::keyboard_rgb`).
+    #[serde(default)]
+    pub keyboard_rgb: Option<crate::hardware::keyboard_rgb::KeyboardState>,
+    /// User's saved colour swatches, as `#rrggbb`. Shared by both devices so a
+    /// colour picked for one is one click away on the other.
+    #[serde(default)]
+    pub saved_colors: Vec<String>,
+    /// Named keyboard + light bar combinations.
+    #[serde(default)]
+    pub lighting_schemes: Vec<LightingScheme>,
+    /// Power mode -> scheme name.
+    #[serde(default)]
+    pub mode_bindings: Vec<ModeBinding>,
+    /// Turn the light bar off after `light_bar_idle_secs` without input. The
+    /// firmware has no timeout for the bar (unlike the keyboard backlight), so
+    /// this is measured by the app - see `hardware::idle`.
+    #[serde(default)]
+    pub light_bar_idle_enabled: bool,
+    #[serde(default = "default_light_bar_idle_secs")]
+    pub light_bar_idle_secs: u32,
+    /// Master switch for idle blanking. The per-device switches below only
+    /// matter while this is on.
+    #[serde(default)]
+    pub idle_enabled: bool,
+    /// One timing for both devices. The keyboard's value is the shared one.
+    #[serde(default = "default_true")]
+    pub idle_synced: bool,
+    #[serde(default = "default_true")]
+    pub idle_keyboard_enabled: bool,
+    #[serde(default = "default_idle_secs")]
+    pub idle_keyboard_secs: u32,
+    #[serde(default = "default_true")]
+    pub idle_bar_enabled: bool,
+    #[serde(default = "default_idle_secs")]
+    pub idle_bar_secs: u32,
+    /// Whether cursor movement counts as activity. Mouse *buttons* always do -
+    /// a click is as deliberate as a keystroke - this is only about motion.
+    #[serde(default = "default_true")]
+    pub idle_mouse_wakes: bool,
+    /// Hold the keyboard backlight awake against the controller's own sleep
+    /// timer (CHANGELOG §24).
+    ///
+    /// Deliberately not under `idle_enabled`: this is what the controller does
+    /// on its own, so it applies whether or not this app blanks anything -
+    /// and it matters most to someone who turned idle blanking off and still
+    /// found the keyboard going dark. Defaults on, because a keyboard that
+    /// blanks while the light bar stays lit is the two devices disagreeing;
+    /// off restores the factory behaviour for anyone who prefers it.
+    #[serde(default = "default_true")]
+    pub idle_keyboard_keepalive: bool,
+
+    /// Which modes the physical mode key steps through, in order, as
+    /// `PowerProfile::to_id()` values. Separate lists per power source: the
+    /// useful set genuinely differs (nobody wants Turbo on battery, and Eco is
+    /// pointless on AC). Empty means "use the firmware's own full order",
+    /// which is what happened before this existed.
+    #[serde(default)]
+    pub mode_cycle_ac: Vec<String>,
+    #[serde(default)]
+    pub mode_cycle_battery: Vec<String>,
+    /// Mode applied at startup. `None` leaves whatever the firmware booted into.
+    #[serde(default)]
+    pub mode_default: Option<String>,
+    /// Drop to Eco automatically below `auto_eco_threshold` percent, and come
+    /// back to the normal battery profile above it.
+    #[serde(default)]
+    pub auto_eco_enabled: bool,
+    #[serde(default = "default_auto_eco_threshold")]
+    pub auto_eco_threshold: u32,
+
+    /// What the dedicated PredatorSense key does: `app` (open Predator Sense,
+    /// the default), `command` (run `predator_key_command`), or `none`.
+    ///
+    /// The key produces no input event at all - the kernel maps neither of the
+    /// HID usages it reports - so the daemon watches its raw HID report
+    /// directly and runs this.
+    #[serde(default = "default_predator_key_action")]
+    pub predator_key_action: String,
+    #[serde(default)]
+    pub predator_key_command: String,
     /// None means the user has never applied a cover-logo setting, so automatic
     /// restoration must leave the controller's firmware default untouched.
     #[serde(default)]
@@ -330,6 +438,25 @@ fn default_font_scale() -> f64 {
     1.0
 }
 
+/// Matches the keyboard backlight's own firmware timeout, so both devices go
+/// dark at the same moment rather than on two unrelated timers.
+fn default_light_bar_idle_secs() -> u32 {
+    30
+}
+
+/// Matches the keyboard backlight's factory firmware timeout.
+fn default_idle_secs() -> u32 {
+    30
+}
+
+fn default_auto_eco_threshold() -> u32 {
+    30
+}
+
+fn default_predator_key_action() -> String {
+    "app".to_string()
+}
+
 fn default_rgb_brightness() -> u8 {
     100
 }
@@ -355,7 +482,11 @@ impl Default for AppConfig {
         Self {
             last_profile: None,
             auto_apply_on_start: false,
-            minimize_on_close: false,
+            // Default on: the timers that do the continuous work (idle
+            // blanking, lighting per power mode, automatic Eco, GameSync, the
+            // software fan curve) live in this process, so quitting on close
+            // silently turns all of them off.
+            minimize_on_close: true,
             start_on_boot: false,
             temp_alerts: true,
             auto_profile_ac: true,
@@ -376,6 +507,28 @@ impl Default for AppConfig {
             magic_rgb_keyboard: None,
             magic_rgb_logo: None,
             chicony_rgb: None,
+            light_bar: None,
+            keyboard_rgb: None,
+            saved_colors: Vec::new(),
+            lighting_schemes: Vec::new(),
+            mode_bindings: Vec::new(),
+            light_bar_idle_enabled: false,
+            light_bar_idle_secs: default_light_bar_idle_secs(),
+            idle_enabled: false,
+            idle_synced: true,
+            idle_keyboard_enabled: true,
+            idle_keyboard_secs: default_idle_secs(),
+            idle_bar_enabled: true,
+            idle_bar_secs: default_idle_secs(),
+            idle_mouse_wakes: true,
+            idle_keyboard_keepalive: true,
+            mode_cycle_ac: Vec::new(),
+            mode_cycle_battery: Vec::new(),
+            mode_default: None,
+            auto_eco_enabled: false,
+            auto_eco_threshold: default_auto_eco_threshold(),
+            predator_key_action: default_predator_key_action(),
+            predator_key_command: String::new(),
             cover_logo: None,
             battery_limiter: false,
             battery_health_mode: false,
@@ -412,7 +565,7 @@ pub fn set_autostart(enabled: bool) {
         let app_desktop = "[Desktop Entry]\n\
 Type=Application\n\
 Name=Predator Sense\n\
-Exec=/opt/predator-sense/predator-sense\n\
+Exec=/opt/predator-sense/predator-sense --background\n\
 Hidden=false\n\
 NoDisplay=true\n\
 X-GNOME-Autostart-enabled=true\n\

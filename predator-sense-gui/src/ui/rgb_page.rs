@@ -37,9 +37,15 @@ pub fn build() -> gtk::ScrolledWindow {
     // no independent zones and a much larger effect list. Routed to its own
     // page instead of branching this one, so the WMI/ENEK5130 path below
     // (and every model it already supports) is completely untouched.
+    // The unified page covers the Chicony keyboard's arbitrary-colour path and
+    // the chassis light bar together, with shared swatches and schemes. It owns
+    // the hardware this machine actually has; magic_rgb_page still serves the
+    // 2024+ Sunrex/Darfon boards it was written for.
+    if crate::hardware::keyboard_rgb::is_available() || crate::hardware::light_bar::is_available() {
+        return crate::ui::lighting_page::build();
+    }
     if crate::hardware::magic_rgb::is_keyboard_available()
         || crate::hardware::magic_rgb::is_logo_available()
-        || crate::hardware::chicony_rgb::is_available()
     {
         return crate::ui::magic_rgb_page::build();
     }

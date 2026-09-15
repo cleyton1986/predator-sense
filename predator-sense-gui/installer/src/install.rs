@@ -1332,6 +1332,19 @@ impl Installer {
             // above nothing here ever writes to the EC, and this is the one
             // device on the list that can change machine state.
             "SUBSYSTEM==\"hidraw\", KERNELS==\"*:1025:*\", MODE=\"0640\", GROUP=\"input\"\n",
+            // The PredatorSense key on the Chicony keyboard (04F2:0117)
+            // reports HID usage 0xC9 on the keyboard interface and a vendor
+            // consumer usage on interface 2. The kernel maps neither, so the
+            // key generates no input event at all and does nothing - the
+            // daemon has to read its raw report instead.
+            //
+            // Interface 2 only: it carries consumer controls, not the
+            // keystroke stream, so this grants sight of the key without
+            // granting sight of what is typed. Matched on
+            // ID_USB_INTERFACE_NUM because the interface number and the
+            // vendor/product ids live on different parent devices, and every
+            // ATTRS match in one rule has to resolve on the same parent.
+            "SUBSYSTEM==\"hidraw\", ENV{ID_VENDOR_ID}==\"04f2\", ENV{ID_MODEL_ID}==\"0117\", ENV{ID_USB_INTERFACE_NUM}==\"02\", MODE=\"0640\", GROUP=\"input\"\n",
         );
         const EC_RULE: &str =
             "SUBSYSTEM==\"chardev\", KERNEL==\"ec\", MODE=\"0640\", GROUP=\"input\"\n";
