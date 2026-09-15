@@ -61,6 +61,12 @@ pub fn build(steps: [u8; geo::STEP_COUNT]) -> FanCurveView {
         let widget = widget.clone();
         Rc::new(move |x: f64, y: f64| {
             let plot = geo::plot_for(widget.width() as f64, widget.height() as f64);
+            // Mirrors the guard in `draw`: a collapsed widget has no column to
+            // resolve a click into, and every position would read as step 0 at
+            // 0%, which is a curve edit nobody asked for.
+            if plot.w <= 0.0 || plot.h <= 0.0 {
+                return;
+            }
             let (changed, steps) = {
                 let mut s = state.borrow_mut();
                 let next = geo::edited(s.steps, plot, x, y);
@@ -157,16 +163,20 @@ fn draw(
     cr.rectangle(plot.x, plot.y, plot.w, plot.h);
     let _ = cr.fill();
 
-    // The band the firmware owns, drawn under the bars: a zero step does not
-    // mean "off until the next breakpoint", it means the firmware keeps the
-    // fans until the whole first non-zero band is cleared.
-    if steps[0] == 0 {
-        // A curve with a zero first step leaves the fans to the firmware up
-        // to the top of the first non-zero band, and an all-zero curve leaves
-        // them to the firmware everywhere - `curve_resume_c` has no boundary
-        // to report for that one, so the band runs to the edge of the axis.
-        let end = geo::firmware_region_end_x(plot, fan::curve_resume_c(&steps))
-            .unwrap_or(plot.x + plot.w);
+    // The band the firmware owns whatever state the fans are in. Deliberately
+    // `curve_zero_region_top_c` and not `curve_resume_c`: between the two the
+    // firmware keeps the fans only if it already has them, and the chart
+    // cannot know that - `fan_state` belongs to the reconciler. Drawing the
+    // wider band would claim firmware control at a temperature where the
+    // curve may be driving a manual duty instead.
+    let all_zero = steps.iter().all(|&pct| pct == 0);
+    let firmware_end = if all_zero {
+        // Every step reads zero, so every temperature is the firmware's.
+        Some(plot.x + plot.w)
+    } else {
+        geo::firmware_region_end_x(plot, fan::curve_zero_region_top_c(&steps))
+    };
+    if let Some(end) = firmware_end {
         cr.set_source_rgba(0.55, 0.62, 0.72, 0.16);
         cr.rectangle(plot.x, plot.y, end - plot.x, plot.h);
         let _ = cr.fill();
@@ -214,11 +224,17 @@ fn draw(
         let _ = cr.stroke();
 
         cr.set_source_rgba(0.92, 0.94, 0.97, if lit { 1.0 } else { 0.7 });
-        label(cr, left + 6.0, (top - 4.0).max(plot.y + 9.0), &format!("{pct}"), 10.0);
+        label(
+            cr,
+            left + 6.0,
+            (top - 4.0).max(plot.y + 9.0),
+            &format!("{pct}"),
+            10.0,
+        );
     }
 
     // Column boundaries and their temperatures.
-    for (i, &c) in fan::FAN_CURVE_BREAKPOINTS_C.iter().enumerate() {
+    for &c in fan::FAN_CURVE_BREAKPOINTS_C.iter() {
         let x = geo::x_for_temp(plot, c);
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.07);
         cr.set_line_width(1.0);
@@ -228,7 +244,6 @@ fn draw(
         cr.set_source_rgba(0.72, 0.76, 0.82, 0.85);
         let text = format!("{}", c as i32);
         label(cr, x - 7.0, plot.y + plot.h + 13.0, &text, 9.0);
-        let _ = i;
     }
 
     // Live temperature marker.
@@ -239,6 +254,12 @@ fn draw(
         cr.move_to(x, plot.y);
         cr.line_to(x, plot.y + plot.h);
         let _ = cr.stroke();
-        label(cr, (x + 4.0).min(plot.x + plot.w - 30.0), plot.y + plot.h - 4.0, &format!("{}C", t as i32), 9.0);
+        label(
+            cr,
+            (x + 4.0).min(plot.x + plot.w - 30.0),
+            plot.y + plot.h - 4.0,
+            &format!("{}C", t as i32),
+            9.0,
+        );
     }
 }
