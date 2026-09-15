@@ -622,6 +622,12 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             // `applying` skips a tick instead of queuing a second write if
             // the previous one is still in flight.
             let applying = Rc::new(Cell::new(false));
+            // What the curve last managed to apply. Both a memory, so a tick
+            // that would change nothing writes nothing, and the answer to
+            // "does the firmware hold the fans", which decides whether a
+            // temperature near the boundary is left alone or taken back. It
+            // only advances on a write that actually succeeded.
+            let fan_state = Rc::new(Cell::new(crate::hardware::fan::FanState::Unknown));
             glib::timeout_add_seconds_local(3, move || {
                 let cfg = config::load_app_config();
                 if cfg.fan_auto_curve_enabled && !applying.get() {
@@ -631,13 +637,67 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     // stays one speed for both fans.
                     let (cpu, gpu) = sensors::read_critical_temps();
                     if let Some(t) = crate::hardware::fan::curve_input_temp(cpu, gpu) {
-                        let pct = crate::hardware::fan::fan_curve_pct(t, &cfg.fan_curve_points);
-                        applying.set(true);
-                        let applying_done = applying.clone();
-                        background::run(
-                            move || crate::hardware::fan::set_pwm_percent(pct, pct),
-                            move |_| applying_done.set(false),
+                        use crate::hardware::fan::{CurveAction, FanState};
+                        let applied = fan_state.get();
+                        let action = crate::hardware::fan::curve_action(
+                            t,
+                            &cfg.fan_curve_points,
+                            applied == FanState::Firmware,
                         );
+                        if crate::hardware::fan::needs_write(action, applied) {
+                            applying.set(true);
+                            let applying_done = applying.clone();
+                            let state = fan_state.clone();
+                            match action {
+                                // A 0% step means stop, and only the firmware
+                                // can do that: manual pwm 0 still spins.
+                                CurveAction::Firmware => background::run(
+                                    || crate::hardware::fan::set_pwm_auto(),
+                                    move |result| {
+                                        applying_done.set(false);
+                                        match result {
+                                            Ok(()) => {
+                                                state.set(FanState::Firmware);
+                                                crate::hardware::applog::info(
+                                                    "fan curve: below the zero step, fans handed to the firmware",
+                                                );
+                                            }
+                                            // The hardware is wherever it was,
+                                            // so the curve must not remember a
+                                            // state it never managed to set.
+                                            Err(error) => {
+                                                state.set(FanState::Unknown);
+                                                crate::hardware::applog::error(&format!(
+                                                    "fan curve: handing the fans to the firmware failed: {error}"
+                                                ));
+                                            }
+                                        }
+                                    },
+                                ),
+                                CurveAction::Manual(pct) => background::run(
+                                    move || crate::hardware::fan::set_pwm_percent(pct, pct),
+                                    move |result| {
+                                        applying_done.set(false);
+                                        match result {
+                                            Ok(()) => {
+                                                state.set(FanState::Manual(pct));
+                                                crate::hardware::applog::info(&format!(
+                                                    "fan curve: {pct}% (hotter die {t:.0} C)"
+                                                ));
+                                            }
+                                            Err(error) => {
+                                                state.set(FanState::Unknown);
+                                                crate::hardware::applog::error(&format!(
+                                                    "fan curve: {pct}% not applied: {error}"
+                                                ));
+                                            }
+                                        }
+                                    },
+                                ),
+                                // needs_write already excluded Hold.
+                                CurveAction::Hold => {}
+                            }
+                        }
                     }
                 }
                 glib::ControlFlow::Continue

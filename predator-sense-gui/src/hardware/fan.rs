@@ -13,6 +13,7 @@ pub enum FanMode {
 /// Set fan mode using the predator-sense-helper (requires pkexec)
 /// Auto and Max use firmware modes (safe). Custom is disabled for safety.
 pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
+    crate::hardware::applog::info(&format!("fan: mode {mode:?}"));
     use crate::hardware::capabilities::FanPresetStatus;
 
     let action = match mode {
@@ -155,6 +156,9 @@ pub fn pwm_available() -> bool {
 /// Set CPU/GPU fan speed as a percentage (0-100). Writes hwmon pwm (0-255).
 /// Switches the fan to manual/custom mode first.
 pub fn set_pwm_percent(cpu_pct: u8, gpu_pct: u8) -> Result<(), String> {
+    crate::hardware::applog::info(&format!(
+        "fan: manual pwm cpu={cpu_pct}% gpu={gpu_pct}%"
+    ));
     let manual = PwmControlMode::Manual.as_str();
     crate::hardware::helper::execute(HelperAction::PwmCpuEnable, &[manual])?;
     crate::hardware::helper::execute(HelperAction::PwmGpuEnable, &[manual])?;
@@ -176,6 +180,7 @@ pub fn set_pwm_percent(cpu_pct: u8, gpu_pct: u8) -> Result<(), String> {
 /// 91 C under load). The bounce was a visible mode-key flicker and a chance of
 /// being left in the wrong profile, bought nothing, and is gone.
 pub fn set_pwm_auto() -> Result<(), String> {
+    crate::hardware::applog::info("fan: firmware curve (pwm_enable=2)");
     let automatic = PwmControlMode::Automatic.as_str();
     crate::hardware::helper::execute(HelperAction::PwmCpuEnable, &[automatic])?;
     crate::hardware::helper::execute(HelperAction::PwmGpuEnable, &[automatic])?;
@@ -235,6 +240,115 @@ pub fn fan_curve_pct(temp_c: f64, steps: &[u8; 6]) -> u8 {
         }
     }
     steps[5]
+}
+
+/// Temperature at which the curve takes manual control back after handing the
+/// fans to the firmware, or `None` for a curve that is zero everywhere.
+///
+/// Deliberately not the boundary of the zero region, and not that boundary
+/// plus a couple of degrees. With the fans stopped the temperature climbs past
+/// any small buffer on its own, and the first non-zero step then pulls it
+/// straight back below the boundary, so the machine alternates between silence
+/// and a spinning fan for as long as it sits idle. Measured on a PH16-71 with
+/// a 3 C buffer and a `[0, 35, ...]` curve: 0 RPM at 45 C, 2500 RPM at 48 C,
+/// back to 0 RPM at 45 C, on a roughly one-minute cycle. A fan that cycles is
+/// worse than a fan that holds a low speed.
+///
+/// So the whole first non-zero band is left to the firmware, whose own ramp is
+/// gentler than any step here, and the curve resumes at the top of that band.
+/// The result is the wide asymmetric gap that hardware zero-RPM modes use
+/// (stop low, start high): with `[0, 35, 50, ...]` the fans are the firmware's
+/// below 55 C and the curve's above it, and once the curve has them it keeps
+/// them until the temperature falls back under 45 C. At idle the firmware
+/// simply holds the temperature inside that band and nothing cycles; under a
+/// real load the temperature crosses the top in seconds.
+fn curve_resume_c(steps: &[u8; 6]) -> Option<f64> {
+    let first_active = steps.iter().position(|&pct| pct != 0)?;
+    // A curve whose only non-zero step is the top one resumes at that step's
+    // own boundary: there is no band above it to defer to.
+    Some(FAN_CURVE_BREAKPOINTS_C[first_active.min(FAN_CURVE_BREAKPOINTS_C.len() - 1)])
+}
+
+/// What the software curve should do on this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurveAction {
+    /// Hand both fans to the firmware curve.
+    ///
+    /// This is the only way to reach 0 RPM. A manual `pwm` of 0 is not off:
+    /// the EC holds a floor, measured at ~1670 RPM on a PH16-71 at idle and
+    /// under load alike, so a user who sets a step to 0% gets a spinning fan
+    /// unless the firmware takes over. Below its own threshold the firmware
+    /// runs the machine genuinely fanless (0 RPM up to ~48 C on that chassis),
+    /// which is what 0% is asking for.
+    Firmware,
+    /// Drive both fans at this percentage.
+    Manual(u8),
+    /// Write nothing. Either the firmware already has the fans and the curve
+    /// still wants 0%, or the temperature has not yet cleared the hysteresis
+    /// band, and taking manual control back would undo the silence.
+    Hold,
+}
+
+/// What the curve last successfully applied to the hardware.
+///
+/// `Unknown` covers startup and any write that failed. The hardware then holds
+/// whatever the firmware, a previous session or another writer left, so the
+/// curve has to assert itself rather than trust a value it never managed to
+/// apply. That distinction is load-bearing: a flag saying "handed off" while
+/// the write actually failed is how the curve and the hardware came to
+/// disagree silently, with the app convinced it had done something it had not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanState {
+    Unknown,
+    Firmware,
+    Manual(u8),
+}
+
+/// Whether `action` still needs to reach the hardware.
+///
+/// The curve runs every few seconds and its answer rarely changes, so without
+/// this check every tick spent four privileged helper round trips restating
+/// the percentage already in force: 84 writes in 6.5 idle minutes, measured.
+pub fn needs_write(action: CurveAction, applied: FanState) -> bool {
+    match (action, applied) {
+        (CurveAction::Hold, _) => false,
+        (CurveAction::Firmware, FanState::Firmware) => false,
+        (CurveAction::Manual(wanted), FanState::Manual(in_force)) => wanted != in_force,
+        _ => true,
+    }
+}
+
+/// Decides between the firmware curve and a manual percentage, given where the
+/// temperature is and whether the firmware currently has control.
+///
+/// A step of 0% means "stop", which only the firmware can do. Coming back out
+/// of that needs the hysteresis buffer, or a temperature hovering at the
+/// boundary would hand the fans back and forth every tick.
+pub fn curve_action(temp_c: f64, steps: &[u8; 6], handed_off: bool) -> CurveAction {
+    if fan_curve_pct(temp_c, steps) == 0 {
+        // Nothing to write once the firmware already has it.
+        return if handed_off {
+            CurveAction::Hold
+        } else {
+            CurveAction::Firmware
+        };
+    }
+    // Once the firmware has them, it keeps them until the temperature clears
+    // the whole first non-zero band. See curve_resume_c for why that is the
+    // band and not the boundary.
+    //
+    // `steps[0] == 0` guards the case where the user edits the zero step away
+    // while the firmware holds the fans: there is no longer a band to defer,
+    // they have asked for manual control at this temperature, and making them
+    // wait for a boundary their curve no longer has would look like the
+    // setting being ignored.
+    if handed_off
+        && steps[0] == 0
+        && curve_resume_c(steps).is_none_or(|resume| temp_c < resume)
+    {
+        return CurveAction::Hold;
+    }
+    CurveAction::Manual(fan_curve_pct(temp_c, steps))
 }
 
 /// Read current CPU/GPU fan PWM as percentage (0-100), if available.
@@ -319,5 +433,117 @@ mod tests {
             80
         );
         assert_eq!(fan_curve_pct(idle_cpu.unwrap(), &steps), 25);
+    }
+    #[test]
+    fn a_zero_step_hands_the_fans_to_the_firmware() {
+        let steps = [0, 35, 50, 65, 80, 100];
+        // Only the firmware can actually stop them; manual 0 still spins.
+        assert_eq!(curve_action(40.0, &steps, false), CurveAction::Firmware);
+        // Once it has them, there is nothing to write each tick.
+        assert_eq!(curve_action(40.0, &steps, true), CurveAction::Hold);
+    }
+
+    #[test]
+    fn the_firmware_keeps_the_fans_through_the_whole_first_band() {
+        let steps = [0, 35, 50, 65, 80, 100];
+        // The measured failure mode: resuming just above 45 C made the fans
+        // cycle between 0 and 2500 RPM every minute, because stopped fans
+        // warm the machine past the boundary and 35% cools it back under.
+        assert_eq!(curve_action(46.0, &steps, true), CurveAction::Hold);
+        assert_eq!(curve_action(50.0, &steps, true), CurveAction::Hold);
+        assert_eq!(curve_action(54.9, &steps, true), CurveAction::Hold);
+        // At the top of that band the curve takes over, at the step for the
+        // temperature it actually reached.
+        assert_eq!(curve_action(55.0, &steps, true), CurveAction::Manual(50));
+        assert_eq!(curve_action(80.0, &steps, true), CurveAction::Manual(80));
+    }
+
+    #[test]
+    fn once_the_curve_has_them_it_keeps_them_until_the_zero_step() {
+        let steps = [0, 35, 50, 65, 80, 100];
+        // The other half of the asymmetric gap: manual control is held all
+        // the way down to the zero region rather than handing back at 55 C.
+        assert_eq!(curve_action(54.0, &steps, false), CurveAction::Manual(35));
+        assert_eq!(curve_action(45.0, &steps, false), CurveAction::Manual(35));
+        assert_eq!(curve_action(44.0, &steps, false), CurveAction::Firmware);
+    }
+
+    #[test]
+    fn the_band_follows_whichever_steps_are_zero() {
+        // Two zero steps: the firmware owns everything below 65 C.
+        let steps = [0, 0, 50, 65, 80, 100];
+        assert_eq!(curve_action(50.0, &steps, true), CurveAction::Hold);
+        assert_eq!(curve_action(64.0, &steps, true), CurveAction::Hold);
+        assert_eq!(curve_action(65.0, &steps, true), CurveAction::Manual(65));
+    }
+
+    #[test]
+    fn a_curve_that_is_zero_until_the_top_step_resumes_at_its_boundary() {
+        let steps = [0, 0, 0, 0, 0, 100];
+        assert_eq!(curve_action(80.0, &steps, true), CurveAction::Hold);
+        assert_eq!(curve_action(85.0, &steps, true), CurveAction::Manual(100));
+    }
+
+    #[test]
+    fn a_curve_without_zeros_never_hands_off() {
+        let steps = DEFAULT_FAN_CURVE;
+        assert_eq!(curve_action(20.0, &steps, false), CurveAction::Manual(25));
+        assert_eq!(curve_action(90.0, &steps, false), CurveAction::Manual(100));
+    }
+
+    #[test]
+    fn editing_the_zero_step_away_takes_the_fans_back_immediately() {
+        // The firmware is holding them from a previous `[0, ...]` curve and
+        // the user has just set the first step to 25%. Waiting for a band the
+        // curve no longer has would read as the setting being ignored.
+        let steps = DEFAULT_FAN_CURVE;
+        assert_eq!(curve_action(20.0, &steps, true), CurveAction::Manual(25));
+    }
+
+    #[test]
+    fn an_all_zero_curve_just_means_leave_it_to_the_firmware() {
+        let steps = [0; 6];
+        assert_eq!(curve_action(95.0, &steps, false), CurveAction::Firmware);
+        assert_eq!(curve_action(95.0, &steps, true), CurveAction::Hold);
+    }
+
+    #[test]
+    fn an_unchanged_manual_percentage_is_not_rewritten() {
+        // The defect this fixes: the curve rewrote the same percentage every
+        // tick, four privileged helper calls at a time, 84 writes in 6.5
+        // minutes of a machine doing nothing.
+        assert!(!needs_write(CurveAction::Manual(35), FanState::Manual(35)));
+    }
+
+    #[test]
+    fn a_changed_manual_percentage_is_written() {
+        assert!(needs_write(CurveAction::Manual(50), FanState::Manual(35)));
+    }
+
+    #[test]
+    fn hold_never_writes() {
+        assert!(!needs_write(CurveAction::Hold, FanState::Firmware));
+        assert!(!needs_write(CurveAction::Hold, FanState::Manual(35)));
+        assert!(!needs_write(CurveAction::Hold, FanState::Unknown));
+    }
+
+    #[test]
+    fn a_repeated_handoff_is_not_rewritten() {
+        assert!(!needs_write(CurveAction::Firmware, FanState::Firmware));
+    }
+
+    #[test]
+    fn switching_between_firmware_and_manual_is_written() {
+        assert!(needs_write(CurveAction::Firmware, FanState::Manual(35)));
+        assert!(needs_write(CurveAction::Manual(35), FanState::Firmware));
+    }
+
+    #[test]
+    fn nothing_is_assumed_before_the_first_successful_write() {
+        // Startup, or after a write failed: the hardware is whatever the
+        // firmware or a previous session left, so the curve has to assert
+        // itself rather than trusting a value it never applied.
+        assert!(needs_write(CurveAction::Manual(35), FanState::Unknown));
+        assert!(needs_write(CurveAction::Firmware, FanState::Unknown));
     }
 }
