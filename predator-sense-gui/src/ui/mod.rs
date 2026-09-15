@@ -24,6 +24,7 @@ pub mod magic_rgb_page;
 pub mod monitor_page;
 pub mod network_page;
 pub mod rgb_page;
+pub mod scroll_guard;
 pub mod setup_page;
 pub mod tech_gauge;
 pub mod temperatures_page;
