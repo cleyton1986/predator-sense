@@ -116,10 +116,9 @@ fn set_fan_mode_inner(mode: FanMode, wake: bool) -> Result<(), String> {
 /// PWM instead. Never reached from the reconciler, which uses
 /// `set_fan_mode_without_wake`: see there for why a background timer must not
 /// move the profile index this reads and writes. The PWM path's own use of
-/// this was removed after the stall it
-/// worked around turned out not to exist; that measurement does not cover the
-/// EC path on the models that do use it, so this is left alone rather than
-/// deleted on a guess.
+/// this was removed after the stall it worked around turned out not to exist;
+/// that measurement does not cover the EC path on the models that do use it,
+/// so this is left alone rather than deleted on a guess.
 pub fn wake_dynamic_fan_curve() {
     use crate::hardware::thermal_profile;
     if !thermal_profile::is_available() {
@@ -472,7 +471,8 @@ pub fn get_pwm_percent() -> Option<(u8, u8)> {
 /// costs one corrective write and no more.
 pub fn observe_fan_state(pwm_available: bool) -> FanState {
     if pwm_available {
-        return match crate::hardware::helper::read(HelperAction::PwmCpuEnableRead).as_deref() {
+        let enable = crate::hardware::helper::read(HelperAction::PwmCpuEnableRead);
+        return match enable.as_deref().map(str::trim) {
             Some(mode) if mode == PwmControlMode::Automatic.as_str() => FanState::Firmware,
             Some(mode) if mode == PwmControlMode::Manual.as_str() => {
                 match get_pwm_percent() {

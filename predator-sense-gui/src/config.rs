@@ -150,7 +150,9 @@ pub struct ModeBinding {
 /// What the fans should do while a given power mode is active.
 ///
 /// `Automatic` leaves them to the firmware, which is the only thing that can
-/// stop them: a manual pwm of 0 is not off, the EC holds a floor.
+/// stop them: a manual pwm of 0 is not off, the EC holds a floor, measured at
+/// ~1670 RPM on a PH16-71. See `fan::CurveAction::Firmware`, which carries the
+/// rest of that measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FanPlan {
@@ -190,9 +192,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub debug_logging: bool,
     /// Issue #41 (TongkyakHermit): keep the fan on Auto even when
-    /// Performance/Turbo is selected, instead of forcing Max like the
-    /// physical Predator/Turbo key does. Off by default - preserves the
-    /// existing safety-first behavior for everyone who doesn't touch it.
+    /// Performance/Turbo is selected, instead of Max like the physical
+    /// Predator/Turbo key does. Off by default - preserves the existing
+    /// safety-first behavior for everyone who doesn't touch it. Expressed by
+    /// binding those two modes' `fan_plans` entries (see
+    /// `fan::plans_with_keep_fan_auto`), which is what the fans actually
+    /// follow; this field is what the switch shows and what migration reads.
     #[serde(default)]
     pub keep_fan_auto_in_performance: bool,
     /// Fan Control page (`ui::fan_control_page`): CoolBoost and the selected

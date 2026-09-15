@@ -695,11 +695,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 return glib::ControlFlow::Continue;
             }
 
+            let active = crate::hardware::profile::get_current_profile();
             let plan = crate::hardware::fan::plan_for_hardware(
-                crate::hardware::fan::plan_for(
-                    crate::hardware::profile::get_current_profile(),
-                    &cfg.fan_plans,
-                ),
+                crate::hardware::fan::plan_for(active, &cfg.fan_plans),
                 crate::hardware::capabilities::get().fan_pwm,
             );
             // Whichever die is hotter. The GPU reading used to be dropped
@@ -730,6 +728,21 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 return glib::ControlFlow::Continue;
             }
             ticks_since_attempt.set(0);
+            // The decision, not the write, and only for a write about to be
+            // dispatched: the reason a fan speed changed was exactly what went
+            // missing when an unexplained manual write at 48 C could not be
+            // attributed afterwards. fan.rs logs the write itself, so this
+            // deliberately carries what that line cannot (the mode, the plan
+            // and the temperature the decision came from) and deliberately
+            // does not repeat its wording.
+            crate::hardware::applog::info(&format!(
+                "fan decision: mode={} plan={:?} temp={} target={:?} (was {:?})",
+                active.map_or_else(|| "unknown".to_string(), |p| p.to_id().to_string()),
+                plan,
+                temp.map_or_else(|| "none".to_string(), |t| format!("{t:.1}C")),
+                target,
+                applied
+            ));
             applying.set(true);
             let applying_done = applying.clone();
             let state = fan_state.clone();

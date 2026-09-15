@@ -117,24 +117,30 @@ pub fn build() -> gtk::Box {
     // Apply custom speeds
     {
         let cs = cpu_scale.clone();
-        let gs = gpu_scale.clone();
         let sl = status_label.clone();
         apply_custom.connect_clicked(move |_| {
             let cpu = cs.value() as u8;
-            let gpu = gs.value() as u8;
             // Intent only: this writes the mode's plan into config, and the
             // reconciler tick applies it to the hardware. The reconciler
             // drives both fans from one percentage (see `plan_target`), so
-            // the CPU slider is the value that reaches the plan; the GPU
-            // slider still shows its own confirmation text below but no
-            // longer has a separate effect on the hardware.
+            // the CPU slider is the only value that reaches the plan, which is
+            // why the GPU number is not in the confirmation: it would report
+            // a speed nothing was asked to apply.
             let result = fan::set_plan_for(
                 crate::hardware::profile::get_current_profile(),
                 config::FanPlan::Fixed { percent: cpu },
             );
             match result {
                 Ok(()) => {
-                    sl.set_text(&format!("CPU: {}%, GPU: {}% ✓", cpu, gpu));
+                    // Not a checkmark: what succeeded is the config write.
+                    // The hardware write happens in the reconciler moments
+                    // later and can still fail there, on a model whose EC
+                    // refuses it or with no helper reachable.
+                    sl.set_text(&format!(
+                        "CPU: {}% ({})",
+                        cpu,
+                        crate::i18n::t("fan_plan_applying")
+                    ));
                     sl.remove_css_class("status-error");
                     sl.add_css_class("status-success");
                 }
@@ -200,7 +206,10 @@ pub fn build() -> gtk::Box {
                         "max" => crate::i18n::t("max"),
                         _ => "",
                     };
-                    sl.set_text(&format!("{} ✓", msg));
+                    // Same reasoning as the Custom button above: the plan is
+                    // recorded, the hardware write is the reconciler's and
+                    // has not happened yet.
+                    sl.set_text(&format!("{} ({})", msg, crate::i18n::t("fan_plan_applying")));
                     sl.remove_css_class("status-error");
                     sl.add_css_class("status-success");
                 }
@@ -372,8 +381,11 @@ pub fn build() -> gtk::Box {
 
         // Per-step editor (issue #59, harry42203): the 6 temperature
         // breakpoints are fixed, only the percent each step applies is
-        // editable. Enforcement still only reads `config::fan_curve_points`
-        // from the global timer in window.rs - this just edits that value.
+        // editable. This edits `config::fan_curve_points` only. The
+        // reconciler reads the steps held inside the active mode's
+        // `FanPlan::Curve`, which the switch above snapshots from this value,
+        // so an edit made while a curve is already running reaches the fans
+        // when that switch is next turned on.
         let edit_title = gtk::Label::new(Some(crate::i18n::t("fan_curve_edit")));
         edit_title.add_css_class("control-label");
         edit_title.set_halign(gtk::Align::Center);
