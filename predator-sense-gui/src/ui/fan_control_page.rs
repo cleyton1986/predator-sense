@@ -34,6 +34,10 @@ const PRESET_AGGRESSIVE: [u8; 6] = [40, 55, 70, 85, 100, 100];
 /// would label a firmware-driven machine as running one fixed speed.
 const DEFAULT_FIXED_PERCENT: u8 = 50;
 
+/// How long a status message stays up: one reconciler tick (3 s) plus a
+/// margin, by which point the write has either reached the fans or failed.
+const STATUS_LINGER_MS: u64 = 4_000;
+
 /// Which of the four plan buttons a plan lights up.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PlanKind {
@@ -110,7 +114,14 @@ struct Page {
     pending_curve: RefCell<Option<[u8; 6]>>,
     commit_queued: Cell<bool>,
     chips: Vec<(gtk::Button, String)>,
-    active_label: gtk::Label,
+    /// One per chip, same order: the "running" badge under the mode the
+    /// machine is actually in. The accent fill above it means something else
+    /// entirely - which mode is being edited - and the two are easy to
+    /// confuse, so each gets its own mark.
+    chip_badges: Vec<gtk::Label>,
+    /// What editing the chosen mode will do, which differs completely
+    /// depending on whether it is the one currently running.
+    editing_note: gtk::Label,
     plan_buttons: Vec<(gtk::Button, PlanKind)>,
     plan_title: gtk::Label,
     plan_desc: gtk::Label,
@@ -119,7 +130,14 @@ struct Page {
     curve_box: gtk::Box,
     curve_view: FanCurveView,
     spins: Vec<gtk::SpinButton>,
+    /// The three curve presets with the steps each writes, so a refresh can
+    /// light whichever one the current curve matches.
+    presets: Vec<(gtk::Button, [u8; 6])>,
     status: gtk::Label,
+    /// Bumped by every status message. A scheduled clear fires only while it
+    /// still owns the latest message, so a stale timer cannot wipe a newer
+    /// line - including an error.
+    status_gen: Cell<u64>,
 }
 
 /// The plan bound to a mode id, with `Automatic` for a mode that has none -
@@ -231,12 +249,22 @@ fn refresh(page: &Rc<Page>) {
     let editing_label = mode_label(&editing);
     page.plan_title
         .set_text(&crate::i18n::tf("fan_plan_for", &[&editing_label]));
-    // Which mode the reconciler is actually driving, which is not necessarily
-    // the one the controls below are editing.
-    page.active_label.set_text(&match active_id.as_deref() {
-        Some(id) => crate::i18n::tf("fan_active_mode_is", &[&mode_label(id)]),
-        None => String::new(),
-    });
+    // Two marks for two states: the accent fill above says which mode is being
+    // edited, the badge says which one the reconciler is driving, and this
+    // line says what editing the chosen one actually does.
+    for ((_, id), badge) in page.chips.iter().zip(page.chip_badges.iter()) {
+        badge.set_text(if active_id.as_deref() == Some(id.as_str()) {
+            crate::i18n::t("fan_mode_running_badge")
+        } else {
+            ""
+        });
+    }
+    page.editing_note
+        .set_text(&if active_id.as_deref() == Some(editing.as_str()) {
+            crate::i18n::tf("fan_editing_active_mode", &[&editing_label])
+        } else {
+            crate::i18n::tf("fan_editing_other_mode", &[&editing_label])
+        });
     page.plan_desc.set_text(match plan {
         // A fixed 0 is not a speed: plan_target hands the fans to the
         // firmware, because a manual pwm of 0 is the EC floor, not off.
@@ -255,6 +283,18 @@ fn refresh(page: &Rc<Page>) {
         // other mode was last set to.
         _ => recall_curve(page, &editing).unwrap_or(cfg.fan_curve_points),
     };
+    // Light the preset this curve matches, and none of them once the steps
+    // have been dragged into something the user made themselves.
+    for (button, preset) in &page.presets {
+        button.remove_css_class("accent-button");
+        button.remove_css_class("secondary-button");
+        button.add_css_class(if kind == PlanKind::Curve && *preset == steps {
+            "accent-button"
+        } else {
+            "secondary-button"
+        });
+    }
+
     page.syncing.set(true);
     // Unconditional, and never left at the spin's own 0 minimum: a click on
     // Fixed reads this value straight back out, and `FanPlan::Fixed` with a
@@ -277,6 +317,8 @@ fn refresh(page: &Rc<Page>) {
 fn report(page: &Rc<Page>, result: Result<(), String>) {
     let editing = page.editing.borrow().clone();
     let active = crate::hardware::profile::get_current_profile().map(|p| p.to_id().to_string());
+    let generation = page.status_gen.get().wrapping_add(1);
+    page.status_gen.set(generation);
     match result {
         Ok(()) => {
             let text = if active.as_deref() == Some(editing.as_str()) {
@@ -287,7 +329,27 @@ fn report(page: &Rc<Page>, result: Result<(), String>) {
             page.status.set_text(&text);
             page.status.remove_css_class("status-error");
             page.status.add_css_class("status-success");
+            // The page cannot honestly upgrade this to "applied": the
+            // reconciler owns the hardware and reports back to the log, not
+            // here. So the message says what was written and then goes away,
+            // instead of sitting on the page implying work still in flight.
+            let weak: Weak<Page> = Rc::downgrade(page);
+            glib::timeout_add_local_once(
+                std::time::Duration::from_millis(STATUS_LINGER_MS),
+                move || {
+                    let Some(page) = weak.upgrade() else { return };
+                    // A newer message owns the line now; leave it be.
+                    if page.status_gen.get() != generation {
+                        return;
+                    }
+                    page.status.set_text("");
+                    page.status.remove_css_class("status-success");
+                },
+            );
         }
+        // Left on screen until something replaces it. A failure is the one
+        // thing here the user has to see, and bumping the generation above
+        // keeps a pending clear from an earlier success off it.
         Err(error) => {
             page.status.set_text(&error);
             page.status.remove_css_class("status-success");
@@ -317,28 +379,39 @@ pub fn build() -> gtk::Box {
     page_box.append(&title);
 
     // ---- mode chips ----
+    // The row carries two states at once. The accent fill marks the mode whose
+    // plan the controls below edit; a badge under one chip marks the mode the
+    // machine is actually in. Clicking a chip only ever changes the first, and
+    // saying so plainly is the whole point of the note underneath.
     let editing_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     editing_row.set_halign(gtk::Align::Center);
     editing_row.set_margin_top(6);
-    let editing_label = gtk::Label::new(Some(crate::i18n::t("fan_editing_mode")));
-    editing_label.add_css_class("info-text-dim");
-    editing_row.append(&editing_label);
 
     let mut chips: Vec<(gtk::Button, String)> = Vec::new();
+    let mut chip_badges: Vec<gtk::Label> = Vec::new();
     for profile in MODES {
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
         let button = gtk::Button::with_label(profile.label());
         button.add_css_class("secondary-button");
-        editing_row.append(&button);
+        // Always present, text set by `refresh`, which knows the active mode.
+        // Hiding it instead would leave that column a line shorter than the
+        // other four and stretch their buttons to fill the difference.
+        let badge = gtk::Label::new(Some(""));
+        badge.add_css_class("info-text-dim");
+        column.append(&button);
+        column.append(&badge);
+        editing_row.append(&column);
         chips.push((button, profile.to_id().to_string()));
+        chip_badges.push(badge);
     }
-    // Which mode is running, at the end of the row the chips are in, because
-    // the two are easy to confuse: a chip click changes what is being edited,
-    // never what the machine is doing.
-    let active_label = gtk::Label::new(None);
-    active_label.add_css_class("info-text-dim");
-    active_label.set_margin_start(6);
-    editing_row.append(&active_label);
     page_box.append(&editing_row);
+
+    let editing_note = gtk::Label::new(None);
+    editing_note.add_css_class("info-note");
+    editing_note.set_halign(gtk::Align::Center);
+    editing_note.set_wrap(true);
+    editing_note.set_justify(gtk::Justification::Center);
+    page_box.append(&editing_note);
 
     // ---- plan selector ----
     let plan_title = gtk::Label::new(None);
@@ -510,7 +583,8 @@ pub fn build() -> gtk::Box {
         pending_curve: RefCell::new(None),
         commit_queued: Cell::new(false),
         chips,
-        active_label,
+        chip_badges,
+        editing_note,
         plan_buttons,
         plan_title,
         plan_desc,
@@ -519,7 +593,9 @@ pub fn build() -> gtk::Box {
         curve_box,
         curve_view,
         spins,
+        presets: preset_buttons,
         status,
+        status_gen: Cell::new(0),
     });
 
     // Leaving the page releases the pin, so the next visit edits the mode the
@@ -643,8 +719,9 @@ pub fn build() -> gtk::Box {
         });
     }
 
-    for (button, steps) in preset_buttons {
+    for (button, steps) in &page.presets {
         let weak: Weak<Page> = Rc::downgrade(&page);
+        let steps = *steps;
         button.connect_clicked(move |_| {
             let Some(page) = weak.upgrade() else { return };
             let mode_id = page.editing.borrow().clone();
