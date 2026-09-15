@@ -518,8 +518,13 @@ pub fn plan_for(
 }
 
 /// Builds the initial per-mode plans from the pre-existing global fan
-/// settings, so migrating changes nothing about how the machine behaves until
-/// a mode is deliberately given its own plan.
+/// settings.
+///
+/// The aim is that migrating leaves the machine behaving as it would have
+/// after its next profile switch, rather than literally unchanged in the
+/// instant it runs: a stored `fan_mode` of "max" was always going to be
+/// overwritten by the next `set_profile`, so it is not preserved. See the
+/// comment in the body for why that is the honest reading.
 ///
 /// The only writer of `fan_plans` that reads the legacy global fields, so the
 /// reconciler itself never has to consult two sources. `fan_auto_curve_enabled`
@@ -529,18 +534,21 @@ pub fn migrate_plans(cfg: &crate::config::AppConfig) -> Vec<crate::config::FanBi
     use crate::config::{FanBinding, FanPlan};
     use crate::hardware::profile::PowerProfile;
 
-    // A curve or an explicit Max was global and applied to whichever mode was
-    // active, so both carry over to every mode. Anything else means the
-    // firmware was in charge except where a profile switch forced Max, which
-    // is what `fan_mode_for` decides, so that mapping is what keeps migration
-    // from quietly dropping the forcing set_profile used to do.
-    let global = if cfg.fan_auto_curve_enabled {
-        Some(FanPlan::Curve { steps: cfg.fan_curve_points })
-    } else if cfg.fan_mode.as_deref() == Some("max") {
-        Some(FanPlan::Max)
-    } else {
-        None
-    };
+    // The software curve was global: its timer wrote whichever mode was
+    // active, every tick, so Curve on all five modes is exactly the old
+    // steady state.
+    //
+    // A saved `fan_mode` is not, and carrying it to every mode would be the
+    // worse error. `set_profile` wrote a fan mode on every profile switch, so
+    // a stored "max" survived only until the next switch, and on Eco, Quiet
+    // and Balanced the behaviour a user actually had was Auto. Carrying it
+    // across would leave the two modes whose purpose is silence running at
+    // full speed for someone who changed nothing. So everything except the
+    // curve resolves per mode through `fan_mode_for`, which is precisely what
+    // a profile switch used to force.
+    let global = cfg
+        .fan_auto_curve_enabled
+        .then(|| FanPlan::Curve { steps: cfg.fan_curve_points });
 
     [
         PowerProfile::Eco,
@@ -938,11 +946,19 @@ mod tests {
     #[test]
     fn a_disabled_curve_migrates_to_the_saved_fan_mode() {
         use crate::config::{AppConfig, FanPlan};
+        // A stored "max" is not carried across: set_profile overwrote it on
+        // the next switch, so Eco, Quiet and Balanced were on Auto in
+        // practice, and making them permanently full speed would be a change,
+        // not a preservation.
         let mut cfg = AppConfig::default();
         cfg.fan_auto_curve_enabled = false;
         cfg.fan_mode = Some("max".into());
-        for binding in migrate_plans(&cfg) {
-            assert_eq!(binding.plan, FanPlan::Max);
+        let plans = migrate_plans(&cfg);
+        for mode in ["eco", "quiet", "balanced"] {
+            assert_eq!(plan_for_id(&plans, mode), Some(FanPlan::Automatic));
+        }
+        for mode in ["performance", "turbo"] {
+            assert_eq!(plan_for_id(&plans, mode), Some(FanPlan::Max));
         }
 
         // A saved "auto" is not the whole story: set_profile forced Max on

@@ -622,9 +622,10 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // of on every tick.
         let migration_warned = Rc::new(Cell::new(false));
         // Whether `fan_state` has been read back from the hardware yet. The
-        // read is privileged, so it goes through the worker thread like any
-        // other, which is why it is a tick of its own rather than a value
-        // fetched before the timer starts.
+        // read goes out through the unprivileged read helper, which is still a
+        // process spawn and a round trip, so it belongs on the worker thread
+        // like any other helper call. That is why it is a tick of its own
+        // rather than a value fetched before the timer starts.
         let seeded = Rc::new(Cell::new(false));
         glib::timeout_add_seconds_local(crate::hardware::fan::RECONCILE_TICK_S, move || {
             use crate::hardware::fan::{CurveAction, FanState};
