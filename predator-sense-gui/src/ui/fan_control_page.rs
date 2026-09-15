@@ -21,8 +21,9 @@ const MODES: [PowerProfile; 5] = [
 ];
 
 /// Starting points for someone who does not want to drag six bars. Silent
-/// leans on the firmware below 55 C, which is where the reconciler hands the
-/// fans back anyway when the first step is zero (see `fan::curve_resume_c`).
+/// leans on the firmware below 65 C, which is where the reconciler hands
+/// the fans back with this curve's two leading zeros (see
+/// `fan::curve_resume_c`).
 const PRESET_SILENT: [u8; 6] = [0, 0, 30, 45, 65, 100];
 const PRESET_AGGRESSIVE: [u8; 6] = [40, 55, 70, 85, 100, 100];
 
@@ -87,6 +88,17 @@ struct Page {
     /// how a page ends up overwriting a value the user is in the middle of
     /// entering.
     shown: RefCell<Option<(String, FanPlan, Option<String>)>>,
+    /// Each mode's last seen curve, so a mode's own steps survive a trip
+    /// through another plan. The global `fan_curve_points` is only the seed
+    /// for a mode that has never had a curve; without this, clicking
+    /// Automatic and then Curve again replaced this mode's curve with
+    /// whichever one was edited last, anywhere.
+    ///
+    /// Scoped to the session on purpose. Across a restart a mode's persisted
+    /// `FanPlan` is whatever it was, so there is no earlier curve to lose:
+    /// this only has to cover the window where the mode is parked on another
+    /// plan and its own steps exist nowhere else.
+    curve_memory: RefCell<Vec<(String, [u8; 6])>>,
     chips: Vec<(gtk::Button, String)>,
     active_label: gtk::Label,
     plan_buttons: Vec<(gtk::Button, PlanKind)>,
@@ -104,6 +116,24 @@ struct Page {
 /// the same fallback `fan::plan_for` uses.
 fn plan_of(cfg: &config::AppConfig, mode_id: &str) -> FanPlan {
     fan::plan_for_id(&cfg.fan_plans, mode_id).unwrap_or(FanPlan::Automatic)
+}
+
+/// Notes `steps` as `mode_id`'s curve for the rest of the session.
+fn remember_curve(page: &Rc<Page>, mode_id: &str, steps: [u8; 6]) {
+    let mut memory = page.curve_memory.borrow_mut();
+    match memory.iter_mut().find(|(id, _)| id == mode_id) {
+        Some((_, remembered)) => *remembered = steps,
+        None => memory.push((mode_id.to_string(), steps)),
+    }
+}
+
+/// `mode_id`'s curve as last seen, or `None` if this session never saw one.
+fn recall_curve(page: &Rc<Page>, mode_id: &str) -> Option<[u8; 6]> {
+    page.curve_memory
+        .borrow()
+        .iter()
+        .find(|(id, _)| id == mode_id)
+        .map(|(_, steps)| *steps)
 }
 
 /// Binds `plan` to `mode_id`. Intent only: the reconciler applies it.
@@ -183,13 +213,23 @@ fn refresh(page: &Rc<Page>) {
         Some(id) => crate::i18n::tf("fan_active_mode_is", &[&mode_label(id)]),
         None => String::new(),
     });
-    page.plan_desc.set_text(kind.description());
+    page.plan_desc.set_text(match plan {
+        // A fixed 0 is not a speed: plan_target hands the fans to the
+        // firmware, because a manual pwm of 0 is the EC floor, not off.
+        FanPlan::Fixed { percent: 0 } => crate::i18n::t("fan_plan_fixed_zero_desc"),
+        _ => kind.description(),
+    });
     page.fixed_box.set_visible(kind == PlanKind::Fixed);
     page.curve_box.set_visible(kind == PlanKind::Curve);
 
     let steps = match plan {
-        FanPlan::Curve { steps } => steps,
-        _ => cfg.fan_curve_points,
+        FanPlan::Curve { steps } => {
+            remember_curve(page, &editing, steps);
+            steps
+        }
+        // What clicking Curve would restore for THIS mode, not what some
+        // other mode was last set to.
+        _ => recall_curve(page, &editing).unwrap_or(cfg.fan_curve_points),
     };
     page.syncing.set(true);
     // Unconditional, and never left at the spin's own 0 minimum: a click on
@@ -442,6 +482,7 @@ pub fn build() -> gtk::Box {
         pinned: Cell::new(false),
         syncing: Cell::new(false),
         shown: RefCell::new(None),
+        curve_memory: RefCell::new(Vec::new()),
         chips,
         active_label,
         plan_buttons,
@@ -530,6 +571,11 @@ pub fn build() -> gtk::Box {
         let weak: Weak<Page> = Rc::downgrade(&page);
         page.curve_view.set_on_change(move |steps| {
             let Some(page) = weak.upgrade() else { return };
+            debug_assert!(
+                !page.syncing.get(),
+                "the chart fired on_change during a refresh: fan_curve_widget::set_steps \
+                 must never invoke the callback"
+            );
             let mode_id = page.editing.borrow().clone();
             let result = write_curve(&mode_id, steps);
             page.syncing.set(true);
