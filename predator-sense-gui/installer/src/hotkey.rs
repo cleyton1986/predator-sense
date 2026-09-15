@@ -434,7 +434,7 @@ pub(crate) fn run() -> AppResult {
     // and a Bluetooth one reconnects. Dropping such a device permanently
     // leaves whatever it served dead - the mode key or the PredatorSense key -
     // with the daemon still running and nothing to say it is half deaf.
-    let mut lost: Vec<(PathBuf, bool)> = Vec::new();
+    let mut lost: Vec<(PathBuf, DeviceKind)> = Vec::new();
     let mut reopen_countdown = REOPEN_EVERY_POLLS;
     while !devices.is_empty() || !lost.is_empty() {
         let mut poll_fds = devices
