@@ -8,6 +8,24 @@ use crate::config;
 use crate::hardware::{fan, sensors};
 use crate::ui::background;
 
+/// Carries an edit of the curve steps into the active mode's plan, so it
+/// reaches the fans on the reconciler's next tick.
+///
+/// Without this the editor is inert: the reconciler reads the steps stored in
+/// the mode's `FanPlan::Curve`, and these spin buttons only write
+/// `fan_curve_points`, so an edit waited for the curve switch to be toggled
+/// off and on before it took effect. A mode on any other plan keeps the edit
+/// in the points alone, ready for the next time the curve is switched on.
+fn apply_steps_to_active_plan(cfg: &mut config::AppConfig) {
+    let Some(profile) = crate::hardware::profile::get_current_profile() else {
+        return;
+    };
+    let current = fan::plan_for(Some(profile), &cfg.fan_plans);
+    if let Some(plan) = fan::plan_with_steps(current, cfg.fan_curve_points) {
+        cfg.fan_plans = fan::with_plan(&cfg.fan_plans, profile.to_id(), plan);
+    }
+}
+
 pub fn build() -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
     page.set_margin_top(14);
@@ -422,6 +440,7 @@ pub fn build() -> gtk::Box {
             spin.connect_value_changed(move |s| {
                 let mut c = config::load_app_config();
                 c.fan_curve_points[i] = s.value() as u8;
+                apply_steps_to_active_plan(&mut c);
                 let _ = config::save_app_config(&c);
             });
         }
@@ -436,6 +455,7 @@ pub fn build() -> gtk::Box {
             reset_btn.connect_clicked(move |_| {
                 let mut c = config::load_app_config();
                 c.fan_curve_points = fan::DEFAULT_FAN_CURVE;
+                apply_steps_to_active_plan(&mut c);
                 let _ = config::save_app_config(&c);
                 for (spin, &pct) in spin_buttons.iter().zip(fan::DEFAULT_FAN_CURVE.iter()) {
                     spin.set_value(pct as f64);
