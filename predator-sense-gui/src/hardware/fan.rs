@@ -492,22 +492,25 @@ pub fn plan_for(
 /// settings, so migrating changes nothing about how the machine behaves until
 /// a mode is deliberately given its own plan.
 ///
-/// This is the only remaining reader of `fan_auto_curve_enabled`,
-/// `fan_curve_points` and `fan_mode`. Every other consumer uses `fan_plans`,
-/// or the two would drift into exactly the disagreement this design removes.
+/// The only writer of `fan_plans` that reads the legacy global fields, so the
+/// reconciler itself never has to consult two sources. `fan_auto_curve_enabled`
+/// and `fan_curve_points` still have one other reader, the Fan Control page,
+/// which shows the switch and the per-step editor from them.
 pub fn migrate_plans(cfg: &crate::config::AppConfig) -> Vec<crate::config::FanBinding> {
     use crate::config::{FanBinding, FanPlan};
     use crate::hardware::profile::PowerProfile;
 
-    let plan = if cfg.fan_auto_curve_enabled {
-        FanPlan::Curve { steps: cfg.fan_curve_points }
+    // A curve or an explicit Max was global and applied to whichever mode was
+    // active, so both carry over to every mode. Anything else means the
+    // firmware was in charge except where a profile switch forced Max, which
+    // is what `fan_mode_for` decides, so that mapping is what keeps migration
+    // from quietly dropping the forcing set_profile used to do.
+    let global = if cfg.fan_auto_curve_enabled {
+        Some(FanPlan::Curve { steps: cfg.fan_curve_points })
+    } else if cfg.fan_mode.as_deref() == Some("max") {
+        Some(FanPlan::Max)
     } else {
-        match cfg.fan_mode.as_deref() {
-            Some("max") => FanPlan::Max,
-            // "auto", anything unrecognised, and never-set all mean the
-            // firmware was in charge, which is Automatic.
-            _ => FanPlan::Automatic,
-        }
+        None
     };
 
     [
@@ -520,9 +523,56 @@ pub fn migrate_plans(cfg: &crate::config::AppConfig) -> Vec<crate::config::FanBi
     .into_iter()
     .map(|profile| FanBinding {
         mode: profile.to_id().to_string(),
-        plan,
+        plan: global.unwrap_or_else(|| {
+            plan_from_fan_mode(crate::hardware::profile::fan_mode_for(
+                profile,
+                cfg.keep_fan_auto_in_performance,
+            ))
+        }),
     })
     .collect()
+}
+
+/// The mode plans this config should have once its "keep the fan on Auto in
+/// Performance and Turbo" setting has changed (issue #41).
+///
+/// Only those two modes are rebound: they are the only ones the setting has
+/// ever spoken for, and every other mode's plan is the user's own. Migration
+/// reads the same setting, but it runs once, so without this the switch would
+/// be remembered and never acted on for anyone whose plans already exist.
+pub fn plans_with_keep_fan_auto(
+    cfg: &crate::config::AppConfig,
+) -> Vec<crate::config::FanBinding> {
+    use crate::hardware::profile::PowerProfile;
+
+    if cfg.fan_plans.is_empty() {
+        // Nothing to rebind yet. Migration answers the same question and also
+        // carries the other three modes' legacy settings across, which
+        // rebinding two modes here would strand.
+        return migrate_plans(cfg);
+    }
+    let mut updated = cfg.fan_plans.clone();
+    for profile in [PowerProfile::Performance, PowerProfile::Turbo] {
+        let plan = plan_from_fan_mode(crate::hardware::profile::fan_mode_for(
+            profile,
+            cfg.keep_fan_auto_in_performance,
+        ));
+        updated = with_plan(&updated, profile.to_id(), plan);
+    }
+    updated
+}
+
+/// The plan that expresses a firmware fan mode, for the callers that have to
+/// bridge the two vocabularies.
+fn plan_from_fan_mode(mode: FanMode) -> crate::config::FanPlan {
+    match mode {
+        FanMode::Auto => crate::config::FanPlan::Automatic,
+        FanMode::Max => crate::config::FanPlan::Max,
+        // `fan_mode_for` never returns Custom. Automatic is the safe answer
+        // for anything this mapping cannot express, the same fallback
+        // `plan_for` uses for an unknown mode.
+        FanMode::Custom(_, _) => crate::config::FanPlan::Automatic,
+    }
 }
 
 /// Narrows a plan to what this machine can actually do.
@@ -866,22 +916,42 @@ mod tests {
             assert_eq!(binding.plan, FanPlan::Max);
         }
 
+        // A saved "auto" is not the whole story: set_profile forced Max on
+        // Performance and Turbo on top of it, so those two keep it.
         let mut cfg = AppConfig::default();
         cfg.fan_auto_curve_enabled = false;
         cfg.fan_mode = Some("auto".into());
-        for binding in migrate_plans(&cfg) {
-            assert_eq!(binding.plan, FanPlan::Automatic);
+        let plans = migrate_plans(&cfg);
+        assert_eq!(plan_for_id(&plans, "balanced"), Some(FanPlan::Automatic));
+        assert_eq!(plan_for_id(&plans, "performance"), Some(FanPlan::Max));
+        assert_eq!(plan_for_id(&plans, "turbo"), Some(FanPlan::Max));
+    }
+
+    #[test]
+    fn nothing_configured_keeps_what_a_profile_switch_used_to_force() {
+        use crate::config::{AppConfig, FanPlan};
+        // set_profile forced Max on Performance and Turbo and Auto on the
+        // rest. Migrating a default config to Automatic everywhere would drop
+        // that silently: Turbo would stop raising the fans at all.
+        let plans = migrate_plans(&AppConfig::default());
+        assert_eq!(plans.len(), 5);
+        assert_eq!(plan_for_id(&plans, "performance"), Some(FanPlan::Max));
+        assert_eq!(plan_for_id(&plans, "turbo"), Some(FanPlan::Max));
+        for mode in ["eco", "quiet", "balanced"] {
+            assert_eq!(plan_for_id(&plans, mode), Some(FanPlan::Automatic));
         }
     }
 
     #[test]
-    fn nothing_configured_migrates_to_automatic() {
+    fn keeping_the_fan_on_auto_in_performance_migrates_those_modes_to_automatic() {
         use crate::config::{AppConfig, FanPlan};
-        let cfg = AppConfig::default();
-        let plans = migrate_plans(&cfg);
-        assert_eq!(plans.len(), 5);
-        for binding in &plans {
-            assert_eq!(binding.plan, FanPlan::Automatic);
+        // The Settings toggle (issue #41): it decided what set_profile forced,
+        // so it has to decide what migration binds, or turning it on before
+        // this feature existed would be forgotten.
+        let mut cfg = AppConfig::default();
+        cfg.keep_fan_auto_in_performance = true;
+        for binding in migrate_plans(&cfg) {
+            assert_eq!(binding.plan, FanPlan::Automatic, "mode {}", binding.mode);
         }
     }
 
@@ -969,6 +1039,55 @@ mod tests {
     fn hold_writes_nothing_on_either_kind_of_hardware() {
         assert_eq!(write_for(CurveAction::Hold, true), None);
         assert_eq!(write_for(CurveAction::Hold, false), None);
+    }
+
+    #[test]
+    fn turning_keep_fan_auto_on_rebinds_only_performance_and_turbo() {
+        use crate::config::{AppConfig, FanBinding, FanPlan};
+        let mut cfg = AppConfig::default();
+        cfg.fan_plans = vec![
+            FanBinding {
+                mode: "balanced".into(),
+                plan: FanPlan::Curve { steps: DEFAULT_FAN_CURVE },
+            },
+            FanBinding { mode: "performance".into(), plan: FanPlan::Max },
+            FanBinding { mode: "turbo".into(), plan: FanPlan::Max },
+        ];
+        cfg.keep_fan_auto_in_performance = true;
+        let plans = plans_with_keep_fan_auto(&cfg);
+        assert_eq!(plan_for_id(&plans, "performance"), Some(FanPlan::Automatic));
+        assert_eq!(plan_for_id(&plans, "turbo"), Some(FanPlan::Automatic));
+        assert_eq!(
+            plan_for_id(&plans, "balanced"),
+            Some(FanPlan::Curve { steps: DEFAULT_FAN_CURVE }),
+            "a mode the setting does not speak for keeps its own plan"
+        );
+    }
+
+    #[test]
+    fn turning_keep_fan_auto_off_puts_performance_and_turbo_back_on_max() {
+        use crate::config::{AppConfig, FanBinding, FanPlan};
+        let mut cfg = AppConfig::default();
+        cfg.fan_plans = vec![
+            FanBinding { mode: "performance".into(), plan: FanPlan::Automatic },
+            FanBinding { mode: "turbo".into(), plan: FanPlan::Automatic },
+        ];
+        cfg.keep_fan_auto_in_performance = false;
+        let plans = plans_with_keep_fan_auto(&cfg);
+        assert_eq!(plan_for_id(&plans, "performance"), Some(FanPlan::Max));
+        assert_eq!(plan_for_id(&plans, "turbo"), Some(FanPlan::Max));
+    }
+
+    #[test]
+    fn the_setting_migrates_instead_of_rebinding_when_no_plans_exist_yet() {
+        use crate::config::{AppConfig, FanPlan};
+        let mut cfg = AppConfig::default();
+        cfg.keep_fan_auto_in_performance = true;
+        let plans = plans_with_keep_fan_auto(&cfg);
+        assert_eq!(plans.len(), 5, "every mode gets a plan, not just the two");
+        for binding in &plans {
+            assert_eq!(binding.plan, FanPlan::Automatic, "mode {}", binding.mode);
+        }
     }
 
     #[test]

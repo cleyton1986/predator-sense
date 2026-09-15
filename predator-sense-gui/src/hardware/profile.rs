@@ -7,29 +7,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const PROFILE_STATE_FILE: &str = "/opt/predator-sense/current_profile";
 
-// Issue #41 (TongkyakHermit): forcing FanMode::Max on Performance/Turbo (see
-// fan_mode_for() below) matches the physical Predator/Turbo key, but some
+// Issue #41 (TongkyakHermit): binding Performance and Turbo to FanMode::Max
+// (see fan_mode_for() below) matches the physical Predator/Turbo key, but some
 // users would rather keep the automatic fan curve even at those power
 // targets and accept a louder/hotter machine only if the curve itself
 // decides that's needed. Opt-in, default off - keeps the existing
 // safety-first behavior for everyone who doesn't touch the new setting.
-static KEEP_FAN_AUTO_IN_PERFORMANCE: AtomicBool = AtomicBool::new(false);
-
-pub fn set_keep_fan_auto_in_performance(v: bool) {
-    KEEP_FAN_AUTO_IN_PERFORMANCE.store(v, Ordering::Relaxed);
-}
-
-/// No longer read by `set_profile` (its fan-forcing call is gone; see the
-/// comment there), so this Settings toggle currently has no effect - a mode
-/// that should stay on Auto in Performance/Turbo is now expressed by binding
-/// that mode's own fan plan to `Automatic` instead. Left in place rather than
-/// deleted since `set_keep_fan_auto_in_performance` still has a caller
-/// (window.rs restores it from config on startup) and untangling the
-/// Settings toggle itself is a UI decision outside this change.
-#[allow(dead_code)]
-pub fn keep_fan_auto_in_performance() -> bool {
-    KEEP_FAN_AUTO_IN_PERFORMANCE.load(Ordering::Relaxed)
-}
+//
+// The in-memory mirror of the setting this module used to keep is gone: since
+// fan behaviour is decided by `config::fan_plans` rather than by set_profile,
+// the only reader is `fan::migrate_plans`, which already has the whole
+// AppConfig in hand. A second copy could only drift from it.
 
 // Issue #57 (dathide): some users run a separate CPU tuning tool (e.g.
 // `tuned` with a custom profile) that writes the exact same sysfs files a
@@ -53,16 +41,17 @@ pub fn manage_cpu_power() -> bool {
     MANAGE_CPU_POWER.load(Ordering::Relaxed)
 }
 
-/// Pure so it's directly testable without touching hardware - see
-/// `fan_mode_for_tests` below.
+/// Which fan mode a power profile asks for. Pure so it's directly testable
+/// without touching hardware - see `fan_mode_for_tests` below.
 ///
-/// No longer called from `set_profile`: each mode's fan plan decides its fan
-/// behavior now, and the reconciler applies it. Kept for its tests, which
-/// document what the physical Turbo key still does to the firmware, and as
-/// the reference the reconciler's own Performance/Turbo-to-Max mapping is
-/// checked against.
-#[allow(dead_code)]
-fn fan_mode_for(profile: PowerProfile, keep_auto: bool) -> crate::hardware::fan::FanMode {
+/// No longer called from `set_profile`, which does not touch fan hardware at
+/// all now. It is instead what `fan::migrate_plans` binds each mode's initial
+/// fan plan from, so the mapping this function has always described survives
+/// the move to per-mode plans rather than being dropped on the way.
+pub(crate) fn fan_mode_for(
+    profile: PowerProfile,
+    keep_auto: bool,
+) -> crate::hardware::fan::FanMode {
     match profile {
         PowerProfile::Performance | PowerProfile::Turbo if keep_auto => {
             crate::hardware::fan::FanMode::Auto
@@ -1032,12 +1021,12 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     apply_firmware_profile(profile);
 
     // Fan mode used to be forced here to match the profile (Performance/Turbo
-    // to Max, everything else to Auto), the same behavior fan_mode_for()
-    // below still documents for the physical Turbo key. That is now decided
-    // by the mode's own fan plan (`config::fan_plans`) instead: the
-    // reconciler tick in window.rs reads the plan bound to whichever profile
-    // is active and applies it, so this function no longer touches fan
-    // hardware at all.
+    // to Max, everything else to Auto), the mapping fan_mode_for() above
+    // holds. That is now decided by the mode's own fan plan
+    // (`config::fan_plans`) instead: the reconciler tick in window.rs reads
+    // the plan bound to whichever profile is active and applies it, so this
+    // function no longer touches fan hardware at all. The mapping itself is
+    // not lost, it is what fan::migrate_plans seeds those plans from.
 
     // Save the selected profile to state file
     let _ = fs::write(PROFILE_STATE_FILE, profile.to_id());

@@ -178,9 +178,10 @@ const SYSTEM_PROMPT: &str = "You manage a laptop's hardware settings through a f
     with performance over leaving it at quiet/balanced. \
     Thermal safety still comes first when temps are genuinely high: call set_fan_mode with mode=max \
     or set_coolboost with enabled=true before ever touching the thermal profile - those cool the \
-    machine directly, a profile change alone does not. Setting performance or turbo already turns \
-    the fan to max as part of the profile itself, so do not call set_fan_mode separately right after \
-    picking one of those two. Do not suggest a thermal profile change two checks in a row unless the \
+    machine directly, a profile change alone does not. A thermal profile no longer changes the fan \
+    on its own: each profile has its own fan setting, which the user can change, so if you need the \
+    fan at maximum call set_fan_mode with mode=max yourself rather than assuming a profile did it. \
+    Do not suggest a thermal profile change two checks in a row unless the \
     state has genuinely changed since the last one - alternating between profiles on every check with \
     no real justification is wrong.";
 

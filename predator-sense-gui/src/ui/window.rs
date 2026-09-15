@@ -319,9 +319,6 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             );
         }
         crate::hardware::applog::set_enabled(cfg.debug_logging);
-        crate::hardware::profile::set_keep_fan_auto_in_performance(
-            cfg.keep_fan_auto_in_performance,
-        );
         crate::hardware::profile::set_manage_cpu_power(cfg.manage_cpu_power);
         crate::hardware::game_sync::set_enabled(cfg.game_sync_enabled);
 
@@ -758,7 +755,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
     // patch). The key itself only ever toggles fan mode/OC/LED at the WMI
     // level - it never touches cpufreq governor/EPP/min_perf, so on its own
     // it can never make the "Modo" page show Turbo. Polling this attribute
-    // and calling our own set_profile()/set_fan_mode() on a transition is
+    // and calling our own set_profile() on a transition is
     // what makes the key match "press it, everything becomes consistently
     // Turbo" - both pages then update on their own via the live-refresh
     // polling already in fan_page.rs/fan_control_page.rs, no direct
@@ -802,22 +799,20 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 // nothing truthful to go back to.
                 before_turbo.set(profile::coherent_profile());
                 let _ = profile::set_profile(profile::PowerProfile::Turbo);
-                crate::hardware::applog::info("Turbo key: pressed, forced profile=Turbo fan=Max");
+                // Only the profile is claimed here. What the fans do is
+                // whatever plan Turbo is bound to, and the reconciler logs
+                // that decision itself when it acts on it.
+                crate::hardware::applog::info(
+                    "Turbo key: pressed, forced profile=Turbo, fan follows that mode's plan",
+                );
             } else {
                 let restore = before_turbo
                     .get()
                     .unwrap_or(profile::PowerProfile::Balanced);
                 let _ = profile::set_profile(restore);
                 crate::hardware::applog::info(&format!(
-                    "Turbo key: released, restored profile={} fan={}",
-                    restore.to_id(),
-                    if restore == profile::PowerProfile::Turbo
-                        || restore == profile::PowerProfile::Performance
-                    {
-                        "Max"
-                    } else {
-                        "Auto"
-                    }
+                    "Turbo key: released, restored profile={}, fan follows that mode's plan",
+                    restore.to_id()
                 ));
             }
             glib::ControlFlow::Continue
@@ -1968,12 +1963,11 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     page.append(&log_row);
 
     // Keep fan on Auto in Performance/Turbo (issue #41, TongkyakHermit) - off
-    // by default, matches the physical Predator/Turbo key forcing Max. The
-    // physical-key handler and the "Modo" page both go through
-    // hardware::profile::set_profile(), which reads this same in-memory
-    // flag, so no daemon restart is needed here (unlike debug_logging
-    // above): the change takes effect on the very next profile switch,
-    // whichever path triggers it.
+    // by default, matching what the physical Predator/Turbo key does to the
+    // firmware. Fan behaviour is a property of each mode's plan now, so the
+    // switch rebinds the two modes it speaks for rather than being consulted
+    // at profile-switch time; the reconciler picks the new plan up on its next
+    // tick, so no daemon restart is needed here (unlike debug_logging above).
     let fan_auto_row = create_setting_row(
         t("keep_fan_auto_in_performance"),
         t("keep_fan_auto_in_performance_desc"),
@@ -1984,8 +1978,8 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     fan_auto_switch.connect_state_set(move |_, active| {
         let mut c = config::load_app_config();
         c.keep_fan_auto_in_performance = active;
+        c.fan_plans = crate::hardware::fan::plans_with_keep_fan_auto(&c);
         let _ = config::save_app_config(&c);
-        crate::hardware::profile::set_keep_fan_auto_in_performance(active);
         glib::Propagation::Proceed
     });
     fan_auto_row.append(&fan_auto_switch);
