@@ -394,6 +394,31 @@ pub fn get_pwm_percent() -> Option<(u8, u8)> {
     ))
 }
 
+/// The plan bound to a raw mode id, for callers that already have the id.
+pub fn plan_for_id(
+    plans: &[crate::config::FanBinding],
+    mode: &str,
+) -> Option<crate::config::FanPlan> {
+    plans
+        .iter()
+        .find(|binding| binding.mode == mode)
+        .map(|binding| binding.plan)
+}
+
+/// The plan bound to `profile`, or `Automatic` when there is none.
+///
+/// `Automatic` is the safe fallback in every unknown case: the firmware can
+/// always cool the machine, and it is also what an un-migrated config means.
+pub fn plan_for(
+    profile: Option<crate::hardware::profile::PowerProfile>,
+    plans: &[crate::config::FanBinding],
+) -> crate::config::FanPlan {
+    let Some(profile) = profile else {
+        return crate::config::FanPlan::Automatic;
+    };
+    plan_for_id(plans, profile.to_id()).unwrap_or(crate::config::FanPlan::Automatic)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -629,5 +654,36 @@ mod tests {
             plan_target(FanPlan::Max, None, false),
             CurveAction::Manual(100)
         );
+    }
+
+    #[test]
+    fn the_plan_for_the_active_mode_is_used() {
+        use crate::config::{FanBinding, FanPlan};
+        use crate::hardware::profile::PowerProfile;
+        let plans = vec![
+            FanBinding { mode: "balanced".into(), plan: FanPlan::Automatic },
+            FanBinding { mode: "turbo".into(), plan: FanPlan::Max },
+        ];
+        assert_eq!(plan_for(Some(PowerProfile::Balanced), &plans), FanPlan::Automatic);
+        assert_eq!(plan_for(Some(PowerProfile::Turbo), &plans), FanPlan::Max);
+    }
+
+    #[test]
+    fn a_mode_with_no_plan_falls_back_to_automatic() {
+        use crate::config::{FanBinding, FanPlan};
+        use crate::hardware::profile::PowerProfile;
+        let plans = vec![FanBinding { mode: "turbo".into(), plan: FanPlan::Max }];
+        // Automatic is the safe fallback: the firmware is always able to cool
+        // the machine, and it is what an un-migrated config means.
+        assert_eq!(plan_for(Some(PowerProfile::Quiet), &plans), FanPlan::Automatic);
+        assert_eq!(plan_for(None, &plans), FanPlan::Automatic);
+    }
+
+    #[test]
+    fn an_unbound_mode_id_has_no_plan() {
+        use crate::config::{FanBinding, FanPlan};
+        let plans = vec![FanBinding { mode: "turbo".into(), plan: FanPlan::Max }];
+        assert_eq!(plan_for_id(&plans, "turbo"), Some(FanPlan::Max));
+        assert_eq!(plan_for_id(&plans, "eco"), None);
     }
 }
