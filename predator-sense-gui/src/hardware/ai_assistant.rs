@@ -599,8 +599,15 @@ pub fn execute(tool: &ToolCall) -> Result<(), String> {
             })
         }
         ToolCall::SetKeyboardBacklightOff => rgb::apply_brightness_only(0),
-        ToolCall::SetFanMode(AiFanMode::Auto) => fan::set_fan_mode(fan::FanMode::Auto),
-        ToolCall::SetFanMode(AiFanMode::Max) => fan::set_fan_mode(fan::FanMode::Max),
+        // Intent only: writes the active mode's plan into config. The
+        // reconciler tick notices on its next pass and does whatever
+        // hardware write follows.
+        ToolCall::SetFanMode(AiFanMode::Auto) => {
+            fan::set_plan_for(profile::get_current_profile(), crate::config::FanPlan::Automatic)
+        }
+        ToolCall::SetFanMode(AiFanMode::Max) => {
+            fan::set_plan_for(profile::get_current_profile(), crate::config::FanPlan::Max)
+        }
         ToolCall::SetCoolBoost(e) => fan::set_coolboost(*e),
         ToolCall::SetGpuPowerLimit(w) => gpu::set_power_limit_clamped(*w),
         ToolCall::SetBatteryLimiter(e) => extras::set_battery_limiter(*e),

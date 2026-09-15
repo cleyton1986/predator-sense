@@ -325,42 +325,29 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         crate::hardware::profile::set_manage_cpu_power(cfg.manage_cpu_power);
         crate::hardware::game_sync::set_enabled(cfg.game_sync_enabled);
 
-        // Fan Control page (ui::fan_control_page): CoolBoost and fan mode
-        // used to only ever be written straight to the EC with nothing
-        // remembering the choice, so closing Predator Sense (or a reboot
-        // resetting the EC) silently dropped them - reapply them here on
-        // every start. Off the GTK thread since each helper write costs
-        // roughly 150ms and can trigger a polkit prompt.
+        // Fan Control page (ui::fan_control_page): CoolBoost used to only
+        // ever be written straight to the EC with nothing remembering the
+        // choice, so closing Predator Sense (or a reboot resetting the EC)
+        // silently dropped it - reapply it here on every start. Off the GTK
+        // thread since each helper write costs roughly 150ms and can trigger
+        // a polkit prompt.
+        //
+        // This used to also reapply `cfg.fan_mode` straight to the EC here,
+        // which raced the reconciler tick below: instrumentation on
+        // 2026-09-15 caught exactly that disagreeing inside one startup
+        // sequence, `set_fan_mode(Auto)` handing the fans to the firmware and
+        // the curve taking them back a few seconds later. The reconciler
+        // already applies whichever plan is bound to the active mode on its
+        // first tick, so there is nothing left for startup to do here.
         let coolboost_enabled = cfg.coolboost_enabled;
-        // Not while the software curve owns the fans. Reapplying the saved EC
-        // preset here and then letting the curve timer below take the fans
-        // back about three seconds later is two owners writing the same
-        // hardware on every launch, and the preset never survives long enough
-        // to be the thing the user asked for. CoolBoost is unaffected: it is a
-        // separate EC byte the curve never touches.
-        let fan_mode = cfg
-            .fan_mode
-            .clone()
-            .filter(|_| !cfg.fan_auto_curve_enabled);
-        if crate::hardware::capabilities::get().ec && (coolboost_enabled || fan_mode.is_some()) {
+        // This supersedes the narrower guard merged upstream as #73, which
+        // skipped the preset only while `fan_auto_curve_enabled` was set. The
+        // reconciler owns the fans under every plan, not just the curve, so
+        // there is no case left where startup should write them.
+        if crate::hardware::capabilities::get().ec && coolboost_enabled {
             background::run(
                 move || {
-                    if coolboost_enabled {
-                        let _ = crate::hardware::fan::set_coolboost(true);
-                    }
-                    match fan_mode.as_deref() {
-                        Some("max") => {
-                            let _ = crate::hardware::fan::set_fan_mode(
-                                crate::hardware::fan::FanMode::Max,
-                            );
-                        }
-                        Some("auto") => {
-                            let _ = crate::hardware::fan::set_fan_mode(
-                                crate::hardware::fan::FanMode::Auto,
-                            );
-                        }
-                        _ => {}
-                    }
+                    let _ = crate::hardware::fan::set_coolboost(true);
                 },
                 |()| {},
             );
@@ -795,9 +782,10 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 // startup - only react to an actual transition from here on.
                 return glib::ControlFlow::Continue;
             }
-            // set_profile() now applies the matching fan mode itself (Max
-            // for Turbo, Auto otherwise), so this only needs to pick the
-            // profile - no separate fan::set_fan_mode call to keep in sync.
+            // set_profile() no longer touches the fan directly; the reconciler
+            // tick above reads the plan bound to whichever profile this leaves
+            // active (Max for Turbo by default, unless the user rebinds it)
+            // and applies it, so this only needs to pick the profile.
             if now {
                 // Snapshot whichever profile is coherently active right now,
                 // before overwriting it - None (no single coherent profile

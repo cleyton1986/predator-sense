@@ -405,6 +405,38 @@ pub fn plan_for_id(
         .map(|binding| binding.plan)
 }
 
+/// `plans` with `mode` bound to `plan`, adding the binding if it is new.
+pub fn with_plan(
+    plans: &[crate::config::FanBinding],
+    mode: &str,
+    plan: crate::config::FanPlan,
+) -> Vec<crate::config::FanBinding> {
+    let mut updated: Vec<crate::config::FanBinding> = plans
+        .iter()
+        .filter(|binding| binding.mode != mode)
+        .cloned()
+        .collect();
+    updated.push(crate::config::FanBinding {
+        mode: mode.to_string(),
+        plan,
+    });
+    updated
+}
+
+/// Writes a plan for `profile` into the config. Intent only: the reconciler
+/// notices on its next tick and performs any hardware write.
+pub fn set_plan_for(
+    profile: Option<crate::hardware::profile::PowerProfile>,
+    plan: crate::config::FanPlan,
+) -> Result<(), String> {
+    let Some(profile) = profile else {
+        return Err("fan plan: no active power mode".into());
+    };
+    let mut cfg = crate::config::load_app_config();
+    cfg.fan_plans = with_plan(&cfg.fan_plans, profile.to_id(), plan);
+    crate::config::save_app_config(&cfg)
+}
+
 /// The plan bound to `profile`, or `Automatic` when there is none.
 ///
 /// `Automatic` is the safe fallback in every unknown case: the firmware can
@@ -809,6 +841,28 @@ mod tests {
         // These two work through the EC preset path on any model.
         assert_eq!(plan_for_hardware(FanPlan::Max, false), FanPlan::Max);
         assert_eq!(plan_for_hardware(FanPlan::Automatic, false), FanPlan::Automatic);
+    }
+
+    #[test]
+    fn setting_a_plan_replaces_only_that_modes_binding() {
+        use crate::config::{FanBinding, FanPlan};
+        let existing = vec![
+            FanBinding { mode: "balanced".into(), plan: FanPlan::Automatic },
+            FanBinding { mode: "turbo".into(), plan: FanPlan::Max },
+        ];
+        let updated = with_plan(&existing, "balanced", FanPlan::Max);
+        assert_eq!(updated.len(), 2);
+        assert_eq!(plan_for_id(&updated, "balanced"), Some(FanPlan::Max));
+        assert_eq!(plan_for_id(&updated, "turbo"), Some(FanPlan::Max));
+    }
+
+    #[test]
+    fn setting_a_plan_for_an_unbound_mode_adds_it() {
+        use crate::config::{FanBinding, FanPlan};
+        let existing = vec![FanBinding { mode: "turbo".into(), plan: FanPlan::Max }];
+        let updated = with_plan(&existing, "eco", FanPlan::Automatic);
+        assert_eq!(updated.len(), 2);
+        assert_eq!(plan_for_id(&updated, "eco"), Some(FanPlan::Automatic));
     }
 
     #[test]

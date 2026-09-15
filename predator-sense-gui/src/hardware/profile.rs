@@ -19,6 +19,14 @@ pub fn set_keep_fan_auto_in_performance(v: bool) {
     KEEP_FAN_AUTO_IN_PERFORMANCE.store(v, Ordering::Relaxed);
 }
 
+/// No longer read by `set_profile` (its fan-forcing call is gone; see the
+/// comment there), so this Settings toggle currently has no effect - a mode
+/// that should stay on Auto in Performance/Turbo is now expressed by binding
+/// that mode's own fan plan to `Automatic` instead. Left in place rather than
+/// deleted since `set_keep_fan_auto_in_performance` still has a caller
+/// (window.rs restores it from config on startup) and untangling the
+/// Settings toggle itself is a UI decision outside this change.
+#[allow(dead_code)]
 pub fn keep_fan_auto_in_performance() -> bool {
     KEEP_FAN_AUTO_IN_PERFORMANCE.load(Ordering::Relaxed)
 }
@@ -47,6 +55,13 @@ pub fn manage_cpu_power() -> bool {
 
 /// Pure so it's directly testable without touching hardware - see
 /// `fan_mode_for_tests` below.
+///
+/// No longer called from `set_profile`: each mode's fan plan decides its fan
+/// behavior now, and the reconciler applies it. Kept for its tests, which
+/// document what the physical Turbo key still does to the firmware, and as
+/// the reference the reconciler's own Performance/Turbo-to-Max mapping is
+/// checked against.
+#[allow(dead_code)]
 fn fan_mode_for(profile: PowerProfile, keep_auto: bool) -> crate::hardware::fan::FanMode {
     match profile {
         PowerProfile::Performance | PowerProfile::Turbo if keep_auto => {
@@ -1016,19 +1031,13 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
 
     apply_firmware_profile(profile);
 
-    // Fan mode used to only follow the physical Predator/Turbo key (see
-    // window.rs's turbo-key handler); picking a profile from the "Modo" page
-    // or via the AI assistant left whatever fan mode was previously set
-    // untouched, so e.g. selecting Quiet right after Max didn't quiet
-    // anything down. Every profile change now carries a matching fan mode,
-    // best-effort like the GPU wattage write above - some models have no EC
-    // fan control at all. Performance/Turbo push CPU+GPU power targets high
-    // enough that automatic fan curves alone won't keep up, so both force
-    // Max by default (matching what the physical Turbo key already does);
-    // only Quiet/Balanced leave the fan on Auto - unless the user opted into
-    // keeping Auto on Performance/Turbo too (see fan_mode_for() above).
-    let fan_mode = fan_mode_for(profile, keep_fan_auto_in_performance());
-    let _ = crate::hardware::fan::set_fan_mode(fan_mode);
+    // Fan mode used to be forced here to match the profile (Performance/Turbo
+    // to Max, everything else to Auto), the same behavior fan_mode_for()
+    // below still documents for the physical Turbo key. That is now decided
+    // by the mode's own fan plan (`config::fan_plans`) instead: the
+    // reconciler tick in window.rs reads the plan bound to whichever profile
+    // is active and applies it, so this function no longer touches fan
+    // hardware at all.
 
     // Save the selected profile to state file
     let _ = fs::write(PROFILE_STATE_FILE, profile.to_id());
