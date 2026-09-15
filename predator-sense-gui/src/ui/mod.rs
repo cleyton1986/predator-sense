@@ -11,6 +11,7 @@ pub mod drivers_page;
 pub mod faceted_card;
 pub mod fan_control_page;
 pub mod fan_curve_geometry;
+pub mod fan_curve_widget;
 pub mod fan_page;
 pub mod font_scale;
 pub mod game_sync_page;
