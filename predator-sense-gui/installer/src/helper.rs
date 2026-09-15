@@ -657,26 +657,6 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
             let speed = parse_u16("speed", &args[4], 0, 255)? as u8;
             chicony_rgb_apply(effect, brightness, color, speed)
         }
-        HelperAction::ChiconySeq => {
-            let text = args[1].trim();
-            if text.len() % 16 != 0 || text.is_empty() {
-                return Err(fail(
-                    "chicony-seq needs whole 8-byte packets (16 hex chars each)".to_string(),
-                ));
-            }
-            let mut packets = Vec::new();
-            for chunk in text.as_bytes().chunks(16) {
-                let mut packet = [0u8; 8];
-                for (index, pair) in chunk.chunks(2).enumerate() {
-                    let pair = std::str::from_utf8(pair)
-                        .map_err(|_| fail("chicony-seq: not valid hex".to_string()))?;
-                    packet[index] = u8::from_str_radix(pair, 16)
-                        .map_err(|_| fail(format!("chicony-seq: bad hex byte '{pair}'")))?;
-                }
-                packets.push(packet);
-            }
-            chicony_send_many(&packets)
-        }
         HelperAction::ChiconyColor => {
             let red = parse_u16("red", &args[1], 0, 255)? as u8;
             let green = parse_u16("green", &args[2], 0, 255)? as u8;

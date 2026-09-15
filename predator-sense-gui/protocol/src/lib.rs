@@ -395,12 +395,6 @@ pub mod helper {
         /// the per-key generation (PH16-71 and similar) uses for solid
         /// colour. Args: RED GREEN BLUE, each 0-255.
         ChiconyColor,
-        /// Raw packet sequence to the Chicony keyboard: one hex string, 8
-        /// bytes (16 hex chars) per packet, all sent inside a single claimed
-        /// USB session. This controller needs a preamble and an apply packet
-        /// around a colour packet, so the sequence has to be atomic; it is
-        /// also how new packet layouts get confirmed on real hardware.
-        ChiconySeq,
         /// Effect on the Chicony keyboard carrying a real RGB colour.
         ///
         /// Args: OPCODE SPEED BRIGHTNESS RED GREEN BLUE DIRECTION. Speed and
@@ -464,7 +458,7 @@ pub mod helper {
     }
 
     impl Action {
-        pub const ALL: [Self; 49] = [
+        pub const ALL: [Self; 48] = [
             Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
@@ -503,7 +497,6 @@ pub mod helper {
             Self::SerialNumberRead,
             Self::ChiconyRgb,
             Self::ChiconyColor,
-            Self::ChiconySeq,
             Self::ChiconyEffect,
             Self::ModeCycle,
             Self::ThermalProfile,
@@ -556,7 +549,6 @@ pub mod helper {
                 "serial-number-read" => Some(Self::SerialNumberRead),
                 "chicony-rgb" => Some(Self::ChiconyRgb),
                 "chicony-color" => Some(Self::ChiconyColor),
-                "chicony-seq" => Some(Self::ChiconySeq),
                 "chicony-effect" => Some(Self::ChiconyEffect),
                 "mode-cycle" => Some(Self::ModeCycle),
                 "thermal-profile" => Some(Self::ThermalProfile),
@@ -611,7 +603,6 @@ pub mod helper {
                 Self::SerialNumberRead => "serial-number-read",
                 Self::ChiconyRgb => "chicony-rgb",
                 Self::ChiconyColor => "chicony-color",
-                Self::ChiconySeq => "chicony-seq",
                 Self::ChiconyEffect => "chicony-effect",
                 Self::ModeCycle => "mode-cycle",
                 Self::ThermalProfile => "thermal-profile",
@@ -667,7 +658,6 @@ pub mod helper {
                 Self::ChiconyColor => 4,
                 Self::ChiconyEffect => 7,
                 Self::ModeCycle => 2,
-                Self::ChiconySeq => 1,
                 Self::ThermalProfile => 1,
                 Self::BootReapplyThermal => 1,
                 Self::TempLimitCaps => 0,
@@ -723,7 +713,6 @@ pub mod helper {
                 Self::ChiconyColor => "chicony-color RED GREEN BLUE BRIGHTNESS",
                 Self::ChiconyEffect => "chicony-effect OPCODE SPEED BRIGHTNESS RED GREEN BLUE DIRECTION",
                 Self::ModeCycle => "mode-cycle AC|skip BATTERY|skip",
-                Self::ChiconySeq => "chicony-seq HEXPACKETS",
                 Self::ThermalProfile => "thermal-profile INDEX",
                 Self::BootReapplyThermal => "boot-reapply-thermal USER_HOME",
                 Self::TempLimitCaps => "temp-limit-caps",
