@@ -13,6 +13,29 @@ pub enum FanMode {
 /// Set fan mode using the predator-sense-helper (requires pkexec)
 /// Auto and Max use firmware modes (safe). Custom is disabled for safety.
 pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
+    set_fan_mode_inner(mode, true)
+}
+
+/// `set_fan_mode` without the EC dynamic-curve wake, for the reconciler.
+///
+/// The wake bounces the WMI `ThermalProfile` index, and that is the same index
+/// `profile::get_current_profile` reads to decide which mode's plan to apply.
+/// From a three-second background timer that means the user's visible power
+/// mode moves as a side effect of a fan write, and if the restore leg fails
+/// (which `wake_dynamic_fan_curve` logs) the machine is left in a different
+/// power mode, whose different plan the next tick then applies. Every caller
+/// that does keep the wake is an explicit user action, where one bounce is
+/// bounded by the action that asked for it.
+///
+/// The trade is that on a model needing the wake, a reconciled Auto reaches
+/// only the EC's static preset rather than its load-following curve. What that
+/// leaves the fans doing is unmeasured: only models without per-fan PWM take
+/// this path, and the machine available for testing has PWM.
+pub fn set_fan_mode_without_wake(mode: FanMode) -> Result<(), String> {
+    set_fan_mode_inner(mode, false)
+}
+
+fn set_fan_mode_inner(mode: FanMode, wake: bool) -> Result<(), String> {
     crate::hardware::applog::info(&format!("fan: mode {mode:?}"));
     use crate::hardware::capabilities::FanPresetStatus;
 
@@ -71,7 +94,7 @@ pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
     // is a real transition on the WMI `ThermalProfile` index - confirmed by
     // hand, see `PROTOCOLO-HARDWARE.md` §9.2. Only Auto needs this: Max is
     // supposed to sit at its fixed setpoint, not follow a curve.
-    if mode == FanMode::Auto {
+    if wake && mode == FanMode::Auto {
         wake_dynamic_fan_curve();
     }
     crate::hardware::helper::execute(action, &[])
@@ -90,7 +113,10 @@ pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
 /// real, visible side effect a caller did not ask for.
 /// Only reached from the EC-preset path in `set_fan_mode`, which a PH16-71
 /// never takes - it is `KnownIncompatible` there, so Auto/Max route through
-/// PWM instead. The PWM path's own use of this was removed after the stall it
+/// PWM instead. Never reached from the reconciler, which uses
+/// `set_fan_mode_without_wake`: see there for why a background timer must not
+/// move the profile index this reads and writes. The PWM path's own use of
+/// this was removed after the stall it
 /// worked around turned out not to exist; that measurement does not cover the
 /// EC path on the models that do use it, so this is left alone rather than
 /// deleted on a guess.
@@ -429,6 +455,44 @@ pub fn get_pwm_percent() -> Option<(u8, u8)> {
         ((cpu * PERCENT_MAX) / PWM_VALUE_MAX) as u8,
         ((gpu * PERCENT_MAX) / PWM_VALUE_MAX) as u8,
     ))
+}
+
+/// What holds the fans right now, read back from the hardware.
+///
+/// The reconciler's `FanState` starts `Unknown`, which reads as a
+/// disagreement, so its first tick wrote unconditionally even for an
+/// `Automatic` plan on a machine the firmware was already governing: a
+/// pointless `pwm_enable=2` on PWM hardware, and on EC-only hardware a preset
+/// write seconds after every launch for a user who configured nothing.
+///
+/// `Unknown` is still the answer whenever the reading does not map onto
+/// something the reconciler itself could have written, because then it has to
+/// assert rather than assume. A manual duty read back can also be a percent
+/// off what was written, since the percent-to-pwm conversion is lossy, which
+/// costs one corrective write and no more.
+pub fn observe_fan_state(pwm_available: bool) -> FanState {
+    if pwm_available {
+        return match crate::hardware::helper::read(HelperAction::PwmCpuEnableRead).as_deref() {
+            Some(mode) if mode == PwmControlMode::Automatic.as_str() => FanState::Firmware,
+            Some(mode) if mode == PwmControlMode::Manual.as_str() => {
+                match get_pwm_percent() {
+                    Some((cpu, _)) => FanState::Manual(cpu),
+                    None => FanState::Unknown,
+                }
+            }
+            // Full speed, or anything unrecognised: not a state the
+            // reconciler writes on this hardware, so it is not a state it may
+            // claim to be holding.
+            _ => FanState::Unknown,
+        };
+    }
+    match get_fan_mode() {
+        Some(FanMode::Auto) => FanState::Firmware,
+        // The Max preset is what `write_for` sends for any manual target on
+        // this hardware, and 100 is the only manual target that can reach it.
+        Some(FanMode::Max) => FanState::Manual(100),
+        _ => FanState::Unknown,
+    }
 }
 
 /// The plan bound to a raw mode id, for callers that already have the id.

@@ -621,6 +621,11 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // logged, so a config that can never be written says so once instead
         // of on every tick.
         let migration_warned = Rc::new(Cell::new(false));
+        // Whether `fan_state` has been read back from the hardware yet. The
+        // read is privileged, so it goes through the worker thread like any
+        // other, which is why it is a tick of its own rather than a value
+        // fetched before the timer starts.
+        let seeded = Rc::new(Cell::new(false));
         glib::timeout_add_seconds_local(crate::hardware::fan::RECONCILE_TICK_S, move || {
             use crate::hardware::fan::{CurveAction, FanState};
 
@@ -667,6 +672,26 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             }
 
             if applying.get() {
+                return glib::ControlFlow::Continue;
+            }
+
+            // Observe before asserting anything. FanState::Unknown reads as a
+            // disagreement with every plan, so the first tick used to write on
+            // every machine at every launch, including one whose plan is
+            // Automatic and whose fans the firmware already has.
+            if !seeded.get() {
+                seeded.set(true);
+                applying.set(true);
+                let applying_done = applying.clone();
+                let state = fan_state.clone();
+                let pwm = crate::hardware::capabilities::get().fan_pwm;
+                background::run(
+                    move || crate::hardware::fan::observe_fan_state(pwm),
+                    move |observed| {
+                        applying_done.set(false);
+                        state.set(observed);
+                    },
+                );
                 return glib::ControlFlow::Continue;
             }
 
@@ -718,11 +743,19 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     crate::hardware::fan::FanWrite::PwmPercent(percent) => {
                         crate::hardware::fan::set_pwm_percent(percent, percent)
                     }
+                    // Without the EC dynamic-curve wake: from here it would
+                    // bounce the same firmware profile index this tick reads
+                    // to pick a plan, so a fan write would move the user's
+                    // visible power mode. See fan::set_fan_mode_without_wake.
                     crate::hardware::fan::FanWrite::PresetAuto => {
-                        crate::hardware::fan::set_fan_mode(crate::hardware::fan::FanMode::Auto)
+                        crate::hardware::fan::set_fan_mode_without_wake(
+                            crate::hardware::fan::FanMode::Auto,
+                        )
                     }
                     crate::hardware::fan::FanWrite::PresetMax => {
-                        crate::hardware::fan::set_fan_mode(crate::hardware::fan::FanMode::Max)
+                        crate::hardware::fan::set_fan_mode_without_wake(
+                            crate::hardware::fan::FanMode::Max,
+                        )
                     }
                 },
                 move |result| {
