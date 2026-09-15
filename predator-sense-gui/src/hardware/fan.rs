@@ -456,6 +456,24 @@ pub fn migrate_plans(cfg: &crate::config::AppConfig) -> Vec<crate::config::FanBi
     .collect()
 }
 
+/// Narrows a plan to what this machine can actually do.
+///
+/// `Curve` and `Fixed` need per-fan PWM. Without `ACER_CAP_PWM` there is no
+/// `pwm1` to write, so they are unreachable through the UI, but they can still
+/// arrive in a config copied from a machine that has it. Resolving to
+/// `Automatic` keeps the fans governed by something rather than leaving a plan
+/// that silently does nothing.
+pub fn plan_for_hardware(
+    plan: crate::config::FanPlan,
+    pwm_available: bool,
+) -> crate::config::FanPlan {
+    use crate::config::FanPlan;
+    match plan {
+        FanPlan::Curve { .. } | FanPlan::Fixed { .. } if !pwm_available => FanPlan::Automatic,
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -773,5 +791,36 @@ mod tests {
         let mut modes: Vec<&str> = plans.iter().map(|b| b.mode.as_str()).collect();
         modes.sort_unstable();
         assert_eq!(modes, vec!["balanced", "eco", "performance", "quiet", "turbo"]);
+    }
+
+    #[test]
+    fn pwm_plans_are_unavailable_without_pwm() {
+        use crate::config::FanPlan;
+        // Reachable from a config copied off a machine that does have PWM.
+        // Resolving to Automatic beats doing nothing silently.
+        assert_eq!(
+            plan_for_hardware(FanPlan::Curve { steps: DEFAULT_FAN_CURVE }, false),
+            FanPlan::Automatic
+        );
+        assert_eq!(
+            plan_for_hardware(FanPlan::Fixed { percent: 40 }, false),
+            FanPlan::Automatic
+        );
+        // These two work through the EC preset path on any model.
+        assert_eq!(plan_for_hardware(FanPlan::Max, false), FanPlan::Max);
+        assert_eq!(plan_for_hardware(FanPlan::Automatic, false), FanPlan::Automatic);
+    }
+
+    #[test]
+    fn every_plan_survives_on_hardware_with_pwm() {
+        use crate::config::FanPlan;
+        for plan in [
+            FanPlan::Automatic,
+            FanPlan::Max,
+            FanPlan::Fixed { percent: 40 },
+            FanPlan::Curve { steps: DEFAULT_FAN_CURVE },
+        ] {
+            assert_eq!(plan_for_hardware(plan, true), plan);
+        }
     }
 }
