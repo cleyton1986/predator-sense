@@ -25,7 +25,17 @@ use std::time::Duration;
 /// Key presses and pointer motion are tracked separately so "moving the mouse
 /// wakes the lights" can be a setting rather than an assumption - some people
 /// want the lights to stay off while only the cursor drifts.
+///
+/// Buttons get a third clock rather than sharing the first. They arrive as
+/// `EV_KEY` exactly like a keystroke, and they have to keep counting as
+/// activity whatever the pointer setting says - a click is as deliberate as a
+/// keystroke - but they are not what the keyboard's own controller counts.
+/// That controller sleeps its backlight after ~30 s without a press on its own
+/// matrix and cannot see a USB mouse or the I2C touchpad, so its clock has to
+/// be countable on its own: on a touchpad every finger-down is a `BTN_TOUCH`,
+/// which otherwise reads as continuous typing to anything asking about keys.
 static LAST_KEY_ACTIVITY: AtomicU64 = AtomicU64::new(0);
+static LAST_BUTTON_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 static LAST_POINTER_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 static WATCHING: AtomicBool = AtomicBool::new(false);
 
@@ -33,9 +43,13 @@ static WATCHING: AtomicBool = AtomicBool::new(false);
 /// `u16 type`, `u16 code`, `i32 value`.
 const INPUT_EVENT_SIZE: usize = 24;
 const INPUT_EVENT_TYPE_OFFSET: usize = 16;
+const INPUT_EVENT_CODE_OFFSET: usize = 18;
 const EV_KEY: u16 = 0x01;
 const EV_REL: u16 = 0x02;
 const EV_ABS: u16 = 0x03;
+/// First `BTN_*` code. Anything below this in `EV_KEY` is a real key; at or
+/// above it is a mouse button, a touchpad finger-down, or a tablet tool.
+const BTN_MISC: u16 = 0x100;
 
 fn monotonic_secs() -> u64 {
     let mut value = libc::timespec {
@@ -51,6 +65,28 @@ fn monotonic_secs() -> u64 {
     value.tv_sec as u64
 }
 
+/// What one input event counts as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Activity {
+    /// A press on a keyboard matrix - the only thing the keyboard's own
+    /// controller sees before it decides to sleep the backlight.
+    Key,
+    /// A mouse button or a touchpad finger-down. Deliberate, so it always
+    /// counts as activity, but invisible to that controller.
+    Button,
+    /// Cursor motion.
+    Pointer,
+}
+
+fn classify(kind: u16, code: u16) -> Option<Activity> {
+    match kind {
+        EV_KEY if code >= BTN_MISC => Some(Activity::Button),
+        EV_KEY => Some(Activity::Key),
+        EV_REL | EV_ABS => Some(Activity::Pointer),
+        _ => None,
+    }
+}
+
 /// Seconds since the last input, or `None` when the watcher never managed to
 /// open any input device.
 ///
@@ -61,7 +97,9 @@ pub fn idle_seconds(pointer_counts: bool) -> Option<u64> {
     if !WATCHING.load(Ordering::Relaxed) {
         return None;
     }
-    let mut last = LAST_KEY_ACTIVITY.load(Ordering::Relaxed);
+    let mut last = LAST_KEY_ACTIVITY
+        .load(Ordering::Relaxed)
+        .max(LAST_BUTTON_ACTIVITY.load(Ordering::Relaxed));
     if pointer_counts {
         last = last.max(LAST_POINTER_ACTIVITY.load(Ordering::Relaxed));
     }
@@ -74,6 +112,7 @@ pub fn idle_seconds(pointer_counts: bool) -> Option<u64> {
 pub fn mark_active() {
     let now = monotonic_secs();
     LAST_KEY_ACTIVITY.store(now, Ordering::Relaxed);
+    LAST_BUTTON_ACTIVITY.store(now, Ordering::Relaxed);
     LAST_POINTER_ACTIVITY.store(now, Ordering::Relaxed);
 }
 
@@ -154,12 +193,21 @@ pub fn start() {
                                 record[INPUT_EVENT_TYPE_OFFSET],
                                 record[INPUT_EVENT_TYPE_OFFSET + 1],
                             ]);
-                            match kind {
-                                EV_KEY => LAST_KEY_ACTIVITY.store(now, Ordering::Relaxed),
-                                EV_REL | EV_ABS => {
+                            let code = u16::from_ne_bytes([
+                                record[INPUT_EVENT_CODE_OFFSET],
+                                record[INPUT_EVENT_CODE_OFFSET + 1],
+                            ]);
+                            match classify(kind, code) {
+                                Some(Activity::Key) => {
+                                    LAST_KEY_ACTIVITY.store(now, Ordering::Relaxed)
+                                }
+                                Some(Activity::Button) => {
+                                    LAST_BUTTON_ACTIVITY.store(now, Ordering::Relaxed)
+                                }
+                                Some(Activity::Pointer) => {
                                     LAST_POINTER_ACTIVITY.store(now, Ordering::Relaxed)
                                 }
-                                _ => {}
+                                None => {}
                             }
                         }
                     }
@@ -178,4 +226,34 @@ pub fn start() {
             thread::sleep(Duration::from_millis(50));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_keystroke_and_a_click_are_different_clocks() {
+        // KEY_A: the matrix the keyboard controller watches.
+        assert_eq!(classify(EV_KEY, 0x1e), Some(Activity::Key));
+        // BTN_LEFT and BTN_TOUCH arrive as EV_KEY too, but the controller
+        // never sees either - a touchpad user would otherwise look like they
+        // were typing continuously while their backlight slept.
+        assert_eq!(classify(EV_KEY, 0x110), Some(Activity::Button));
+        assert_eq!(classify(EV_KEY, 0x14a), Some(Activity::Button));
+    }
+
+    #[test]
+    fn motion_is_pointer_activity() {
+        assert_eq!(classify(EV_REL, 0x00), Some(Activity::Pointer));
+        assert_eq!(classify(EV_ABS, 0x00), Some(Activity::Pointer));
+    }
+
+    #[test]
+    fn padding_events_are_ignored() {
+        // EV_SYN closes every report and EV_MSC carries scancodes; counting
+        // either would make an idle machine look busy forever.
+        assert_eq!(classify(0x00, 0x00), None);
+        assert_eq!(classify(0x04, 0x04), None);
+    }
 }
