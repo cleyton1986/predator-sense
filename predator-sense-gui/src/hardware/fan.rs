@@ -396,6 +396,18 @@ pub fn plan_target(
             }
         }
         FanPlan::Max => CurveAction::Manual(100),
+        // 0% means "stop", and a manual pwm of 0 is not off (see
+        // `CurveAction::Firmware`), so a fixed 0 takes the same handoff a 0%
+        // curve step does. Without it the Custom slider at 0 left the fans
+        // spinning at the EC floor for good, while the same 0 as a curve step
+        // reached true 0 RPM.
+        FanPlan::Fixed { percent: 0 } => {
+            if handed_off {
+                CurveAction::Hold
+            } else {
+                CurveAction::Firmware
+            }
+        }
         FanPlan::Fixed { percent } => CurveAction::Manual(percent.min(100)),
         FanPlan::Curve { steps } => match temp_c {
             Some(temp_c) => curve_action(temp_c, &steps, handed_off),
@@ -957,6 +969,35 @@ mod tests {
     fn hold_writes_nothing_on_either_kind_of_hardware() {
         assert_eq!(write_for(CurveAction::Hold, true), None);
         assert_eq!(write_for(CurveAction::Hold, false), None);
+    }
+
+    #[test]
+    fn a_fixed_plan_of_zero_hands_the_fans_to_the_firmware() {
+        use crate::config::FanPlan;
+        // The Custom slider goes down to 0 and writes it verbatim into the
+        // plan, so this is the same request a 0% curve step makes: only the
+        // firmware can actually stop the fans.
+        assert_eq!(
+            plan_target(FanPlan::Fixed { percent: 0 }, Some(40.0), false),
+            CurveAction::Firmware
+        );
+        assert_eq!(
+            plan_target(FanPlan::Fixed { percent: 0 }, Some(40.0), true),
+            CurveAction::Hold
+        );
+    }
+
+    #[test]
+    fn a_fixed_plan_above_the_range_is_clamped_to_full_speed() {
+        use crate::config::FanPlan;
+        assert_eq!(
+            plan_target(FanPlan::Fixed { percent: 101 }, None, false),
+            CurveAction::Manual(100)
+        );
+        assert_eq!(
+            plan_target(FanPlan::Fixed { percent: u8::MAX }, None, false),
+            CurveAction::Manual(100)
+        );
     }
 
     #[test]
