@@ -351,6 +351,35 @@ pub fn curve_action(temp_c: f64, steps: &[u8; 6], handed_off: bool) -> CurveActi
     CurveAction::Manual(fan_curve_pct(temp_c, steps))
 }
 
+/// Resolves a mode's plan into what the reconciler should do this tick.
+///
+/// `temp_c` is the hotter die from `curve_input_temp`. `handed_off` is whether
+/// the firmware currently holds the fans, which only `Curve` and `Automatic`
+/// care about.
+pub fn plan_target(
+    plan: crate::config::FanPlan,
+    temp_c: Option<f64>,
+    handed_off: bool,
+) -> CurveAction {
+    use crate::config::FanPlan;
+    match plan {
+        FanPlan::Automatic => {
+            if handed_off {
+                CurveAction::Hold
+            } else {
+                CurveAction::Firmware
+            }
+        }
+        FanPlan::Max => CurveAction::Manual(100),
+        FanPlan::Fixed { percent } => CurveAction::Manual(percent.min(100)),
+        FanPlan::Curve { steps } => match temp_c {
+            Some(temp_c) => curve_action(temp_c, &steps, handed_off),
+            // No sensor: writing a guessed percentage is how fans get pinned.
+            None => CurveAction::Hold,
+        },
+    }
+}
+
 /// Read current CPU/GPU fan PWM as percentage (0-100), if available.
 pub fn get_pwm_percent() -> Option<(u8, u8)> {
     let cpu: u16 = crate::hardware::helper::read(HelperAction::PwmCpuRead)?
@@ -545,5 +574,60 @@ mod tests {
         // itself rather than trusting a value it never applied.
         assert!(needs_write(CurveAction::Manual(35), FanState::Unknown));
         assert!(needs_write(CurveAction::Firmware, FanState::Unknown));
+    }
+
+    #[test]
+    fn automatic_leaves_the_fans_to_the_firmware() {
+        use crate::config::FanPlan;
+        assert_eq!(
+            plan_target(FanPlan::Automatic, Some(70.0), false),
+            CurveAction::Firmware
+        );
+        // Already handed off: nothing to write every tick.
+        assert_eq!(
+            plan_target(FanPlan::Automatic, Some(70.0), true),
+            CurveAction::Hold
+        );
+    }
+
+    #[test]
+    fn fixed_and_max_are_flat_percentages() {
+        use crate::config::FanPlan;
+        assert_eq!(
+            plan_target(FanPlan::Fixed { percent: 40 }, Some(70.0), false),
+            CurveAction::Manual(40)
+        );
+        assert_eq!(
+            plan_target(FanPlan::Max, Some(30.0), false),
+            CurveAction::Manual(100)
+        );
+    }
+
+    #[test]
+    fn a_curve_plan_uses_the_curve_rules() {
+        use crate::config::FanPlan;
+        let plan = FanPlan::Curve { steps: [0, 35, 50, 65, 80, 100] };
+        // Below the zero step: hand off, exactly as curve_action decides.
+        assert_eq!(plan_target(plan, Some(40.0), false), CurveAction::Firmware);
+        // Inside the firmware band after a handoff: hold.
+        assert_eq!(plan_target(plan, Some(50.0), true), CurveAction::Hold);
+        // Above the band: the curve takes over.
+        assert_eq!(plan_target(plan, Some(70.0), true), CurveAction::Manual(65));
+    }
+
+    #[test]
+    fn no_temperature_reading_means_write_nothing() {
+        use crate::config::FanPlan;
+        // A curve cannot be evaluated without a sensor, and guessing a
+        // percentage for hardware whose temperature is unknown is how fans end
+        // up pinned. Flat plans do not need one.
+        assert_eq!(
+            plan_target(FanPlan::Curve { steps: DEFAULT_FAN_CURVE }, None, false),
+            CurveAction::Hold
+        );
+        assert_eq!(
+            plan_target(FanPlan::Max, None, false),
+            CurveAction::Manual(100)
+        );
     }
 }
