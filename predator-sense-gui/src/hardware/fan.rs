@@ -506,6 +506,38 @@ pub fn plan_for_hardware(
     }
 }
 
+/// Which hardware call a resolved target needs on this machine.
+///
+/// Two families of Acer hardware reach this point. Models with
+/// `ACER_CAP_PWM` take a duty cycle per fan; everything else has only the EC's
+/// own Auto and Max presets. Keeping the choice in one pure function means the
+/// reconciler does not grow a second decision path, and it stays testable
+/// without hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanWrite {
+    /// `pwm_enable = 2` on both fans: hand them to the firmware curve.
+    PwmAuto,
+    /// A manual duty on both fans.
+    PwmPercent(u8),
+    /// The EC's Auto preset, for models with no per-fan PWM.
+    PresetAuto,
+    /// The EC's Max preset.
+    PresetMax,
+}
+
+pub fn write_for(target: CurveAction, pwm_available: bool) -> Option<FanWrite> {
+    match (target, pwm_available) {
+        (CurveAction::Hold, _) => None,
+        (CurveAction::Firmware, true) => Some(FanWrite::PwmAuto),
+        (CurveAction::Manual(percent), true) => Some(FanWrite::PwmPercent(percent)),
+        // Without per-fan PWM, plan_for_hardware has already narrowed every
+        // plan to Automatic or Max, so a manual target can only have come from
+        // Max. There is no EC preset for an arbitrary percentage.
+        (CurveAction::Firmware, false) => Some(FanWrite::PresetAuto),
+        (CurveAction::Manual(_), false) => Some(FanWrite::PresetMax),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -876,5 +908,29 @@ mod tests {
         ] {
             assert_eq!(plan_for_hardware(plan, true), plan);
         }
+    }
+
+    #[test]
+    fn pwm_hardware_gets_pwm_writes() {
+        assert_eq!(write_for(CurveAction::Firmware, true), Some(FanWrite::PwmAuto));
+        assert_eq!(
+            write_for(CurveAction::Manual(35), true),
+            Some(FanWrite::PwmPercent(35))
+        );
+    }
+
+    #[test]
+    fn ec_only_hardware_gets_preset_writes() {
+        // plan_for_hardware narrows Curve and Fixed to Automatic when there is
+        // no PWM, so only Automatic and Max can reach here, which is why
+        // Manual maps to the Max preset rather than a duty cycle.
+        assert_eq!(write_for(CurveAction::Firmware, false), Some(FanWrite::PresetAuto));
+        assert_eq!(write_for(CurveAction::Manual(100), false), Some(FanWrite::PresetMax));
+    }
+
+    #[test]
+    fn hold_writes_nothing_on_either_kind_of_hardware() {
+        assert_eq!(write_for(CurveAction::Hold, true), None);
+        assert_eq!(write_for(CurveAction::Hold, false), None);
     }
 }

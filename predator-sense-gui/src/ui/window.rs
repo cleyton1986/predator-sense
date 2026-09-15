@@ -599,124 +599,112 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // launch until the user visited Fan Control again. Re-reads the
         // config every tick, same as the game list above: toggling the
         // switch takes effect on the next tick, no restart needed.
-        if crate::hardware::capabilities::get().fan_pwm {
-            // The write goes through the persistent privileged helper (see
-            // hardware::helper), which holds a mutex shared with every other
-            // privileged caller in the app - calling it straight from this
-            // timer would block the main thread (and every other feature's
-            // privileged call) for the length of a pkexec auth prompt or a
-            // full session respawn, so it runs on a worker thread instead.
-            // `applying` skips a tick instead of queuing a second write if
-            // the previous one is still in flight.
-            let applying = Rc::new(Cell::new(false));
-            // What the curve last managed to apply. Both a memory, so a tick
-            // that would change nothing writes nothing, and the answer to
-            // "does the firmware hold the fans", which decides whether a
-            // temperature near the boundary is left alone or taken back. It
-            // only advances on a write that actually succeeded.
-            let fan_state = Rc::new(Cell::new(crate::hardware::fan::FanState::Unknown));
-            glib::timeout_add_seconds_local(3, move || {
-                use crate::hardware::fan::{CurveAction, FanState};
+        // The write goes through the persistent privileged helper (see
+        // hardware::helper), which holds a mutex shared with every other
+        // privileged caller in the app - calling it straight from this
+        // timer would block the main thread (and every other feature's
+        // privileged call) for the length of a pkexec auth prompt or a
+        // full session respawn, so it runs on a worker thread instead.
+        // `applying` skips a tick instead of queuing a second write if
+        // the previous one is still in flight.
+        let applying = Rc::new(Cell::new(false));
+        // What the curve last managed to apply. Both a memory, so a tick
+        // that would change nothing writes nothing, and the answer to
+        // "does the firmware hold the fans", which decides whether a
+        // temperature near the boundary is left alone or taken back. It
+        // only advances on a write that actually succeeded.
+        let fan_state = Rc::new(Cell::new(crate::hardware::fan::FanState::Unknown));
+        glib::timeout_add_seconds_local(3, move || {
+            use crate::hardware::fan::{CurveAction, FanState};
 
-                let cfg = config::load_app_config();
-                // Migrate on first sight, then use plans only. An empty list
-                // means either a fresh install or a config from before this
-                // feature, and both want the pre-existing global settings
-                // carried forward unchanged rather than reset to Automatic.
-                if cfg.fan_plans.is_empty() {
-                    let mut migrated = cfg.clone();
-                    migrated.fan_plans = crate::hardware::fan::migrate_plans(&cfg);
-                    if config::save_app_config(&migrated).is_ok() {
-                        crate::hardware::applog::info(
-                            "fan: migrated the global fan settings to per-mode plans",
-                        );
+            let cfg = config::load_app_config();
+            // Migrate on first sight, then use plans only. An empty list
+            // means either a fresh install or a config from before this
+            // feature, and both want the pre-existing global settings
+            // carried forward unchanged rather than reset to Automatic.
+            if cfg.fan_plans.is_empty() {
+                let mut migrated = cfg.clone();
+                migrated.fan_plans = crate::hardware::fan::migrate_plans(&cfg);
+                if config::save_app_config(&migrated).is_ok() {
+                    crate::hardware::applog::info(
+                        "fan: migrated the global fan settings to per-mode plans",
+                    );
+                }
+                return glib::ControlFlow::Continue;
+            }
+
+            if applying.get() {
+                return glib::ControlFlow::Continue;
+            }
+
+            let plan = crate::hardware::fan::plan_for_hardware(
+                crate::hardware::fan::plan_for(
+                    crate::hardware::profile::get_current_profile(),
+                    &cfg.fan_plans,
+                ),
+                crate::hardware::capabilities::get().fan_pwm,
+            );
+            // Whichever die is hotter. The GPU reading used to be dropped
+            // here, so a GPU-bound load with an idle CPU got no fan
+            // response at all. See fan::curve_input_temp for why this
+            // stays one speed for both fans.
+            let (cpu, gpu) = sensors::read_critical_temps();
+            let temp = crate::hardware::fan::curve_input_temp(cpu, gpu);
+            let applied = fan_state.get();
+            let target = crate::hardware::fan::plan_target(
+                plan,
+                temp,
+                applied == FanState::Firmware,
+            );
+            if !crate::hardware::fan::needs_write(target, applied) {
+                return glib::ControlFlow::Continue;
+            }
+
+            let pwm = crate::hardware::capabilities::get().fan_pwm;
+            let Some(write) = crate::hardware::fan::write_for(target, pwm) else {
+                return glib::ControlFlow::Continue;
+            };
+            applying.set(true);
+            let applying_done = applying.clone();
+            let state = fan_state.clone();
+            let intended = target;
+            background::run(
+                move || match write {
+                    crate::hardware::fan::FanWrite::PwmAuto => {
+                        crate::hardware::fan::set_pwm_auto()
                     }
-                    return glib::ControlFlow::Continue;
-                }
-
-                if applying.get() {
-                    return glib::ControlFlow::Continue;
-                }
-
-                let plan = crate::hardware::fan::plan_for_hardware(
-                    crate::hardware::fan::plan_for(
-                        crate::hardware::profile::get_current_profile(),
-                        &cfg.fan_plans,
-                    ),
-                    crate::hardware::capabilities::get().fan_pwm,
-                );
-                // Whichever die is hotter. The GPU reading used to be dropped
-                // here, so a GPU-bound load with an idle CPU got no fan
-                // response at all. See fan::curve_input_temp for why this
-                // stays one speed for both fans.
-                let (cpu, gpu) = sensors::read_critical_temps();
-                let temp = crate::hardware::fan::curve_input_temp(cpu, gpu);
-                let applied = fan_state.get();
-                let target = crate::hardware::fan::plan_target(
-                    plan,
-                    temp,
-                    applied == FanState::Firmware,
-                );
-                if !crate::hardware::fan::needs_write(target, applied) {
-                    return glib::ControlFlow::Continue;
-                }
-
-                applying.set(true);
-                let applying_done = applying.clone();
-                let state = fan_state.clone();
-                match target {
-                    // A 0% step means stop, and only the firmware can do
-                    // that: manual pwm 0 still spins.
-                    CurveAction::Firmware => background::run(
-                        || crate::hardware::fan::set_pwm_auto(),
-                        move |result| {
-                            applying_done.set(false);
-                            match result {
-                                // set_pwm_auto already logs the write itself,
-                                // at the point it observes the actual I/O
-                                // outcome; a second line here would just
-                                // double-count the same write.
-                                Ok(()) => state.set(FanState::Firmware),
-                                // The hardware is wherever it was, so the
-                                // reconciler must not remember a state it
-                                // never managed to set.
-                                Err(error) => {
-                                    state.set(FanState::Unknown);
-                                    crate::hardware::applog::error(&format!(
-                                        "fan: handing the fans to the firmware failed: {error}"
-                                    ));
-                                }
-                            }
-                        },
-                    ),
-                    CurveAction::Manual(pct) => background::run(
-                        move || crate::hardware::fan::set_pwm_percent(pct, pct),
-                        move |result| {
-                            applying_done.set(false);
-                            match result {
-                                // set_pwm_percent already logs the write
-                                // itself (without the temperature, which only
-                                // the tick knows). A second line here would
-                                // double-count the same write against the
-                                // "fan: manual pwm" grep used to verify write
-                                // volume, so the temperature is dropped
-                                // rather than logged again.
-                                Ok(()) => state.set(FanState::Manual(pct)),
-                                Err(error) => {
-                                    state.set(FanState::Unknown);
-                                    crate::hardware::applog::error(&format!(
-                                        "fan: pwm {pct}% not applied: {error}"
-                                    ));
-                                }
-                            }
-                        },
-                    ),
-                    // needs_write already excluded Hold.
-                    CurveAction::Hold => {}
-                }
-                glib::ControlFlow::Continue
-            });
-        }
+                    crate::hardware::fan::FanWrite::PwmPercent(percent) => {
+                        crate::hardware::fan::set_pwm_percent(percent, percent)
+                    }
+                    crate::hardware::fan::FanWrite::PresetAuto => {
+                        crate::hardware::fan::set_fan_mode(crate::hardware::fan::FanMode::Auto)
+                    }
+                    crate::hardware::fan::FanWrite::PresetMax => {
+                        crate::hardware::fan::set_fan_mode(crate::hardware::fan::FanMode::Max)
+                    }
+                },
+                move |result| {
+                    applying_done.set(false);
+                    match result {
+                        // FanState tracks the target, not the call: a
+                        // preset Auto and a pwm_enable=2 are both "the
+                        // firmware has them" as far as needs_write cares.
+                        Ok(()) => state.set(match intended {
+                            CurveAction::Firmware => FanState::Firmware,
+                            CurveAction::Manual(percent) => FanState::Manual(percent),
+                            CurveAction::Hold => FanState::Unknown,
+                        }),
+                        Err(error) => {
+                            state.set(FanState::Unknown);
+                            crate::hardware::applog::error(&format!(
+                                "fan: {write:?} not applied: {error}"
+                            ));
+                        }
+                    }
+                },
+            );
+            glib::ControlFlow::Continue
+        });
     }
 
     // AI assistant background monitor (opt-in, off unless ai_assistant_enabled).
