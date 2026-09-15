@@ -685,12 +685,11 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         move |result| {
                             applying_done.set(false);
                             match result {
-                                Ok(()) => {
-                                    state.set(FanState::Firmware);
-                                    crate::hardware::applog::info(
-                                        "fan: firmware curve given control of the fans",
-                                    );
-                                }
+                                // set_pwm_auto already logs the write itself,
+                                // at the point it observes the actual I/O
+                                // outcome; a second line here would just
+                                // double-count the same write.
+                                Ok(()) => state.set(FanState::Firmware),
                                 // The hardware is wherever it was, so the
                                 // reconciler must not remember a state it
                                 // never managed to set.
@@ -708,17 +707,14 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         move |result| {
                             applying_done.set(false);
                             match result {
-                                Ok(()) => {
-                                    state.set(FanState::Manual(pct));
-                                    match temp {
-                                        Some(t) => crate::hardware::applog::info(&format!(
-                                            "fan: manual pwm {pct}% (hotter die {t:.0} C)"
-                                        )),
-                                        None => crate::hardware::applog::info(&format!(
-                                            "fan: manual pwm {pct}%"
-                                        )),
-                                    }
-                                }
+                                // set_pwm_percent already logs the write
+                                // itself (without the temperature, which only
+                                // the tick knows). A second line here would
+                                // double-count the same write against the
+                                // "fan: manual pwm" grep used to verify write
+                                // volume, so the temperature is dropped
+                                // rather than logged again.
+                                Ok(()) => state.set(FanState::Manual(pct)),
                                 Err(error) => {
                                     state.set(FanState::Unknown);
                                     crate::hardware::applog::error(&format!(
