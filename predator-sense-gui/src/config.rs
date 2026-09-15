@@ -146,6 +146,28 @@ pub struct ModeBinding {
     pub scheme: String,
 }
 
+/// What the fans should do while a given power mode is active.
+///
+/// `Automatic` leaves them to the firmware, which is the only thing that can
+/// stop them: a manual pwm of 0 is not off, the EC holds a floor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FanPlan {
+    Automatic,
+    Curve { steps: [u8; 6] },
+    Fixed { percent: u8 },
+    Max,
+}
+
+/// Binds a fan plan to a power mode, keyed by `PowerProfile::to_id()` for the
+/// same reason `ModeBinding` is: the map stays readable in config.json and
+/// survives an unknown mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanBinding {
+    pub mode: String,
+    pub plan: FanPlan,
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -197,6 +219,11 @@ pub struct AppConfig {
     /// this setting sees any behavior change.
     #[serde(default = "default_fan_curve_points")]
     pub fan_curve_points: [u8; 6],
+    /// One fan plan per power mode. Empty means "not migrated yet", which
+    /// `hardware::fan::migrate_plans` fills from the pre-existing global fan
+    /// settings on first run.
+    #[serde(default)]
+    pub fan_plans: Vec<FanBinding>,
     /// Last-applied static RGB zone colors (issue #11: nothing persisted this
     /// before, so a full power cycle always reset the keyboard to its default
     /// pulsing effect). Reapplied after login/resume by the Rust hotkey service.
@@ -499,6 +526,7 @@ impl Default for AppConfig {
             fan_mode: None,
             fan_auto_curve_enabled: false,
             fan_curve_points: default_fan_curve_points(),
+            fan_plans: Vec::new(),
             rgb_static_zones: None,
             rgb_brightness: 100,
             rgb_is_static: true,
@@ -739,5 +767,36 @@ mod tests {
         let back: MacroStep = serde_json::from_str(&json).expect("step should deserialize");
         assert_eq!(back.delay_ms, 500);
         assert!(back.delay_only);
+    }
+}
+
+#[cfg(test)]
+mod fan_plan_tests {
+    use super::*;
+
+    #[test]
+    fn a_curve_plan_survives_a_config_round_trip() {
+        let binding = FanBinding {
+            mode: "balanced".into(),
+            plan: FanPlan::Curve { steps: [0, 35, 50, 65, 80, 100] },
+        };
+        let json = serde_json::to_string(&binding).expect("serialize");
+        let back: FanBinding = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.mode, "balanced");
+        assert_eq!(back.plan, FanPlan::Curve { steps: [0, 35, 50, 65, 80, 100] });
+    }
+
+    #[test]
+    fn every_plan_variant_round_trips() {
+        for plan in [
+            FanPlan::Automatic,
+            FanPlan::Max,
+            FanPlan::Fixed { percent: 40 },
+            FanPlan::Curve { steps: crate::hardware::fan::DEFAULT_FAN_CURVE },
+        ] {
+            let json = serde_json::to_string(&plan).expect("serialize");
+            let back: FanPlan = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, plan);
+        }
     }
 }
