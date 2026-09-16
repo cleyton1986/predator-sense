@@ -7,12 +7,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const PROFILE_STATE_FILE: &str = "/opt/predator-sense/current_profile";
 
-// Issue #41 (TongkyakHermit): forcing FanMode::Max on Performance/Turbo (see
-// fan_mode_for() below) matches the physical Predator/Turbo key, but some
-// users would rather keep the automatic fan curve even at those power
-// targets and accept a louder/hotter machine only if the curve itself
-// decides that's needed. Opt-in, default off - keeps the existing
-// safety-first behavior for everyone who doesn't touch the new setting.
+// Issue #41 (TongkyakHermit): Turbo follows the physical Predator/Turbo key
+// and forces FanMode::Max. The opt-in below keeps Turbo on the automatic
+// curve instead. Performance is always automatic: forcing the same fan preset
+// as Turbo made both modes behave and sound indistinguishable.
 static KEEP_FAN_AUTO_IN_PERFORMANCE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_keep_fan_auto_in_performance(v: bool) {
@@ -46,17 +44,16 @@ pub fn manage_cpu_power() -> bool {
 /// `fan_mode_for_tests` below.
 fn fan_mode_for(profile: PowerProfile, keep_auto: bool) -> crate::hardware::fan::FanMode {
     match profile {
-        PowerProfile::Performance | PowerProfile::Turbo if keep_auto => {
-            crate::hardware::fan::FanMode::Auto
-        }
-        PowerProfile::Performance | PowerProfile::Turbo => crate::hardware::fan::FanMode::Max,
+        PowerProfile::Turbo if !keep_auto => crate::hardware::fan::FanMode::Max,
         // The official app disables fan control entirely on Quiet and Eco
         // (`MUI_Fan_Disabled_message_Quiet`/`_Eco`) rather than just leaving
         // it on Auto - this app has no "disabled" fan mode, so Auto is the
         // closest match, same as Quiet already gets.
-        PowerProfile::Quiet | PowerProfile::Balanced | PowerProfile::Eco => {
-            crate::hardware::fan::FanMode::Auto
-        }
+        PowerProfile::Quiet
+        | PowerProfile::Balanced
+        | PowerProfile::Performance
+        | PowerProfile::Turbo
+        | PowerProfile::Eco => crate::hardware::fan::FanMode::Auto,
     }
 }
 const SYSFS_ROOT: &str = "/sys";
@@ -935,10 +932,9 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     // anything down. Every profile change now carries a matching fan mode,
     // best-effort like the GPU wattage write above - some models have no EC
     // fan control at all. Performance/Turbo push CPU+GPU power targets high
-    // enough that automatic fan curves alone won't keep up, so both force
-    // Max by default (matching what the physical Turbo key already does);
-    // only Quiet/Balanced leave the fan on Auto - unless the user opted into
-    // keeping Auto on Performance/Turbo too (see fan_mode_for() above).
+    // enough to need distinct cooling policies: Turbo forces Max by default
+    // (matching the physical Turbo key), while Performance stays on the
+    // firmware's dynamic curve. The opt-in setting keeps Turbo on Auto too.
     let fan_mode = fan_mode_for(profile, keep_fan_auto_in_performance());
     let _ = crate::hardware::fan::set_fan_mode(fan_mode);
 
@@ -1394,13 +1390,13 @@ mod tests {
         assert_eq!(info.epp, None);
     }
 
-    // Issue #41 (TongkyakHermit): opt-in "keep fan on Auto even in
-    // Performance/Turbo" setting.
+    // Issue #41 (TongkyakHermit): the legacy setting now only changes Turbo;
+    // Performance always uses the automatic fan curve.
     #[test]
-    fn fan_mode_defaults_to_max_on_performance_and_turbo() {
+    fn performance_uses_auto_and_turbo_defaults_to_max() {
         assert_eq!(
             fan_mode_for(PowerProfile::Performance, false),
-            crate::hardware::fan::FanMode::Max
+            crate::hardware::fan::FanMode::Auto
         );
         assert_eq!(
             fan_mode_for(PowerProfile::Turbo, false),
@@ -1409,7 +1405,7 @@ mod tests {
     }
 
     #[test]
-    fn fan_mode_stays_auto_on_performance_and_turbo_when_opted_in() {
+    fn fan_mode_stays_auto_on_turbo_when_opted_in() {
         assert_eq!(
             fan_mode_for(PowerProfile::Performance, true),
             crate::hardware::fan::FanMode::Auto

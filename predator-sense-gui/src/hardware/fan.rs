@@ -164,6 +164,12 @@ pub fn fan_curve_pct(temp_c: f64) -> u8 {
     }
 }
 
+/// A saved software curve must never override an explicit Maximum preset,
+/// including one selected through the physical Predator/Turbo key.
+pub fn software_curve_allowed(current_mode: Option<FanMode>) -> bool {
+    current_mode != Some(FanMode::Max)
+}
+
 /// Read current CPU/GPU fan PWM as percentage (0-100), if available.
 pub fn get_pwm_percent() -> Option<(u8, u8)> {
     let cpu: u16 = crate::hardware::helper::read(HelperAction::PwmCpuRead)?
@@ -176,4 +182,31 @@ pub fn get_pwm_percent() -> Option<(u8, u8)> {
         ((cpu * PERCENT_MAX) / PWM_VALUE_MAX) as u8,
         ((gpu * PERCENT_MAX) / PWM_VALUE_MAX) as u8,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fan_curve_pct, software_curve_allowed, FanMode};
+
+    #[test]
+    fn software_curve_never_stops_the_fans() {
+        assert_eq!(fan_curve_pct(-10.0), 25);
+        assert_eq!(fan_curve_pct(44.9), 25);
+        assert_eq!(fan_curve_pct(45.0), 35);
+    }
+
+    #[test]
+    fn software_curve_increases_at_each_temperature_threshold() {
+        let samples = [44.0, 45.0, 55.0, 65.0, 75.0, 85.0];
+        let speeds: Vec<u8> = samples.into_iter().map(fan_curve_pct).collect();
+        assert_eq!(speeds, [25, 35, 50, 65, 80, 100]);
+    }
+
+    #[test]
+    fn software_curve_never_overrides_the_maximum_preset() {
+        assert!(!software_curve_allowed(Some(FanMode::Max)));
+        assert!(software_curve_allowed(Some(FanMode::Auto)));
+        assert!(software_curve_allowed(Some(FanMode::Custom(50, 50))));
+        assert!(software_curve_allowed(None));
+    }
 }

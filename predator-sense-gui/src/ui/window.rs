@@ -345,7 +345,14 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         applying.set(true);
                         let applying_done = applying.clone();
                         background::run(
-                            move || crate::hardware::fan::set_pwm_percent(pct, pct),
+                            move || {
+                                let mode = crate::hardware::fan::get_fan_mode();
+                                if crate::hardware::fan::software_curve_allowed(mode) {
+                                    crate::hardware::fan::set_pwm_percent(pct, pct)
+                                } else {
+                                    Ok(())
+                                }
+                            },
                             move |_| applying_done.set(false),
                         );
                     }
