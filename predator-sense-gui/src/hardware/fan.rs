@@ -50,10 +50,14 @@ pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
     // is a real transition on the WMI `ThermalProfile` index - confirmed by
     // hand, see `PROTOCOLO-HARDWARE.md` §9.2. Only Auto needs this: Max is
     // supposed to sit at its fixed setpoint, not follow a curve.
+    crate::hardware::helper::execute(action, &[])?;
     if mode == FanMode::Auto {
+        // The thermal-profile transition must happen after FanAuto. Doing it
+        // first lets the preset write overwrite the dynamic curve we just
+        // woke and can leave some firmware at a zero/static fan setpoint.
         wake_dynamic_fan_curve();
     }
-    crate::hardware::helper::execute(action, &[])
+    Ok(())
 }
 
 /// Bounces the firmware thermal-profile index off itself through another
