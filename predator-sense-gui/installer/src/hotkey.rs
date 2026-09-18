@@ -509,7 +509,12 @@ pub(crate) fn run() -> AppResult {
                     Ok(false) => {}
                     Err(error) => {
                         logger.error(format!("Tecla PredatorSense: leitura falhou: {error}"));
-                        devices.remove(index);
+                        // Queued for reopening like every other branch here. It
+                        // used to be dropped outright, so one transient read
+                        // error - a re-enumeration on resume, say - disabled
+                        // the key until the daemon was restarted.
+                        let (path, _, is_ec) = devices.remove(index);
+                        lost.push((path, is_ec));
                     }
                 }
                 continue;
