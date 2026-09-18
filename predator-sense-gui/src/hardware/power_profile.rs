@@ -29,6 +29,8 @@ use std::sync::atomic::{AtomicBool, AtomicI8, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::config::PowerSourceAction;
+
 use super::profile::{policy_view, set_profile, PowerProfile};
 
 const CRITICAL_BATTERY_PCT: u32 = 15;
@@ -47,7 +49,8 @@ const CRITICAL_BATTERY_PCT: u32 = 15;
 /// window before the policy reasserts itself.
 const OVERRIDE_GRACE: Duration = Duration::from_secs(60);
 
-static ENABLED: AtomicBool = AtomicBool::new(false);
+/// What a plug or unplug does, as [`PowerSourceAction::index`].
+static ACTION: AtomicI8 = AtomicI8::new(1);
 /// Automatic Eco below a battery threshold. Separate from the hard-coded
 /// [`CRITICAL_BATTERY_PCT`] floor below: that one is a safety net at 15%, this
 /// is the user's own "save power from here on" line, and it drops to Eco
@@ -78,12 +81,23 @@ static PENDING_OVERRIDE: Mutex<Option<(OutOfPolicyState, Instant)>> = Mutex::new
 /// not count as a transition and move the mode out from under the user.
 static LAST_AC: AtomicI8 = AtomicI8::new(-1);
 
-pub fn set_auto(v: bool) {
-    ENABLED.store(v, Ordering::Relaxed);
+pub fn set_action(action: PowerSourceAction) {
+    ACTION.store(
+        match action {
+            PowerSourceAction::Keep => 0,
+            PowerSourceAction::MoveIfDisallowed => 1,
+            PowerSourceAction::AlwaysSet => 2,
+        },
+        Ordering::Relaxed,
+    );
 }
 
-pub fn is_auto() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+fn action() -> PowerSourceAction {
+    match ACTION.load(Ordering::Relaxed) {
+        0 => PowerSourceAction::Keep,
+        2 => PowerSourceAction::AlwaysSet,
+        _ => PowerSourceAction::MoveIfDisallowed,
+    }
 }
 
 pub fn set_auto_eco(enabled: bool, threshold: u32) {
@@ -152,13 +166,16 @@ fn battery_capacity_pct() -> Option<u32> {
 /// a change of power source, so they keep running on every tick.
 ///
 /// `None` on AC: neither rule has anything to say while plugged in.
+///
+/// Gated by the automatic-Eco switch alone, not by what a power-source change
+/// does. They were both behind one master before, so turning the power-source
+/// behaviour off silently stopped the "switch to Eco below X%" setting from
+/// working while its own switch still read as on.
 fn level_rule(ac: bool, current: Option<PowerProfile>, battery_pct: Option<u32>) -> Option<PowerProfile> {
-    if ac {
+    if ac || !AUTO_ECO.load(Ordering::Relaxed) {
         return None;
     }
-    if AUTO_ECO.load(Ordering::Relaxed)
-        && battery_pct.is_some_and(|pct| pct < AUTO_ECO_PCT.load(Ordering::Relaxed))
-    {
+    if battery_pct.is_some_and(|pct| pct < AUTO_ECO_PCT.load(Ordering::Relaxed)) {
         return match current {
             Some(PowerProfile::Eco) => None,
             _ => Some(PowerProfile::Eco),
@@ -202,11 +219,23 @@ fn nearest(to: PowerProfile, among: &[PowerProfile]) -> Option<PowerProfile> {
 /// when the lists cannot answer: an empty `into`, or a machine whose current
 /// mode cannot be read at all.
 fn transition_target(
+    action: PowerSourceAction,
     current: Option<PowerProfile>,
     into: &[PowerProfile],
     other: &[PowerProfile],
     fallback: PowerProfile,
 ) -> Option<PowerProfile> {
+    match action {
+        // Nothing here moves the mode; the caller should not even be asking.
+        PowerSourceAction::Keep => return None,
+        // The configured target, whatever the machine is on and whatever the
+        // lists say. This is the only variant where those targets mean
+        // anything, which is why the UI only offers them here.
+        PowerSourceAction::AlwaysSet => {
+            return (current != Some(fallback)).then_some(fallback);
+        }
+        PowerSourceAction::MoveIfDisallowed => {}
+    }
     let Some(current) = current else {
         // The mode cannot be read at all. Moving the machine now would be
         // guessing: this rule exists to move a mode the new source does not
@@ -256,16 +285,6 @@ fn same_state(seen: OutOfPolicyState, now: OutOfPolicyState) -> bool {
 /// Call periodically. Moves the mode on a power-source transition, and holds
 /// the two battery-level rules; a no-op at every other moment.
 pub fn check() {
-    if !is_auto() {
-        clear_pending_override();
-        // Still tracked while the feature is off, or turning it back on would
-        // read as a transition and move the mode without anything having been
-        // plugged or unplugged.
-        if let Some(ac) = ac_online() {
-            LAST_AC.store(i8::from(ac), Ordering::Relaxed);
-        }
-        return;
-    }
     let Some(ac) = ac_online() else { return };
     let previous = LAST_AC.swap(i8::from(ac), Ordering::Relaxed);
     let transitioned = previous >= 0 && previous != i8::from(ac);
@@ -293,7 +312,7 @@ pub fn check() {
     // would have picked.
     let level = level_rule(ac, current, battery_capacity_pct());
 
-    if transitioned {
+    if transitioned && action() != PowerSourceAction::Keep {
         // A plug or unplug is a discrete event the user caused, so whichever
         // rule answers it acts at once. The grace window below exists to stop
         // a timer re-deciding a steady state, and this is not one: making a
@@ -311,7 +330,9 @@ pub fn check() {
             } else {
                 (CYCLE_BATTERY.lock().unwrap(), CYCLE_AC.lock().unwrap())
             };
-            level.or_else(|| transition_target(current, &into, &other, fallback_for(ac)))
+            level.or_else(|| {
+                transition_target(action(), current, &into, &other, fallback_for(ac))
+            })
         };
         // The mode moving without the user asking needs to say why in terms of
         // what it read, not just what it decided: every wrong answer this rule
@@ -430,6 +451,10 @@ mod tests {
         AUTO_ECO_PCT.store(threshold, Ordering::Relaxed);
     }
 
+    /// Every test below that predates the three-way choice was asserting this
+    /// one behaviour, so it is named rather than repeated.
+    const MOVE: PowerSourceAction = PowerSourceAction::MoveIfDisallowed;
+
     const ECO: PowerProfile = PowerProfile::Eco;
     const QUIET: PowerProfile = PowerProfile::Quiet;
     const BALANCED: PowerProfile = PowerProfile::Balanced;
@@ -464,12 +489,12 @@ mod tests {
         let battery = [ECO, QUIET, BALANCED];
         let ac = [BALANCED, PERFORMANCE, TURBO];
         assert_eq!(
-            transition_target(Some(BALANCED), &ac, &battery, PERFORMANCE),
+            transition_target(MOVE, Some(BALANCED), &ac, &battery, PERFORMANCE),
             None,
             "plugging in while on a mode AC already allows must not move it"
         );
         assert_eq!(
-            transition_target(Some(BALANCED), &battery, &ac, QUIET),
+            transition_target(MOVE, Some(BALANCED), &battery, &ac, QUIET),
             None,
             "and neither must unplugging"
         );
@@ -480,7 +505,7 @@ mod tests {
         let battery = [ECO, QUIET, BALANCED];
         let ac = [BALANCED, PERFORMANCE, TURBO];
         assert_eq!(
-            transition_target(Some(TURBO), &battery, &ac, QUIET),
+            transition_target(MOVE, Some(TURBO), &battery, &ac, QUIET),
             Some(BALANCED)
         );
     }
@@ -490,11 +515,11 @@ mod tests {
         let battery = [ECO, QUIET, BALANCED];
         let ac = [BALANCED, PERFORMANCE, TURBO];
         assert_eq!(
-            transition_target(Some(ECO), &ac, &battery, PERFORMANCE),
+            transition_target(MOVE, Some(ECO), &ac, &battery, PERFORMANCE),
             Some(BALANCED)
         );
         assert_eq!(
-            transition_target(Some(QUIET), &ac, &battery, PERFORMANCE),
+            transition_target(MOVE, Some(QUIET), &ac, &battery, PERFORMANCE),
             Some(BALANCED)
         );
     }
@@ -507,11 +532,11 @@ mod tests {
         let battery = [ECO, QUIET, BALANCED];
         let ac = [QUIET, BALANCED, TURBO];
         assert_eq!(
-            transition_target(Some(TURBO), &battery, &ac, QUIET),
+            transition_target(MOVE, Some(TURBO), &battery, &ac, QUIET),
             Some(BALANCED)
         );
         assert_eq!(
-            transition_target(Some(ECO), &ac, &battery, TURBO),
+            transition_target(MOVE, Some(ECO), &ac, &battery, TURBO),
             Some(QUIET)
         );
     }
@@ -530,11 +555,11 @@ mod tests {
         let battery = [ECO, QUIET];
         let ac = [PERFORMANCE, TURBO];
         assert_eq!(
-            transition_target(Some(TURBO), &battery, &ac, BALANCED),
+            transition_target(MOVE, Some(TURBO), &battery, &ac, BALANCED),
             Some(QUIET)
         );
         assert_eq!(
-            transition_target(Some(ECO), &ac, &battery, BALANCED),
+            transition_target(MOVE, Some(ECO), &ac, &battery, BALANCED),
             Some(PERFORMANCE)
         );
     }
@@ -545,7 +570,7 @@ mod tests {
     #[test]
     fn the_configured_target_is_the_fallback_when_the_new_source_has_no_list() {
         assert_eq!(
-            transition_target(Some(TURBO), &[], &[ECO, QUIET], BALANCED),
+            transition_target(MOVE, Some(TURBO), &[], &[ECO, QUIET], BALANCED),
             Some(BALANCED)
         );
     }
@@ -557,10 +582,10 @@ mod tests {
     #[test]
     fn an_unreadable_mode_is_left_alone_rather_than_guessed_at() {
         assert_eq!(
-            transition_target(None, &[ECO, QUIET], &[TURBO], BALANCED),
+            transition_target(MOVE, None, &[ECO, QUIET], &[TURBO], BALANCED),
             None
         );
-        assert_eq!(transition_target(None, &[], &[], BALANCED), None);
+        assert_eq!(transition_target(MOVE, None, &[], &[], BALANCED), None);
     }
 
     /// The whole point of the rewrite: nothing here fires unless the power
@@ -574,9 +599,50 @@ mod tests {
         let battery = [ECO, QUIET, BALANCED];
         let ac = [BALANCED, PERFORMANCE, TURBO];
         assert_eq!(
-            transition_target(Some(PERFORMANCE), &battery, &ac, QUIET),
+            transition_target(MOVE, Some(PERFORMANCE), &battery, &ac, QUIET),
             Some(BALANCED),
             "the rule itself still has an answer; check() is what withholds it"
+        );
+    }
+
+    /// "Keep my mode" means exactly that: a plug or unplug decides nothing,
+    /// even when the mode is one the new source's list does not contain.
+    #[test]
+    fn keeping_the_mode_moves_nothing() {
+        let battery = [ECO, QUIET, BALANCED];
+        let ac = [BALANCED, PERFORMANCE, TURBO];
+        assert_eq!(
+            transition_target(PowerSourceAction::Keep, Some(TURBO), &battery, &ac, QUIET),
+            None
+        );
+        assert_eq!(
+            transition_target(PowerSourceAction::Keep, None, &[], &[], QUIET),
+            None
+        );
+    }
+
+    /// "Always use the mode set below" ignores the lists entirely, which is
+    /// the whole point: it is the predictable option for someone who does not
+    /// want to reason about what both sources allow.
+    #[test]
+    fn always_set_goes_to_the_configured_target() {
+        let battery = [ECO, QUIET, BALANCED];
+        let ac = [BALANCED, PERFORMANCE, TURBO];
+        const ALWAYS: PowerSourceAction = PowerSourceAction::AlwaysSet;
+        assert_eq!(
+            transition_target(ALWAYS, Some(TURBO), &battery, &ac, QUIET),
+            Some(QUIET)
+        );
+        // Balanced is allowed on battery and would survive under the other
+        // behaviour; here it still goes to the configured target.
+        assert_eq!(
+            transition_target(ALWAYS, Some(BALANCED), &battery, &ac, QUIET),
+            Some(QUIET)
+        );
+        // Already there is nothing to do, so no redundant write.
+        assert_eq!(
+            transition_target(ALWAYS, Some(QUIET), &battery, &ac, QUIET),
+            None
         );
     }
 
@@ -592,10 +658,29 @@ mod tests {
     #[test]
     fn below_the_critical_line_forces_quiet() {
         let _guard = SERIAL.lock().unwrap();
-        with_auto_eco(false, 30);
+        with_auto_eco(true, 0); // threshold 0 so only the critical rule can fire
         assert_eq!(level_rule(false, Some(BALANCED), Some(5)), Some(QUIET));
         assert_eq!(level_rule(false, Some(TURBO), Some(14)), Some(QUIET));
         assert_eq!(level_rule(false, Some(BALANCED), Some(15)), None);
+    }
+
+    /// Both battery-level rules answer to the automatic-Eco switch, including
+    /// the critical floor.
+    ///
+    /// That is a deliberate change. They used to sit behind the power-source
+    /// setting, which meant turning that off silently stopped "switch to Eco
+    /// below X%" from working while its own switch still read as on. Tying
+    /// them to the switch whose label describes them is the honest arrangement,
+    /// and the cost is that someone who turns that switch off also loses the
+    /// 15% Quiet floor. That floor saves charge rather than protecting
+    /// hardware, and a user who has turned battery management off has said what
+    /// they want.
+    #[test]
+    fn the_battery_rules_answer_to_their_own_switch() {
+        let _guard = SERIAL.lock().unwrap();
+        with_auto_eco(false, 30);
+        assert_eq!(level_rule(false, Some(BALANCED), Some(5)), None);
+        assert_eq!(level_rule(false, Some(BALANCED), Some(29)), None);
     }
 
     /// Eco is at least as conservative as Quiet, so the critical rule has
