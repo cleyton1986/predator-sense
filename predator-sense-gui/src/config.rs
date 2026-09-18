@@ -355,6 +355,14 @@ pub struct AppConfig {
     /// Post a desktop notification whenever the active mode changes, from any
     /// source: the mode key, this app, the desktop's own power menu, or the
     /// battery rules.
+    /// What a plug or unplug does - see [`PowerSourceAction`].
+    ///
+    /// `None` means a config written before this existed, and is resolved
+    /// through [`AppConfig::power_source_action`] from the old boolean so an
+    /// upgrade keeps behaving as it did rather than silently switching a
+    /// feature on.
+    #[serde(default)]
+    pub power_source_action: Option<PowerSourceAction>,
     #[serde(default)]
     pub notify_mode_changes: bool,
     #[serde(default)]
@@ -499,6 +507,30 @@ fn default_idle_secs() -> u32 {
     30
 }
 
+/// What a plug or unplug does to the active mode.
+///
+/// Replaces the older `auto_profile_ac` boolean, which could only say "leave it
+/// alone" or "do the clever thing", and left the two configured targets on
+/// screen doing nothing whenever the mode-key lists were set - which is almost
+/// always. Each variant now decides whether those targets apply at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum PowerSourceAction {
+    /// Never move the mode. Plugging in and unplugging change nothing.
+    #[serde(rename = "keep")]
+    Keep,
+    /// Move only when the new source does not allow the current mode, landing
+    /// on the nearest mode both mode-key lists allow. Balanced survives an
+    /// unplug; Turbo does not.
+    #[default]
+    #[serde(rename = "move-if-disallowed")]
+    MoveIfDisallowed,
+    /// Always switch to the mode configured for that source, whatever the
+    /// current one is. The only variant where `profile_ac` and
+    /// `profile_battery` mean anything.
+    #[serde(rename = "always-set")]
+    AlwaysSet,
+}
+
 /// How the app's five modes fold onto the desktop's three power profiles.
 ///
 /// Both variants agree at the ends, Eco to power-saver and Turbo to
@@ -513,6 +545,24 @@ pub enum PpdMap {
     /// Quiet sits with Balanced instead, leaving power saver for Eco alone.
     #[serde(rename = "quiet-is-balanced")]
     QuietIsBalanced,
+}
+
+impl AppConfig {
+    /// What a plug or unplug should do, resolving a config that predates the
+    /// setting.
+    ///
+    /// Before this was a choice it was the `auto_profile_ac` boolean, so a
+    /// config without the new key is read through the old one: off meant "do
+    /// not touch my mode", on meant what is now `MoveIfDisallowed`. Without
+    /// this an upgrade would hand everyone the enum's default and quietly turn
+    /// the feature on for anyone who had deliberately turned it off.
+    pub fn power_source_action(&self) -> PowerSourceAction {
+        self.power_source_action.unwrap_or(if self.auto_profile_ac {
+            PowerSourceAction::MoveIfDisallowed
+        } else {
+            PowerSourceAction::Keep
+        })
+    }
 }
 
 fn default_auto_eco_threshold() -> u32 {
@@ -594,6 +644,7 @@ impl Default for AppConfig {
             mode_default: None,
             auto_eco_enabled: false,
             auto_eco_threshold: default_auto_eco_threshold(),
+            power_source_action: None,
             notify_mode_changes: false,
             ppd_sync_enabled: false,
             ppd_sync_map: PpdMap::default(),

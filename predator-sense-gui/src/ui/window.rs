@@ -282,7 +282,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // mode-key cycles the power policy came up with.
         crate::hardware::applog::set_enabled(cfg.debug_logging);
         crate::hardware::alerts::set_enabled(cfg.temp_alerts);
-        crate::hardware::power_profile::set_auto(cfg.auto_profile_ac);
+        crate::hardware::power_profile::set_action(cfg.power_source_action());
         crate::hardware::power_profile::set_target_profiles(cfg.profile_ac, cfg.profile_battery);
         crate::hardware::power_profile::set_auto_eco(cfg.auto_eco_enabled, cfg.auto_eco_threshold);
         // The same lists the mode key uses are what a power-source change

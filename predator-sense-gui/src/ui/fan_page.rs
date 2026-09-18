@@ -1597,11 +1597,34 @@ pub fn build_mode_key_section() -> gtk::Box {
     power.set_title(crate::i18n::t("power_source_section"));
     power.set_description(Some(crate::i18n::t("power_source_section_desc")));
 
-    let auto_row = adw::SwitchRow::new();
-    auto_row.set_title(crate::i18n::t("auto_profile_ac"));
-    auto_row.set_subtitle(crate::i18n::t("auto_profile_ac_desc"));
-    auto_row.set_active(cfg.auto_profile_ac);
-    power.add(&auto_row);
+    // One choice rather than a switch plus two targets that mostly did nothing.
+    // Each option decides for itself whether those targets apply, so they are
+    // only sensitive under the one that reads them.
+    let action_choices = [
+        (config::PowerSourceAction::Keep, "power_action_keep"),
+        (
+            config::PowerSourceAction::MoveIfDisallowed,
+            "power_action_move_if_disallowed",
+        ),
+        (config::PowerSourceAction::AlwaysSet, "power_action_always_set"),
+    ];
+    let action_labels: Vec<&str> = action_choices
+        .iter()
+        .map(|(_, key)| crate::i18n::t(key))
+        .collect();
+    let action_row = adw::ComboRow::new();
+    action_row.set_title(crate::i18n::t("power_action"));
+    action_row.set_subtitle(crate::i18n::t("power_action_desc"));
+    action_row.set_model(Some(&gtk::StringList::new(&action_labels)));
+    let current_action = cfg.power_source_action();
+    action_row.set_selected(
+        action_choices
+            .iter()
+            .position(|(a, _)| *a == current_action)
+            .unwrap_or(1) as u32,
+    );
+    crate::ui::scroll_guard::redirect_scroll_to_page(&action_row);
+    power.add(&action_row);
 
     // Eco is battery-only in the official app, so the AC list keeps the four
     // choices it always had and only the battery list carries it. Position is
@@ -1632,7 +1655,10 @@ pub fn build_mode_key_section() -> gtk::Box {
             .position(|(_, p)| *p == cfg.profile_ac)
             .unwrap_or(1) as u32,
     );
-    ac_row.set_sensitive(cfg.auto_profile_ac);
+    ac_row.set_sensitive(current_action == config::PowerSourceAction::AlwaysSet);
+    // A wheel tick over a dropdown changes its value, and this page
+    // scrolls. See ui::scroll_guard.
+    crate::ui::scroll_guard::redirect_scroll_to_page(&ac_row);
     ac_row.connect_selected_notify(move |row| {
         let Some((_, profile)) = ac_choices.get(row.selected() as usize) else {
             return; // GTK_INVALID_LIST_POSITION, not a real pick
@@ -1658,7 +1684,10 @@ pub fn build_mode_key_section() -> gtk::Box {
             .position(|(_, p)| *p == cfg.profile_battery)
             .unwrap_or(1) as u32,
     );
-    battery_row.set_sensitive(cfg.auto_profile_ac);
+    battery_row.set_sensitive(current_action == config::PowerSourceAction::AlwaysSet);
+    // A wheel tick over a dropdown changes its value, and this page
+    // scrolls. See ui::scroll_guard.
+    crate::ui::scroll_guard::redirect_scroll_to_page(&battery_row);
     battery_row.connect_selected_notify(move |row| {
         let Some((_, profile)) = battery_choices.get(row.selected() as usize) else {
             return;
@@ -1673,15 +1702,20 @@ pub fn build_mode_key_section() -> gtk::Box {
     {
         let ac_row = ac_row.clone();
         let battery_row = battery_row.clone();
-        auto_row.connect_active_notify(move |row| {
-            let active = row.is_active();
+        action_row.connect_selected_notify(move |row| {
+            let Some((action, _)) = action_choices.get(row.selected() as usize) else {
+                return;
+            };
             let mut c = config::load_app_config();
-            c.auto_profile_ac = active;
+            c.power_source_action = Some(*action);
+            // Kept in step so anything still reading the old boolean - and a
+            // downgrade to a build that only knows it - sees the same intent.
+            c.auto_profile_ac = *action != config::PowerSourceAction::Keep;
             let _ = config::save_app_config(&c);
-            crate::hardware::power_profile::set_auto(active);
-            // The two fall-backs only ever apply through this rule.
-            ac_row.set_sensitive(active);
-            battery_row.set_sensitive(active);
+            crate::hardware::power_profile::set_action(*action);
+            let targets_apply = *action == config::PowerSourceAction::AlwaysSet;
+            ac_row.set_sensitive(targets_apply);
+            battery_row.set_sensitive(targets_apply);
         });
     }
     page.append(&power);
@@ -1743,6 +1777,9 @@ pub fn build_mode_key_section() -> gtk::Box {
             .unwrap_or(0) as u32,
     );
     map_row.set_sensitive(cfg.ppd_sync_enabled);
+    // A wheel tick over a dropdown changes its value, and this page
+    // scrolls. See ui::scroll_guard.
+    crate::ui::scroll_guard::redirect_scroll_to_page(&map_row);
     map_row.connect_selected_notify(move |row| {
         let Some((map, _)) = map_choices.get(row.selected() as usize) else {
             return;
