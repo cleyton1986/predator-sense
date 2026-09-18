@@ -50,9 +50,21 @@ pub fn resumed() -> bool {
     };
     let current_ms = (current * 1000.0).max(0.0) as u64;
     let previous_ms = LAST_OFFSET_MS.swap(current_ms, Ordering::Relaxed);
+    is_resume(previous_ms, current_ms)
+}
+
+/// The decision behind [`resumed`], separated from the clock so it can be
+/// tested with values rather than with whatever this machine's uptime happens
+/// to be.
+///
+/// `previous_ms == u64::MAX` is the "no baseline yet" sentinel.
+fn is_resume(previous_ms: u64, current_ms: u64) -> bool {
     if previous_ms == u64::MAX {
         return false;
     }
+    // Saturating: the gap between these two clocks only ever grows, but if it
+    // ever appeared to shrink this must read as no resume rather than wrap
+    // into an enormous one.
     let grew_by = current_ms.saturating_sub(previous_ms) as f64 / 1000.0;
     grew_by > RESUME_THRESHOLD_SECS
 }
@@ -76,25 +88,47 @@ mod tests {
         assert!(!resumed());
     }
 
+    // The decision is tested with values rather than against the clock. The
+    // previous version of these two tests derived its "30 s ago" baseline from
+    // `suspend_offset()`, which is the time this machine has *actually* spent
+    // suspended: on a host that has not suspended this boot that reads 0, the
+    // `saturating_sub` floored at 0, and the test measured a 0 s gap and
+    // failed. It passed only on a machine that happened to have suspended
+    // already, and failed every time on a fresh boot or in CI.
+
     #[test]
-    fn a_jump_past_the_threshold_reads_as_a_resume_once() {
-        let Some(now) = suspend_offset() else {
-            return; // no clocks in this environment; nothing to assert
-        };
-        let now_ms = (now * 1000.0).max(0.0) as u64;
-        // Pretend the last sample was taken 30 s of suspend ago.
-        LAST_OFFSET_MS.store(now_ms.saturating_sub(30_000), Ordering::Relaxed);
-        assert!(resumed(), "a 30 s gap is a suspend");
-        assert!(!resumed(), "and it must not fire again on the next poll");
+    fn the_first_sample_is_only_a_baseline() {
+        assert!(!is_resume(u64::MAX, 31_000), "nothing to compare against yet");
     }
 
     #[test]
-    fn a_jump_under_the_threshold_is_ignored() {
-        let Some(now) = suspend_offset() else {
-            return;
-        };
-        let now_ms = (now * 1000.0).max(0.0) as u64;
-        LAST_OFFSET_MS.store(now_ms.saturating_sub(200), Ordering::Relaxed);
-        assert!(!resumed(), "200 ms of drift is scheduling noise, not a suspend");
+    fn a_gap_past_the_threshold_is_a_resume() {
+        assert!(is_resume(1_000, 31_000), "30 s of suspend is a resume");
+    }
+
+    #[test]
+    fn a_gap_under_the_threshold_is_scheduling_noise() {
+        assert!(!is_resume(1_000, 1_200), "200 ms of drift is not a suspend");
+    }
+
+    #[test]
+    fn the_threshold_itself_is_not_a_resume() {
+        // The comparison is `>`, so exactly the threshold must not fire.
+        assert!(!is_resume(0, (RESUME_THRESHOLD_SECS * 1000.0) as u64));
+        assert!(is_resume(0, (RESUME_THRESHOLD_SECS * 1000.0) as u64 + 1));
+    }
+
+    #[test]
+    fn the_same_sample_twice_is_not_a_resume() {
+        // This is what makes `resumed()` fire once: it swaps the new value in,
+        // so the poll straight after a real jump compares a gap of zero.
+        assert!(!is_resume(31_000, 31_000));
+    }
+
+    #[test]
+    fn a_gap_that_went_backwards_is_not_a_resume() {
+        // The gap between these clocks only grows, but if it ever appeared to
+        // shrink the subtraction must floor rather than wrap into a huge gap.
+        assert!(!is_resume(5_000, 1_000));
     }
 }
