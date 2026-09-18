@@ -501,36 +501,64 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             }
         });
 
-        // The event source. Absent on an older module, in which case the tick
-        // below is the whole mechanism and behaves exactly as it used to.
-        match std::fs::File::open(crate::hardware::thermal_profile::index_path()) {
-            Ok(file) => {
-                use std::io::{Read, Seek};
-                use std::os::unix::io::AsRawFd;
-                let fd = file.as_raw_fd();
-                let react = react_to_mode.clone();
-                let mut file = file;
-                glib::unix_fd_add_local(fd, glib::IOCondition::PRI, move |_, _| {
-                    // A sysfs attribute re-arms its notification only once the
-                    // new value has been read, so this read is required rather
-                    // than informational: without it the source would fire
-                    // continuously. `file` is owned by this closure, which is
-                    // also what keeps the descriptor alive.
-                    let mut value = String::new();
-                    let _ = file.rewind();
-                    let _ = file.read_to_string(&mut value);
-                    react();
-                    glib::ControlFlow::Continue
-                });
-                crate::hardware::applog::info(
-                    "mode changes are event-driven; the five second tick is a backstop",
-                );
+        // Two event sources, because neither sees every change. Measured with
+        // the app stopped so nothing else could react:
+        //
+        //   writing the acer-wmi attribute  -> notifies it, NOT platform_profile
+        //   writing platform_profile        -> notifies it, NOT the acer attribute
+        //
+        // The first is this app's own writes and the mode key, which the
+        // driver handles in-kernel. The second is anything going through the
+        // standard interface, which is how the desktop's power menu changes the
+        // mode. Watching only one of them leaves the other on the five second
+        // backstop, so both are watched and the closure is idempotent anyway.
+        //
+        // `platform_profile` is also the portable half: it exists on any
+        // machine with a platform profile driver, including one running a
+        // module without the `sysfs_notify` this fork adds.
+        let mut watched = Vec::new();
+        for path in [
+            crate::hardware::thermal_profile::index_path(),
+            std::path::PathBuf::from("/sys/firmware/acpi/platform_profile"),
+        ] {
+            match std::fs::File::open(&path) {
+                Ok(file) => {
+                    use std::io::{Read, Seek};
+                    use std::os::unix::io::AsRawFd;
+                    let fd = file.as_raw_fd();
+                    let react = react_to_mode.clone();
+                    let mut file = file;
+                    glib::unix_fd_add_local(fd, glib::IOCondition::PRI, move |_, _| {
+                        // A sysfs attribute re-arms its notification only once
+                        // the new value has been read, so this read is required
+                        // rather than informational: without it the source would
+                        // fire continuously. `file` is owned by this closure,
+                        // which is also what keeps the descriptor alive.
+                        let mut value = String::new();
+                        let _ = file.rewind();
+                        let _ = file.read_to_string(&mut value);
+                        react();
+                        glib::ControlFlow::Continue
+                    });
+                    watched.push(path.display().to_string());
+                }
+                Err(error) => {
+                    crate::hardware::applog::info(&format!(
+                        "not watching {} ({error}); changes made through it wait for the tick",
+                        path.display()
+                    ));
+                }
             }
-            Err(error) => {
-                crate::hardware::applog::info(&format!(
-                    "no thermal profile attribute to wait on ({error}); mode changes are polled"
-                ));
-            }
+        }
+        if watched.is_empty() {
+            crate::hardware::applog::info(
+                "no mode attribute to wait on; mode changes are polled every five seconds",
+            );
+        } else {
+            crate::hardware::applog::info(&format!(
+                "mode changes are event-driven on {}; the five second tick is a backstop",
+                watched.join(" and ")
+            ));
         }
 
         glib::timeout_add_seconds_local(5, move || {
