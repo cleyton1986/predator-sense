@@ -802,7 +802,10 @@ pub fn load_app_config_source() -> AppConfigSource {
     let source = read_app_config_at(&config_dir().join("config.json"));
     if let AppConfigSource::Unreadable(error) = &source {
         if !CONFIG_UNREADABLE_LOGGED.swap(true, Ordering::Relaxed) {
-            crate::hardware::applog::error(&format!(
+            // `error_always`, not `error`: `debug_logging` comes from the
+            // file that just failed to parse, so the gate is off exactly when
+            // this needs saying.
+            crate::hardware::applog::error_always(&format!(
                 "config: config.json exists but could not be loaded, running on defaults \
                  without overwriting it: {error}"
             ));
@@ -875,6 +878,96 @@ pub fn save_app_config(config: &AppConfig) -> Result<(), String> {
     fs::write(&path, json).map_err(|e| format!("Erro ao salvar config: {}", e))
 }
 
+/// A timestamp shaped for a filename, `2026-09-18-1611`.
+///
+/// The same `localtime_r` approach `applog::timestamp` uses, for the same
+/// reason: nothing in this crate pulls in a date library for two format
+/// strings.
+fn file_timestamp() -> String {
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        format!(
+            "{:04}-{:02}-{:02}-{:02}{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min
+        )
+    }
+}
+
+/// The name an exported settings file is offered under.
+pub fn suggested_export_filename() -> String {
+    format!("predator-sense-settings-{}.json", file_timestamp())
+}
+
+/// Write a config to an arbitrary path, pretty printed.
+pub fn write_app_config_to(path: &Path, config: &AppConfig) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| e.to_string())
+}
+
+/// Write the settings currently in force to `path`.
+///
+/// Serializes the loaded config rather than copying config.json byte for
+/// byte, so an exported file is always one this build can read back.
+///
+/// The `Unreadable` arm is why this returns a `Result` at all. A config.json
+/// this build cannot parse leaves the app running on defaults, deliberately,
+/// so that the file is not overwritten; exporting those defaults under the
+/// user's own filename would hand them a backup with none of their settings
+/// in it and no hint anything was wrong. `Missing` is a different case and not
+/// an error: with no file at all the app really is running on defaults, so
+/// defaults are honestly what there is to export.
+pub fn export_app_config_to(path: &Path) -> Result<(), String> {
+    let config = match load_app_config_source() {
+        AppConfigSource::Loaded(config) => config,
+        AppConfigSource::Missing => AppConfig::default(),
+        AppConfigSource::Unreadable(error) => return Err(error),
+    };
+    write_app_config_to(path, &config)
+}
+
+/// Read a settings file back, without changing anything yet.
+///
+/// Validated through the very `read_app_config_at` the app starts up with, so
+/// a file that would send the app to defaults is rejected here, while the
+/// user's own settings are still on disk, rather than after it has replaced
+/// them.
+pub fn import_app_config_from(path: &Path) -> Result<AppConfig, String> {
+    match read_app_config_at(path) {
+        AppConfigSource::Loaded(config) => Ok(config),
+        AppConfigSource::Missing => Err("no such file".to_string()),
+        AppConfigSource::Unreadable(error) => Err(error),
+    }
+}
+
+/// Copy `from` into `dir` under a timestamped name, if it exists at all.
+///
+/// A byte copy, not a re-serialize: a backup exists to hold exactly what was
+/// there, and that includes a file this build cannot parse - which is the one
+/// it matters most not to lose, since it is still the only record of what the
+/// user had set.
+pub fn backup_config_file(from: &Path, dir: &Path) -> Result<Option<PathBuf>, String> {
+    if !from.exists() {
+        return Ok(None);
+    }
+    let to = dir.join(format!("config-backup-{}.json", file_timestamp()));
+    fs::copy(from, &to).map_err(|e| e.to_string())?;
+    Ok(Some(to))
+}
+
+/// Put the current config aside before something replaces it wholesale.
+///
+/// `None` means there was no config file yet, so there was nothing to lose.
+pub fn backup_app_config() -> Result<Option<PathBuf>, String> {
+    ensure_dirs();
+    backup_config_file(&config_dir().join("config.json"), &config_dir())
+}
+
 fn sanitize_filename(name: &str) -> String {
     name.chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == ' ')
@@ -942,6 +1035,119 @@ mod tests {
         let back: MacroStep = serde_json::from_str(&json).expect("step should deserialize");
         assert_eq!(back.delay_ms, 500);
         assert!(back.delay_only);
+    }
+
+    /// The round trip the feature exists for. Not a serde smoke test: the
+    /// fields checked here are the ones that are expensive to rebuild by
+    /// hand - per-mode fan plans, lighting schemes, the mode-key cycles -
+    /// which is exactly what a user would be exporting to keep.
+    #[test]
+    fn an_exported_settings_file_imports_back_unchanged() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-export-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("export.json");
+
+        let mut config = AppConfig::default();
+        config.fan_plans = vec![
+            FanBinding {
+                mode: "quiet".to_string(),
+                plan: FanPlan::Curve {
+                    steps: [15, 25, 35, 50, 80, 100],
+                },
+            },
+            FanBinding {
+                mode: "turbo".to_string(),
+                plan: FanPlan::Max,
+            },
+        ];
+        config.saved_colors = vec!["#ff0000".to_string()];
+        config.font_scale = 1.25;
+
+        write_app_config_to(&path, &config).expect("export");
+        let back = import_app_config_from(&path).expect("import");
+
+        assert_eq!(back.fan_plans.len(), 2);
+        assert_eq!(back.fan_plans[0].mode, "quiet");
+        assert_eq!(
+            back.fan_plans[0].plan,
+            FanPlan::Curve {
+                steps: [15, 25, 35, 50, 80, 100]
+            }
+        );
+        assert_eq!(back.fan_plans[1].plan, FanPlan::Max);
+        assert_eq!(back.saved_colors, vec!["#ff0000".to_string()]);
+        assert!((back.font_scale - 1.25).abs() < f64::EPSILON);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    /// Import has to refuse before it replaces, not after. A file that does
+    /// not parse is precisely the one that would leave the app running on
+    /// defaults with no visible sign, which is what the feature is meant to
+    /// rescue people from, not to cause.
+    #[test]
+    fn an_unreadable_settings_file_is_rejected_by_import() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-import-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("not-a-config.json");
+
+        // Valid JSON, wrong content: this is the shape that slips past a
+        // parse-only check, and it is also what a hand-edited config looks
+        // like when an enum's tag is written the wrong way round.
+        fs::write(&path, r#"{"fan_plans": [{"mode": "quiet", "plan": {"Curve": {"steps": [0, 0, 0, 0, 0, 0]}}}]}"#).expect("write");
+        assert!(
+            import_app_config_from(&path).is_err(),
+            "a file the app would silently fall back on must not be importable"
+        );
+
+        fs::write(&path, "{ not json at all").expect("write");
+        assert!(import_app_config_from(&path).is_err());
+
+        let _ = fs::remove_file(&path);
+        assert!(
+            import_app_config_from(&path).is_err(),
+            "no file at all is an error to import from, not a silent set of defaults"
+        );
+        let _ = fs::remove_dir(&dir);
+    }
+
+    /// The backup taken before an import has to hold a file this build
+    /// cannot parse, because that is the case where it is the user's only
+    /// remaining record of what they had set.
+    #[test]
+    fn a_backup_keeps_the_bytes_of_an_unparseable_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-backup-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let source = dir.join("config.json");
+
+        assert!(
+            matches!(backup_config_file(&source, &dir), Ok(None)),
+            "no config to back up is not a failure"
+        );
+
+        let original = "{ half written and unparseable";
+        fs::write(&source, original).expect("write");
+        let backup = backup_config_file(&source, &dir)
+            .expect("backup")
+            .expect("there was a file, so there must be a backup");
+        assert_eq!(
+            fs::read_to_string(&backup).expect("read back"),
+            original
+        );
+
+        let _ = fs::remove_file(&backup);
+        let _ = fs::remove_file(&source);
+        let _ = fs::remove_dir(&dir);
     }
 }
 
