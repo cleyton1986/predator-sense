@@ -1795,7 +1795,7 @@ fn draw_brand_mark(cr: &gtk4::cairo::Context, w: f64, h: f64) {
     let _ = cr.fill();
 }
 
-fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
+fn build_settings_page(app: &adw::Application) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_hexpand(true);
@@ -2450,6 +2450,125 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
         page.append(&sl);
     }
 
+    // === Settings backup ===
+    //
+    // Everything every page of this app writes lives in one config.json, and
+    // the only copy of it is in the user's home. A reinstall, a distro hop or
+    // a hand-edit that does not parse takes all of it at once: lighting
+    // schemes, per-mode fan plans, mode-key cycles, saved colours. These two
+    // rows are the smallest thing that makes that recoverable, which is also
+    // why the import validates the file *before* it replaces anything rather
+    // than after.
+    let backup_title = gtk::Label::new(Some(t("settings_backup")));
+    backup_title.add_css_class("settings-section-title");
+    backup_title.set_halign(gtk::Align::Start);
+    backup_title.set_margin_top(20);
+    page.append(&backup_title);
+
+    let backup_desc = gtk::Label::new(Some(t("settings_backup_desc")));
+    backup_desc.add_css_class("settings-row-desc");
+    backup_desc.set_halign(gtk::Align::Start);
+    backup_desc.set_wrap(true);
+    page.append(&backup_desc);
+
+    // An empty `.status-label` still reserves its own padding and GTK has no
+    // `:empty`, so this starts hidden and appears only once it has something
+    // to say.
+    let backup_status = gtk::Label::new(None);
+    backup_status.add_css_class("status-label");
+    backup_status.set_halign(gtk::Align::Start);
+    backup_status.set_wrap(true);
+    backup_status.set_visible(false);
+
+    let export_row = create_setting_row(t("settings_export"), t("settings_export_desc"));
+    let export_btn = gtk::Button::with_label(t("settings_export_button"));
+    export_btn.set_valign(gtk::Align::Center);
+    {
+        let app = app.clone();
+        let status = backup_status.clone();
+        export_btn.connect_clicked(move |_| {
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title(crate::i18n::t("settings_export"));
+            dialog.set_modal(true);
+            dialog.set_initial_name(Some(config::suggested_export_filename().as_str()));
+            dialog.set_filters(Some(&settings_file_filters()));
+            let status = status.clone();
+            dialog.save(
+                app.active_window().as_ref(),
+                gio::Cancellable::NONE,
+                move |result| {
+                    // `Err` here is the ordinary "closed the picker without
+                    // choosing anything" case, not a failure worth reporting.
+                    let Ok(file) = result else { return };
+                    let Some(path) = file.path() else { return };
+                    match config::export_app_config_to(&path) {
+                        Ok(()) => set_backup_status(
+                            &status,
+                            &crate::i18n::tf(
+                                "settings_export_done",
+                                &[&path.display().to_string()],
+                            ),
+                            true,
+                        ),
+                        Err(error) => set_backup_status(
+                            &status,
+                            &crate::i18n::tf("settings_export_failed", &[&error]),
+                            false,
+                        ),
+                    }
+                },
+            );
+        });
+    }
+    export_row.append(&export_btn);
+    page.append(&export_row);
+
+    let import_row = create_setting_row(t("settings_import"), t("settings_import_desc"));
+    let import_btn = gtk::Button::with_label(t("settings_import_button"));
+    import_btn.set_valign(gtk::Align::Center);
+    {
+        let app = app.clone();
+        let status = backup_status.clone();
+        import_btn.connect_clicked(move |_| {
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title(crate::i18n::t("settings_import"));
+            dialog.set_modal(true);
+            dialog.set_filters(Some(&settings_file_filters()));
+            let status = status.clone();
+            let app = app.clone();
+            dialog.open(
+                app.active_window().as_ref(),
+                gio::Cancellable::NONE,
+                move |result| {
+                    let Ok(file) = result else { return };
+                    let Some(path) = file.path() else { return };
+                    // Checked while the user's own settings are still on disk.
+                    // A file that would send the app to defaults must never
+                    // get as far as replacing them.
+                    let imported = match config::import_app_config_from(&path) {
+                        Ok(imported) => imported,
+                        Err(error) => {
+                            set_backup_status(
+                                &status,
+                                &crate::i18n::tf("settings_import_failed", &[&error]),
+                                false,
+                            );
+                            return;
+                        }
+                    };
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    confirm_and_replace_settings(&app, imported, &name, &status);
+                },
+            );
+        });
+    }
+    import_row.append(&import_btn);
+    page.append(&import_row);
+    page.append(&backup_status);
+
     let about = gtk::Label::new(Some(t("about")));
     about.add_css_class("settings-section-title");
     about.set_halign(gtk::Align::Start);
@@ -2492,4 +2611,88 @@ pub(crate) fn create_setting_row(title: &str, desc: &str) -> gtk::Box {
     text.append(&d);
     row.append(&text);
     row
+}
+
+/// The `*.json` filter both settings pickers offer.
+fn settings_file_filters() -> gio::ListStore {
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some(crate::i18n::t("settings_backup")));
+    filter.add_suffix("json");
+    let filters = gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&filter);
+    filters
+}
+
+/// One line of feedback under the backup rows, in the success or error colour.
+fn set_backup_status(label: &gtk::Label, text: &str, ok: bool) {
+    label.set_text(text);
+    label.remove_css_class("status-success");
+    label.remove_css_class("status-error");
+    label.add_css_class(if ok { "status-success" } else { "status-error" });
+    label.set_visible(true);
+}
+
+/// Ask before replacing every setting at once, then do it and restart.
+///
+/// The confirmation is not ceremony: this is the only action in the app that
+/// overwrites all of a user's settings in one go, and the file it overwrites
+/// may be their only copy. The backup taken here is the safety net for the
+/// case where the imported file turns out not to be the one they meant.
+fn confirm_and_replace_settings(
+    app: &adw::Application,
+    imported: config::AppConfig,
+    file_name: &str,
+    status: &gtk::Label,
+) {
+    use libadwaita::prelude::*;
+
+    let Some(parent) = app.active_window() else {
+        return;
+    };
+    let dialog = adw::AlertDialog::new(
+        Some(crate::i18n::t("settings_import_confirm_title")),
+        Some(&crate::i18n::tf("settings_import_confirm_body", &[file_name])),
+    );
+    dialog.add_responses(&[
+        ("cancel", crate::i18n::t("settings_import_cancel")),
+        ("replace", crate::i18n::t("settings_import_replace")),
+    ]);
+    dialog.set_response_appearance("replace", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+
+    let status = status.clone();
+    dialog.choose(&parent, gio::Cancellable::NONE, move |response| {
+        if response != "replace" {
+            return;
+        }
+        if let Err(error) = config::backup_app_config() {
+            set_backup_status(
+                &status,
+                &crate::i18n::tf("settings_import_failed", &[&error]),
+                false,
+            );
+            return;
+        }
+        if let Err(error) = config::save_app_config(&imported) {
+            set_backup_status(
+                &status,
+                &crate::i18n::tf("settings_import_failed", &[&error]),
+                false,
+            );
+            return;
+        }
+        // The same relaunch the language dropdown does, for the same reason.
+        // Every page is built once from the config it was handed, and a good
+        // half of these settings are pushed to hardware at startup, so
+        // nothing short of a restart can honestly claim to have applied them.
+        // The typed internal argument delays GTK initialization long enough
+        // for this process to free the single-instance D-Bus name.
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe)
+                .arg(predator_sense_protocol::internal::DELAYED_APPLICATION_START_ARGUMENT)
+                .spawn();
+        }
+        std::process::exit(0);
+    });
 }
