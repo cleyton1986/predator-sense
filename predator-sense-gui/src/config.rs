@@ -1056,6 +1056,69 @@ mod tests {
         assert!(back.delay_only);
     }
 
+    /// A settings file exported before a field existed must still import.
+    ///
+    /// This is the compatibility direction the export/import feature creates
+    /// and then has to keep: someone exports, updates the app, and imports
+    /// their own file back. `temp_alert_c` is the first field added after the
+    /// feature shipped, so it stands in for every field added later.
+    #[test]
+    fn a_settings_file_exported_before_a_field_existed_still_imports() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-oldexport-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("old-export.json");
+
+        let mut value =
+            serde_json::to_value(AppConfig::default()).expect("serialize the current shape");
+        value
+            .as_object_mut()
+            .expect("a config is a JSON object")
+            .remove("temp_alert_c")
+            .expect("the field must be there to remove, or this test proves nothing");
+        fs::write(&path, serde_json::to_string_pretty(&value).expect("json")).expect("write");
+
+        let imported = import_app_config_from(&path).expect("an older export must still import");
+        assert_eq!(
+            imported.temp_alert_c,
+            default_temp_alert_c(),
+            "a field the file predates has to come back as its default, not fail the import"
+        );
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    /// And the other direction: a file from a newer build, carrying a key this
+    /// one has never heard of, must not be rejected. In a project where users
+    /// are on whatever version their distro or a release page gave them, an
+    /// export from a newer app landing on an older one is ordinary, and
+    /// refusing it would be a worse failure than ignoring one key.
+    #[test]
+    fn a_settings_file_with_an_unknown_key_still_imports() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-newexport-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("new-export.json");
+
+        let mut value = serde_json::to_value(AppConfig::default()).expect("serialize");
+        value.as_object_mut().expect("object").insert(
+            "a_setting_from_a_later_version".to_string(),
+            serde_json::json!({"nested": [1, 2, 3]}),
+        );
+        fs::write(&path, serde_json::to_string_pretty(&value).expect("json")).expect("write");
+
+        let imported = import_app_config_from(&path).expect("an unknown key must not fail import");
+        assert_eq!(imported.temp_alert_c, default_temp_alert_c());
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
     /// The round trip the feature exists for. Not a serde smoke test: the
     /// fields checked here are the ones that are expensive to rebuild by
     /// hand - per-mode fan plans, lighting schemes, the mode-key cycles -
