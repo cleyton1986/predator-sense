@@ -17,13 +17,27 @@ use gtk4::prelude::*;
 
 /// A critical-temperature alert.
 ///
-/// Urgent, unlike a mode change: this is the one notification in the app that
-/// wants to interrupt. Its own id so it never replaces, or is replaced by, the
-/// mode notification.
+/// Normal priority, the same level as a mode change. This shipped as `Urgent`,
+/// on the reasoning that a thermal warning is the one thing in this app worth
+/// interrupting for, and in use that was wrong: `Urgent` is the freedesktop
+/// "critical" urgency, which GNOME Shell deliberately treats as a banner that
+/// never times out and shows through Do Not Disturb. So a machine sitting at
+/// 90 C under a game left a notification parked on screen until it was
+/// clicked, on top of the game, reported as "very distracting".
+///
+/// Dropping to `Normal` costs nothing that was doing real work. Nothing here
+/// protects the hardware: the firmware throttles on its own, this only tells
+/// the user, and a banner that shows and fades does that. The user also
+/// already has the live reading on the dashboard and in the tray. What guards
+/// against a missed alert is the debounce in `alerts`, not the urgency: one
+/// notification per crossing, re-armed only after the temperature drops 5 C
+/// below the limit.
+///
+/// Its own id so it never replaces, or is replaced by, the mode notification.
 pub fn temperature_alert(app: &impl IsA<gio::Application>, title: &str, body: &str) {
     let notification = gio::Notification::new(title);
     notification.set_body(Some(body));
-    notification.set_priority(gio::NotificationPriority::Urgent);
+    notification.set_priority(gio::NotificationPriority::Normal);
     app.as_ref()
         .send_notification(Some("temperature-alert"), &notification);
 }
