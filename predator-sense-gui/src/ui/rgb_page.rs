@@ -44,8 +44,17 @@ pub fn build() -> gtk::ScrolledWindow {
     if crate::hardware::keyboard_rgb::is_available() || crate::hardware::light_bar::is_available() {
         return crate::ui::lighting_page::build();
     }
+    // `chicony_rgb::is_available()` is a USB-ID check with no model gate, and it
+    // has to stay in this condition. The check above is deliberately narrower -
+    // `keyboard_rgb` requires the Chicony controller *and* a listed chassis - so
+    // on a Chicony machine that is not a listed model (the Helios 300 /
+    // PH317-56 class this project already drives through `chicony_rgb`) it is
+    // false, and dropping this disjunct left those laptops matching neither
+    // branch and losing the RGB page they have today. The PH16-71 still takes
+    // the unified page because `keyboard_rgb` is tested first.
     if crate::hardware::magic_rgb::is_keyboard_available()
         || crate::hardware::magic_rgb::is_logo_available()
+        || crate::hardware::chicony_rgb::is_available()
     {
         return crate::ui::magic_rgb_page::build();
     }
@@ -2041,3 +2050,4 @@ pub(crate) fn draw_keyboard(cr: &gtk4::cairo::Context, w: f64, h: f64, colors: &
     );
     fill_key_path(cr, r, g, b);
 }
+
