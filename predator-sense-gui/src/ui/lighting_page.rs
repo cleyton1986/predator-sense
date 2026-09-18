@@ -103,8 +103,8 @@ pub fn build() -> gtk::ScrolledWindow {
         suppress: false,
     }));
 
-    let have_keyboard = keyboard_rgb::is_available();
-    let have_bar = light_bar::is_available();
+    let have_keyboard = crate::hardware::capabilities::get().keyboard_rgb;
+    let have_bar = crate::hardware::capabilities::get().light_bar;
 
     if !have_keyboard && !have_bar {
         let note = gtk::Label::new(Some(crate::i18n::t("lighting_no_devices")));
@@ -994,7 +994,7 @@ fn build_idle_section(have_keyboard: bool, have_bar: bool) -> gtk::Box {
             if active {
                 // One owner - see this function's doc comment. Only worth
                 // taking if this app can blank the keyboard itself.
-                if crate::hardware::keyboard_rgb::is_available() {
+                if crate::hardware::capabilities::get().keyboard_rgb {
                     let _ = crate::hardware::extras::set_backlight_timeout(false);
                 }
                 crate::hardware::idle::start();
@@ -1343,8 +1343,8 @@ fn build_scheme_bar(
             let mut cfg = config::load_app_config();
             let scheme = LightingScheme {
                 name: name.clone(),
-                keyboard: keyboard_rgb::is_available().then_some(live.keyboard),
-                light_bar: light_bar::is_available().then_some(live.light_bar),
+                keyboard: crate::hardware::capabilities::get().keyboard_rgb.then_some(live.keyboard),
+                light_bar: crate::hardware::capabilities::get().light_bar.then_some(live.light_bar),
             };
             match cfg
                 .lighting_schemes
@@ -1384,7 +1384,7 @@ fn apply_scheme_by_name(name: &str, state: Option<&Rc<RefCell<LightingState>>>) 
         return;
     };
     if let Some(keyboard) = scheme.keyboard {
-        if keyboard_rgb::is_available() && keyboard_rgb::apply(&keyboard).is_ok() {
+        if crate::hardware::capabilities::get().keyboard_rgb && keyboard_rgb::apply(&keyboard).is_ok() {
             cfg.keyboard_rgb = Some(keyboard);
             if let Some(state) = state {
                 state.borrow_mut().keyboard = keyboard;
@@ -1396,7 +1396,7 @@ fn apply_scheme_by_name(name: &str, state: Option<&Rc<RefCell<LightingState>>>) 
             .light_bar
             .map(|previous| previous.mode == LightBarMode::Off)
             .unwrap_or(true);
-        if light_bar::is_available() && light_bar::apply(&bar, wake).is_ok() {
+        if crate::hardware::capabilities::get().light_bar && light_bar::apply(&bar, wake).is_ok() {
             cfg.light_bar = Some(bar);
             if let Some(state) = state {
                 state.borrow_mut().light_bar = bar;

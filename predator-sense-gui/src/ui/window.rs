@@ -384,8 +384,8 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 // one-way trade: the firmware timeout goes off, and the timer
                 // meant to replace it declines to blank anything, leaving the
                 // backlight lit for good on a chassis that was working fine.
-                let can_blank_keyboard = crate::hardware::keyboard_rgb::is_available();
-                let can_blank_bar = crate::hardware::light_bar::is_available();
+                let can_blank_keyboard = crate::hardware::capabilities::get().keyboard_rgb;
+                let can_blank_bar = crate::hardware::capabilities::get().light_bar;
                 if !can_blank_keyboard && !can_blank_bar {
                     return;
                 }
@@ -705,11 +705,11 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
 
                 let want_keyboard_off = cfg.idle_enabled
                     && cfg.idle_keyboard_enabled
-                    && crate::hardware::keyboard_rgb::is_available()
+                    && crate::hardware::capabilities::get().keyboard_rgb
                     && idle >= keyboard_limit;
                 let want_bar_off = cfg.idle_enabled
                     && cfg.idle_bar_enabled
-                    && crate::hardware::light_bar::is_available()
+                    && crate::hardware::capabilities::get().light_bar
                     && idle >= bar_limit;
 
                 if want_keyboard_off != crate::hardware::keyboard_rgb::is_blanked() {
@@ -750,7 +750,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 if cfg.idle_keyboard_keepalive
                     && !want_keyboard_off
                     && !crate::hardware::keyboard_rgb::is_blanked()
-                    && crate::hardware::keyboard_rgb::is_available()
+                    && crate::hardware::capabilities::get().keyboard_rgb
                 {
                     let key_idle = crate::hardware::idle::key_idle_seconds().unwrap_or(0);
                     // `map_or` rather than `is_none_or`: the sibling crates
@@ -2397,7 +2397,7 @@ fn build_settings_page(app: &adw::Application) -> gtk::ScrolledWindow {
         // (ui::lighting_page). Every other machine still needs it here: that
         // page is not built for them, and without this row the firmware
         // timeout would have no control anywhere in the app.
-        if !crate::hardware::keyboard_rgb::is_available() {
+        if !crate::hardware::capabilities::get().keyboard_rgb {
             let backlight_timeout_row =
                 create_setting_row(t("backlight_timeout"), t("backlight_timeout_desc"));
             let backlight_timeout_switch = gtk::Switch::new();
