@@ -282,6 +282,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // mode-key cycles the power policy came up with.
         crate::hardware::applog::set_enabled(cfg.debug_logging);
         crate::hardware::alerts::set_enabled(cfg.temp_alerts);
+        crate::hardware::alerts::set_threshold_c(cfg.temp_alert_c);
         crate::hardware::power_profile::set_action(cfg.power_source_action());
         crate::hardware::power_profile::set_target_profiles(cfg.profile_ac, cfg.profile_battery);
         crate::hardware::power_profile::set_auto_eco(cfg.auto_eco_enabled, cfg.auto_eco_threshold);
@@ -2039,15 +2040,61 @@ fn build_settings_page(app: &adw::Application) -> gtk::ScrolledWindow {
     let alert_switch = gtk::Switch::new();
     alert_switch.set_active(cfg.temp_alerts);
     alert_switch.set_valign(gtk::Align::Center);
-    alert_switch.connect_state_set(move |_, active| {
-        let mut c = config::load_app_config();
-        c.temp_alerts = active;
-        let _ = config::save_app_config(&c);
-        crate::hardware::alerts::set_enabled(active);
-        glib::Propagation::Proceed
-    });
+
+    // The temperature that switch fires at. Built before the switch's handler
+    // so the handler can grey it out: a threshold with alerts off is a control
+    // that does nothing, and showing that is cheaper than a user wondering why
+    // theirs never fires.
+    let threshold_row =
+        create_setting_row(t("temp_alert_threshold"), t("temp_alert_threshold_desc"));
+    let threshold_label = gtk::Label::new(Some(&format!("{} \u{b0}C", cfg.temp_alert_c)));
+    threshold_label.add_css_class("settings-row-desc");
+    let threshold_scale = gtk::Scale::with_range(
+        gtk::Orientation::Horizontal,
+        f64::from(crate::hardware::alerts::MIN_THRESHOLD_C),
+        f64::from(crate::hardware::alerts::MAX_THRESHOLD_C),
+        1.0,
+    );
+    threshold_scale.set_value(f64::from(cfg.temp_alert_c));
+    threshold_scale.set_size_request(160, -1);
+    threshold_scale.set_valign(gtk::Align::Center);
+    threshold_scale.add_css_class("accent-scale");
+    threshold_row.set_sensitive(cfg.temp_alerts);
+    // A `GtkRange` handles the scroll wheel itself, so without this a wheel
+    // tick while scrolling the page past it silently changes the temperature
+    // the machine warns at.
+    crate::ui::scroll_guard::redirect_scroll_to_page(&threshold_scale);
+    {
+        let lbl = threshold_label.clone();
+        threshold_scale.connect_value_changed(move |sc| {
+            let celsius = sc.value().round() as u8;
+            lbl.set_text(&format!("{} \u{b0}C", celsius));
+            // In force immediately, before the save: the alert tick reads this
+            // in-memory value, so the next reading is already judged against
+            // the new threshold.
+            crate::hardware::alerts::set_threshold_c(celsius);
+            let mut c = config::load_app_config();
+            c.temp_alert_c = celsius;
+            let _ = config::save_app_config(&c);
+        });
+    }
+
+    {
+        let threshold_row = threshold_row.clone();
+        alert_switch.connect_state_set(move |_, active| {
+            let mut c = config::load_app_config();
+            c.temp_alerts = active;
+            let _ = config::save_app_config(&c);
+            crate::hardware::alerts::set_enabled(active);
+            threshold_row.set_sensitive(active);
+            glib::Propagation::Proceed
+        });
+    }
     alert_row.append(&alert_switch);
     page.append(&alert_row);
+    threshold_row.append(&threshold_label);
+    threshold_row.append(&threshold_scale);
+    page.append(&threshold_row);
 
     // The auto-profile switch and its two fall-back targets moved to the Mode
     // page, next to the mode-key cycles the rule actually reads. They were a
@@ -2138,6 +2185,9 @@ fn build_settings_page(app: &adw::Application) -> gtk::ScrolledWindow {
     font_scale.set_size_request(160, -1);
     font_scale.set_valign(gtk::Align::Center);
     font_scale.add_css_class("accent-scale");
+    // Same reason as the threshold slider above: a wheel tick over an
+    // unguarded `GtkRange` on a scrolling page rescales the whole app.
+    crate::ui::scroll_guard::redirect_scroll_to_page(&font_scale);
     {
         let lbl = font_scale_label.clone();
         font_scale.connect_value_changed(move |sc| {
