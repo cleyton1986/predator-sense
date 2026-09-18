@@ -81,6 +81,23 @@ struct Config {
     rgb_dynamic_last: Option<SavedLightingConfig>,
     #[serde(default)]
     cover_logo: Option<CoverLogoConfig>,
+    /// Which modes the mode key steps through, per power source, as
+    /// `PowerProfile::to_id()` values. Empty means "whatever the firmware
+    /// offers", which is what this did before the lists existed.
+    #[serde(default)]
+    mode_cycle_ac: Vec<String>,
+    #[serde(default)]
+    mode_cycle_battery: Vec<String>,
+    /// What the PredatorSense key does: "app" (open Predator Sense, the
+    /// default), "command" (run `predator_key_command`), or "none".
+    #[serde(default = "default_predator_key_action")]
+    predator_key_action: String,
+    #[serde(default)]
+    predator_key_command: String,
+}
+
+fn default_predator_key_action() -> String {
+    "app".to_string()
 }
 
 impl Default for Config {
@@ -92,6 +109,10 @@ impl Default for Config {
             rgb_is_static: true,
             rgb_dynamic_last: None,
             cover_logo: None,
+            mode_cycle_ac: Vec::new(),
+            mode_cycle_battery: Vec::new(),
+            predator_key_action: default_predator_key_action(),
+            predator_key_command: String::new(),
         }
     }
 }
@@ -337,10 +358,10 @@ pub(crate) fn run() -> AppResult {
     // O terceiro campo marca o EC HID. Guardar um indice separado seria um bug:
     // devices sao removidos quando desconectam, e os indices dos seguintes
     // deslizam - fazendo o "indice do EC" apontar para um teclado.
-    let mut devices: Vec<(PathBuf, File, bool)> = Vec::new();
+    let mut devices: Vec<(PathBuf, File, DeviceKind)> = Vec::new();
     for path in paths {
         match File::open(&path) {
-            Ok(file) => devices.push((path, file, false)),
+            Ok(file) => devices.push((path, file, DeviceKind::Input)),
             Err(error) => logger.error(format!("Falha ao abrir {}: {error}", path.display())),
         }
     }
@@ -348,13 +369,29 @@ pub(crate) fn run() -> AppResult {
     // produces no input-subsystem event - so it is polled alongside the
     // keyboards but parsed differently. Optional: older models have no such
     // key, and without the udev rule the node stays root-only.
+    match find_predator_key_hid() {
+        Some(path) => match File::open(&path) {
+            Ok(file) => {
+                logger.info(format!("Tecla PredatorSense: monitorando {}", path.display()));
+                devices.push((path, file, DeviceKind::PredatorKey));
+            }
+            Err(error) => logger.error(format!(
+                "Tecla PredatorSense: {} não pôde ser aberto: {error}",
+                path.display()
+            )),
+        },
+        None => logger.info(
+            "Tecla PredatorSense: nenhum nó HID acessível (regra udev ausente?)".to_string(),
+        ),
+    }
+
     let mode_key = ModeKey::load(&home);
     let (ec_hid, ec_candidates) = find_ec_hid(&mode_key);
     match ec_hid {
         Some(path) => match File::open(&path) {
             Ok(file) => {
                 logger.info(format!("Tecla de modo: monitorando {}", path.display()));
-                devices.push((path, file, true));
+                devices.push((path, file, DeviceKind::ModeKey));
             }
             Err(error) => logger.info(format!(
                 "Tecla de modo indisponível ({error}); confira o grupo input"
@@ -397,7 +434,7 @@ pub(crate) fn run() -> AppResult {
     // and a Bluetooth one reconnects. Dropping such a device permanently
     // leaves whatever it served dead - the mode key or the PredatorSense key -
     // with the daemon still running and nothing to say it is half deaf.
-    let mut lost: Vec<(PathBuf, bool)> = Vec::new();
+    let mut lost: Vec<(PathBuf, DeviceKind)> = Vec::new();
     let mut reopen_countdown = REOPEN_EVERY_POLLS;
     while !devices.is_empty() || !lost.is_empty() {
         let mut poll_fds = devices
@@ -458,14 +495,38 @@ pub(crate) fn run() -> AppResult {
             if events & libc::POLLIN == 0 {
                 continue;
             }
-            if devices[index].2 {
+            if devices[index].2 == DeviceKind::PredatorKey {
+                match read_predator_key(&mut devices[index].1) {
+                    Ok(true) => {
+                        if last_activation.elapsed()
+                            > Duration::from_secs(timing::HOTKEY_DEBOUNCE_SECS)
+                        {
+                            last_activation = Instant::now();
+                            let config = load_config(&config_path);
+                            run_predator_key_action(&mut logger, &config);
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        logger.error(format!("Tecla PredatorSense: leitura falhou: {error}"));
+                        // Queued for reopening like every other branch here. It
+                        // used to be dropped outright, so one transient read
+                        // error - a re-enumeration on resume, say - disabled
+                        // the key until the daemon was restarted.
+                        let (path, _, is_ec) = devices.remove(index);
+                        lost.push((path, is_ec));
+                    }
+                }
+                continue;
+            }
+            if devices[index].2 == DeviceKind::ModeKey {
                 match read_mode_key(&mut devices[index].1, &mode_key) {
                     Ok(true) => {
                         if last_mode_activation.elapsed()
                             > Duration::from_secs(timing::HOTKEY_DEBOUNCE_SECS)
                         {
                             last_mode_activation = Instant::now();
-                            cycle_thermal_profile(&mut logger);
+                            cycle_thermal_profile(&mut logger, &config_path);
                         }
                     }
                     Ok(false) => {}
@@ -679,6 +740,116 @@ fn find_ec_hid(mode_key: &ModeKey) -> (Option<PathBuf>, Vec<String>) {
 }
 
 /// Reads one input report and reports whether it is the mode-switch key.
+/// What a watched node reports, so one loop can serve three sources.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeviceKind {
+    /// evdev node carrying `PREDATOR_KEY_CODE`.
+    Input,
+    /// Raw HID node the mode-switch key reports on (older/other models).
+    ModeKey,
+    /// Raw HID node the PredatorSense key reports on.
+    PredatorKey,
+}
+
+/// The PredatorSense key's HID report on the Chicony keyboard's consumer
+/// interface.
+///
+/// The key reports usage 0xC9 on the keyboard interface and this vendor
+/// consumer usage on interface 2, and the kernel maps neither - it produces no
+/// input event whatsoever, which is why the key appears dead. Interface 2
+/// carries consumer controls rather than the keystroke stream, so watching it
+/// does not mean watching what is typed.
+const PREDATOR_KEY_HID_REPORT: [u8; 3] = [0x04, 0x81, 0xFF];
+const PREDATOR_KEY_HID_VENDOR: &str = "04F2";
+const PREDATOR_KEY_HID_PRODUCT: &str = "0117";
+const PREDATOR_KEY_HID_INTERFACE: &str = "02";
+
+/// Chassis this report was confirmed on.
+///
+/// `04F2:0117` is not unique to it - the same Chicony controller ships on the
+/// Helios 300 / PH317-56 generation. Without this gate the daemon would open
+/// interface 2 there too and treat any report starting `04 81 FF` as the
+/// PredatorSense key, launching the app (or, if the user bound a command,
+/// running it) when some ordinary consumer key is pressed.
+const PREDATOR_KEY_MODELS: &[&str] = &["PH16-71"];
+
+/// True when DMI names one of [`PREDATOR_KEY_MODELS`], compared as whole
+/// whitespace-separated words so `PH16-71` does not match `PH16-71X`.
+fn chassis_has_predator_key() -> bool {
+    let Ok(name) = fs::read_to_string(path::PRODUCT_NAME) else {
+        return false;
+    };
+    name.split_whitespace()
+        .any(|part| PREDATOR_KEY_MODELS.iter().any(|m| part.eq_ignore_ascii_case(m)))
+}
+
+/// Locates that node. `None` when this is not a chassis with the key, when
+/// the keyboard is absent, or when the udev rule granting group access was
+/// never installed.
+fn find_predator_key_hid() -> Option<PathBuf> {
+    if !chassis_has_predator_key() {
+        return None;
+    }
+    let entries = fs::read_dir("/sys/class/hidraw").ok()?;
+    for entry in entries.flatten() {
+        let base = entry.path();
+        let Ok(uevent) = fs::read_to_string(base.join("device/uevent")) else {
+            continue;
+        };
+        let matches_device = uevent.lines().any(|line| {
+            line.strip_prefix("HID_ID=").is_some_and(|id| {
+                let id = id.to_ascii_uppercase();
+                id.contains(PREDATOR_KEY_HID_VENDOR) && id.contains(PREDATOR_KEY_HID_PRODUCT)
+            })
+        });
+        if !matches_device {
+            continue;
+        }
+        let interface = fs::read_to_string(base.join("device/../bInterfaceNumber"))
+            .unwrap_or_default();
+        if interface.trim() != PREDATOR_KEY_HID_INTERFACE {
+            continue;
+        }
+        let node = PathBuf::from("/dev").join(entry.file_name());
+        if node.exists() {
+            return Some(node);
+        }
+    }
+    None
+}
+
+fn read_predator_key(file: &mut File) -> Result<bool, std::io::Error> {
+    let mut buffer = [0u8; 64];
+    let read = file.read(&mut buffer)?;
+    Ok(buffer[..read].starts_with(&PREDATOR_KEY_HID_REPORT))
+}
+
+/// Runs whatever the user bound the PredatorSense key to.
+fn run_predator_key_action(logger: &mut Logger, config: &Config) {
+    match config.predator_key_action.as_str() {
+        "none" => {}
+        "command" => {
+            let command = config.predator_key_command.trim();
+            if command.is_empty() {
+                logger.error("Tecla PredatorSense: nenhum comando configurado".to_string());
+                return;
+            }
+            let mut shell = Command::new("/bin/sh");
+            shell
+                .arg("-c")
+                .arg(command)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            ensure_display(&mut shell);
+            if let Err(error) = spawn_reaped(&mut shell) {
+                logger.error(format!("Tecla PredatorSense: '{command}' falhou: {error}"));
+            }
+        }
+        // "app" and anything unrecognised: open the app, the default.
+        _ => activate_app(logger),
+    }
+}
+
 fn read_mode_key(file: &mut File, mode_key: &ModeKey) -> Result<bool, std::io::Error> {
     let mut buffer = [0u8; 64];
     let read = file.read(&mut buffer)?;
@@ -718,6 +889,74 @@ fn read_firmware_profiles() -> Option<FirmwareProfiles> {
 /// cycling by bit position jumps around instead of stepping up as the key is
 /// meant to. A calibration that no longer matches what the firmware accepts
 /// (BIOS update) is discarded rather than used to write a rejected index.
+/// App tier for a `PowerProfile::to_id()` value. The GUI crate owns the enum,
+/// so the daemon maps the ids by hand rather than depending on it.
+fn tier_for_profile_id(id: &str) -> Option<u8> {
+    match id {
+        "eco" => Some(0),
+        "quiet" => Some(1),
+        "balanced" => Some(2),
+        "performance" => Some(3),
+        "turbo" => Some(4),
+        _ => None,
+    }
+}
+
+fn on_ac_power() -> Option<bool> {
+    let entries = fs::read_dir(Path::new(battery::SYSFS_ROOT).join("class/power_supply")).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Skip an entry that will not answer rather than abandoning the scan:
+        // a wireless mouse, a headset or a UPS shows up here too, and `?` on
+        // its unreadable `type` used to return None for the whole function
+        // before the real Mains supply was ever reached. The caller defaults
+        // to AC on None, so that silently ran the AC cycle while on battery.
+        let Ok(kind) = fs::read_to_string(path.join("type")) else {
+            continue;
+        };
+        if kind.trim() != "Mains" {
+            continue;
+        }
+        let Ok(online) = fs::read_to_string(path.join("online")) else {
+            continue;
+        };
+        return Some(online.trim() == "1");
+    }
+    None
+}
+
+/// The user's own cycle for the current power source, as firmware indices.
+///
+/// `None` when no list is configured, or when none of the listed modes map to
+/// a profile this firmware actually supports - in either case the caller falls
+/// back to the firmware's full order rather than leaving the key doing nothing.
+fn custom_cycle_order(config: &Config, on_ac: bool, supported: &[u8]) -> Option<Vec<u8>> {
+    let ids = if on_ac {
+        &config.mode_cycle_ac
+    } else {
+        &config.mode_cycle_battery
+    };
+    if ids.is_empty() {
+        return None;
+    }
+    let calibration = thermal_profile::calibration_path()
+        .and_then(|path| fs::read(path).ok())
+        .and_then(|data| serde_json::from_slice::<thermal_profile::Calibration>(&data).ok())?;
+    let mut order = Vec::new();
+    for id in ids {
+        let Some(tier) = tier_for_profile_id(id) else {
+            continue;
+        };
+        let Some(index) = calibration.index_for_tier(tier) else {
+            continue;
+        };
+        if supported.contains(&index) && !order.contains(&index) {
+            order.push(index);
+        }
+    }
+    (!order.is_empty()).then_some(order)
+}
+
 fn cycle_order(supported: &[u8]) -> Vec<u8> {
     let calibration = thermal_profile::calibration_path()
         .and_then(|path| fs::read(path).ok())
@@ -754,7 +993,7 @@ fn cycle_order_from(
 /// The manual notes mode switching only works with the battery at 40% or above;
 /// below that the firmware silently refuses, so say so instead of leaving the
 /// user wondering why the key did nothing.
-fn cycle_thermal_profile(logger: &mut Logger) {
+fn cycle_thermal_profile(logger: &mut Logger, config_path: &Path) {
     let Some(firmware) = read_firmware_profiles() else {
         logger.debug("Tecla de modo: firmware não expõe thermal_profile");
         return;
@@ -780,14 +1019,21 @@ fn cycle_thermal_profile(logger: &mut Logger) {
         }
     }
 
-    let order = cycle_order(&firmware.supported);
+    // Re-read per press rather than caching: the lists are edited in the GUI,
+    // and a mode key that needed a daemon restart to pick up a setting change
+    // would feel broken.
+    let config = load_config(config_path);
+    let on_ac = on_ac_power().unwrap_or(true);
+    let order = custom_cycle_order(&config, on_ac, &firmware.supported)
+        .unwrap_or_else(|| cycle_order(&firmware.supported));
     let next = match firmware
         .current
         .and_then(|current| order.iter().position(|index| *index == current))
     {
         Some(position) => order[(position + 1) % order.len()],
-        // The firmware boots into an index it then refuses to accept back, so
-        // the current one may not be in the list at all.
+        // Either the firmware booted into an index it refuses to accept back,
+        // or the user picked a mode outside their own cycle in the app. Both
+        // resolve the same way: step back onto the start of the cycle.
         None => order[0],
     };
 

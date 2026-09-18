@@ -211,6 +211,16 @@ pub fn sync_window_suspended(window: &impl IsA<gtk::Window>) {
 
 /// Esconde a janela e garante que o tray helper está rodando.
 /// Unifica o comportamento do botão ✕ custom e do close request do WM.
+/// Starts the app with no window on screen: the timers that do the real work
+/// run either way, and the window is built only so activating later is
+/// instant. Same path the tray uses, so there is one definition of "running
+/// without a window".
+pub fn start_in_background(app: &adw::Application) {
+    if let Some(window) = app.active_window() {
+        hide_to_tray(&window, app);
+    }
+}
+
 fn hide_to_tray<W: IsA<gtk::Widget>>(win: &W, app: &adw::Application) {
     crate::app_state::set_window_visible(false);
     win.set_visible(false);
@@ -269,6 +279,45 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         crate::hardware::alerts::set_enabled(cfg.temp_alerts);
         crate::hardware::power_profile::set_auto(cfg.auto_profile_ac);
         crate::hardware::power_profile::set_target_profiles(cfg.profile_ac, cfg.profile_battery);
+        crate::hardware::power_profile::set_auto_eco(cfg.auto_eco_enabled, cfg.auto_eco_threshold);
+
+        // The cycles live in the kernel module, which forgets them on every
+        // reload and every boot, so they are pushed back on each start.
+        {
+            let ac = cfg.mode_cycle_ac.clone();
+            let battery = cfg.mode_cycle_battery.clone();
+            background::run(
+                move || crate::hardware::profile::push_mode_cycles(&ac, &battery),
+                |result| {
+                    if let Err(error) = result {
+                        crate::hardware::applog::error(&format!(
+                            "startup: mode-key cycle not installed: {error}"
+                        ));
+                    }
+                },
+            );
+        }
+
+        // Startup mode. Applied once, off-thread: the firmware picks its own
+        // index on every power cycle, so without this the machine comes back
+        // wherever the EC left it rather than where the user actually wants to
+        // start.
+        if let Some(default_mode) = cfg
+            .mode_default
+            .as_deref()
+            .and_then(crate::hardware::profile::PowerProfile::from_id)
+        {
+            background::run(
+                move || crate::hardware::profile::set_profile(default_mode),
+                |result| {
+                    if let Err(error) = result {
+                        crate::hardware::applog::error(&format!(
+                            "startup: default mode not applied: {error}"
+                        ));
+                    }
+                },
+            );
+        }
         crate::hardware::applog::set_enabled(cfg.debug_logging);
         crate::hardware::profile::set_keep_fan_auto_in_performance(
             cfg.keep_fan_auto_in_performance,
@@ -317,10 +366,237 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             );
         }
 
-        glib::timeout_add_seconds_local(5, || {
+        // Lighting has the same "forgot on power cycle" gap: neither the
+        // Chicony USB keyboard nor the WMI channel (the chassis light bar on
+        // the PH16-71 generation) remembers anything across a reboot, and the
+        // hotkey service only replays the ENEK5130 HID path. Restore both
+        // here; the Chicony write goes through the same privileged helper
+        // session the fan-mode reapply above already opened.
+        // `wake: true` - after a power cycle the light bar's firmware needs
+        // one Breathing frame before any other mode becomes visible.
+        background::run(
+            || crate::hardware::lighting::restore_saved(true, "startup"),
+            |()| {},
+        );
+
+        // Idle-off covers the keyboard (firmware timer) and the light bar
+        // (measured by us) as one feature, so the bar half has to follow the
+        // firmware setting even when the user never opens the Lighting page -
+        // pages here are built lazily, and doing this only in the page meant a
+        // machine with the firmware timeout already on never blanked its bar.
+        background::run(
+            || crate::hardware::extras::get_backlight_timeout(),
+            |firmware_enabled| {
+                // Only take this feature over on a machine whose lighting this
+                // app can actually blank. The two writes below are otherwise a
+                // one-way trade: the firmware timeout goes off, and the timer
+                // meant to replace it declines to blank anything, leaving the
+                // backlight lit for good on a chassis that was working fine.
+                let can_blank_keyboard = crate::hardware::keyboard_rgb::is_available();
+                let can_blank_bar = crate::hardware::light_bar::is_available();
+                if !can_blank_keyboard && !can_blank_bar {
+                    return;
+                }
+                let mut cfg = config::load_app_config();
+                // Inherit the old single light-bar flag, or the firmware
+                // timeout, the first time this runs.
+                if !cfg.idle_enabled && (cfg.light_bar_idle_enabled || firmware_enabled) {
+                    cfg.idle_enabled = true;
+                    let _ = config::save_app_config(&cfg);
+                }
+                if cfg.idle_enabled {
+                    // One owner: the firmware's own timer cannot see the mouse
+                    // and runs on its own clock, so it has to be off for the
+                    // two devices to blank together.
+                    //
+                    // On PH16-71 this write is not enough, and not because it
+                    // fails - the function round-trips, and the backlight
+                    // still blanks at ~30 s with it read back as off. The
+                    // Chicony controller keeps a sleep timer of its own that
+                    // this function does not reach, which the keepalive in the
+                    // idle tick below handles. The write stays because it is
+                    // the right lever on the models where it is connected.
+                    if firmware_enabled && cfg.idle_keyboard_enabled && can_blank_keyboard {
+                        let _ = crate::hardware::extras::set_backlight_timeout(false);
+                    }
+                }
+                // The watcher backs the keepalive as well, and that is not
+                // part of idle blanking: it runs with the master switch off,
+                // for the user who turned blanking off and still watched the
+                // controller blank the keyboard on its own. So it starts for
+                // either reason, not only the first - otherwise the tick's
+                // `idle_seconds() == None` early return would make the
+                // keepalive setting silently inert in exactly the case it
+                // exists for.
+                if cfg.idle_enabled || (cfg.idle_keyboard_keepalive && can_blank_keyboard) {
+                    crate::hardware::idle::start();
+                    crate::hardware::idle::mark_active();
+                }
+            },
+        );
+
+        // Lighting follows the power mode. Idle blanking is separate, on a
+        // much shorter timer further down - a mode change only needs noticing
+        // promptly, whereas the lights going dark has to look deliberate.
+        let last_mode: Rc<std::cell::RefCell<Option<crate::hardware::profile::PowerProfile>>> =
+            Rc::new(std::cell::RefCell::new(crate::hardware::profile::get_current_profile()));
+        glib::timeout_add_seconds_local(5, move || {
             let (cpu, gpu) = sensors::read_critical_temps();
             crate::hardware::alerts::check(cpu, gpu);
             crate::hardware::power_profile::check();
+
+            if let Some(now) = crate::hardware::profile::get_current_profile() {
+                let changed = last_mode.borrow().map(|previous| previous != now).unwrap_or(true);
+                if changed {
+                    *last_mode.borrow_mut() = Some(now);
+                    crate::ui::lighting_page::apply_scheme_for_mode(now);
+                }
+            }
+
+            glib::ControlFlow::Continue
+        });
+
+        // Idle blanking for BOTH devices from one timer.
+        //
+        // The keyboard has a timeout of its own, but it only watches key
+        // presses - it cannot see the mouse - and it runs on its own clock, so
+        // the two devices went dark about a second apart and mouse movement
+        // woke only the bar. Driving both from here is the only way they can
+        // actually agree.
+        //
+        // Two separate timers claim the keyboard, and only one of them lets go.
+        // The firmware's is switched off in `apply_idle_setting`. The Chicony
+        // controller's own is not switchable at all from here, so it is kept
+        // from ever expiring instead - see the keepalive at the end of the
+        // tick.
+        {
+            /// How long the keyboard controller's own ~30 s sleep timer is
+            /// allowed to run before a write restarts it. Comfortably inside
+            /// the window, with room for a tick delayed under load.
+            const KEYBOARD_KEEPALIVE_SECS: u64 = 20;
+
+            // Cadence guard. `key_idle` keeps climbing after a keepalive -
+            // the write is not a keystroke and must not pretend to be one, or
+            // the controller's clock and ours would disagree - so without
+            // this the threshold would be met on every tick from then on.
+            let last_keepalive: Rc<Cell<Option<std::time::Instant>>> = Rc::new(Cell::new(None));
+            glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+                // Resume from suspend, checked before anything else in here:
+                // the early return below fires whenever idle tracking is off,
+                // and lighting still has to come back on those machines.
+                //
+                // The controllers do not necessarily hold their state across a
+                // suspend cycle, and nothing else would notice - the hotkey
+                // daemon replays only the ENEK5130 HID path on resume, which
+                // is not the hardware this chassis has.
+                if crate::hardware::resume::resumed() {
+                    crate::hardware::applog::info(
+                        "resume from suspend: restoring keyboard and light bar",
+                    );
+                    // Waking the machine is activity. Without this the idle
+                    // watcher still holds whatever it measured before the
+                    // suspend and would blank again immediately; it also lets
+                    // the blanking logic below undo a blank that was in place
+                    // when the lid closed.
+                    crate::hardware::idle::mark_active();
+                    // `wake: false` - the light bar's controller stayed
+                    // powered, so it does not need the Breathing priming frame
+                    // a cold boot does, and skipping it avoids a visible
+                    // flicker and 300 ms of sleeping.
+                    background::run(
+                        || crate::hardware::lighting::restore_saved(false, "resume"),
+                        |()| {},
+                    );
+                }
+
+                let cfg = config::load_app_config();
+                let idle = crate::hardware::idle::idle_seconds(cfg.idle_mouse_wakes);
+                let Some(idle) = idle else {
+                    return glib::ControlFlow::Continue;
+                };
+
+                let keyboard_limit = cfg.idle_keyboard_secs as u64;
+                let bar_limit = if cfg.idle_synced {
+                    keyboard_limit
+                } else {
+                    cfg.idle_bar_secs as u64
+                };
+
+                let want_keyboard_off = cfg.idle_enabled
+                    && cfg.idle_keyboard_enabled
+                    && crate::hardware::keyboard_rgb::is_available()
+                    && idle >= keyboard_limit;
+                let want_bar_off = cfg.idle_enabled
+                    && cfg.idle_bar_enabled
+                    && crate::hardware::light_bar::is_available()
+                    && idle >= bar_limit;
+
+                if want_keyboard_off != crate::hardware::keyboard_rgb::is_blanked() {
+                    if want_keyboard_off {
+                        let _ = crate::hardware::keyboard_rgb::blank();
+                    } else {
+                        crate::hardware::keyboard_rgb::unblank();
+                    }
+                }
+                if want_bar_off != crate::hardware::light_bar::is_blanked() {
+                    if want_bar_off {
+                        let _ = crate::hardware::light_bar::blank();
+                    } else {
+                        crate::hardware::light_bar::unblank();
+                    }
+                }
+
+                // Keyboard controller keepalive.
+                //
+                // The controller sleeps its backlight after ~30 s without a
+                // press on its own matrix. It cannot see a USB mouse or the
+                // I2C touchpad, so a stretch of mouse-only work blanked the
+                // keyboard at 30 s while the bar - which this timer really
+                // does own - stayed lit, which is the two devices coming apart
+                // for a reason no setting here controls. Any write restarts
+                // that timer, so one re-apply inside the window holds it open.
+                //
+                // Costs nothing in the common cases: while the user types,
+                // their own keys reset the controller's timer and `key_idle`
+                // never reaches the threshold; while the lighting is
+                // deliberately blanked, `is_blanked` skips it. It is not gated
+                // on `idle_enabled` - a user who switched idle-off *off* wants
+                // the keyboard lit, and the controller blanks it regardless.
+                //
+                // The write needs the privileged helper, whose mutex is shared
+                // with every other privileged caller, so it goes off-thread
+                // for the same reason the fan curve below does.
+                if cfg.idle_keyboard_keepalive
+                    && !want_keyboard_off
+                    && !crate::hardware::keyboard_rgb::is_blanked()
+                    && crate::hardware::keyboard_rgb::is_available()
+                {
+                    let key_idle = crate::hardware::idle::key_idle_seconds().unwrap_or(0);
+                    // `map_or` rather than `is_none_or`: the sibling crates
+                    // declare rust-version 1.80 and that method landed in 1.82.
+                    let due = last_keepalive
+                        .get()
+                        .map_or(true, |sent| sent.elapsed().as_secs() >= KEYBOARD_KEEPALIVE_SECS);
+                    if key_idle >= KEYBOARD_KEEPALIVE_SECS && due {
+                        last_keepalive.set(Some(std::time::Instant::now()));
+                        background::run(
+                            || {
+                                if let Err(error) = crate::hardware::keyboard_rgb::refresh() {
+                                    crate::hardware::applog::info(&format!(
+                                        "keyboard keepalive failed: {error}"
+                                    ));
+                                }
+                            },
+                            |()| {},
+                        );
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+
+
+        glib::timeout_add_seconds_local(5, move || {
             // Re-reads the game list from config every tick (cheap: a small
             // Vec clone), same reasoning as re-reading `ai_check_interval_min`
             // below - editing the list in the UI takes effect on the next
@@ -1811,14 +2087,31 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
         usb_row.append(&usb_switch);
         page.append(&usb_row);
 
-        // Keyboard backlight auto-off timer
-        let backlight_timeout_row =
-            create_setting_row(t("backlight_timeout"), t("backlight_timeout_desc"));
-        let backlight_timeout_switch = gtk::Switch::new();
-        backlight_timeout_switch.set_valign(gtk::Align::Center);
-        backlight_timeout_switch.set_sensitive(false);
-        backlight_timeout_row.append(&backlight_timeout_switch);
-        page.append(&backlight_timeout_row);
+        // The keyboard backlight auto-off switch moved to the Lighting page,
+        // next to the light bar's equivalent, on the chassis that page serves
+        // (ui::lighting_page). Every other machine still needs it here: that
+        // page is not built for them, and without this row the firmware
+        // timeout would have no control anywhere in the app.
+        if !crate::hardware::keyboard_rgb::is_available() {
+            let backlight_timeout_row =
+                create_setting_row(t("backlight_timeout"), t("backlight_timeout_desc"));
+            let backlight_timeout_switch = gtk::Switch::new();
+            backlight_timeout_switch.set_valign(gtk::Align::Center);
+            backlight_timeout_switch.set_sensitive(false);
+            backlight_timeout_row.append(&backlight_timeout_switch);
+            page.append(&backlight_timeout_row);
+            background::run(
+                || crate::hardware::extras::get_backlight_timeout(),
+                move |enabled| {
+                    backlight_timeout_switch.set_active(enabled);
+                    backlight_timeout_switch.connect_state_set(|_, active| {
+                        let _ = crate::hardware::extras::set_backlight_timeout(active);
+                        glib::Propagation::Proceed
+                    });
+                    backlight_timeout_switch.set_sensitive(true);
+                },
+            );
+        }
 
         // These reads each launch the EC helper and can take ~150 ms. Keep
         // the switches disabled until all states arrive off-thread, then
@@ -1829,10 +2122,9 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
                     crate::hardware::extras::get_lcd_overdrive(),
                     crate::hardware::extras::get_boot_animation(),
                     crate::hardware::extras::get_usb_charging(),
-                    crate::hardware::extras::get_backlight_timeout(),
                 )
             },
-            move |(lcd_enabled, boot_enabled, usb_enabled, backlight_timeout_enabled)| {
+            move |(lcd_enabled, boot_enabled, usb_enabled)| {
                 lcd_switch.set_active(lcd_enabled);
                 lcd_switch.connect_state_set(|_, active| {
                     let _ = crate::hardware::extras::set_lcd_overdrive(active);
@@ -1853,13 +2145,6 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
                     glib::Propagation::Proceed
                 });
                 usb_switch.set_sensitive(true);
-
-                backlight_timeout_switch.set_active(backlight_timeout_enabled);
-                backlight_timeout_switch.connect_state_set(|_, active| {
-                    let _ = crate::hardware::extras::set_backlight_timeout(active);
-                    glib::Propagation::Proceed
-                });
-                backlight_timeout_switch.set_sensitive(true);
             },
         );
     }
