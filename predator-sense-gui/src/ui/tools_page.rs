@@ -18,11 +18,6 @@ use std::rc::Rc;
 
 use crate::ui::{ai_page, audio_eq_page, game_sync_page, grub_splash_page, macros_page};
 
-/// Chassis with the dedicated PredatorSense key. Kept in step with
-/// `PREDATOR_KEY_MODELS` in the daemon (`installer/src/hotkey.rs`), which is
-/// what actually watches the key.
-const PREDATOR_KEY_MODELS: &[&str] = &["PH16-71"];
-
 pub fn build(window: &gtk::ApplicationWindow) -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
     page.set_margin_top(10);
@@ -65,7 +60,9 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::Box {
     // generation only. Offering a binding editor for a key the machine does
     // not have would be a tab that can never do anything.
     let has_predator_key =
-        crate::hardware::sysinfo::product_matches(PREDATOR_KEY_MODELS);
+        crate::hardware::sysinfo::product_matches(
+            predator_sense_protocol::dmi::PREDATOR_KEY_MODELS,
+        );
 
     let mut tabs: Vec<(&str, &str, Option<&str>)> = vec![
         (crate::i18n::t("game_sync_nav"), "game_sync", None),
