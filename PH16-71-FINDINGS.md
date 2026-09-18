@@ -21,7 +21,9 @@ Three things to know before reading:
   written down, and several plausible theories were thrown out when the
   measurements disagreed with them.
 
-The branch this describes is rebased onto v0.3.5-preview.
+The branch this describes is rebased onto v0.3.5-preview. Sections 1 to 26 are
+that branch; 27 onward is the `fan-per-mode-plans` follow-up, which continues
+from it and is proposed separately.
 
 ## Test hardware
 
@@ -1784,6 +1786,475 @@ the machine was only passing through during a switch. It now skips while
 
 ---
 
+## 34. The power-source group had a dead control, and a dropdown that rewrote settings by itself
+
+**Reported as:** "I just opened the Mode section and saw the setting 'When the
+power source changes'. It's now bugged and conflicting."
+
+Three separate faults, one of which had already silently changed the user's
+configuration.
+
+### A dropdown on a scrolling page rewrites itself under the wheel
+
+`profile_battery` had changed from Quiet to Eco. Nothing in testing set it and
+the user had not chosen it. §32 added three `AdwComboRow` dropdowns to the Mode
+page, which scrolls, and GTK dropdowns handle the scroll wheel themselves: a
+tick with the pointer over one silently selects a different option.
+
+This was already documented as a hazard for sliders, with a
+`ui::scroll_guard` written for exactly it and a list of pages still needing it.
+Adding new spinnable controls without applying it was the mistake. All three
+now redirect the wheel to the page, and the guard's own documentation says
+combo rows are the worse case: a slider at least looks draggable, while a
+dropdown gives no hint that a wheel tick over it is destructive.
+
+### A control that did nothing, next to one that did
+
+The group showed a switch and two mode pickers. The switch did what the user
+designed in §29: on a plug or unplug, move to the nearest mode both mode-key
+lists allow. The two pickers were the older mechanism, and their own subtitles
+admitted they were "used only if the mode-key list is empty" - which, for
+anyone who has configured the lists, means never. Two prominent controls, one
+permanently inert, with nothing on screen to say which.
+
+Replaced by one choice, because the user wanted all three behaviours available
+rather than a single "clever" one:
+
+| choice | on a plug or unplug | the two pickers |
+|---|---|---|
+| Keep my mode | nothing happens | greyed out |
+| Switch only if needed | keeps the mode unless the new source's list disallows it, then the nearest mode both allow | greyed out |
+| Always use a set mode | goes to the configured mode for that source, whatever the current one is | active |
+
+The pickers are sensitive only under the third, which is the whole point: a
+control that cannot affect anything should not look like it can.
+
+`auto_profile_ac` was a boolean and could not express three states.
+`PowerSourceAction` replaces it, and a config written before this is read
+through the old flag - off becomes `Keep`, on becomes `Switch only if needed` -
+so an upgrade behaves as it did rather than silently enabling something. The
+old flag is still written in step, so a downgrade sees the same intent.
+
+### The battery rules answered to the wrong switch
+
+"Switch to Eco below X%" and the 15% Quiet floor were both gated behind the
+power-source setting, so turning that off stopped automatic Eco from working
+while its own switch still read as on. Latent before, a trap once "Keep my
+mode" existed: choosing it would have silently disabled a feature the user had
+deliberately turned on.
+
+They answer to the automatic-Eco switch now, the one whose label describes
+them. The cost is that turning that switch off also drops the 15% floor. That
+floor saves charge rather than protecting hardware, and someone who turns
+battery management off has said what they want.
+
+### The labels did not fit
+
+The first version of the choice used sentences: "Switch only if the new source
+disallows it". The row truncated them to "Switch only if the new s...", in the
+button and in the popup, which is worse than no label. They are 12 and 21
+characters now, against the ~27 that row was cutting at, and the explanation
+moved to the subtitle, which wraps. Widening the control would not have held:
+the width comes from the window, and translations run longer than English.
+
+*Files:* `config.rs`, `hardware/power_profile.rs`, `ui/fan_page.rs`,
+`ui/scroll_guard.rs`, `ui/window.rs`, `i18n.rs`
+
+## 35. Settings lived in one file with no way out, and a file that would not parse said nothing
+
+**Asked for as:** "save it somewhere persistent so that if we ever need it we
+have it. maybe create an import export function in predatorSense in the
+settings menu"
+
+Found the hard way, on the machine this branch was developed on.
+
+### The failure that prompted it
+
+Restoring the config keys that a downgrade had stripped (§34's aftermath), the
+replacement `fan_plans` were hand-written in the wrong shape:
+
+```json
+{"mode": "quiet", "plan": {"Curve": {"steps": [25, 30, 45, 60, 75, 95]}}}
+```
+
+`FanPlan` is `#[serde(tag = "kind")]`, so the shape it wants is
+`{"kind": "curve", "steps": [...]}`. Serde rejected the file with
+``missing field `kind` at line 233 column 7``.
+
+What that did is by design and is the right design: `read_app_config_at`
+returns `Unreadable`, the app runs on `AppConfig::default()`, and it does
+**not** write defaults back over a file that still holds everything the user
+had. What was wrong is that nothing said so. The app ran on defaults for eight
+minutes with a valid-looking config on disk, no window message, no failing exit
+code, and an empty log.
+
+The log was empty for a specific and circular reason. `load_app_config_source`
+reports this through `applog::error`, and `applog` is gated on
+`cfg.debug_logging`, which is read from the file that just failed to parse. The
+gate is off precisely when the message matters most.
+
+Measured, on the restored build with `debug_logging: true` sitting in the file
+it could not read:
+
+| what was checked | result |
+|---|---|
+| `app.log` after startup | last line 15:49:18, process started 15:52:30, nothing written |
+| watcher file descriptors on the process | both present, `ppoll` blocked, so the app was alive and healthy |
+| settings actually in force | defaults, not the file's |
+
+The app being visibly fine is what makes this bad: every symptom pointed at the
+settings simply not having been saved.
+
+### Two changes
+
+**`applog::error_always`.** One function, one caller. It writes regardless of
+the switch, and its documentation says why it exists and that it is not a
+general escape hatch. Everything else in the app stays behind the user's
+setting.
+
+**Export and import, in Settings under "Settings backup".** The rules that
+matter are about what happens on failure, not on success:
+
+| decision | why |
+|---|---|
+| Export serializes the loaded config, it does not copy bytes | an exported file is then always one this build can read back |
+| Export refuses when the live config is `Unreadable` | exporting defaults under the user's own filename would hand them a backup with none of their settings in it, and no hint |
+| Export on `Missing` writes defaults, no error | with no file at all, defaults are honestly what the app is running |
+| Import validates through `read_app_config_at` before touching anything | a file that would send the app to defaults is refused while the user's own settings are still on disk |
+| Import copies the current config aside first, byte for byte | the file being replaced may be the only record, including when this build cannot parse it |
+| Import relaunches the app | every page is built once from the config it was handed, and half of these settings are pushed to hardware at startup; nothing less can claim to have applied them |
+
+The relaunch reuses what the language dropdown already does, including the
+typed internal argument that delays GTK initialization long enough for the
+single-instance D-Bus name to be freed.
+
+### Verified
+
+End to end, with the app installed and `PREDATOR_SENSE_LOG_DIR` and
+`XDG_CONFIG_HOME` redirected so the real config was never at risk. A config
+that parses as JSON but not as an `AppConfig`:
+
+```
+[2026-09-18 16:29:22] ERROR config: config.json exists but could not be loaded,
+running on defaults without overwriting it: missing field `kind` at line 1 column 76
+```
+
+written with logging off, and the broken file left byte-identical afterwards.
+Before this change the same run produced an empty log directory.
+
+Three new unit tests: the export/import round trip preserving per-mode fan
+plans and saved colours, an unreadable file being refused by import (both the
+externally tagged shape that caused this and outright malformed JSON), and a
+backup keeping the bytes of a config this build cannot parse.
+
+## 36. The temperature alert was set to the one urgency a desktop never dismisses
+
+**Reported as:** "The temp warning that shows when the CPU is hot should be
+medium level notification. It's very distracting in its current state."
+
+§33 moved these alerts off `notify-send` and onto `gio::Notification`, and set
+them to `NotificationPriority::Urgent` on the reasoning that a thermal warning
+is the one notification in this app worth interrupting for. That reasoning was
+about the message and ignored what the level means to the desktop receiving it.
+
+`Urgent` is the freedesktop *critical* urgency. GNOME Shell deliberately treats
+critical notifications as banners that never time out and that show through Do
+Not Disturb, because the category is meant for things like a battery about to
+die. A machine sitting at 90 C under a game therefore left a banner parked over
+the game until it was clicked, which is how it was reported.
+
+Now `Normal`, the same level as the mode-change announcement, which shows and
+fades.
+
+Nothing was lost by lowering it, because the urgency was never what made the
+alert safe:
+
+| what it does | where it lives | changed? |
+|---|---|---|
+| fires once per crossing of 90 C | `CPU_FIRED`/`GPU_FIRED` in `alerts` | no |
+| re-arms only below 85 C | `HYSTERESIS_C` | no |
+| at most one a minute across both sensors | `LAST_NOTIFY` | no |
+| stays on screen until clicked | notification priority | **yes, removed** |
+
+Nothing in this path protects the hardware either. The firmware throttles on
+its own, the notification only tells the user, and the live reading is already
+on the dashboard and in the tray.
+
+### Verified
+
+All 24 threads loaded until the package temperature reached 91 C, with
+`dbus-monitor` on the session bus for the whole run:
+
+```
+method call ... destination=org.gtk.Notifications member=AddNotification
+   string "com.predator.sense"
+   string "temperature-alert"
+      string "title"    variant string "Temperature alert"
+      string "body"     variant string "CPU at critical temperature (91°C)"
+      string "priority" variant string "normal"
+```
+
+One call for the run, not one per tick, under its own id so it never collides
+with the mode notification. The field read `"urgent"` before this change.
+
+### Then the threshold itself became a setting
+
+**Asked for as:** "now we should be able to control that, put a slider
+underneath it to control the threshold"
+
+The same reasoning that made the urgency wrong makes a hardcoded 90 C wrong.
+It is a judgement, not a property of the hardware: this CPU reports `high` and
+`crit` at 100 C and throttles itself there, and this chassis sits in the high
+eighties under sustained load by design. Where between those a warning is
+worth having is the user's call.
+
+`temp_alert_c` is now in config, with a slider directly under the alerts
+switch, live like everything else on that page. The value is pushed into the
+alert module before the save, so the very next sensor tick is judged against
+it.
+
+Bounds are 70 to 100, and `set_threshold_c` clamps to the same range the
+slider offers, so a hand-edited config cannot put the alert somewhere it never
+fires or never stops. The slider greys out when alerts are switched off.
+
+The crossing decision moved into a pure `crossing()` returning `Fire`, `Rearm`
+or `Hold`, with unit tests, because the hysteresis is what keeps a machine
+hovering at the limit from alerting on every tick and it now has to hold at
+any threshold rather than at one. The debounce behaviour is unchanged: one
+alert per crossing, re-armed only 5 C below, at most one a minute across both
+sensors.
+
+**Also fixed here**: the font-scale slider on this same page had no scroll
+guard, so a wheel tick over it while scrolling the page rescaled the entire
+app. Both sliders have `redirect_scroll_to_page` now. That makes three
+separate instances of this same bug on this branch (lighting page sliders,
+the Mode page combo rows in §34, and this), which is the argument for the
+guard being the default rather than something remembered per widget.
+
+### Verified
+
+Two runs against `dbus-monitor` on the session bus, six loaded cores each:
+
+| threshold | package temperature | notifications |
+|---|---|---|
+| 90 C | reached 91 C | 1, within 5 s |
+| 98 C | held 88 to 94 C for 65 s | **0** |
+
+The negative run is the one that proves the setting is read. An alert at a low
+threshold proves nothing on this machine, because the package jumps past 90 C
+within five seconds of any real load, so it would have fired under the old
+constant too.
+
+### What this did to the export/import feature from §35
+
+Nothing, and that is now enforced rather than assumed. Adding a field is the
+first real test of the contract those two buttons create, so both directions
+are pinned down:
+
+| case | behaviour |
+|---|---|
+| a file exported before `temp_alert_c` existed, imported now | loads, field takes its default of 90 |
+| a file carrying a key this build does not know, imported | loads, key ignored, not refused |
+
+The first works because every field added after the fact carries
+`#[serde(default)]`. The second was already true, since `AppConfig` does not
+set `deny_unknown_fields`, but it was true by accident; there is now a test
+that fails if someone adds that attribute, because a user on an older build
+importing a newer export is ordinary in a project where people run whatever
+version a distro handed them.
+
+Checked against the real file, not only synthetic ones: the config backed up
+from this machine at 16:11, before the field existed, imports through the
+app's own path with all five fan plans, both sync settings and the
+power-source action intact.
+
+---
+
+# Backfill: the `fan-per-mode-plans` work, §37 to §40
+
+**These four sections are out of order on purpose.** They cover work done
+*before* §28, the largest single feature on this branch, which was specified and
+reviewed at the time but never given sections of its own here. They are appended
+rather than renumbered into place because §28 to §36 are already
+cross-referenced from commit messages and from comments posted upstream, and
+renumbering would break every one of those references.
+
+Evidence here is the commit record and measurements already established
+elsewhere in this file, not fresh instrumentation.
+
+## 37. Every mode got its own fan plan, and the fans got a single owner
+
+Before this, fan behaviour was global and two subsystems wrote it. The Fan
+Control page owned a curve and a manual duty; `set_profile` separately forced a
+fan mode on every power-mode switch. Neither knew about the other, which is the
+family of bug §27 is one instance of.
+
+Now each of the five power modes owns a `FanPlan` in `config.fan_plans`
+(`Automatic`, `Curve { steps }`, `Fixed { percent }`, `Max`), and a single
+3-second reconciler in `ui/window.rs` is the only thing in the app that writes
+fan hardware. Every other caller, the Fan Control page and the AI assistant
+included, writes intent into config and waits for the next tick.
+
+### The parts that were not obvious
+
+**Migration had to preserve behaviour and initially did not.** It carried the
+global Fan Control setting and dropped what `set_profile` had been forcing, so
+on a default config every mode became `Automatic` and **Turbo stopped raising
+the fans at all**. `migrate_plans` now seeds each mode from
+`profile::fan_mode_for()`, the same mapping `set_profile` applied, so a default
+config binds Performance and Turbo to `Max` and the rest to `Automatic`
+(`9a2755a`). That also gave the issue #41 Settings toggle its meaning back: it
+decides what migration binds.
+
+**A fixed 0% is not off, and had to be taught that.** `plan_target`'s `Fixed`
+arm passed 0 through as a manual duty, which this project has already measured
+as not off: the EC holds a floor around **1670 RPM** on a PH16-71. The Custom
+slider runs from 0, so dragging it to 0 asked for silence and got a fan that
+never stopped, while the same 0 as a curve's first step reached true 0 RPM by
+handing back to the firmware. Both now take the firmware handoff (`dcce370`).
+
+**The reconciler could storm.** The design called for a failure back-off that
+was never implemented, which only became dangerous once the tick lost its
+config and capability gates and began running on every machine, with
+`FanState::Unknown` at startup meaning the first tick always wants a write. Two
+failures never clear by themselves: an EC that refuses the preset bytes rejects
+every attempt, and an unreachable helper spawns a fresh `pkexec` per attempt,
+which is **an authentication dialog every three seconds for a fan write nobody
+asked for**. The counter resets only on a write that actually succeeded, so a
+permanently dead path settles at one attempt every 30 s (`99e8101`).
+
+**A background fan write was moving the user's power mode.** On hardware
+without per-fan PWM, a reconciled `Auto` went through `set_fan_mode`, which
+wakes the EC's dynamic curve by bouncing the WMI ThermalProfile index off
+another index and back. That is the same index `get_current_profile` reads to
+decide which mode's plan to apply, so a timer changed the visible power mode as
+a side effect, and a failed restore leg left the machine in a different mode
+whose different plan the next tick would then apply. The reconciler now calls a
+no-wake entry point; every caller that keeps the wake is an explicit user
+action (`d19b021`).
+
+**A failed config write must not disable fan control.** The migration branch
+returned unconditionally after trying to save, so a config it could never write
+(a directory left root-owned under `pkexec`, a full disk, an immutable home)
+meant the tick never reached the plan branch again: `Max`, `Fixed` and `Curve`
+permanently inert, with nothing logged by default. It now logs once and applies
+the migrated plans from memory, so fan control never depends on a successful
+write. The same commit stopped an unparseable config from being answered with
+defaults that then got persisted over a file still holding every lighting
+scheme, game profile and macro (`32c112d`) - the same failure mode §35 later
+made visible.
+
+Two rules are load-bearing rather than stylistic, and are written down as
+project rules for that reason: a manual PWM of 0 is not off on this chassis, and the reconciler writes
+only on a change, so an idle machine produces no fan writes at all.
+
+## 38. Fan Control rebuilt around the plan, with a curve you can drag
+
+The page was built for the old global model and could not express a per-mode
+plan. Rebuilt around one mode picker and one plan selector (`2624634`), with
+the curve drawn as a **draggable step chart** (`6f13d5c`): six bars on a
+ten-degree grid, the firmware-owned band shaded behind them, and a marker at
+the current temperature lighting the step in force. Stepped rather than smooth
+on purpose, because the curve is stepped and a smooth line would show speeds
+the reconciler never writes.
+
+The geometry is a separate module with its own tests so it can be verified
+without a display (`5128ced`).
+
+Details that only appeared once someone used it:
+
+- `set_steps` deliberately does not fire the change callback, so pushing config
+  into the widget cannot turn into a write back out of it (`6f13d5c`).
+- The page stopped rewriting controls nothing had asked it to change
+  (`1113e15`), and a mode now keeps its own curve when it leaves Curve and
+  comes back (`70c6c5c`).
+- "Applying..." never came down. It cannot honestly become "applied", because
+  the reconciler owns the hardware and reports to the log rather than to the
+  page, so it states what was written and clears after one reconciler tick plus
+  a margin. An error stays until something replaces it, since that is the one
+  line the user has to see (`f4c46de`).
+- The shaded band marks only the temperatures the curve always leaves to the
+  firmware (`5c595a9`, `fe8b5e5`).
+- The page scrolls (`67168f7`), and the new strings went into the other seven
+  languages (`d015c74`).
+
+A pre-flight scan of the plan caught five defects before implementation,
+including a `RefCell` borrow held across a callback that reaches back into the
+widget (`a5d5607`).
+
+## 39. A privileged action that should not have shipped, and a UI pass
+
+**`ChiconySeq` is gone** (`438311d`). It took a hex string from the caller and
+sent it to the keyboard controller as arbitrary 8-byte USB control packets, as
+root, validated only for hex format and length. Nothing in the GUI ever called
+it: it was the tool used to confirm this controller's packet layouts on real
+hardware during development, and it had no business in a shipping build. The
+atomicity its doc comment described is handled inside `chicony_send_many`,
+which the typed `ChiconyEffect` and `ChiconyColor` actions already use; those
+two carry validated, bounded arguments and are now the only way to reach this
+controller. The maintainer independently raised this in his security review of
+PR #69.
+
+**27 switches across 7 pages were painting the user's desktop accent, not the
+app's** (`19ff217`). libadwaita 1.6+ colours every switch, checkbutton, entry
+focus ring and dropdown arrow from the system accent - `gsettings` returns
+`red` on this machine - and `style.css` never defined the variables it reads.
+Defining them next to the cyan literal means `brand_theme::recolor`'s string
+replacement recolours stock widgets per power mode for free.
+
+**The Lighting page had no frame** (`cd88793`). One unclamped column, sliders
+stretching to the window width, sections separated by a faint default rule, and
+three empty `.status-label`s each reserving their own padding. Now an
+`adw::Clamp` at 980 px, exactly two of the app's 460-px cards wide, with
+sliders at a fixed 280 px behind an 11-character label column so Brightness and
+Speed start at the same x.
+
+**Sliders were stealing the scroll wheel** (`45e82d5`). `GtkRange` handles
+scroll itself, so a wheel tick over a slider changed that slider instead of
+scrolling the page, and on the lighting page those controls apply live, so
+scrolling past a brightness slider wrote to the hardware. The guard captures the
+event before the range sees it and hands the same tick to the enclosing
+`ScrolledWindow`; dragging, clicking and keyboard control are untouched. This
+bug has now recurred twice more, in §34 and §36, which is why the guard is now
+treated as required on any scrolling page rather than remembered per widget.
+
+**The Drivers page's serial-number diagram was unreadable** (`4b387ea`). The
+drawing was not at fault: `find-serial-number.svg` carries only a `viewBox`, so
+its natural size is 443x84, and a widget size request is a minimum rather than
+a cap, so an 84-px-tall bitmap was stretched to 260 and went soft. Replaced
+with a photo of a real label, capped during decode and never scaled up, since
+`GtkPicture` reports an image's full size as its natural size and a large file
+would otherwise make the widget that tall and push the page out of view.
+
+## 40. Six ways this fork misbehaved on Acers that are not a PH16-71
+
+An audit of the whole branch against upstream, looking specifically for
+behaviour that is correct here and wrong elsewhere (`1cdfd7f`). This is the
+section most worth reading before adding any new hardware path, because every
+defect in it has the same shape: something gated on nothing, or gated on a USB
+id that other models share.
+
+| what went wrong elsewhere | why | fix |
+|---|---|---|
+| **Keyboard backlight left permanently lit** | startup switched the firmware's own backlight timeout off unconditionally, so the app's idle timer could own both devices, but that timer only blanks when `keyboard_rgb` is available, which is PH16-71 only. Every other Acer lost its factory auto-off and got nothing back | the takeover now requires hardware this app can actually blank |
+| **No way to undo it** | the auto-off switch had moved to the Lighting page, which only exists on this chassis, leaving both remaining call sites passing `false`: nothing in the tree could re-enable the timeout | the Settings row is restored on machines the Lighting page does not serve |
+| **PredatorSense key watch repeated the shared-USB-id trap** | `04F2:0117` interface 2 with no DMI check would read an ordinary consumer report on a Helios 300 as the key, launching the app or running the user's bound command | gated on model, like the GUI path |
+| **Fan-curve bounce ran everywhere** | `set_pwm_auto()` cycles the firmware power profile to wake a curve this EC leaves stalled; elsewhere that is a visible unrequested mode change, and a failed restore strands the wrong profile | limited to the models where the stall was measured |
+| **`on_ac_power()` aborted its scan** | a `?` on an unreadable `type` returned `None` for the whole function, and a wireless mouse or a UPS in `/sys/class/power_supply` was enough to trigger it. The caller defaults to AC, so **the mode key ran the AC cycle while on battery** | the scan skips what it cannot read instead of giving up |
+| **`mode_cycle_*` offered where they do nothing** | only the `predator_v4` path reads a cycle | creation moved inside that check with matching removal on unload, and the GUI checks the attribute exists before offering the editor or pushing a cycle |
+
+Also in the same commit: hide the PredatorSense key tab on a chassis without
+the key; create the debugfs probe only where `WMID_GUID4` exists, **since
+reading `gkbbl_get` traps to SMM**; re-read the cycle length under
+`mode_cycle_lock`; and fix `chicony_rgb::set_static_color()` passing three
+arguments to a four-argument helper action.
+
+The general rule this produced: new hardware paths are gated on
+`sysinfo::product_matches()`, a whole-word DMI `product_name` check, not on a
+USB id, and a model joins the list only once someone has confirmed it.
+
+---
+
 ## Also worth flagging to upstream (not fixed here)
 
 - **CoolBoost has no measurable effect on a PH16-71, and the register is not
@@ -1901,9 +2372,26 @@ the machine was only passing through during a switch. It now skips while
 | Fan curve sees the GPU | **Fixed** - hotter die drives it; coupling measured (26) |
 | Fan Control: one control per setting | **Fixed**, user-confirmed on hardware (27) |
 | Curve step edit reaching the fans | **Working**: a dragged `[25,30,45,60,75,95]` drove pwm 30% then 45% as the die hit 56 C |
+| Idle cost of the rebuilt page | 1.90% CPU over 30 s, zero fan writes while nothing changed |
+| Status line clearing itself | **Fixed**: states intent, clears after one reconciler tick (27) |
 | Fixed 50%, then Fixed 0% | **Working**: `Manual(50)` and a 50% duty, then `target=Firmware` and `pwm_enable=2`, not a manual 0 |
 | Shaded band matches `curve_zero_region_top_c` | **Working**, user-confirmed: band stops at 45 for `[0,30,...]`, and the log wrote `Manual(30)` at 50 C, inside the range the old band would have called firmware |
-| Idle cost of the rebuilt page | 1.90% CPU over 30 s, zero fan writes while nothing changed |
-| CoolBoost toggling without a fan write | **Working**: no fan decision line, plan untouched. CoolBoost itself has no measurable fan effect here and the EC overwrites the byte |
-| Unit tests | 289 GUI + 85 installer + 54 protocol passed, 0 failed |
-
+| CoolBoost toggling without a fan write | **Working**: no fan decision line, plan untouched. CoolBoost itself has no measurable fan effect here and the EC overwrites the byte, see the upstream notes |
+| Mode key leaving the CPU behind | **Fixed** - the key's mode is applied in full within 5 s (28) |
+| Eco chosen with the mode key, on battery | **Fixed** - held 150 s and 120 s, no policy override (28) |
+| Mode held across a plug and an unplug | **Fixed** - both directions logged `=> None`, mode untouched (29) |
+| Unplug with PPD blinding the CPU read | **Fixed** - `cpu None` but `in Some("balanced")`, left alone; applied Quiet three times before (29) |
+| Auto-Eco at the user's own threshold | **Working** - fired unprompted at 28% against a 30% setting, applied Eco in full, did not repeat (29) |
+| Quiet unreachable from Eco | **Fixed** - helper verified `min_perf_pct` against a turbo-dependent estimate and rolled the profile back; Eco->Quiet->Eco->Balanced all apply, no errors (31) |
+| Turbo locking other tools out of EPP | **Fixed** - writable again, PPD switches. Costs nothing: 2624 vs 2627 MHz under load at equal watts, 0.13 W less at idle, quiet machine, 3+3 paired runs (30) |
+| Desktop indicator follows the mode | **Working** - Eco/Quiet/Balanced all showed the right bucket, Quiet kept index 0 (32) |
+| Mode-change notifications | **Working** - `AddNotification` seen on the bus from `com.predator.sense` (32) |
+| Mode changes reach the CPU | **Fixed** - event-driven, 138-265 ms, no skipped modes at a 2 s cadence (33) |
+| Temperature alerts without libnotify | **Fixed** - GIO path, no external binary (33) |
+| Dropdowns rewriting settings on scroll | **Fixed** - guard applied; it had already changed `profile_battery` (34) |
+| A config that will not parse reports itself | **Fixed**: error written with logging off, broken file left byte-identical (35) |
+| Temperature alert urgency | **Fixed**: `priority: "normal"` on the bus at 91 C, one call for the run, was "urgent" (36) |
+| Temperature alert threshold | **Working**: 0 notifications with 88-94 C held for 65 s at a 98 C threshold, against 1 within 5 s at 90 C (36) |
+| Font-scale slider stealing the wheel | **Fixed**: guard applied, third instance of this bug (36) |
+| Settings export and import | **Working**, user-confirmed: exported, a malformed file refused with nothing changed, then imported and relaunched. Left `config-backup-2026-09-18-1708.json` beside the config, settings intact, watcher re-armed on both attributes (35) |
+| Unit tests | 300 GUI + 85 installer + 54 protocol passed, 0 failed |
