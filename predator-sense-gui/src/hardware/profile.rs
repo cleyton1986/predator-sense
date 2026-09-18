@@ -1046,6 +1046,26 @@ fn read_cpu_reading_at(sysfs_root: &Path) -> CpuReading {
 
 pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     let _in_flight = ApplyGuard::new();
+
+    // First, before this function writes anything of its own.
+    //
+    // Telling the desktop's power daemon which profile matches this mode makes
+    // it write, and it writes more than the indicator: on the machine this was
+    // measured on it sets both the firmware index and the CPU's
+    // energy/performance preference. Anything this function writes afterwards
+    // therefore lands on top of it, which is exactly what is wanted - the app
+    // owns the mode, the daemon owns only the label.
+    //
+    // It used to sit just before the firmware index instead, which protected
+    // the index and nothing else, so on battery the daemon's own preference
+    // (it leans further toward saving once unplugged) was applied *after* this
+    // mode's and quietly replaced it. Balanced on battery then ran with the
+    // daemon's setting rather than its own. See CHANGELOG §32.
+    {
+        let cfg = crate::config::load_app_config();
+        crate::hardware::ppd::sync_to_mode(profile, cfg.ppd_sync_enabled, cfg.ppd_sync_map);
+    }
+
     let s = settings_for(profile);
 
     if manage_cpu_power() {
@@ -1151,16 +1171,6 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
                 profile.to_id()
             ));
         }
-    }
-
-    // Before the firmware index, not after. Setting the desktop's profile makes
-    // that daemon write its own platform profile, and for Quiet and Performance
-    // that is a different index from this mode's; going first means this app's
-    // own write lands last and wins, leaving the desktop indicator pointing at
-    // the right one of its three buckets. See hardware::ppd.
-    {
-        let cfg = crate::config::load_app_config();
-        crate::hardware::ppd::sync_to_mode(profile, cfg.ppd_sync_enabled, cfg.ppd_sync_map);
     }
 
     apply_firmware_profile(profile);
