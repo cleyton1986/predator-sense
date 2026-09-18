@@ -345,6 +345,23 @@ pub struct AppConfig {
     #[serde(default = "default_auto_eco_threshold")]
     pub auto_eco_threshold: u32,
 
+    /// Tell the desktop's power-mode control which of its three profiles the
+    /// active mode corresponds to, so its indicator stops contradicting the
+    /// app. Off by default: it writes to a daemon this app does not own.
+    ///
+    /// The desktop API has three profiles and this app has five, so the map is
+    /// lossy by construction and the user picks which way it folds - see
+    /// `PpdMap`.
+    /// Post a desktop notification whenever the active mode changes, from any
+    /// source: the mode key, this app, the desktop's own power menu, or the
+    /// battery rules.
+    #[serde(default)]
+    pub notify_mode_changes: bool,
+    #[serde(default)]
+    pub ppd_sync_enabled: bool,
+    #[serde(default)]
+    pub ppd_sync_map: PpdMap,
+
     /// What the dedicated PredatorSense key does: `app` (open Predator Sense,
     /// the default), `command` (run `predator_key_command`), or `none`.
     ///
@@ -482,6 +499,22 @@ fn default_idle_secs() -> u32 {
     30
 }
 
+/// How the app's five modes fold onto the desktop's three power profiles.
+///
+/// Both variants agree at the ends, Eco to power-saver and Turbo to
+/// performance, and differ only in where Quiet lands, which is the one that
+/// genuinely reads either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum PpdMap {
+    /// Eco and Quiet both read as the desktop's power saver.
+    #[default]
+    #[serde(rename = "quiet-saves-power")]
+    QuietSavesPower,
+    /// Quiet sits with Balanced instead, leaving power saver for Eco alone.
+    #[serde(rename = "quiet-is-balanced")]
+    QuietIsBalanced,
+}
+
 fn default_auto_eco_threshold() -> u32 {
     30
 }
@@ -561,6 +594,9 @@ impl Default for AppConfig {
             mode_default: None,
             auto_eco_enabled: false,
             auto_eco_threshold: default_auto_eco_threshold(),
+            notify_mode_changes: false,
+            ppd_sync_enabled: false,
+            ppd_sync_map: PpdMap::default(),
             predator_key_action: default_predator_key_action(),
             predator_key_command: String::new(),
             cover_logo: None,

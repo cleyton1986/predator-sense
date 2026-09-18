@@ -276,10 +276,18 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
     // Runs every 5s regardless of window visibility (works in the tray too).
     {
         let cfg = config::load_app_config();
+        // First, before anything below can log: this is what opens the log at
+        // all, so every startup line emitted ahead of it was written into a
+        // switched-off logger and lost - including the one that says which
+        // mode-key cycles the power policy came up with.
+        crate::hardware::applog::set_enabled(cfg.debug_logging);
         crate::hardware::alerts::set_enabled(cfg.temp_alerts);
         crate::hardware::power_profile::set_auto(cfg.auto_profile_ac);
         crate::hardware::power_profile::set_target_profiles(cfg.profile_ac, cfg.profile_battery);
         crate::hardware::power_profile::set_auto_eco(cfg.auto_eco_enabled, cfg.auto_eco_threshold);
+        // The same lists the mode key uses are what a power-source change
+        // moves between, so the policy needs them too, not just the driver.
+        crate::hardware::power_profile::set_cycles(&cfg.mode_cycle_ac, &cfg.mode_cycle_battery);
 
         // The cycles live in the kernel module, which forgets them on every
         // reload and every boot, so they are pushed back on each start.
@@ -318,7 +326,6 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 },
             );
         }
-        crate::hardware::applog::set_enabled(cfg.debug_logging);
         crate::hardware::profile::set_manage_cpu_power(cfg.manage_cpu_power);
         crate::hardware::game_sync::set_enabled(cfg.game_sync_enabled);
 
@@ -424,18 +431,74 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // promptly, whereas the lights going dark has to look deliberate.
         let last_mode: Rc<std::cell::RefCell<Option<crate::hardware::profile::PowerProfile>>> =
             Rc::new(std::cell::RefCell::new(crate::hardware::profile::get_current_profile()));
+        // Announcing the change needs the application, since the notification
+        // goes out as the app rather than through a separate binary.
+        let notify_app = app.clone();
         glib::timeout_add_seconds_local(5, move || {
             let (cpu, gpu) = sensors::read_critical_temps();
             crate::hardware::alerts::check(cpu, gpu);
-            crate::hardware::power_profile::check();
+
+            // Nothing in here may act while a switch is part-way through. A
+            // profile is applied off-thread in several steps, and with the
+            // desktop-indicator sync on, one of those steps deliberately puts
+            // the firmware on a *different* index for about 112 ms before this
+            // app writes its own (see hardware::ppd). A tick landing inside
+            // that window would otherwise read the intermediate mode as a real
+            // change: remember it, apply that mode's lighting, and announce it.
+            // Skipping the block entirely leaves `last_mode` alone, so the tick
+            // after the switch settles sees the final mode and acts on it once.
+            if crate::hardware::profile::apply_in_flight() {
+                crate::hardware::power_profile::check();
+                return glib::ControlFlow::Continue;
+            }
 
             if let Some(now) = crate::hardware::profile::get_current_profile() {
-                let changed = last_mode.borrow().map(|previous| previous != now).unwrap_or(true);
+                let previous = *last_mode.borrow();
+                let changed = previous.map(|previous| previous != now).unwrap_or(true);
                 if changed {
                     *last_mode.borrow_mut() = Some(now);
+                    // The mode key moved the firmware index and nothing else -
+                    // see profile::completion_target. Applying the rest of the
+                    // mode here is what stops the power policy below from
+                    // reading a half-moved machine as "in no mode at all" and
+                    // overwriting the user's choice with its configured
+                    // target, and it is also what makes a keyed Eco actually
+                    // save power instead of only relabelling itself. A no-op
+                    // for a change this app made itself.
+                    let completion = crate::hardware::profile::completion_target(
+                        now,
+                        crate::hardware::profile::coherent_profile(),
+                    );
+                    if let Some(target) = completion {
+                        crate::hardware::applog::info(&format!(
+                            "mode changed outside the app to {}; applying the rest of that mode",
+                            target.to_id()
+                        ));
+                        if let Err(error) = crate::hardware::profile::set_profile(target) {
+                            crate::hardware::applog::error(&format!(
+                                "mode {} not completed: {error}",
+                                target.to_id()
+                            ));
+                        }
+                    }
+                    // Every source lands here - the mode key, this app's own
+                    // cards, the desktop's power menu, the battery rules - so
+                    // one call covers them all.
+                    crate::hardware::notify::mode_changed(
+                        &notify_app,
+                        previous.map(|p| p.label().to_string()).as_deref(),
+                        now.label(),
+                        config::load_app_config().notify_mode_changes,
+                    );
                     crate::ui::lighting_page::apply_scheme_for_mode(now);
                 }
             }
+
+            // After the completion above, not before: on the tick that first
+            // sees a key press, the policy would otherwise open a grace window
+            // against a machine that is about to become compliant in the same
+            // tick.
+            crate::hardware::power_profile::check();
 
             glib::ControlFlow::Continue
         });
@@ -1918,104 +1981,9 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     alert_row.append(&alert_switch);
     page.append(&alert_row);
 
-    // Auto performance profile by power source (AC vs battery)
-    let acp_row = create_setting_row(t("auto_profile_ac"), t("auto_profile_ac_desc"));
-    let acp_switch = gtk::Switch::new();
-    acp_switch.set_active(cfg.auto_profile_ac);
-    acp_switch.set_valign(gtk::Align::Center);
-    acp_row.append(&acp_switch);
-    page.append(&acp_row);
-
-    // Eco is battery-only in the official app (`MUI_Mode_Intro_ECO`, "Can be
-    // used when running on battery only") - it never gets an AC card, so the
-    // AC target list stays at the same four choices it always had. The
-    // battery list gets it as a fifth choice.
-    //
-    // Dropdown position is matched against these arrays directly rather than
-    // through `PowerProfile::index()`: Eco sits *below* Quiet in that
-    // ordering (see its doc comment), so position and index no longer agree
-    // once Eco exists, and the AC list does not even carry it at all.
-    let ac_profile_choices: [(&str, crate::hardware::profile::PowerProfile); 4] = [
-        ("quiet", crate::hardware::profile::PowerProfile::Quiet),
-        ("balanced", crate::hardware::profile::PowerProfile::Balanced),
-        (
-            "performance",
-            crate::hardware::profile::PowerProfile::Performance,
-        ),
-        ("turbo", crate::hardware::profile::PowerProfile::Turbo),
-    ];
-    let battery_profile_choices: [(&str, crate::hardware::profile::PowerProfile); 5] = [
-        ("quiet", crate::hardware::profile::PowerProfile::Quiet),
-        ("balanced", crate::hardware::profile::PowerProfile::Balanced),
-        (
-            "performance",
-            crate::hardware::profile::PowerProfile::Performance,
-        ),
-        ("turbo", crate::hardware::profile::PowerProfile::Turbo),
-        ("eco", crate::hardware::profile::PowerProfile::Eco),
-    ];
-    let ac_profile_labels: Vec<&str> = ac_profile_choices.iter().map(|(k, _)| t(k)).collect();
-    let battery_profile_labels: Vec<&str> =
-        battery_profile_choices.iter().map(|(k, _)| t(k)).collect();
-
-    let ac_profile_row = create_setting_row(t("profile_when_ac"), t("profile_when_ac_desc"));
-    ac_profile_row.set_sensitive(cfg.auto_profile_ac);
-    let ac_profile_dd = gtk::DropDown::from_strings(&ac_profile_labels);
-    let ac_selected = ac_profile_choices
-        .iter()
-        .position(|(_, p)| *p == cfg.profile_ac)
-        .unwrap_or(1) as u32; // Balanced, if the saved choice is somehow Eco.
-    ac_profile_dd.set_selected(ac_selected);
-    ac_profile_dd.set_valign(gtk::Align::Center);
-    ac_profile_dd.connect_selected_notify(move |dd| {
-        let sel = dd.selected() as usize;
-        let Some((_, profile)) = ac_profile_choices.get(sel) else {
-            return; // GTK_INVALID_LIST_POSITION or other transient state, not a real user pick
-        };
-        let mut c = config::load_app_config();
-        c.profile_ac = *profile;
-        let _ = config::save_app_config(&c);
-        crate::hardware::power_profile::set_target_profiles(c.profile_ac, c.profile_battery);
-    });
-    ac_profile_row.append(&ac_profile_dd);
-    page.append(&ac_profile_row);
-
-    let battery_profile_row =
-        create_setting_row(t("profile_when_battery"), t("profile_when_battery_desc"));
-    battery_profile_row.set_sensitive(cfg.auto_profile_ac);
-    let battery_profile_dd = gtk::DropDown::from_strings(&battery_profile_labels);
-    let battery_selected = battery_profile_choices
-        .iter()
-        .position(|(_, p)| *p == cfg.profile_battery)
-        .unwrap_or(1) as u32; // Balanced, if the saved choice can't be shown.
-    battery_profile_dd.set_selected(battery_selected);
-    battery_profile_dd.set_valign(gtk::Align::Center);
-    battery_profile_dd.connect_selected_notify(move |dd| {
-        let sel = dd.selected() as usize;
-        let Some((_, profile)) = battery_profile_choices.get(sel) else {
-            return; // GTK_INVALID_LIST_POSITION or other transient state, not a real user pick
-        };
-        let mut c = config::load_app_config();
-        c.profile_battery = *profile;
-        let _ = config::save_app_config(&c);
-        crate::hardware::power_profile::set_target_profiles(c.profile_ac, c.profile_battery);
-    });
-    battery_profile_row.append(&battery_profile_dd);
-    page.append(&battery_profile_row);
-
-    {
-        let ac_row = ac_profile_row.clone();
-        let bat_row = battery_profile_row.clone();
-        acp_switch.connect_state_set(move |_, active| {
-            let mut c = config::load_app_config();
-            c.auto_profile_ac = active;
-            let _ = config::save_app_config(&c);
-            crate::hardware::power_profile::set_auto(active);
-            ac_row.set_sensitive(active);
-            bat_row.set_sensitive(active);
-            glib::Propagation::Proceed
-        });
-    }
+    // The auto-profile switch and its two fall-back targets moved to the Mode
+    // page, next to the mode-key cycles the rule actually reads. They were a
+    // feature split across two pages with nothing saying so.
 
     // Persistent debug log (issue #7) - off by default, only meant for
     // remote debugging sessions like the one that motivated it.
