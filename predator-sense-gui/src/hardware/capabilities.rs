@@ -29,6 +29,14 @@ pub struct Capabilities {
     /// that one is the badge on the outside of the lid, this is the bar across
     /// the chassis, and a machine can have either, both or neither.
     pub light_bar: bool,
+    /// Chicony USB keyboard backlight with arbitrary colour
+    /// (`hardware::keyboard_rgb`). Distinct from `rgb` above, which is the
+    /// older WMI palette channel, and from `cover_logo`.
+    pub keyboard_rgb: bool,
+    /// The dedicated PredatorSense key beside NumLock. Model-gated rather than
+    /// probed: the key reports on a USB interface several chassis share, so a
+    /// device check alone would fire on machines that do not have it.
+    pub predator_key: bool,
     /// Raw EC access (/dev/ec) — needed for CoolBoost / LCD overdrive / etc.
     pub ec: bool,
     /// NVIDIA GPU monitoring available without waking the dGPU during detection.
@@ -103,6 +111,10 @@ impl Capabilities {
             cover_logo: crate::hardware::hid_rgb::has_cover_logo()
                 || crate::hardware::magic_rgb::is_logo_available(),
             light_bar: crate::hardware::light_bar::is_available(),
+            keyboard_rgb: crate::hardware::keyboard_rgb::is_available(),
+            predator_key: crate::hardware::sysinfo::product_matches(
+                predator_sense_protocol::dmi::PREDATOR_KEY_MODELS,
+            ),
             ec: Path::new("/dev/ec").exists(),
             nvidia_gpu: crate::hardware::nvidia::is_available(),
             battery_limit: battery_charge_limit().is_some(),
@@ -344,5 +356,26 @@ mod tests {
             FanPresetStatus::Unverified
         );
         assert_eq!(fan_preset_status_for(""), FanPresetStatus::Unverified);
+    }
+}
+
+#[cfg(test)]
+mod capability_fields {
+    #[test]
+    fn every_lighting_surface_the_ui_gates_on_has_a_field_here() {
+        // The two added last had callers reaching past the struct into
+        // is_available() in fifteen places, which is how a gate gets forgotten
+        // on one path while the others keep it.
+        let caps = super::get();
+        let _: bool = caps.light_bar;
+        let _: bool = caps.keyboard_rgb;
+        let _: bool = caps.predator_key;
+    }
+
+    #[test]
+    fn the_struct_agrees_with_the_modules_it_summarises() {
+        let caps = super::get();
+        assert_eq!(caps.keyboard_rgb, crate::hardware::keyboard_rgb::is_available());
+        assert_eq!(caps.light_bar, crate::hardware::light_bar::is_available());
     }
 }
