@@ -204,6 +204,42 @@ impl PowerProfile {
     }
 }
 
+/// The two `mode_cycle_*` attributes as the driver currently holds them.
+///
+/// `None` on a chassis where facer does not create them, which is the same
+/// condition [`push_mode_cycles`] checks before spending a helper round trip.
+pub fn read_mode_cycles() -> Option<(String, String)> {
+    const DIR: &str = "/sys/devices/platform/acer-wmi";
+    let ac = std::fs::read_to_string(format!("{DIR}/mode_cycle_ac")).ok()?;
+    let battery = std::fs::read_to_string(format!("{DIR}/mode_cycle_battery")).ok()?;
+    Some((ac, battery))
+}
+
+/// Has the driver lost the cycles the user configured?
+///
+/// The cycles live only in the kernel module, which creates both attributes
+/// empty. Startup pushes them down, but a module reload afterwards - an
+/// explicit `--reload-module`, or the DKMS rebuild that follows every kernel
+/// upgrade - empties them again with nothing to notice. The mode key does not
+/// die when that happens, which is what makes it easy to miss: a zero-length
+/// cycle sends `acer_mode_cycle_next()` back to the driver's own ladder, so the
+/// key still works and simply stops honouring the user's choice.
+///
+/// **Only absence counts, never a difference.** Config stores profile ids and
+/// the driver speaks per-machine WMI indices, and a tier the calibration
+/// cannot place is dropped from the encoded list. Treating "not what I would
+/// have written" as a loss would push on every tick for the life of the
+/// session, each one a privileged helper call.
+pub fn mode_cycles_lost(
+    kernel_ac: &str,
+    kernel_battery: &str,
+    cfg_ac: &[String],
+    cfg_battery: &[String],
+) -> bool {
+    let lost = |kernel: &str, cfg: &[String]| !cfg.is_empty() && kernel.trim().is_empty();
+    lost(kernel_ac, cfg_ac) || lost(kernel_battery, cfg_battery)
+}
+
 /// Pushes the user's mode-key cycles down to the driver.
 ///
 /// The mode key is handled inside the kernel on this hardware - no input event
@@ -1192,6 +1228,49 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod mode_cycle_tests {
+    use super::*;
+
+    #[test]
+    fn a_driver_that_forgot_its_cycles_needs_them_back() {
+        // What a module reload leaves behind: the attributes exist and are
+        // empty, while config still holds what the user chose.
+        assert!(mode_cycles_lost("", "", &["quiet".into()], &["eco".into()]));
+        assert!(mode_cycles_lost("\n", "\n", &["quiet".into()], &["eco".into()]));
+    }
+
+    #[test]
+    fn one_empty_side_is_enough() {
+        assert!(mode_cycles_lost("0,1,4", "", &["quiet".into()], &["eco".into()]));
+        assert!(mode_cycles_lost("", "6,0,1", &["quiet".into()], &["eco".into()]));
+    }
+
+    #[test]
+    fn cycles_already_installed_are_left_alone() {
+        // The push costs a privileged helper round trip, so anything that is
+        // already there must not trigger one.
+        assert!(!mode_cycles_lost("0,1,4", "6,0,1", &["quiet".into()], &["eco".into()]));
+    }
+
+    #[test]
+    fn nothing_configured_means_nothing_to_install() {
+        // An empty driver attribute is correct here, not a loss: the driver
+        // falls back to its own ladder and that is what the user asked for.
+        assert!(!mode_cycles_lost("", "", &[], &[]));
+        assert!(!mode_cycles_lost("0,1,4", "", &["quiet".into()], &[]));
+    }
+
+    #[test]
+    fn the_contents_are_not_compared_only_their_absence() {
+        // Deliberate: config ids are translated to per-machine WMI indices
+        // through the calibration, and a tier the calibration cannot place is
+        // dropped from the encoded list. Comparing contents would see that as
+        // a permanent mismatch and push on every tick forever.
+        assert!(!mode_cycles_lost("9,9,9", "9", &["quiet".into()], &["eco".into()]));
+    }
 }
 
 #[cfg(test)]
