@@ -3675,11 +3675,58 @@ static ssize_t mode_cycle_format(char *buf, const u8 *cycle, u8 len)
 	return written;
 }
 
+/*
+ * Is @value a profile index a cycle is allowed to contain?
+ *
+ * Two layers, because a cycle entry is not like a thermal_profile write. That
+ * one is applied immediately, in front of the person who typed it; a cycle is
+ * stored and replayed later from the mode key's WMI notify path, so a bad
+ * value is wrong on every key press from then on rather than once.
+ *
+ * First the static set this driver itself names. These are the only indices
+ * acer_mode_cycle_next() can hand to acer_thermal_profile_change(), and
+ * anything else would be forwarded to WMI - and through it to firmware SMM -
+ * as a number no interface here defines.
+ *
+ * Then, when the firmware will say, the machine's own supported-profile
+ * bitmask. That is the same check thermal_profile_store() makes, and it is
+ * skipped the same way when the bitmask cannot be read, so a firmware that
+ * under-reports its own set never makes a profile unreachable.
+ */
+static bool acer_mode_cycle_index_valid(u8 value, u8 supported, bool have_supported)
+{
+	switch (value) {
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_QUIET:
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_BALANCED:
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_PERFORMANCE:
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_TURBO:
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_WMI_ECO:
+		break;
+	default:
+		return false;
+	}
+
+	/* Every index above is < BITS_PER_BYTE, so BIT() is in range here. */
+	if (have_supported && !(supported & BIT(value)))
+		return false;
+
+	return true;
+}
+
 static ssize_t mode_cycle_parse(const char *buf, size_t count, u8 *cycle, u8 *len)
 {
 	u8 parsed[ACER_MODE_CYCLE_MAX];
 	u8 parsed_len = 0;
 	const char *cursor = buf;
+	u8 supported;
+	bool have_supported;
+
+	/*
+	 * Once for the whole list, not once per entry: each call is a WMI round
+	 * trip, and the set cannot change while this write is being parsed.
+	 */
+	have_supported = !WMID_gaming_get_misc_setting(
+		ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES, &supported);
 
 	while (*cursor && cursor < buf + count) {
 		unsigned int value;
@@ -3693,6 +3740,8 @@ static ssize_t mode_cycle_parse(const char *buf, size_t count, u8 *cycle, u8 *le
 		if (sscanf(cursor, "%u%n", &value, &consumed) != 1)
 			return -EINVAL;
 		if (value > U8_MAX)
+			return -EINVAL;
+		if (!acer_mode_cycle_index_valid((u8)value, supported, have_supported))
 			return -EINVAL;
 		if (parsed_len >= ACER_MODE_CYCLE_MAX)
 			return -E2BIG;
