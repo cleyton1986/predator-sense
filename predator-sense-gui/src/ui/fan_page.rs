@@ -792,10 +792,17 @@ pub fn build() -> gtk::Box {
         if !crate::app_state::is_window_visible() || !page_reconcile.is_mapped() {
             return glib::ControlFlow::Continue;
         }
-        let now = profile::get_current_profile();
-        if now != last_known.get() {
-            last_known.set(now);
-            apply_active_visuals(&cards.borrow(), now);
+        // Not while a switch is part-way through: applying a mode moves the
+        // firmware index in more than one step, so a tick landing inside one
+        // would light up a card for a mode the machine is only passing through.
+        // Skipping leaves `last_known` alone, so the next tick shows the
+        // settled mode.
+        if !profile::apply_in_flight() {
+            let now = profile::get_current_profile();
+            if now != last_known.get() {
+                last_known.set(now);
+                apply_active_visuals(&cards.borrow(), now);
+            }
         }
         info_label.set_text(&cpu_policy_info_text());
         // The power source can change at any moment by unplugging the

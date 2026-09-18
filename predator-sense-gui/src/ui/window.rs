@@ -426,78 +426,118 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             },
         );
 
-        // Lighting follows the power mode. Idle blanking is separate, on a
-        // much shorter timer further down - a mode change only needs noticing
-        // promptly, whereas the lights going dark has to look deliberate.
+        // Reacting to the power mode changing, from any source: this app, the
+        // mode key handled inside the kernel, the desktop's power menu, the
+        // battery rules.
+        //
+        // Driven by the driver rather than by a timer. `facer` calls
+        // `sysfs_notify` on the thermal profile attribute whenever the index
+        // moves, so this waits on the file and acts as it happens. The five
+        // second tick below still calls the same closure as a backstop, which
+        // is what keeps this working on an older module that does not notify,
+        // and what covers a change no notification arrives for.
+        //
+        // Polling was not merely slower, it lost changes: a mode held for less
+        // than one interval was never applied at all, so cycling the key
+        // quickly left intermediate modes displayed but never configured.
         let last_mode: Rc<std::cell::RefCell<Option<crate::hardware::profile::PowerProfile>>> =
             Rc::new(std::cell::RefCell::new(crate::hardware::profile::get_current_profile()));
-        // Announcing the change needs the application, since the notification
-        // goes out as the app rather than through a separate binary.
         let notify_app = app.clone();
-        glib::timeout_add_seconds_local(5, move || {
-            let (cpu, gpu) = sensors::read_critical_temps();
-            crate::hardware::alerts::check(cpu, gpu);
-
-            // Nothing in here may act while a switch is part-way through. A
-            // profile is applied off-thread in several steps, and with the
-            // desktop-indicator sync on, one of those steps deliberately puts
-            // the firmware on a *different* index for about 112 ms before this
-            // app writes its own (see hardware::ppd). A tick landing inside
-            // that window would otherwise read the intermediate mode as a real
-            // change: remember it, apply that mode's lighting, and announce it.
-            // Skipping the block entirely leaves `last_mode` alone, so the tick
-            // after the switch settles sees the final mode and acts on it once.
-            if crate::hardware::profile::apply_in_flight() {
-                crate::hardware::power_profile::check();
-                return glib::ControlFlow::Continue;
-            }
-
-            if let Some(now) = crate::hardware::profile::get_current_profile() {
+        let notify_app_for_alerts = app.clone();
+        let react_to_mode: Rc<dyn Fn()> = Rc::new({
+            let last_mode = last_mode.clone();
+            move || {
+                // Nothing in here may act while a switch is part-way through. A
+                // profile is applied off-thread in several steps, and with the
+                // desktop-indicator sync on one of those steps deliberately
+                // puts the firmware on a different index for a few milliseconds
+                // before this app writes its own (see hardware::ppd). Acting on
+                // that would mean remembering the wrong mode, applying its
+                // lighting and announcing it. Leaving `last_mode` alone means
+                // the next call sees the settled mode and acts once.
+                if crate::hardware::profile::apply_in_flight() {
+                    return;
+                }
+                let Some(now) = crate::hardware::profile::get_current_profile() else {
+                    return;
+                };
                 let previous = *last_mode.borrow();
-                let changed = previous.map(|previous| previous != now).unwrap_or(true);
-                if changed {
-                    *last_mode.borrow_mut() = Some(now);
-                    // The mode key moved the firmware index and nothing else -
-                    // see profile::completion_target. Applying the rest of the
-                    // mode here is what stops the power policy below from
-                    // reading a half-moved machine as "in no mode at all" and
-                    // overwriting the user's choice with its configured
-                    // target, and it is also what makes a keyed Eco actually
-                    // save power instead of only relabelling itself. A no-op
-                    // for a change this app made itself.
-                    let completion = crate::hardware::profile::completion_target(
-                        now,
-                        crate::hardware::profile::coherent_profile(),
-                    );
-                    if let Some(target) = completion {
-                        crate::hardware::applog::info(&format!(
-                            "mode changed outside the app to {}; applying the rest of that mode",
+                if previous.map(|previous| previous == now).unwrap_or(false) {
+                    return;
+                }
+                *last_mode.borrow_mut() = Some(now);
+
+                // The mode key moves the firmware index and nothing else - see
+                // profile::completion_target. Applying the rest of the mode
+                // here is what stops the power policy from reading a half-moved
+                // machine as "in no mode at all" and overwriting the user's
+                // choice, and what makes a keyed Eco actually save power rather
+                // than only relabelling itself. A no-op for a change this app
+                // made itself.
+                if let Some(target) = crate::hardware::profile::completion_target(
+                    now,
+                    crate::hardware::profile::coherent_profile(),
+                ) {
+                    crate::hardware::applog::info(&format!(
+                        "mode changed outside the app to {}; applying the rest of that mode",
+                        target.to_id()
+                    ));
+                    if let Err(error) = crate::hardware::profile::set_profile(target) {
+                        crate::hardware::applog::error(&format!(
+                            "mode {} not completed: {error}",
                             target.to_id()
                         ));
-                        if let Err(error) = crate::hardware::profile::set_profile(target) {
-                            crate::hardware::applog::error(&format!(
-                                "mode {} not completed: {error}",
-                                target.to_id()
-                            ));
-                        }
                     }
-                    // Every source lands here - the mode key, this app's own
-                    // cards, the desktop's power menu, the battery rules - so
-                    // one call covers them all.
-                    crate::hardware::notify::mode_changed(
-                        &notify_app,
-                        previous.map(|p| p.label().to_string()).as_deref(),
-                        now.label(),
-                        config::load_app_config().notify_mode_changes,
-                    );
-                    crate::ui::lighting_page::apply_scheme_for_mode(now);
                 }
-            }
 
-            // After the completion above, not before: on the tick that first
-            // sees a key press, the policy would otherwise open a grace window
-            // against a machine that is about to become compliant in the same
-            // tick.
+                // Every source lands here, so one call covers them all.
+                crate::hardware::notify::mode_changed(
+                    &notify_app,
+                    previous.map(|p| p.label().to_string()).as_deref(),
+                    now.label(),
+                    config::load_app_config().notify_mode_changes,
+                );
+                crate::ui::lighting_page::apply_scheme_for_mode(now);
+            }
+        });
+
+        // The event source. Absent on an older module, in which case the tick
+        // below is the whole mechanism and behaves exactly as it used to.
+        match std::fs::File::open(crate::hardware::thermal_profile::index_path()) {
+            Ok(file) => {
+                use std::io::{Read, Seek};
+                use std::os::unix::io::AsRawFd;
+                let fd = file.as_raw_fd();
+                let react = react_to_mode.clone();
+                let mut file = file;
+                glib::unix_fd_add_local(fd, glib::IOCondition::PRI, move |_, _| {
+                    // A sysfs attribute re-arms its notification only once the
+                    // new value has been read, so this read is required rather
+                    // than informational: without it the source would fire
+                    // continuously. `file` is owned by this closure, which is
+                    // also what keeps the descriptor alive.
+                    let mut value = String::new();
+                    let _ = file.rewind();
+                    let _ = file.read_to_string(&mut value);
+                    react();
+                    glib::ControlFlow::Continue
+                });
+                crate::hardware::applog::info(
+                    "mode changes are event-driven; the five second tick is a backstop",
+                );
+            }
+            Err(error) => {
+                crate::hardware::applog::info(&format!(
+                    "no thermal profile attribute to wait on ({error}); mode changes are polled"
+                ));
+            }
+        }
+
+        glib::timeout_add_seconds_local(5, move || {
+            let (cpu, gpu) = sensors::read_critical_temps();
+            crate::hardware::alerts::check(&notify_app_for_alerts, cpu, gpu);
+
+            react_to_mode();
             crate::hardware::power_profile::check();
 
             glib::ControlFlow::Continue
