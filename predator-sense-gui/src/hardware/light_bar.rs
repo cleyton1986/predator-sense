@@ -166,6 +166,29 @@ fn write_frame(state: &LightBarState) -> Result<(), String> {
         .map_err(|e| tf("rgb_err_write_device", &[DEVICE, &e.to_string()]))
 }
 
+/// `state` as it has to go on the wire.
+///
+/// `Off` becomes Static at zero brightness, because the mode id `0x00` is
+/// *Static*, not Off: the firmware reports mode `0x00` after being sent
+/// Static's `0xFF` while the bar is still visibly lit, so the "off" id
+/// inherited from the Windows-derived mode tables blanks nothing here. See
+/// [`blank`].
+///
+/// Everything that writes a saved state goes through this. It exists as one
+/// function because it did not: [`unblank`] wrote the saved state raw, so a bar
+/// the user had switched off came back at its last colour the first time the
+/// idle watcher woke it.
+fn on_wire(state: &LightBarState) -> LightBarState {
+    if state.mode == LightBarMode::Off {
+        return LightBarState {
+            mode: LightBarMode::Static,
+            brightness: 0,
+            ..*state
+        };
+    }
+    *state
+}
+
 /// Applies `state`. `wake` first sends a Breathing frame: after the firmware
 /// has been left in its "logical off" state (mode `Off`, or a fresh boot)
 /// other modes are accepted but the strip stays dark until one Breathing
@@ -174,14 +197,8 @@ pub fn apply(state: &LightBarState, wake: bool) -> Result<(), String> {
     if !is_available() {
         return Err(tf("rgb_err_device_not_found", &[DEVICE]));
     }
-    // `Off` is expressed as zero brightness - see `blank()` for why the mode id
-    // cannot do it.
     if state.mode == LightBarMode::Off {
-        return write_frame(&LightBarState {
-            mode: LightBarMode::Static,
-            brightness: 0,
-            ..*state
-        });
+        return write_frame(&on_wire(state));
     }
     if wake && state.mode != LightBarMode::Breathing && state.mode != LightBarMode::Off {
         write_frame(&LightBarState {
@@ -225,12 +242,55 @@ pub fn unblank() {
     let Some(saved) = crate::config::load_app_config().light_bar else {
         return;
     };
-    let _ = write_frame(&saved);
+    // Through `on_wire`, not raw: a saved `Off` written literally relights the
+    // bar, since its mode id does not blank this firmware.
+    let _ = write_frame(&on_wire(&saved));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn off_goes_on_the_wire_as_static_at_zero_brightness() {
+        let saved = LightBarState {
+            mode: LightBarMode::Off,
+            speed: 2,
+            brightness: 90,
+            red: 0x10,
+            green: 0x20,
+            blue: 0x30,
+        };
+        let wire = on_wire(&saved);
+        assert_eq!(wire.mode, LightBarMode::Static, "Off's own id does not blank this firmware");
+        assert_eq!(wire.brightness, 0, "zero brightness is what actually blanks it");
+        // Everything else has to survive, so turning the bar back on restores
+        // the colour the user chose rather than a default.
+        assert_eq!((wire.speed, wire.red, wire.green, wire.blue), (2, 0x10, 0x20, 0x30));
+    }
+
+    #[test]
+    fn every_other_mode_goes_on_the_wire_unchanged() {
+        for mode in [
+            LightBarMode::Static,
+            LightBarMode::Breathing,
+            LightBarMode::Neon,
+            LightBarMode::Wave,
+        ] {
+            let state = LightBarState { mode, ..Default::default() };
+            assert_eq!(on_wire(&state), state, "{mode:?} must not be rewritten");
+        }
+    }
+
+    #[test]
+    fn an_off_state_on_the_wire_is_the_same_frame_blank_sends() {
+        // `unblank()` restoring a saved `Off` must land on exactly what
+        // `blank()` would have written, or the bar comes back lit.
+        let saved = LightBarState { mode: LightBarMode::Off, ..Default::default() };
+        let blanked = LightBarState { brightness: 0, ..saved };
+        assert_eq!(frame(&on_wire(&saved))[2], frame(&blanked)[2]);
+        assert_eq!(frame(&on_wire(&saved))[2], 0);
+    }
 
     #[test]
     fn frame_matches_the_hardware_confirmed_layout() {
