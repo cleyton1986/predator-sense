@@ -15,6 +15,19 @@
 use gtk4::gio;
 use gtk4::prelude::*;
 
+/// A critical-temperature alert.
+///
+/// Urgent, unlike a mode change: this is the one notification in the app that
+/// wants to interrupt. Its own id so it never replaces, or is replaced by, the
+/// mode notification.
+pub fn temperature_alert(app: &impl IsA<gio::Application>, title: &str, body: &str) {
+    let notification = gio::Notification::new(title);
+    notification.set_body(Some(body));
+    notification.set_priority(gio::NotificationPriority::Urgent);
+    app.as_ref()
+        .send_notification(Some("temperature-alert"), &notification);
+}
+
 /// Announce a mode change.
 ///
 /// `previous` is `None` for the first mode seen in a session, which is not a
