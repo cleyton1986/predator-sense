@@ -221,11 +221,16 @@ pub fn blank() -> Result<(), String> {
     let saved = crate::config::load_app_config()
         .light_bar
         .unwrap_or_default();
-    BLANKED.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Only after the write lands. The flag is what the idle tick compares
+    // against to decide there is nothing to do, so setting it first meant a
+    // failed privileged write left it claiming a lit bar was blanked, and
+    // nothing ever retried.
     write_frame(&LightBarState {
         brightness: 0,
         ..saved
-    })
+    })?;
+    BLANKED.store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
 }
 
 /// True when the bar is currently blanked by the idle watcher.
@@ -238,13 +243,18 @@ pub fn is_blanked() -> bool {
 /// 300 ms sleep, which matters because the idle watcher calls it from the UI
 /// thread the moment a key is pressed.
 pub fn unblank() {
-    BLANKED.store(false, std::sync::atomic::Ordering::Relaxed);
     let Some(saved) = crate::config::load_app_config().light_bar else {
+        BLANKED.store(false, std::sync::atomic::Ordering::Relaxed);
         return;
     };
     // Through `on_wire`, not raw: a saved `Off` written literally relights the
     // bar, since its mode id does not blank this firmware.
-    let _ = write_frame(&on_wire(&saved));
+    if write_frame(&on_wire(&saved)).is_ok() {
+        // Same reason as `blank`: clearing this first would tell the idle tick
+        // the bar is showing again when the write that was meant to restore it
+        // had failed, and it would never try a second time.
+        BLANKED.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
