@@ -2457,3 +2457,82 @@ mod temp_limit_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// Reading and matching this machine's DMI identity.
+///
+/// Lives here because both the GUI and the installer need it and the installer
+/// cannot depend on the GUI crate. It used to exist twice, and the two copies
+/// had already drifted: only the GUI honoured the `PREDATOR_SENSE_FORCE_MODEL`
+/// override, so the hotkey daemon ignored the documented escape hatch.
+pub mod dmi {
+    /// Chassis with the dedicated PredatorSense key beside NumLock.
+    ///
+    /// One list, used by the daemon that watches the key and by the GUI page
+    /// that offers to rebind it. Add a model only once someone has confirmed
+    /// it on real hardware.
+    pub const PREDATOR_KEY_MODELS: &[&str] = &["PH16-71"];
+
+    /// True when `product_name` names one of `models`.
+    ///
+    /// Model codes are compared as whole whitespace-separated words, so
+    /// `PH16-71` matches `"Predator PH16-71"` but not `"Predator PH16-71X"` -
+    /// a different chassis whose firmware is not known to behave the same way.
+    /// Pure, so it is testable without touching DMI or the environment.
+    pub fn matches_model(product_name: &str, models: &[&str]) -> bool {
+        product_name
+            .split_whitespace()
+            .any(|part| models.iter().any(|m| part.eq_ignore_ascii_case(m)))
+    }
+
+    /// [`matches_model`] against this machine's DMI `product_name`.
+    ///
+    /// `PREDATOR_SENSE_FORCE_MODEL` overrides the DMI read so someone on an
+    /// unlisted chassis can try a gated path and report back without
+    /// rebuilding.
+    pub fn product_matches(models: &[&str]) -> bool {
+        let name = std::env::var("PREDATOR_SENSE_FORCE_MODEL")
+            .ok()
+            .or_else(|| {
+                std::fs::read_to_string("/sys/class/dmi/id/product_name")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            })
+            .unwrap_or_default();
+        matches_model(&name, models)
+    }
+}
+
+#[cfg(test)]
+mod dmi_tests {
+    use super::dmi;
+
+    #[test]
+    fn a_model_code_matches_as_a_whole_word() {
+        assert!(dmi::matches_model("Predator PH16-71", &["PH16-71"]));
+        assert!(dmi::matches_model("predator ph16-71", &["PH16-71"]));
+    }
+
+    #[test]
+    fn a_longer_code_sharing_a_prefix_does_not_match() {
+        // PH16-71X is a different chassis whose firmware is not known to
+        // behave the same way. This is the whole reason the comparison is
+        // whole-word rather than a substring test.
+        assert!(!dmi::matches_model("Predator PH16-71X", &["PH16-71"]));
+    }
+
+    #[test]
+    fn an_empty_name_or_list_matches_nothing() {
+        assert!(!dmi::matches_model("", &["PH16-71"]));
+        assert!(!dmi::matches_model("Predator PH16-71", &[]));
+    }
+
+    #[test]
+    fn any_listed_model_matches() {
+        assert!(dmi::matches_model("Nitro AN515-58", &["PH16-71", "AN515-58"]));
+    }
+
+    #[test]
+    fn the_predator_key_list_is_the_one_both_crates_use() {
+        assert_eq!(dmi::PREDATOR_KEY_MODELS, &["PH16-71"]);
+    }
+}

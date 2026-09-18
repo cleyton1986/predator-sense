@@ -839,16 +839,17 @@ const PREDATOR_KEY_HID_INTERFACE: &str = "02";
 /// interface 2 there too and treat any report starting `04 81 FF` as the
 /// PredatorSense key, launching the app (or, if the user bound a command,
 /// running it) when some ordinary consumer key is pressed.
-const PREDATOR_KEY_MODELS: &[&str] = &["PH16-71"];
-
-/// True when DMI names one of [`PREDATOR_KEY_MODELS`], compared as whole
+/// True when DMI names one of
+/// [`predator_sense_protocol::dmi::PREDATOR_KEY_MODELS`], compared as whole
 /// whitespace-separated words so `PH16-71` does not match `PH16-71X`.
+///
+/// This now honours `PREDATOR_SENSE_FORCE_MODEL`, which the GUI always did and
+/// this did not: forcing a model used to give you the rebinding page without
+/// the daemon that makes the key work.
 fn chassis_has_predator_key() -> bool {
-    let Ok(name) = fs::read_to_string(path::PRODUCT_NAME) else {
-        return false;
-    };
-    name.split_whitespace()
-        .any(|part| PREDATOR_KEY_MODELS.iter().any(|m| part.eq_ignore_ascii_case(m)))
+    predator_sense_protocol::dmi::product_matches(
+        predator_sense_protocol::dmi::PREDATOR_KEY_MODELS,
+    )
 }
 
 /// Locates that node. `None` when this is not a chassis with the key, when
