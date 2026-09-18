@@ -3,6 +3,7 @@ pub mod ai_assistant;
 pub mod ai_snapshot;
 pub mod alerts;
 pub mod applog;
+pub mod blanking;
 pub mod audio_eq;
 pub mod audio_sync;
 pub mod capabilities;
