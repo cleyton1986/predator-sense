@@ -562,12 +562,77 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             ));
         }
 
+        // Reinstalling the mode-key cycles the driver forgot.
+        //
+        // Startup pushes them once, but the cycles live only in the kernel
+        // module and it creates both attributes empty. Every module reload
+        // after that - `--reload-module`, and the DKMS rebuild that follows a
+        // kernel upgrade - wipes them with nothing watching, so the mode key
+        // quietly reverts to the driver's own ladder until the app restarts.
+        //
+        // Reading the two attributes is a pair of small sysfs reads, cheap
+        // enough for this tick. The *push* is a privileged helper call, so it
+        // is rate-limited by the same rule the fan reconciler uses: retry
+        // freely at first, then back off, because an unreachable helper spawns
+        // a fresh pkexec per attempt and that is an authentication dialog the
+        // user never asked for.
+        // Shared with the completion callback, which is what moves the
+        // counter: only a push that actually succeeded clears it, and anything
+        // else must raise it, or the back-off never engages.
+        let cycle_failures = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let cycle_ticks = std::cell::Cell::new(u32::MAX / 2);
+        let cycle_pending = std::rc::Rc::new(std::cell::Cell::new(false));
         glib::timeout_add_seconds_local(5, move || {
             let (cpu, gpu) = sensors::read_critical_temps();
             crate::hardware::alerts::check(&notify_app_for_alerts, cpu, gpu);
 
             react_to_mode();
             crate::hardware::power_profile::check();
+
+            cycle_ticks.set(cycle_ticks.get().saturating_add(1));
+            if !cycle_pending.get() {
+                let cfg = crate::config::load_app_config();
+                if let Some((kernel_ac, kernel_battery)) =
+                    crate::hardware::profile::read_mode_cycles()
+                {
+                    if crate::hardware::profile::mode_cycles_lost(
+                        &kernel_ac,
+                        &kernel_battery,
+                        &cfg.mode_cycle_ac,
+                        &cfg.mode_cycle_battery,
+                    ) && crate::hardware::fan::may_attempt_write(
+                        cycle_failures.get(),
+                        cycle_ticks.get(),
+                    ) {
+                        cycle_ticks.set(0);
+                        cycle_pending.set(true);
+                        let ac = cfg.mode_cycle_ac.clone();
+                        let battery = cfg.mode_cycle_battery.clone();
+                        let done = cycle_pending.clone();
+                        let failures = cycle_failures.clone();
+                        background::run(
+                            move || crate::hardware::profile::push_mode_cycles(&ac, &battery),
+                            move |result: Result<(), String>| {
+                                done.set(false);
+                                match result {
+                                    Ok(()) => {
+                                        failures.set(0);
+                                        crate::hardware::applog::info(
+                                            "mode-key cycles reinstalled after a module reload",
+                                        );
+                                    }
+                                    Err(error) => {
+                                        failures.set(failures.get().saturating_add(1));
+                                        crate::hardware::applog::error(&format!(
+                                            "mode-key cycles not reinstalled: {error}"
+                                        ));
+                                    }
+                                }
+                            },
+                        );
+                    }
+                }
+            }
 
             glib::ControlFlow::Continue
         });
