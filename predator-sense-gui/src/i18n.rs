@@ -779,6 +779,8 @@ fn t_pt(key: &str) -> &str {
         "settings_import_confirm_body" => "Todas as configurações, esquemas de iluminação e planos de ventoinha serão substituídos pelos do arquivo {0}. As configurações atuais são copiadas para a pasta de configuração antes, e o aplicativo reinicia para aplicar as novas.",
         "settings_import_cancel" => "Cancelar",
         "settings_import_replace" => "Substituir e reiniciar",
+        "temp_alert_threshold" => "Temperatura do alerta",
+        "temp_alert_threshold_desc" => "Avisa quando a CPU ou a GPU atingir este valor. O alerta dispara uma vez por cruzamento e só rearma 5 °C abaixo dele.",
         _ => key,
     }
 }
@@ -1500,6 +1502,8 @@ fn t_en(key: &str) -> &str {
         "settings_import_confirm_body" => "Every setting, lighting scheme and fan plan will be replaced by the ones in {0}. Your current settings are copied into the configuration folder first, and the app restarts to apply the new ones.",
         "settings_import_cancel" => "Cancel",
         "settings_import_replace" => "Replace and restart",
+        "temp_alert_threshold" => "Alert temperature",
+        "temp_alert_threshold_desc" => "Warns when the CPU or GPU reaches this value. The alert fires once per crossing and only re-arms 5 °C below it.",
         _ => key,
     }
 }
@@ -2221,6 +2225,8 @@ fn t_es(key: &str) -> &str {
         "settings_import_confirm_body" => "Todos los ajustes, esquemas de iluminación y planes de ventilador se sustituirán por los de {0}. La configuración actual se copia antes a la carpeta de configuración y la aplicación se reinicia para aplicar la nueva.",
         "settings_import_cancel" => "Cancelar",
         "settings_import_replace" => "Sustituir y reiniciar",
+        "temp_alert_threshold" => "Temperatura de la alerta",
+        "temp_alert_threshold_desc" => "Avisa cuando la CPU o la GPU alcanza este valor. La alerta se dispara una vez por cruce y solo se rearma 5 °C por debajo.",
         _ => key,
     }
 }
@@ -2941,6 +2947,8 @@ fn t_zh(key: &str) -> &str {
         "settings_import_confirm_body" => "所有设置、灯光方案和风扇计划都将替换为 {0} 中的内容。当前设置会先复制到配置文件夹，应用随后重启以应用新设置。",
         "settings_import_cancel" => "取消",
         "settings_import_replace" => "替换并重启",
+        "temp_alert_threshold" => "警报温度",
+        "temp_alert_threshold_desc" => "当 CPU 或 GPU 达到此温度时发出警告。每次越过阈值只提示一次，降到低于该值 5 °C 后才会重新启用。",
         _ => key,
     }
 }
@@ -3661,6 +3669,8 @@ fn t_ja(key: &str) -> &str {
         "settings_import_confirm_body" => "すべての設定、ライティングスキーム、ファンプランが {0} の内容に置き換わります。現在の設定は先に設定フォルダーへコピーされ、アプリが再起動して新しい設定を適用します。",
         "settings_import_cancel" => "キャンセル",
         "settings_import_replace" => "置き換えて再起動",
+        "temp_alert_threshold" => "警告する温度",
+        "temp_alert_threshold_desc" => "CPU または GPU がこの温度に達したときに通知します。しきい値を超えるたびに 1 回だけ通知し、5 °C 下回るまで再通知しません。",
         _ => key,
     }
 }
@@ -4381,6 +4391,8 @@ fn t_ru(key: &str) -> &str {
         "settings_import_confirm_body" => "Все настройки, схемы подсветки и планы вентиляторов будут заменены на содержимое файла {0}. Текущие настройки сначала копируются в папку конфигурации, затем приложение перезапустится, чтобы применить новые.",
         "settings_import_cancel" => "Отмена",
         "settings_import_replace" => "Заменить и перезапустить",
+        "temp_alert_threshold" => "Температура оповещения",
+        "temp_alert_threshold_desc" => "Предупреждает, когда процессор или видеокарта достигает этого значения. Оповещение срабатывает один раз за превышение и снова взводится только на 5 °C ниже.",
         _ => key,
     }
 }
@@ -5101,6 +5113,8 @@ fn t_de(key: &str) -> &str {
         "settings_import_confirm_body" => "Alle Einstellungen, Beleuchtungsschemata und Lüfterpläne werden durch die aus {0} ersetzt. Die aktuellen Einstellungen werden vorher in den Konfigurationsordner kopiert, und die App startet neu, um die neuen anzuwenden.",
         "settings_import_cancel" => "Abbrechen",
         "settings_import_replace" => "Ersetzen und neu starten",
+        "temp_alert_threshold" => "Warntemperatur",
+        "temp_alert_threshold_desc" => "Warnt, wenn CPU oder GPU diesen Wert erreicht. Die Warnung erscheint einmal pro Überschreitung und wird erst 5 °C darunter wieder scharf.",
         _ => key,
     }
 }
@@ -5822,6 +5836,8 @@ fn t_it(key: &str) -> &str {
         "settings_import_confirm_body" => "Tutte le impostazioni, gli schemi di illuminazione e i piani ventola saranno sostituiti con quelli di {0}. Le impostazioni attuali vengono prima copiate nella cartella di configurazione e l'app si riavvia per applicare le nuove.",
         "settings_import_cancel" => "Annulla",
         "settings_import_replace" => "Sostituisci e riavvia",
+        "temp_alert_threshold" => "Temperatura di allerta",
+        "temp_alert_threshold_desc" => "Avvisa quando la CPU o la GPU raggiunge questo valore. L'avviso scatta una volta per superamento e si riarma solo 5 °C al di sotto.",
         _ => key,
     }
 }
@@ -6543,6 +6559,8 @@ fn t_tr(key: &str) -> &str {
         "settings_import_confirm_body" => "Tüm ayarlar, aydınlatma şemaları ve fan planları {0} dosyasındakilerle değiştirilecek. Mevcut ayarlar önce yapılandırma klasörüne kopyalanır ve uygulama yenilerini uygulamak için yeniden başlar.",
         "settings_import_cancel" => "İptal",
         "settings_import_replace" => "Değiştir ve yeniden başlat",
+        "temp_alert_threshold" => "Uyarı sıcaklığı",
+        "temp_alert_threshold_desc" => "İşlemci veya ekran kartı bu değere ulaştığında uyarır. Uyarı her eşik aşımında bir kez verilir ve yeniden hazır olması için 5 °C altına inmesi gerekir.",
         _ => key,
     }
 }

@@ -181,6 +181,18 @@ pub struct AppConfig {
     pub start_on_boot: bool,
     #[serde(default = "default_true")]
     pub temp_alerts: bool,
+    /// The temperature a critical alert fires at, in Celsius.
+    ///
+    /// Configurable because "critical" is a judgement, not a property of the
+    /// silicon: this CPU reports `high` and `crit` at 100 C and throttles
+    /// itself there, so anything below that is the user deciding when they
+    /// want to be told. A gaming chassis sits in the high eighties under load
+    /// by design, which is why the default is 90 rather than something that
+    /// would cry wolf every session. The UI offers 70 to 100; the alert path
+    /// clamps to the same range, so a hand-edited 5 or 200 cannot make the
+    /// alert fire constantly or never.
+    #[serde(default = "default_temp_alert_c")]
+    pub temp_alert_c: u8,
     #[serde(default)]
     pub auto_profile_ac: bool,
     #[serde(default = "default_profile_ac")]
@@ -573,6 +585,12 @@ fn default_predator_key_action() -> String {
     "app".to_string()
 }
 
+/// 90 C: below the 100 C this CPU throttles at, above the high eighties a
+/// gaming chassis reaches under sustained load by design.
+fn default_temp_alert_c() -> u8 {
+    90
+}
+
 fn default_rgb_brightness() -> u8 {
     100
 }
@@ -605,6 +623,7 @@ impl Default for AppConfig {
             minimize_on_close: true,
             start_on_boot: false,
             temp_alerts: true,
+            temp_alert_c: default_temp_alert_c(),
             auto_profile_ac: true,
             profile_ac: default_profile_ac(),
             profile_battery: default_profile_battery(),
