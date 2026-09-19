@@ -841,6 +841,44 @@ pub fn load_app_config() -> AppConfig {
     }
 }
 
+/// Bumped by [`save_app_config`], so a cached copy can tell it is stale.
+static CONFIG_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times this process has saved the config.
+pub fn config_generation() -> u64 {
+    CONFIG_GENERATION.load(Ordering::Relaxed)
+}
+
+/// [`load_app_config`], but parsed only when something has changed it.
+///
+/// For callers on a timer. The idle watcher runs four times a second and was
+/// opening and parsing the whole file on each tick, for settings that change
+/// only when the user edits them.
+///
+/// Caching it outright would have been wrong: settings in this app apply live,
+/// and the tick is how an edit reaches the idle watcher. So the cache is
+/// invalidated by [`save_app_config`], which is the only way the file changes
+/// while the app is running - editing it by hand underneath a running app is
+/// already documented as unsupported, because the app will overwrite it.
+pub fn load_app_config_cached() -> AppConfig {
+    thread_local! {
+        static CACHE: std::cell::RefCell<Option<(u64, AppConfig)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+    let generation = config_generation();
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        match cache.as_ref() {
+            Some((cached_generation, config)) if *cached_generation == generation => config.clone(),
+            _ => {
+                let config = load_app_config();
+                *cache = Some((generation, config.clone()));
+                config
+            }
+        }
+    })
+}
+
 /// Save a macro, one JSON file per macro named after it (same convention as
 /// lighting profiles above).
 pub fn save_macro(macro_: &Macro) -> Result<(), String> {
@@ -894,7 +932,11 @@ pub fn save_app_config(config: &AppConfig) -> Result<(), String> {
     let path = config_dir().join("config.json");
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Erro ao serializar config: {}", e))?;
-    fs::write(&path, json).map_err(|e| format!("Erro ao salvar config: {}", e))
+    fs::write(&path, json).map_err(|e| format!("Erro ao salvar config: {}", e))?;
+    // Tells `load_app_config_cached` its copy is stale. After the write, so a
+    // failed save does not invalidate a cache that still matches the file.
+    CONFIG_GENERATION.fetch_add(1, Ordering::Relaxed);
+    Ok(())
 }
 
 /// A timestamp shaped for a filename, `2026-09-18-1611`.

@@ -2489,16 +2489,30 @@ pub mod dmi {
     /// `PREDATOR_SENSE_FORCE_MODEL` overrides the DMI read so someone on an
     /// unlisted chassis can try a gated path and report back without
     /// rebuilding.
+    /// This machine's DMI `product_name`, read once.
+    ///
+    /// `PREDATOR_SENSE_FORCE_MODEL` is consulted first and is captured once
+    /// too: it is a developer override read at startup, and re-reading the
+    /// environment four times a second to notice a change nobody makes was the
+    /// cost this removes. Neither value can change without restarting the
+    /// process, or the machine.
+    pub fn product_name() -> &'static str {
+        static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        NAME.get_or_init(|| {
+            std::env::var("PREDATOR_SENSE_FORCE_MODEL")
+                .ok()
+                .or_else(|| {
+                    std::fs::read_to_string("/sys/class/dmi/id/product_name")
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                })
+                .unwrap_or_default()
+        })
+        .as_str()
+    }
+
     pub fn product_matches(models: &[&str]) -> bool {
-        let name = std::env::var("PREDATOR_SENSE_FORCE_MODEL")
-            .ok()
-            .or_else(|| {
-                std::fs::read_to_string("/sys/class/dmi/id/product_name")
-                    .ok()
-                    .map(|s| s.trim().to_string())
-            })
-            .unwrap_or_default();
-        matches_model(&name, models)
+        matches_model(product_name(), models)
     }
 }
 
@@ -2529,6 +2543,20 @@ mod dmi_tests {
     #[test]
     fn any_listed_model_matches() {
         assert!(dmi::matches_model("Nitro AN515-58", &["PH16-71", "AN515-58"]));
+    }
+
+    #[test]
+    fn the_dmi_name_is_read_once_and_remembered() {
+        // The 250 ms idle timer asks this four times a second for a value that
+        // cannot change without a reboot. Reading the file every time was pure
+        // cost.
+        let first = dmi::product_name();
+        let second = dmi::product_name();
+        assert_eq!(first, second);
+        assert!(
+            std::ptr::eq(first, second),
+            "the same cached string, not a re-read"
+        );
     }
 
     #[test]
