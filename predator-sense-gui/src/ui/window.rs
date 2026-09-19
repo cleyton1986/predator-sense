@@ -591,7 +591,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
 
             cycle_ticks.set(cycle_ticks.get().saturating_add(1));
             if !cycle_pending.get() {
-                let cfg = crate::config::load_app_config();
+                // Cached: this runs every five seconds and only needs the two
+                // cycle lists, which change when the user edits them.
+                let cfg = crate::config::load_app_config_cached();
                 if let Some((kernel_ac, kernel_battery)) =
                     crate::hardware::profile::read_mode_cycles()
                 {
