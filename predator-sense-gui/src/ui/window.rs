@@ -690,7 +690,11 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     );
                 }
 
-                let cfg = config::load_app_config();
+                // Cached, not re-parsed: this runs four times a second and the
+                // settings it reads change only when the user edits them, which
+                // bumps the generation this cache checks. See
+                // `config::load_app_config_cached`.
+                let cfg = config::load_app_config_cached();
                 let idle = crate::hardware::idle::idle_seconds(cfg.idle_mouse_wakes);
                 let Some(idle) = idle else {
                     return glib::ControlFlow::Continue;
