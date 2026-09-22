@@ -10,6 +10,7 @@ pub mod drivers_page;
 pub mod faceted_card;
 pub mod fan_control_page;
 pub mod fan_page;
+pub mod fingerprint_page;
 pub mod font_scale;
 pub mod game_sync_page;
 pub mod gauge_widget;
