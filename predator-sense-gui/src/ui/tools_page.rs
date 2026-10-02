@@ -11,10 +11,17 @@
 
 use gtk4::prelude::*;
 use gtk4::{self as gtk};
+use libadwaita as adw;
+use libadwaita::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ui::{ai_page, audio_eq_page, game_sync_page, grub_splash_page, macros_page};
+
+/// Chassis with the dedicated PredatorSense key. Kept in step with
+/// `PREDATOR_KEY_MODELS` in the daemon (`installer/src/hotkey.rs`), which is
+/// what actually watches the key.
+const PREDATOR_KEY_MODELS: &[&str] = &["PH16-71"];
 
 pub fn build(window: &gtk::ApplicationWindow) -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
@@ -54,14 +61,23 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::Box {
     stack.add_named(&audio_eq_page::build(), Some("audio_eq"));
     stack.add_named(&ai_page::build(window), Some("ai"));
     stack.add_named(&grub_splash_page::build(window), Some("grub_splash"));
+    // The dedicated PredatorSense key beside NumLock exists on this chassis
+    // generation only. Offering a binding editor for a key the machine does
+    // not have would be a tab that can never do anything.
+    let has_predator_key =
+        crate::hardware::sysinfo::product_matches(PREDATOR_KEY_MODELS);
 
-    let tabs: [(&str, &str, Option<&str>); 5] = [
+    let mut tabs: Vec<(&str, &str, Option<&str>)> = vec![
         (crate::i18n::t("game_sync_nav"), "game_sync", None),
         (crate::i18n::t("macros_nav"), "macros", None),
         (crate::i18n::t("audio_eq_nav"), "audio_eq", None),
         (crate::i18n::t("ai_page_nav"), "ai", None),
         (crate::i18n::t("grub_splash_nav"), "grub_splash", None),
     ];
+    if has_predator_key {
+        stack.add_named(&build_predator_key_page(), Some("predator_key"));
+        tabs.push((crate::i18n::t("predator_key_nav"), "predator_key", None));
+    }
     let buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
     for (i, (label, key, badge)) in tabs.iter().enumerate() {
         // Same overlay-with-badge trick `tool_card` used before this page
@@ -122,4 +138,85 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::Box {
     page.append(&stack);
 
     page
+}
+
+// ---------------------------------------------------------------------------
+// PredatorSense key binding
+// ---------------------------------------------------------------------------
+
+/// What the dedicated PredatorSense key (next to NumLock) should do.
+///
+/// The key reports two HID usages the kernel maps to nothing, so it generates
+/// no input event and appears dead. The daemon reads its raw report instead
+/// and runs whatever is chosen here.
+pub fn build_predator_key_page() -> gtk::ScrolledWindow {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+
+    let shell = gtk::Box::new(gtk::Orientation::Vertical, 16);
+    shell.set_margin_top(16);
+    shell.set_margin_bottom(16);
+    shell.set_margin_start(16);
+    shell.set_margin_end(16);
+
+    let cfg = crate::config::load_app_config();
+
+    let group = adw::PreferencesGroup::new();
+    group.set_title(crate::i18n::t("predator_key_title"));
+    group.set_description(Some(crate::i18n::t("predator_key_desc")));
+
+    const ACTIONS: [(&str, &str); 3] = [
+        ("app", "predator_key_action_app"),
+        ("command", "predator_key_action_command"),
+        ("none", "predator_key_action_none"),
+    ];
+
+    let action_row = adw::ComboRow::new();
+    action_row.set_title(crate::i18n::t("predator_key_action"));
+    action_row.set_model(Some(&gtk::StringList::new(
+        &ACTIONS
+            .iter()
+            .map(|(_, key)| crate::i18n::t(key))
+            .collect::<Vec<_>>(),
+    )));
+    action_row.set_selected(
+        ACTIONS
+            .iter()
+            .position(|(id, _)| *id == cfg.predator_key_action)
+            .unwrap_or(0) as u32,
+    );
+    group.add(&action_row);
+
+    let command_row = adw::EntryRow::new();
+    command_row.set_title(crate::i18n::t("predator_key_command"));
+    command_row.set_text(&cfg.predator_key_command);
+    command_row.set_visible(cfg.predator_key_action == "command");
+    group.add(&command_row);
+
+    {
+        let command_row = command_row.clone();
+        action_row.connect_selected_notify(move |row| {
+            let mut cfg = crate::config::load_app_config();
+            let (id, _) = ACTIONS[(row.selected() as usize).min(ACTIONS.len() - 1)];
+            cfg.predator_key_action = id.to_string();
+            let _ = crate::config::save_app_config(&cfg);
+            command_row.set_visible(id == "command");
+        });
+    }
+    command_row.connect_changed(|row| {
+        let mut cfg = crate::config::load_app_config();
+        cfg.predator_key_command = row.text().to_string();
+        let _ = crate::config::save_app_config(&cfg);
+    });
+
+    shell.append(&group);
+
+    let note = gtk::Label::new(Some(crate::i18n::t("predator_key_note")));
+    note.add_css_class("cover-logo-hint");
+    note.set_wrap(true);
+    note.set_halign(gtk::Align::Start);
+    shell.append(&note);
+
+    scroll.set_child(Some(&shell));
+    scroll
 }

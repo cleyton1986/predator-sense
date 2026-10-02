@@ -278,8 +278,9 @@ pub fn build_features_flow() -> gtk::FlowBox {
     feat_flow.set_margin_top(6);
     feat_flow.set_homogeneous(true);
 
-    let features: [(&str, bool); 8] = [
+    let features: [(&str, bool); 9] = [
         (crate::i18n::t("feat_rgb"), caps.rgb),
+        (crate::i18n::t("feat_light_bar"), caps.light_bar),
         (crate::i18n::t("feat_cover_logo"), caps.cover_logo),
         (crate::i18n::t("feat_fan_rpm"), caps.fan_rpm),
         (crate::i18n::t("feat_fan_pwm"), caps.fan_pwm),

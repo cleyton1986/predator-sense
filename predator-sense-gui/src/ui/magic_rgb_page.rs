@@ -17,6 +17,7 @@ use std::rc::Rc;
 
 use crate::hardware::chicony_rgb;
 use crate::hardware::magic_rgb::{self, KeyboardEffect, LogoEffect};
+use crate::hardware::light_bar::{self, LightBarMode, LightBarState};
 use crate::ui::background;
 
 pub fn build() -> gtk::ScrolledWindow {
@@ -63,6 +64,18 @@ pub fn build() -> gtk::ScrolledWindow {
             "chicony",
             crate::i18n::t("chicony_rgb_section").to_string(),
             build_chicony_section().upcast(),
+        ));
+    }
+    // The chassis light bar on the PH16-71 generation hangs off the same
+    // WMI method the keyboard backlight uses on older models, selected by a
+    // target byte (see `hardware::light_bar`). rgb_page.rs never shows its
+    // WMI panel once a USB keyboard backend exists, and that panel addresses
+    // the keyboard target anyway, so the bar gets its own tab here.
+    if light_bar::is_available() && !sections.is_empty() {
+        sections.push((
+            "light_bar",
+            crate::i18n::t("light_bar_section").to_string(),
+            build_light_bar_section().upcast(),
         ));
     }
 
@@ -849,6 +862,168 @@ fn build_logo_section() -> gtk::Box {
         });
     }
     btn_row.append(&off_btn);
+    page.append(&btn_row);
+    page.append(&status);
+
+    page
+}
+
+struct LightBarPanel {
+    state: LightBarState,
+    status: gtk::Label,
+}
+
+/// Chassis light bar (`hardware::light_bar`): one colour for the whole bar,
+/// the firmware's own effect list, speed 1-5, brightness 0-100. Persisted in
+/// `AppConfig::light_bar` and restored by `window::build_main_ui` at startup.
+fn build_light_bar_section() -> gtk::Box {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    page.set_margin_top(6);
+
+    page.append(&section_title(crate::i18n::t("light_bar_section")));
+
+    let note = gtk::Label::new(Some(crate::i18n::t("light_bar_note")));
+    note.add_css_class("cover-logo-hint");
+    note.set_wrap(true);
+    note.set_halign(gtk::Align::Start);
+    page.append(&note);
+
+    let status = gtk::Label::new(None);
+    status.add_css_class("status-label");
+
+    let saved = crate::config::load_app_config().light_bar;
+    let initial = saved.unwrap_or_default();
+    let panel = Rc::new(RefCell::new(LightBarPanel {
+        state: initial,
+        status: status.clone(),
+    }));
+
+    let modes_row = gtk::FlowBox::new();
+    modes_row.set_selection_mode(gtk::SelectionMode::None);
+    modes_row.set_max_children_per_line(5);
+    modes_row.set_min_children_per_line(2);
+    modes_row.set_row_spacing(6);
+    modes_row.set_column_spacing(6);
+    modes_row.set_homogeneous(true);
+
+    let (speed_row, speed_scale) = labeled_scale(
+        crate::i18n::t("speed"),
+        light_bar::SPEED_MIN as f64,
+        light_bar::SPEED_MAX as f64,
+        initial.speed.clamp(light_bar::SPEED_MIN, light_bar::SPEED_MAX) as f64,
+    );
+    let (bright_row, bright_scale) = labeled_scale(
+        crate::i18n::t("brightness"),
+        0.0,
+        light_bar::BRIGHTNESS_MAX as f64,
+        initial.brightness.min(light_bar::BRIGHTNESS_MAX) as f64,
+    );
+    let (color_column, color_scales) = color_row((
+        initial.red as f64,
+        initial.green as f64,
+        initial.blue as f64,
+    ));
+    for scale in &color_scales {
+        let panel = panel.clone();
+        let scales = color_scales.clone();
+        scale.connect_value_changed(move |_| {
+            let mut p = panel.borrow_mut();
+            p.state.red = scales[0].value() as u8;
+            p.state.green = scales[1].value() as u8;
+            p.state.blue = scales[2].value() as u8;
+        });
+    }
+
+    // Only the controls an effect actually uses are shown.
+    let sync_visibility = {
+        let speed_row = speed_row.clone();
+        let color_column = color_column.clone();
+        let bright_row = bright_row.clone();
+        move |mode: LightBarMode| {
+            speed_row.set_visible(mode.uses_speed());
+            color_column.set_visible(mode.uses_color());
+            bright_row.set_visible(mode != LightBarMode::Off);
+        }
+    };
+    sync_visibility(initial.mode);
+
+    let mut mode_buttons = Vec::new();
+    for mode in LightBarMode::ALL {
+        let btn = gtk::ToggleButton::with_label(crate::i18n::t(mode.label_key()));
+        btn.add_css_class("mode-button");
+        if mode == initial.mode {
+            btn.set_active(true);
+            btn.add_css_class("mode-active");
+        }
+        modes_row.insert(&btn, -1);
+        mode_buttons.push((mode, btn));
+    }
+    let mode_buttons = Rc::new(mode_buttons);
+    for (mode, btn) in mode_buttons.iter() {
+        let mode = *mode;
+        let panel = panel.clone();
+        let mode_buttons = mode_buttons.clone();
+        let sync_visibility = sync_visibility.clone();
+        btn.connect_toggled(move |b| {
+            if !b.is_active() {
+                if mode_buttons.iter().all(|(_, other)| !other.is_active()) {
+                    b.set_active(true);
+                }
+                return;
+            }
+            for (_, other) in mode_buttons.iter() {
+                if other != b {
+                    other.set_active(false);
+                    other.remove_css_class("mode-active");
+                }
+            }
+            b.add_css_class("mode-active");
+            panel.borrow_mut().state.mode = mode;
+            sync_visibility(mode);
+        });
+    }
+    page.append(&modes_row);
+
+    {
+        let panel = panel.clone();
+        speed_scale.connect_value_changed(move |s| panel.borrow_mut().state.speed = s.value() as u8);
+    }
+    {
+        let panel = panel.clone();
+        bright_scale
+            .connect_value_changed(move |s| panel.borrow_mut().state.brightness = s.value() as u8);
+    }
+    page.append(&bright_row);
+    page.append(&speed_row);
+    page.append(&color_column);
+
+    let btn_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    btn_row.set_halign(gtk::Align::Center);
+    btn_row.set_margin_top(6);
+
+    let apply_btn = gtk::Button::with_label(crate::i18n::t("apply"));
+    apply_btn.add_css_class("accent-button");
+    {
+        let panel = panel.clone();
+        apply_btn.connect_clicked(move |_| {
+            let p = panel.borrow();
+            let cfg = crate::config::load_app_config();
+            // Coming from Off (or from nothing ever applied) the firmware
+            // wants a Breathing frame first or the strip stays dark.
+            let wake = cfg
+                .light_bar
+                .map(|previous| previous.mode == LightBarMode::Off)
+                .unwrap_or(true);
+            let result = light_bar::apply(&p.state, wake);
+            if result.is_ok() {
+                let mut cfg = cfg;
+                cfg.light_bar = Some(p.state);
+                let _ = crate::config::save_app_config(&cfg);
+            }
+            apply_result(&p.status, result);
+        });
+    }
+    btn_row.append(&apply_btn);
     page.append(&btn_row);
     page.append(&status);
 

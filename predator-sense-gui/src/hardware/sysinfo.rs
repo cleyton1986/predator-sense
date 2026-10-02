@@ -98,6 +98,34 @@ pub fn is_nitro_brand() -> bool {
         .is_some_and(|name| name.to_lowercase().contains("nitro"))
 }
 
+/// True when this machine's DMI `product_name` names one of `models`.
+///
+/// Model codes are compared as whole whitespace-separated words, so `PH16-71`
+/// matches `"Predator PH16-71"` but not `"Predator PH16-71X"` - a different
+/// chassis whose firmware is not known to behave the same way.
+///
+/// Used to gate hardware paths whose wire format was confirmed on specific
+/// chassis and is known to differ elsewhere, rather than inferring support
+/// from a USB ID or a device node that several generations share.
+///
+/// `PREDATOR_SENSE_FORCE_MODEL` overrides the DMI read, so someone on an
+/// unlisted chassis can try a gated path and report back without rebuilding.
+pub fn product_matches(models: &[&str]) -> bool {
+    let name = std::env::var("PREDATOR_SENSE_FORCE_MODEL")
+        .ok()
+        .or_else(|| read_trim("/sys/class/dmi/id/product_name"))
+        .unwrap_or_default();
+    matches_model(&name, models)
+}
+
+/// The whole-word comparison behind [`product_matches`], split out so it can
+/// be tested without touching DMI or the process environment.
+fn matches_model(product_name: &str, models: &[&str]) -> bool {
+    product_name
+        .split_whitespace()
+        .any(|part| models.iter().any(|m| part.eq_ignore_ascii_case(m)))
+}
+
 fn read_trim(path: &str) -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
@@ -241,4 +269,30 @@ fn active_net_interface() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_model;
+
+    #[test]
+    fn matches_the_model_code_as_a_whole_word() {
+        assert!(matches_model("Predator PH16-71", &["PH16-71"]));
+        assert!(matches_model("predator ph16-71", &["PH16-71"]));
+    }
+
+    #[test]
+    fn does_not_match_a_longer_neighbouring_model_code() {
+        // A different chassis - its firmware is not known to behave the same,
+        // so a gated path must stay off rather than guess.
+        assert!(!matches_model("Predator PH16-71X", &["PH16-71"]));
+        assert!(!matches_model("Predator PH16-72", &["PH16-71"]));
+    }
+
+    #[test]
+    fn unknown_or_empty_dmi_never_matches() {
+        assert!(!matches_model("Nitro AN515-58", &["PH16-71"]));
+        assert!(!matches_model("", &["PH16-71"]));
+        assert!(!matches_model("Predator PH16-71", &[]));
+    }
 }

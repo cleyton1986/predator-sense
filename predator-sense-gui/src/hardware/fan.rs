@@ -27,7 +27,16 @@ pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
         // A real report (issue #1) already confirmed this model's EC
         // firmware disagrees with the PH315-54 values - sending them does
         // nothing trustworthy, so refuse instead of pretending it worked.
+        // Unless the kernel exposes the predator_v4 PWM path: there the
+        // same two presets exist as WMI fan-behavior modes (verified on a
+        // PH16-71 - full speed ~6000 RPM, auto back to the EC curve).
         FanPresetStatus::KnownIncompatible => {
+            if pwm_available() {
+                return match mode {
+                    FanMode::Auto => set_pwm_auto(),
+                    _ => set_pwm_full_speed(),
+                };
+            }
             return Err(crate::i18n::t("fan_ec_incompatible").to_string());
         }
         // No report either way. Withholding fan control on every unlisted
@@ -67,7 +76,13 @@ pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
 /// is a bonus wake-up, not the fan mode change itself. Logs if the bounce
 /// left the profile somewhere other than where it started, since that *is* a
 /// real, visible side effect a caller did not ask for.
-fn wake_dynamic_fan_curve() {
+/// Only reached from the EC-preset path in `set_fan_mode`, which a PH16-71
+/// never takes - it is `KnownIncompatible` there, so Auto/Max route through
+/// PWM instead. The PWM path's own use of this was removed after the stall it
+/// worked around turned out not to exist; that measurement does not cover the
+/// EC path on the models that do use it, so this is left alone rather than
+/// deleted on a guess.
+pub fn wake_dynamic_fan_curve() {
     use crate::hardware::thermal_profile;
     if !thermal_profile::is_available() {
         return;
@@ -140,10 +155,28 @@ pub fn set_pwm_percent(cpu_pct: u8, gpu_pct: u8) -> Result<(), String> {
 }
 
 /// Restore automatic fan control (pwm_enable=2) on both fans.
+///
+/// This used to be followed by a thermal-profile bounce, on the belief that
+/// `pwm_enable = 2` left the EC in a static state reporting 0 RPM until the
+/// profile index was transitioned. Re-measured on a PH16-71: that was a
+/// misdiagnosis. 0 RPM at idle is the firmware curve working - this chassis
+/// runs fanless when cool - and the fans ramp on their own under load with no
+/// bounce at all (0 RPM at 42 C idle, unchanged by a bounce; 2913/2902 RPM at
+/// 91 C under load). The bounce was a visible mode-key flicker and a chance of
+/// being left in the wrong profile, bought nothing, and is gone.
 pub fn set_pwm_auto() -> Result<(), String> {
     let automatic = PwmControlMode::Automatic.as_str();
     crate::hardware::helper::execute(HelperAction::PwmCpuEnable, &[automatic])?;
     crate::hardware::helper::execute(HelperAction::PwmGpuEnable, &[automatic])?;
+    Ok(())
+}
+
+/// Firmware "max fan" through the PWM path: fan-behavior mode 0 (turbo /
+/// full speed) on both fans - what the physical Turbo key selects.
+pub fn set_pwm_full_speed() -> Result<(), String> {
+    let full = PwmControlMode::FullSpeed.as_str();
+    crate::hardware::helper::execute(HelperAction::PwmCpuEnable, &[full])?;
+    crate::hardware::helper::execute(HelperAction::PwmGpuEnable, &[full])?;
     Ok(())
 }
 

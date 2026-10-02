@@ -24,6 +24,11 @@ pub struct Capabilities {
     pub rgb: bool,
     /// Independently addressable RGB logo on the display lid (ENE target 0x83).
     pub cover_logo: bool,
+    /// Chassis light bar over the firmware's WMI lighting channel
+    /// (`hardware::light_bar`). A separate device from `cover_logo` above:
+    /// that one is the badge on the outside of the lid, this is the bar across
+    /// the chassis, and a machine can have either, both or neither.
+    pub light_bar: bool,
     /// Raw EC access (/dev/ec) — needed for CoolBoost / LCD overdrive / etc.
     pub ec: bool,
     /// NVIDIA GPU monitoring available without waking the dGPU during detection.
@@ -97,6 +102,7 @@ impl Capabilities {
                 || crate::hardware::chicony_rgb::is_available(),
             cover_logo: crate::hardware::hid_rgb::has_cover_logo()
                 || crate::hardware::magic_rgb::is_logo_available(),
+            light_bar: crate::hardware::light_bar::is_available(),
             ec: Path::new("/dev/ec").exists(),
             nvidia_gpu: crate::hardware::nvidia::is_available(),
             battery_limit: battery_charge_limit().is_some(),
@@ -125,7 +131,13 @@ const FAN_PRESET_VERIFIED: &[&str] = &["PH315-54"];
 ///   control at all; root cause confirmed to be a different EC firmware, not
 ///   an app bug. Refusing here beats sending PH315-54 bytes that are already
 ///   known not to mean the same thing on this board.
-const FAN_PRESET_KNOWN_INCOMPATIBLE: &[&str] = &["PH317-55"];
+/// - **PH16-71** (hand-verified 2026-09-14 on a Predator PH16-71, BIOS
+///   V1.18): the EC accepts the bytes and reads them back (`auto` -> `max`
+///   -> `auto` exactly), but fan RPM never moves - ~1765 RPM steady through
+///   a Max write. Real fan control on this chassis is the predator_v4 WMI
+///   PWM path (facer `.pwm = 1`), which does respond: pwm 255 -> ~6000 RPM,
+///   pwm 128 -> ~3450 RPM.
+const FAN_PRESET_KNOWN_INCOMPATIBLE: &[&str] = &["PH317-55", "PH16-71"];
 
 /// Every other Predator/Nitro model this project knows the name of, with no
 /// fan-preset report either way yet - `fan_preset_status_for` returns
@@ -146,7 +158,6 @@ const FAN_PRESET_KNOWN_INCOMPATIBLE: &[&str] = &["PH317-55"];
 ///   reports Auto/Max working.
 #[allow(dead_code)] // Reference list for future confirmations, not read at runtime.
 const FAN_PRESET_KERNEL_KNOWN_MODELS: &[&str] = &[
-    "PH16-71",
     "PH16-72",
     "PHN16-71",
     "PHN16S-71",

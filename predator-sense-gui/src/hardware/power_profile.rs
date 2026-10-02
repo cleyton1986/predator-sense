@@ -38,6 +38,12 @@ const CRITICAL_BATTERY_PCT: u32 = 15;
 const OVERRIDE_GRACE: Duration = Duration::from_secs(60);
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
+/// Automatic Eco below a battery threshold. Separate from the hard-coded
+/// [`CRITICAL_BATTERY_PCT`] floor below: that one is a safety net at 15%, this
+/// is the user's own "save power from here on" line, and it drops to Eco
+/// rather than Quiet.
+static AUTO_ECO: AtomicBool = AtomicBool::new(false);
+static AUTO_ECO_PCT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(30);
 static AC_PROFILE: AtomicI8 = AtomicI8::new(PowerProfile::Performance.index());
 static BATTERY_PROFILE: AtomicI8 = AtomicI8::new(PowerProfile::Balanced.index());
 
@@ -58,6 +64,11 @@ pub fn set_auto(v: bool) {
 
 pub fn is_auto() -> bool {
     ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_auto_eco(enabled: bool, threshold: u32) {
+    AUTO_ECO.store(enabled, Ordering::Relaxed);
+    AUTO_ECO_PCT.store(threshold, Ordering::Relaxed);
 }
 
 pub fn set_target_profiles(ac: PowerProfile, battery: PowerProfile) {
@@ -134,6 +145,14 @@ fn desired_profile_for(
             Some(PowerProfile::Performance) | Some(PowerProfile::Turbo) => None,
             Some(current) if current == ac_target => None,
             _ => Some(ac_target),
+        };
+    }
+    if AUTO_ECO.load(Ordering::Relaxed)
+        && battery_pct.is_some_and(|pct| pct < AUTO_ECO_PCT.load(Ordering::Relaxed))
+    {
+        return match current {
+            Some(PowerProfile::Eco) => None,
+            _ => Some(PowerProfile::Eco),
         };
     }
     if battery_pct.is_some_and(|pct| pct < CRITICAL_BATTERY_PCT) {

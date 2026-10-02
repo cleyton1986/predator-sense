@@ -1,5 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
+use libadwaita as adw;
+use libadwaita::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -813,7 +815,16 @@ pub fn build() -> gtk::Box {
         glib::ControlFlow::Continue
     });
 
-    stack.add_named(&tab1_box, Some("modes"));
+    tab1_box.append(&build_mode_key_section());
+
+    // The cards alone fill the page, so everything added below them used to be
+    // off-screen with no way to reach it - this tab never scrolled.
+    let tab1_scroll = gtk::ScrolledWindow::new();
+    tab1_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    tab1_scroll.set_vexpand(true);
+    tab1_scroll.set_child(Some(&tab1_box));
+
+    stack.add_named(&tab1_scroll, Some("modes"));
     stack.add_named(&tab2_box, Some("firmware"));
     page.append(&tab_bar);
     page.append(&stack);
@@ -1335,4 +1346,248 @@ fn temp_limit_unlock(
     }
 
     box_
+}
+
+
+// ---------------------------------------------------------------------------
+// Mode-key behaviour
+// ---------------------------------------------------------------------------
+
+use crate::config;
+
+/// Every mode, weakest to strongest, for the cycle editors.
+const CYCLE_CHOICES: [(PowerProfile, &str); 5] = [
+    (PowerProfile::Eco, "eco"),
+    (PowerProfile::Quiet, "quiet"),
+    (PowerProfile::Balanced, "balanced"),
+    (PowerProfile::Performance, "performance"),
+    (PowerProfile::Turbo, "turbo"),
+];
+
+/// Installs the configured cycles in the kernel module, where the mode key is
+/// actually handled. Off the UI thread: it goes through the privileged helper.
+fn push_cycles(cfg: &config::AppConfig) {
+    let ac = cfg.mode_cycle_ac.clone();
+    let battery = cfg.mode_cycle_battery.clone();
+    crate::ui::background::run(
+        move || crate::hardware::profile::push_mode_cycles(&ac, &battery),
+        |result| {
+            if let Err(error) = result {
+                crate::hardware::applog::error(&format!("mode-key cycle not installed: {error}"));
+            }
+        },
+    );
+}
+
+/// One editable cycle: which modes the mode key visits, in order.
+///
+/// Order matters as much as membership - "Quiet, Balanced, Performance" and
+/// the reverse are different keys to press - so included modes float to the
+/// top with move up/down, and excluded ones sit below them.
+fn build_cycle_group(
+    title_key: &str,
+    subtitle_key: &str,
+    read: fn(&config::AppConfig) -> Vec<String>,
+    write: fn(&mut config::AppConfig, Vec<String>),
+) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
+    group.set_title(crate::i18n::t(title_key));
+    group.set_description(Some(crate::i18n::t(subtitle_key)));
+
+    let rows: Rc<RefCell<Vec<adw::ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
+    let rebuild: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    {
+        let group = group.clone();
+        let rows = rows.clone();
+        let rebuild_inner = rebuild.clone();
+        let build: Box<dyn Fn()> = Box::new(move || {
+            for row in rows.borrow().iter() {
+                group.remove(row);
+            }
+            rows.borrow_mut().clear();
+
+            let selected = read(&config::load_app_config());
+            // Included first, in the order the key will visit them.
+            let mut ordered: Vec<(PowerProfile, &str, bool)> = Vec::new();
+            for id in &selected {
+                if let Some((profile, key)) =
+                    CYCLE_CHOICES.iter().find(|(_, key)| *key == id.as_str())
+                {
+                    ordered.push((*profile, key, true));
+                }
+            }
+            for (profile, key) in CYCLE_CHOICES {
+                if !selected.iter().any(|entry| entry == key) {
+                    ordered.push((profile, key, false));
+                }
+            }
+
+            let included = selected.len();
+            for (position, (profile, key, is_in)) in ordered.into_iter().enumerate() {
+                let row = adw::ActionRow::new();
+                row.set_title(profile.label());
+                if is_in {
+                    row.set_subtitle(&crate::i18n::tf(
+                        "cycle_step",
+                        &[&(position + 1).to_string()],
+                    ));
+                }
+
+                let check = gtk::CheckButton::new();
+                check.set_active(is_in);
+                check.set_valign(gtk::Align::Center);
+                {
+                    let rebuild_inner = rebuild_inner.clone();
+                    check.connect_toggled(move |check| {
+                        let mut cfg = config::load_app_config();
+                        let mut list = read(&cfg);
+                        if check.is_active() {
+                            if !list.iter().any(|entry| entry == key) {
+                                list.push(key.to_string());
+                            }
+                        } else {
+                            list.retain(|entry| entry != key);
+                        }
+                        write(&mut cfg, list);
+                        let _ = config::save_app_config(&cfg);
+                        push_cycles(&cfg);
+                        if let Some(rebuild) = rebuild_inner.borrow().as_ref() {
+                            rebuild();
+                        }
+                    });
+                }
+                row.add_prefix(&check);
+                row.set_activatable_widget(Some(&check));
+
+                if is_in {
+                    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+                    controls.set_valign(gtk::Align::Center);
+                    let up = gtk::Button::from_icon_name("go-up-symbolic");
+                    let down = gtk::Button::from_icon_name("go-down-symbolic");
+                    up.add_css_class("flat");
+                    down.add_css_class("flat");
+                    up.set_sensitive(position > 0);
+                    down.set_sensitive(position + 1 < included);
+                    for (button, delta) in [(&up, -1i32), (&down, 1i32)] {
+                        let rebuild_inner = rebuild_inner.clone();
+                        button.connect_clicked(move |_| {
+                            let mut cfg = config::load_app_config();
+                            let mut list = read(&cfg);
+                            if let Some(at) = list.iter().position(|entry| entry == key) {
+                                let target = at as i32 + delta;
+                                if target >= 0 && (target as usize) < list.len() {
+                                    list.swap(at, target as usize);
+                                    write(&mut cfg, list);
+                                    let _ = config::save_app_config(&cfg);
+                                    push_cycles(&cfg);
+                                }
+                            }
+                            if let Some(rebuild) = rebuild_inner.borrow().as_ref() {
+                                rebuild();
+                            }
+                        });
+                    }
+                    controls.append(&up);
+                    controls.append(&down);
+                    row.add_suffix(&controls);
+                }
+
+                group.add(&row);
+                rows.borrow_mut().push(row);
+            }
+        });
+        *rebuild.borrow_mut() = Some(build);
+    }
+    if let Some(build) = rebuild.borrow().as_ref() {
+        build();
+    }
+    group
+}
+
+/// Mode-key settings: startup mode, automatic Eco, and the two cycles.
+pub fn build_mode_key_section() -> gtk::Box {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 18);
+    page.set_margin_top(28);
+    page.set_margin_bottom(8);
+
+    let cfg = config::load_app_config();
+
+    let behaviour = adw::PreferencesGroup::new();
+    behaviour.set_title(crate::i18n::t("mode_key_section"));
+    behaviour.set_description(Some(crate::i18n::t("mode_key_desc")));
+
+    // --- startup mode ---
+    let mut default_options = vec![crate::i18n::t("mode_default_none").to_string()];
+    default_options.extend(CYCLE_CHOICES.iter().map(|(p, _)| p.label().to_string()));
+    let default_row = adw::ComboRow::new();
+    default_row.set_title(crate::i18n::t("mode_default"));
+    default_row.set_subtitle(crate::i18n::t("mode_default_desc"));
+    default_row.set_model(Some(&gtk::StringList::new(
+        &default_options.iter().map(String::as_str).collect::<Vec<_>>(),
+    )));
+    default_row.set_selected(
+        cfg.mode_default
+            .as_deref()
+            .and_then(|id| CYCLE_CHOICES.iter().position(|(_, key)| *key == id))
+            .map(|position| position as u32 + 1)
+            .unwrap_or(0),
+    );
+    default_row.connect_selected_notify(|row| {
+        let mut cfg = config::load_app_config();
+        let index = row.selected() as usize;
+        cfg.mode_default = index
+            .checked_sub(1)
+            .and_then(|position| CYCLE_CHOICES.get(position))
+            .map(|(_, key)| key.to_string());
+        let _ = config::save_app_config(&cfg);
+    });
+    behaviour.add(&default_row);
+
+    // --- automatic Eco ---
+    let eco_row = adw::SwitchRow::new();
+    eco_row.set_title(crate::i18n::t("auto_eco"));
+    eco_row.set_subtitle(crate::i18n::t("auto_eco_desc"));
+    eco_row.set_active(cfg.auto_eco_enabled);
+    behaviour.add(&eco_row);
+
+    let threshold_row = adw::SpinRow::with_range(5.0, 95.0, 5.0);
+    threshold_row.set_title(crate::i18n::t("auto_eco_threshold"));
+    threshold_row.set_value(cfg.auto_eco_threshold as f64);
+    threshold_row.set_sensitive(cfg.auto_eco_enabled);
+    behaviour.add(&threshold_row);
+
+    {
+        let threshold_row = threshold_row.clone();
+        eco_row.connect_active_notify(move |row| {
+            let mut cfg = config::load_app_config();
+            cfg.auto_eco_enabled = row.is_active();
+            let _ = config::save_app_config(&cfg);
+            threshold_row.set_sensitive(cfg.auto_eco_enabled);
+            crate::hardware::power_profile::set_auto_eco(
+                cfg.auto_eco_enabled,
+                cfg.auto_eco_threshold,
+            );
+        });
+    }
+    threshold_row.connect_value_notify(|row| {
+        let mut cfg = config::load_app_config();
+        cfg.auto_eco_threshold = row.value() as u32;
+        let _ = config::save_app_config(&cfg);
+        crate::hardware::power_profile::set_auto_eco(cfg.auto_eco_enabled, cfg.auto_eco_threshold);
+    });
+
+    page.append(&behaviour);
+    page.append(&build_cycle_group(
+        "cycle_on_ac",
+        "cycle_on_ac_desc",
+        |cfg| cfg.mode_cycle_ac.clone(),
+        |cfg, list| cfg.mode_cycle_ac = list,
+    ));
+    page.append(&build_cycle_group(
+        "cycle_on_battery",
+        "cycle_on_battery_desc",
+        |cfg| cfg.mode_cycle_battery.clone(),
+        |cfg, list| cfg.mode_cycle_battery = list,
+    ));
+    page
 }
