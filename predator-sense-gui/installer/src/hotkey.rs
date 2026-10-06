@@ -386,29 +386,36 @@ pub(crate) fn run() -> AppResult {
     }
 
     let mode_key = ModeKey::load(&home);
-    let (ec_hid, ec_candidates) = find_ec_hid(&mode_key);
-    match ec_hid {
-        Some(path) => match File::open(&path) {
+    let (ec_hids, ec_candidates) = find_ec_hid(&mode_key);
+    // Every matching node is polled, not just the first: see find_ec_hid. One
+    // node failing to open must not drop the others - on a composite keyboard
+    // the one that carries the key may well be the one after the failure.
+    for path in &ec_hids {
+        match File::open(path) {
             Ok(file) => {
                 logger.info(format!("Tecla de modo: monitorando {}", path.display()));
-                devices.push((path, file, DeviceKind::ModeKey));
+                devices.push((path.clone(), file, DeviceKind::ModeKey));
             }
             Err(error) => logger.info(format!(
-                "Tecla de modo indisponível ({error}); confira o grupo input"
+                "Tecla de modo indisponível em {} ({error}); confira o grupo input",
+                path.display()
             )),
-        },
-        // Logged rather than silent: on a model whose EC reports a different
-        // product id this list is what lets the user point mode_key.json at
-        // the right device instead of concluding the key is unsupported.
-        None if ec_candidates.is_empty() => {
-            logger.debug("Tecla de modo: nenhum dispositivo HID Acer encontrado")
         }
-        None => logger.info(format!(
+    }
+    // Logged rather than silent: on a model whose EC reports a different
+    // product id this list is what lets the user point mode_key.json at
+    // the right device instead of concluding the key is unsupported.
+    if !ec_hids.is_empty() {
+        // Already logged per node above.
+    } else if ec_candidates.is_empty() {
+        logger.debug("Tecla de modo: nenhum dispositivo HID Acer encontrado")
+    } else {
+        logger.info(format!(
             "Tecla de modo: nenhum dispositivo casou com {}:{}; candidatos Acer: {}",
             mode_key.vendor,
             mode_key.product,
             ec_candidates.join(", ")
-        )),
+        ))
     }
 
     if devices.is_empty() {
@@ -607,14 +614,20 @@ pub(crate) fn run() -> AppResult {
 /// Anyone whose key does not work can find the right values from the candidate
 /// list this daemon logs at startup plus `sudo hexdump -C /dev/hidrawN`, and
 /// report them so the defaults can grow a per-model table.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ModeKey {
-    #[serde(default = "default_ec_vendor")]
     vendor: String,
-    #[serde(default = "default_ec_product")]
     product: String,
-    #[serde(default = "default_mode_key_report")]
     report: Vec<u8>,
+}
+
+/// `mode_key.json` as written: every field optional, so a partial override
+/// keeps this chassis's defaults for what it omits rather than the EC's.
+#[derive(Deserialize)]
+struct ModeKeyOverride {
+    vendor: Option<String>,
+    product: Option<String>,
+    report: Option<Vec<u8>>,
 }
 
 fn default_ec_vendor() -> String {
@@ -639,25 +652,63 @@ impl Default for ModeKey {
     }
 }
 
+/// Chassis whose mode key does not report through the EC, as
+/// `(model, vendor, product, report)`.
+///
+/// On the PT14-51 the key reports on the Sunrex keyboard's interface 1.2
+/// instead (issue #76). Gated by model like [`PREDATOR_KEY_MODELS`]: the same
+/// keyboard may ship on other chassis where `04 81 FF` means something else.
+const MODE_KEY_MODELS: &[(&str, &str, &str, [u8; 3])] =
+    &[("PT14-51", "05AF", "766D", [0x04, 0x81, 0xFF])];
+
 impl ModeKey {
     const CONFIG: &'static str = ".config/predator-sense/mode_key.json";
+
+    /// The built-in mapping for a DMI product name: the entry from
+    /// [`MODE_KEY_MODELS`] when one names this chassis, compared as whole
+    /// words, and the EC's otherwise.
+    fn for_product(name: &str) -> Self {
+        name.split_whitespace()
+            .find_map(|part| {
+                MODE_KEY_MODELS
+                    .iter()
+                    .find(|(model, ..)| part.eq_ignore_ascii_case(model))
+            })
+            .map(|(_, vendor, product, report)| Self {
+                vendor: vendor.to_string(),
+                product: product.to_string(),
+                report: report.to_vec(),
+            })
+            .unwrap_or_default()
+    }
+
+    fn chassis_default() -> Self {
+        Self::for_product(&fs::read_to_string(path::PRODUCT_NAME).unwrap_or_default())
+    }
 
     fn load(home: &Path) -> Self {
         let path = home.join(Self::CONFIG);
         let Ok(data) = fs::read(&path) else {
-            return Self::default();
+            return Self::chassis_default();
         };
         // Reported rather than silently defaulted: someone who wrote this file
         // is trying to make a dead key work, and falling back without a word
         // looks exactly like the key still being unsupported.
-        match serde_json::from_slice(&data) {
-            Ok(mode_key) => mode_key,
+        match serde_json::from_slice::<ModeKeyOverride>(&data) {
+            Ok(file) => {
+                let base = Self::chassis_default();
+                Self {
+                    vendor: file.vendor.unwrap_or(base.vendor),
+                    product: file.product.unwrap_or(base.product),
+                    report: file.report.unwrap_or(base.report),
+                }
+            }
             Err(error) => {
                 eprintln!(
                     "predator-sense-hotkey: {} é inválido ({error}); usando os valores padrão",
                     path.display()
                 );
-                Self::default()
+                Self::chassis_default()
             }
         }
     }
@@ -692,19 +743,29 @@ impl ModeKey {
     }
 }
 
-/// Locates the embedded controller's hidraw node.
+/// Locates the hidraw nodes the mode-switch key may report on.
 ///
 /// Never hard-code /dev/hidrawN: the numbering changes between boots.
 ///
-/// Returns the matching node plus every Acer HID device seen along the way.
-/// The candidate list is what makes this diagnosable on a model whose EC
-/// reports a different product id: the daemon logs it, and the user can point
-/// `mode_key.json` at the right one instead of the key simply staying dead.
-fn find_ec_hid(mode_key: &ModeKey) -> (Option<PathBuf>, Vec<String>) {
+/// Returns **every** matching node, not just the first. A composite keyboard
+/// exposes one hidraw node per USB interface, all answering to the same vendor
+/// and product id, and only one of them carries the key: on a PT14-51 (issue
+/// #44) four nodes share `05AF:766D` and the key reports on interface 1.2
+/// alone, so keeping the first match is a one-in-four guess that leaves the key
+/// silently dead the other three times. Extra nodes cost an idle file
+/// descriptor each and the report itself identifies the press, so listening to
+/// all of them removes the guess for free.
+///
+/// Also returns every HID device seen whose vendor is either the Acer EC or
+/// whatever `mode_key.json` asks for. The candidate list is what makes this
+/// diagnosable on a model whose key lives somewhere else entirely: the daemon
+/// logs it, and the user can point `mode_key.json` at the right one instead of
+/// the key simply staying dead.
+fn find_ec_hid(mode_key: &ModeKey) -> (Vec<PathBuf>, Vec<String>) {
     let mut candidates = Vec::new();
-    let mut found = None;
+    let mut found = Vec::new();
     let Ok(entries) = fs::read_dir("/sys/class/hidraw") else {
-        return (None, candidates);
+        return (found, candidates);
     };
     for entry in entries.flatten() {
         // Skip, never abort: one unreadable node among a dozen must not hide
@@ -722,9 +783,9 @@ fn find_ec_hid(mode_key: &ModeKey) -> (Option<PathBuf>, Vec<String>) {
         };
         let node = PathBuf::from("/dev").join(entry.file_name());
         if hid_id.split(':').nth(1).is_some_and(|vendor| {
-            vendor
-                .trim_start_matches('0')
-                .eq_ignore_ascii_case(hardware::EC_HID_VENDOR.trim_start_matches('0'))
+            let vendor = vendor.trim_start_matches('0');
+            vendor.eq_ignore_ascii_case(hardware::EC_HID_VENDOR.trim_start_matches('0'))
+                || vendor.eq_ignore_ascii_case(mode_key.vendor.trim_start_matches('0'))
         }) {
             let name = uevent
                 .lines()
@@ -732,10 +793,14 @@ fn find_ec_hid(mode_key: &ModeKey) -> (Option<PathBuf>, Vec<String>) {
                 .unwrap_or("?");
             candidates.push(format!("{} [{hid_id}] {name}", node.display()));
         }
-        if found.is_none() && mode_key.matches(hid_id) {
-            found = Some(node);
+        if mode_key.matches(hid_id) {
+            found.push(node);
         }
     }
+    // Directory order is not stable between boots; sorting keeps the log and
+    // the polled order reading the same way twice.
+    found.sort();
+    candidates.sort();
     (found, candidates)
 }
 
@@ -1826,19 +1891,37 @@ mod tests {
     #[test]
     fn a_missing_or_broken_override_falls_back_to_the_measured_defaults() {
         let home = tempfile::tempdir().unwrap();
-        assert_eq!(ModeKey::load(home.path()), ModeKey::default());
+        assert_eq!(ModeKey::load(home.path()), ModeKey::chassis_default());
 
         let path = home.path().join(ModeKey::CONFIG);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "{ not json").unwrap();
-        assert_eq!(ModeKey::load(home.path()), ModeKey::default());
+        assert_eq!(ModeKey::load(home.path()), ModeKey::chassis_default());
 
-        // A partial override keeps the defaults for everything it omits.
+        // A partial override keeps this chassis's defaults for everything it
+        // omits - on a PT14-51 the keyboard's, not the EC's.
         fs::write(&path, r#"{"product":"0000ABCD"}"#).unwrap();
         let loaded = ModeKey::load(home.path());
+        let base = ModeKey::chassis_default();
         assert_eq!(loaded.product, "0000ABCD");
-        assert_eq!(loaded.vendor, hardware::EC_HID_VENDOR);
-        assert_eq!(loaded.report, hardware::EC_HID_MODE_KEY_REPORT);
+        assert_eq!(loaded.vendor, base.vendor);
+        assert_eq!(loaded.report, base.report);
+    }
+
+    #[test]
+    fn mode_key_default_follows_chassis() {
+        let pt14 = ModeKey::for_product("Predator PT14-51\n");
+        assert_eq!(pt14.vendor, "05AF");
+        assert_eq!(pt14.product, "766D");
+        assert_eq!(pt14.report, [0x04, 0x81, 0xFF]);
+        assert!(pt14.matches("0003:000005AF:0000766D"));
+        assert!(pt14.is_press(&[0x04, 0x81, 0xFF]));
+        assert!(!pt14.is_press(&[0x04, 0x00, 0x00]));
+
+        // Whole words only, and every other chassis keeps the EC mapping.
+        assert_eq!(ModeKey::for_product("Predator PT14-51X"), ModeKey::default());
+        assert_eq!(ModeKey::for_product("Predator PH315-54"), ModeKey::default());
+        assert_eq!(ModeKey::for_product(""), ModeKey::default());
     }
 
     fn calibration(indices: &[u8]) -> thermal_profile::Calibration {
