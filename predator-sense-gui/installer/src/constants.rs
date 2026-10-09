@@ -268,6 +268,10 @@ pub(crate) mod timing {
     pub const RESUME_THRESHOLD_SECS: f64 = 0.5;
     pub const LIGHTING_RESTORE_RETRY_DELAYS_SECS: [u64; 3] = [0, 1, 2];
     pub const SERVICE_RESTART_SECS: u64 = 5;
+    /// Give up after this many failed starts inside the interval, so a session
+    /// that predates the `input` group change is not restarted forever (#81).
+    pub const SERVICE_START_LIMIT_BURST: u32 = 5;
+    pub const SERVICE_START_LIMIT_INTERVAL_SECS: u64 = 300;
     pub const PROCESS_SHUTDOWN_GRACE_SECS: u64 = 1;
 }
 

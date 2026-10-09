@@ -1,5 +1,6 @@
 use crate::constants::{app, command, hardware, logging, path, timing};
 use crate::process::{process_running, spawn_reaped};
+use crate::i18n::Language;
 use crate::AppResult;
 use predator_sense_protocol::battery;
 use predator_sense_protocol::helper::Action as HelperAction;
@@ -412,10 +413,12 @@ pub(crate) fn run() -> AppResult {
     }
 
     if devices.is_empty() {
-        return Err(
-            "predator-sense-hotkey: nenhum dispositivo pôde ser aberto; verifique o grupo input"
-                .into(),
-        );
+        return Err(Language::detect()
+            .select(
+                "predator-sense-hotkey: no input device could be opened; check the input group (log out and back in after it is added)",
+                "predator-sense-hotkey: nenhum dispositivo pôde ser aberto; verifique o grupo input",
+            )
+            .into());
     }
 
     let mut last_activation =

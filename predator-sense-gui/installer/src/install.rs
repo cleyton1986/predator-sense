@@ -1404,7 +1404,9 @@ impl Installer {
         let hotkey_unit = format!(
             "[Unit]\n\
              Description={}\n\
-             After=graphical-session.target\n\n\
+             After=graphical-session.target\n\
+             StartLimitIntervalSec={}\n\
+             StartLimitBurst={}\n\n\
              [Service]\n\
              ExecStart={}\n\
              Restart=on-failure\n\
@@ -1412,6 +1414,8 @@ impl Installer {
              [Install]\n\
              WantedBy=default.target\n",
             service::HOTKEY_DESCRIPTION,
+            timing::SERVICE_START_LIMIT_INTERVAL_SECS,
+            timing::SERVICE_START_LIMIT_BURST,
             path::HOTKEY,
             timing::SERVICE_RESTART_SECS,
         );
