@@ -2,6 +2,7 @@ mod app_state;
 mod config;
 mod hardware;
 mod process;
+mod single_instance;
 pub mod i18n;
 mod tray;
 mod ui;
@@ -134,6 +135,12 @@ fn main() {
             GSK_RENDERER_ENV,
             gl_renderer_name(gtk::major_version(), gtk::minor_version()),
         );
+    }
+
+    // A dead predecessor still holding the name would swallow this launch
+    // without a window or a word (issue #80).
+    if !single_instance::claim_name() {
+        std::process::exit(1);
     }
 
     let app = adw::Application::builder()
