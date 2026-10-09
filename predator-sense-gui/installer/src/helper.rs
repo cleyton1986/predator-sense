@@ -13,6 +13,7 @@ use predator_sense_protocol::helper::{
     Action as HelperAction, CpuGovernor, EnergyPreference, Switch, OPTIONAL_VALUE_SKIP,
 };
 use predator_sense_protocol::internal;
+use predator_sense_protocol::process as bounded;
 use predator_sense_protocol::temp_limit::{self, Bound, Capability};
 use predator_sense_protocol::thermal_profile;
 use serde::Deserialize;
@@ -1831,11 +1832,24 @@ fn reapply_thermal_with(
     write("thermal-profile", &index.to_string(), &attribute)
 }
 
+/// Longest an external tool may take. `nvidia-smi` against a dGPU parked in
+/// RTD3 can block inside the driver for good (issue #79); without a limit the
+/// helper never answers and the GUI waiting on it goes down with it.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Marks a timeout in the message so a caller can tell "the tool refused" from
+/// "the tool never answered" and stop piling more calls onto a stuck driver.
+const TIMED_OUT_MARKER: &str = "did not answer within";
+
 fn command(name: &str, args: &[&str]) -> AppResult {
-    let output = Command::new(name)
-        .args(args)
-        .output()
-        .map_err(|error| fail(format!("cannot execute {name}: {error}")))?;
+    let output = bounded::output_with_timeout(Command::new(name).args(args), COMMAND_TIMEOUT)
+        .map_err(|error| match error {
+            bounded::RunError::TimedOut => fail(format!(
+                "{name} {TIMED_OUT_MARKER} {}s; the GPU driver looks stuck, so GPU control is unavailable",
+                COMMAND_TIMEOUT.as_secs()
+            )),
+            bounded::RunError::Io(error) => fail(format!("cannot execute {name}: {error}")),
+        })?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
         return Err(fail(format!("{name} failed: {}", detail.trim())));
@@ -1855,7 +1869,13 @@ fn set_gpu_power_limit(
     watts: u16,
     mut execute: impl FnMut(&str, &[&str]) -> AppResult,
 ) -> AppResult {
-    let _ = execute(external::NVIDIA_SMI, &["-pm", "1"]);
+    // Persistence mode is best effort, but a tool that did not answer at all
+    // would only hang the next call the same way.
+    if let Err(error) = execute(external::NVIDIA_SMI, &["-pm", "1"]) {
+        if error.to_string().contains(TIMED_OUT_MARKER) {
+            return Err(error);
+        }
+    }
     let watts = watts.to_string();
     execute(external::NVIDIA_SMI, &["-pl", watts.as_str()])
 }

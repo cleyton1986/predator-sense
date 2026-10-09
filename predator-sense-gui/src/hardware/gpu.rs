@@ -206,12 +206,16 @@ fn static_metrics_with_cached_invariants() -> GpuMetrics {
 }
 
 fn fetch_gpu_metrics() -> Option<GpuMetrics> {
-    let o = Command::new("nvidia-smi")
-        .args([
+    // Bounded: on a hybrid laptop the dGPU can sit in RTD3 and nvidia-smi then
+    // blocks inside the driver for good (issue #79). Held forever it would keep
+    // the query lock, and with it every later refresh, hostage.
+    let o = predator_sense_protocol::process::output_with_timeout(
+        Command::new("nvidia-smi").args([
             "--query-gpu=name,driver_version,vbios_version,memory.total,memory.used,memory.free,temperature.gpu,clocks.gr,clocks.mem,clocks.max.gr,clocks.max.mem,utilization.gpu,utilization.memory,power.draw,power.limit,power.max_limit,fan.speed,pstate,pcie.link.gen.current,pcie.link.width.current,power.min_limit,inforom.pwr",
             "--format=csv,noheader,nounits",
-        ])
-        .output();
+        ]),
+        Duration::from_secs(5),
+    );
     let o = o.ok().filter(|output| output.status.success())?;
     parse_gpu_metrics(&String::from_utf8_lossy(&o.stdout))
 }

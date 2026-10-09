@@ -1527,6 +1527,123 @@ pub mod temp_limit {
     }
 }
 
+/// Running an external program without trusting it to come back.
+///
+/// `nvidia-smi` on a hybrid laptop whose dGPU is parked in RTD3 can block in an
+/// uninterruptible driver call that even `SIGKILL` cannot end (issue #79), so a
+/// plain `Command::output()` would hang its caller for good.
+pub mod process {
+    use std::io::{self, Read};
+    use std::process::{Command, Output, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    #[derive(Debug)]
+    pub enum RunError {
+        /// The program could not be started or polled.
+        Io(io::Error),
+        /// The program was still running when the limit passed.
+        TimedOut,
+    }
+
+    impl std::fmt::Display for RunError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Io(error) => write!(formatter, "{error}"),
+                Self::TimedOut => formatter.write_str("timed out"),
+            }
+        }
+    }
+
+    fn drain<R: Read + Send + 'static>(mut stream: R) -> thread::JoinHandle<Vec<u8>> {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stream.read_to_end(&mut bytes);
+            bytes
+        })
+    }
+
+    /// Like `Command::output`, but gives up after `limit`.
+    ///
+    /// On timeout the child gets a `SIGKILL` and this returns at once without
+    /// waiting for it: a process stuck in the kernel will not die, and waiting
+    /// is exactly the hang being avoided. A detached thread reaps it if it ever
+    /// does exit, so it cannot linger as a zombie.
+    pub fn output_with_timeout(command: &mut Command, limit: Duration) -> Result<Output, RunError> {
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(RunError::Io)?;
+        let stdout = child.stdout.take().map(drain);
+        let stderr = child.stderr.take().map(drain);
+        let deadline = Instant::now() + limit;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let collect = |handle: Option<thread::JoinHandle<Vec<u8>>>| {
+                        handle.and_then(|handle| handle.join().ok()).unwrap_or_default()
+                    };
+                    return Ok(Output {
+                        status,
+                        stdout: collect(stdout),
+                        stderr: collect(stderr),
+                    });
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                    return Err(RunError::TimedOut);
+                }
+                Err(error) => return Err(RunError::Io(error)),
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn returns_the_output_of_a_program_that_finishes() {
+            let output = output_with_timeout(
+                Command::new("sh").args(["-c", "echo hi; echo err >&2"]),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"hi\n");
+            assert_eq!(output.stderr, b"err\n");
+        }
+
+        #[test]
+        fn gives_up_on_a_program_that_does_not_finish() {
+            let started = Instant::now();
+            let result = output_with_timeout(
+                Command::new("sleep").arg("30"),
+                Duration::from_millis(150),
+            );
+            assert!(matches!(result, Err(RunError::TimedOut)));
+            assert!(started.elapsed() < Duration::from_secs(5));
+        }
+
+        #[test]
+        fn reports_a_program_that_cannot_start() {
+            let result = output_with_timeout(
+                &mut Command::new("/nonexistent/predator-sense-test"),
+                Duration::from_secs(1),
+            );
+            assert!(matches!(result, Err(RunError::Io(_))));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::helper::{Action, CpuGovernor, EnergyPreference, Switch};

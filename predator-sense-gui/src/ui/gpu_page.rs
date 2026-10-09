@@ -235,14 +235,19 @@ pub fn build() -> gtk::Box {
                 if generation.get() != this_gen {
                     return; // A newer change superseded this one.
                 }
-                match crate::hardware::gpu::set_power_limit(w) {
-                    Ok(()) => v.set_text(&format!("{w} W ✓")),
-                    Err(e) => {
-                        v.set_text(&format!("⚠ {w} W"));
-                        err_label.set_text(&e);
-                        err_label.set_visible(true);
-                    }
-                }
+                // Off the GTK thread: the helper can take several seconds to
+                // give up on a stuck GPU driver, and the window must not freeze.
+                background::run(
+                    move || crate::hardware::gpu::set_power_limit(w),
+                    move |result| match result {
+                        Ok(()) => v.set_text(&format!("{w} W ✓")),
+                        Err(e) => {
+                            v.set_text(&format!("⚠ {w} W"));
+                            err_label.set_text(&e);
+                            err_label.set_visible(true);
+                        }
+                    },
+                );
             });
         });
     }
