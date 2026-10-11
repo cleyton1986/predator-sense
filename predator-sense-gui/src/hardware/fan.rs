@@ -44,6 +44,17 @@ pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
         // just make the gap visible instead of assuming it behaves the same
         // everywhere.
         FanPresetStatus::Unverified => {
+            // The official app never writes EC fan bytes on the predator_v4
+            // generation, it only drives the WMI fan-behavior method that the
+            // kernel's PWM path wraps. When that path is there, use it: the
+            // EC preset bytes were measured to move no air on the PH16-71
+            // and only flash the mode key (issue #82 reports the same).
+            if pwm_available() {
+                return match mode {
+                    FanMode::Auto => set_pwm_auto(),
+                    _ => set_pwm_full_speed(),
+                };
+            }
             crate::hardware::applog::info(&format!(
                 "fan preset bytes are unverified on this model ({}); sending the \
                  PH315-54 values anyway",

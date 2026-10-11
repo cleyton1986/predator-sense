@@ -550,6 +550,20 @@ fn write_took_effect(
     state_satisfies_plan(state, plan, capabilities, MinPerfMatch::AtLeast)
 }
 
+/// The firmware thermal-profile index the official Windows app uses for a
+/// tier (`OPERATING_MODE`: QUIET=0, DEFAULT=1, EXTREME=4, TURBO=5, ECO=6),
+/// or `None` when the firmware does not list that index as supported.
+fn windows_static_index(profile: PowerProfile, supported: &[u8]) -> Option<u8> {
+    let index = match profile {
+        PowerProfile::Quiet => 0,
+        PowerProfile::Balanced => 1,
+        PowerProfile::Performance => 4,
+        PowerProfile::Turbo => 5,
+        PowerProfile::Eco => 6,
+    };
+    supported.contains(&index).then_some(index)
+}
+
 /// Moves the firmware thermal profile to match one of the app's four tiers.
 ///
 /// This is the only thing in a profile switch that moves the package power
@@ -572,9 +586,28 @@ fn apply_firmware_profile(profile: PowerProfile) {
         return;
     }
     let Some(calibration) = crate::hardware::thermal_profile::load() else {
-        crate::hardware::applog::info(
-            "no thermal profile calibration for this machine; firmware profile left unchanged",
-        );
+        // No measured ranking. The official app drives these same indices
+        // from a fixed table (QUIET=0, DEFAULT=1, EXTREME=4, TURBO=5, ECO=6,
+        // through `SetGamingMiscSetting` 0x0B), and on the one machine where
+        // the ladder was measured (PHN16-73) it matches the power order
+        // exactly. Use it only when the firmware advertises the index it
+        // needs; a machine that does not is still left alone.
+        let supported = crate::hardware::thermal_profile::supported();
+        let Some(index) = windows_static_index(profile, &supported) else {
+            crate::hardware::applog::info(
+                "no thermal profile calibration for this machine and the firmware does not \
+                 advertise the official index for this tier; firmware profile left unchanged",
+            );
+            return;
+        };
+        if let Err(e) = crate::hardware::thermal_profile::set(index) {
+            crate::hardware::applog::error(&format!(
+                "thermal profile {index} for {} not applied: {e}",
+                profile.to_id()
+            ));
+            return;
+        }
+        crate::hardware::thermal_profile::remember(index);
         return;
     };
     let Some(index) = calibration.index_for_tier(profile.index() as u8) else {
@@ -1010,6 +1043,20 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_static_index_follows_the_official_table_and_the_supported_mask() {
+        let all = [0u8, 1, 4, 5, 6];
+        assert_eq!(windows_static_index(PowerProfile::Quiet, &all), Some(0));
+        assert_eq!(windows_static_index(PowerProfile::Balanced, &all), Some(1));
+        assert_eq!(windows_static_index(PowerProfile::Performance, &all), Some(4));
+        assert_eq!(windows_static_index(PowerProfile::Turbo, &all), Some(5));
+        assert_eq!(windows_static_index(PowerProfile::Eco, &all), Some(6));
+        // A firmware that does not list the index is left alone.
+        assert_eq!(windows_static_index(PowerProfile::Turbo, &[0, 1, 4]), None);
+        assert_eq!(windows_static_index(PowerProfile::Eco, &[0, 1, 4, 5]), None);
+        assert_eq!(windows_static_index(PowerProfile::Quiet, &[]), None);
+    }
+
     use super::*;
 
     /// The exact-match answer, which is all most of these fixtures care about.
