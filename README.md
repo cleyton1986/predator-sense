@@ -159,7 +159,7 @@ Legend: ✅ tested & working · 🟡 implemented, not tested (needs a tester) ·
 | PH517-51 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-52 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-61 | ✅ | 🟡 | ✅ | ✅ | 🟡 | - | ❌ |
-| PHN16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
+| PHN16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 🧪 |
 | PHN16S-71 | ✅ | ✅ | ✅ | ✅ | ✅ | - | ❌ |
 | PHN16-72 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 |
 | **PHN16-73** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -173,6 +173,8 @@ Legend: ✅ tested & working · 🟡 implemented, not tested (needs a tester) ·
 | PT917-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 
 > If your model is not listed, it may still work — the kernel module detects compatible WMI interfaces automatically. If it worked (or didn't) for you, please open an issue mentioning your model so we can update this table.
+
+> **Not yet confirmed (v0.3.12):** the PHN16-71 fan profiles and PWM (the kernel quirk now sets `predator_v4`/`pwm`, inferred from the PH16-71), the rear light bar and its extra effects on PH16-72/PH18-72, the Sunrex per-key frame on the PT14-51, and the GPU mux switch were written from the official Windows app and have not been confirmed on real hardware. If you own one of these, a report in the issue tracker is what turns them into ✅.
 
 ### Fan control — three levels
 

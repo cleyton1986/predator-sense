@@ -159,7 +159,7 @@ Legenda: ✅ testado e funcionando · 🟡 implementado, não testado (precisa d
 | PH517-51 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-52 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-61 | ✅ | 🟡 | ✅ | ✅ | 🟡 | - | ❌ |
-| PHN16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
+| PHN16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 🧪 |
 | PHN16S-71 | ✅ | ✅ | ✅ | ✅ | ✅ | - | ❌ |
 | PHN16-72 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 |
 | **PHN16-73** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -173,6 +173,8 @@ Legenda: ✅ testado e funcionando · 🟡 implementado, não testado (precisa d
 | PT917-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 
 > Se o seu modelo não está listado, ele ainda pode funcionar — o módulo do kernel detecta interfaces WMI compatíveis automaticamente. Se funcionou (ou não) para você, por favor abra uma issue mencionando seu modelo para que possamos atualizar esta tabela.
+
+> **Ainda não confirmado (v0.3.12):** os perfis de ventoinha e o PWM do PHN16-71 (o quirk do kernel agora define `predator_v4`/`pwm`, inferido do PH16-71), a barra de luz traseira e seus efeitos extras no PH16-72/PH18-72, o frame per-key da Sunrex no PT14-51 e o interruptor MUX da GPU foram escritos a partir do app oficial do Windows e não foram confirmados em hardware real. Se você tem um desses, um relato no issue tracker é o que os transforma em ✅.
 
 ### Controle de ventoinha — três níveis
 

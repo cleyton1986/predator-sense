@@ -159,7 +159,7 @@ Açıklama: ✅ test edildi ve çalışıyor · 🟡 uygulandı, test edilmedi (
 | PH517-51 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-52 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-61 | ✅ | 🟡 | ✅ | ✅ | 🟡 | - | ❌ |
-| PHN16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
+| PHN16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 🧪 |
 | PHN16S-71 | ✅ | ✅ | ✅ | ✅ | ✅ | - | ❌ |
 | PHN16-72 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 |
 | **PHN16-73** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -173,6 +173,8 @@ Açıklama: ✅ test edildi ve çalışıyor · 🟡 uygulandı, test edilmedi (
 | PT917-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 
 > Modeliniz listede yoksa yine de çalışabilir — çekirdek modülü uyumlu WMI arayüzlerini otomatik olarak algılar. Sizde çalıştıysa (ya da çalışmadıysa), lütfen modelinizi belirterek bir issue açın ki bu tabloyu güncelleyebilelim.
+
+> **Henüz doğrulanmadı (v0.3.12):** PHN16-71 fan profilleri ve PWM (çekirdek quirk'i artık `predator_v4`/`pwm` ayarlıyor, PH16-71'den çıkarım), PH16-72/PH18-72 üzerindeki arka ışık çubuğu ve ek efektleri, PT14-51 üzerindeki Sunrex tuş başına çerçeve ve GPU MUX anahtarı resmi Windows uygulamasına bakılarak yazıldı ve gerçek donanımda doğrulanmadı. Bunlardan birine sahipsen, issue takipçisine yazacağın bir rapor onları ✅ yapar.
 
 ### Fan kontrolü — üç seviye
 

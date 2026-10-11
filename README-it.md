@@ -159,7 +159,7 @@ Legenda: ✅ testato e funzionante · 🟡 implementato, non testato (serve un t
 | PH517-51 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-52 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-61 | ✅ | 🟡 | ✅ | ✅ | 🟡 | - | ❌ |
-| PHN16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
+| PHN16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 🧪 |
 | PHN16S-71 | ✅ | ✅ | ✅ | ✅ | ✅ | - | ❌ |
 | PHN16-72 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 |
 | **PHN16-73** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -173,6 +173,8 @@ Legenda: ✅ testato e funzionante · 🟡 implementato, non testato (serve un t
 | PT917-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 
 > Se il tuo modello non è elencato, potrebbe comunque funzionare — il modulo kernel rileva automaticamente le interfacce WMI compatibili. Se ha funzionato (o non ha funzionato) per te, apri una issue menzionando il tuo modello così possiamo aggiornare questa tabella.
+
+> **Non ancora confermato (v0.3.12):** i profili ventola e il PWM del PHN16-71 (il quirk del kernel ora imposta `predator_v4`/`pwm`, dedotto dal PH16-71), la barra luminosa posteriore e i suoi effetti extra su PH16-72/PH18-72, il frame per-key Sunrex sul PT14-51 e l'interruttore MUX della GPU sono stati scritti a partire dall'app ufficiale Windows e non sono stati confermati su hardware reale. Se possiedi uno di questi, una segnalazione nell'issue tracker è ciò che li trasforma in ✅.
 
 ### Controllo ventole — tre livelli
 

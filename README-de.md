@@ -159,7 +159,7 @@ Legende: ✅ getestet und funktionsfähig · 🟡 implementiert, nicht getestet 
 | PH517-51 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-52 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 | PH517-61 | ✅ | 🟡 | ✅ | ✅ | 🟡 | - | ❌ |
-| PHN16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
+| PHN16-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | 🟡 | 🧪 |
 | PHN16S-71 | ✅ | ✅ | ✅ | ✅ | ✅ | - | ❌ |
 | PHN16-72 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 🧪 |
 | **PHN16-73** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -173,6 +173,8 @@ Legende: ✅ getestet und funktionsfähig · 🟡 implementiert, nicht getestet 
 | PT917-71 | ✅ | 🟡 | ✅ | 🟡 | 🟡 | - | ❌ |
 
 > Falls Ihr Modell nicht aufgeführt ist, könnte es trotzdem funktionieren: Das Kernelmodul erkennt kompatible WMI-Schnittstellen automatisch. Wenn es bei Ihnen funktioniert hat (oder nicht), eröffnen Sie bitte ein Issue mit Angabe Ihres Modells, damit diese Tabelle aktualisiert werden kann.
+
+> **Noch nicht bestätigt (v0.3.12):** die Lüfterprofile und das PWM des PHN16-71 (der Kernel-Quirk setzt jetzt `predator_v4`/`pwm`, vom PH16-71 abgeleitet), die hintere Lichtleiste und ihre zusätzlichen Effekte beim PH16-72/PH18-72, der Sunrex-Per-Key-Frame beim PT14-51 und der GPU-MUX-Schalter wurden anhand der offiziellen Windows-App geschrieben und nicht auf echter Hardware bestätigt. Wenn du eines dieser Geräte hast, macht eine Meldung im Issue-Tracker daraus ein ✅.
 
 ### Lüftersteuerung: drei Stufen
 
