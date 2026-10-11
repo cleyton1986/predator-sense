@@ -951,7 +951,7 @@ fn build_light_bar_section() -> gtk::Box {
     sync_visibility(initial.mode);
 
     let mut mode_buttons = Vec::new();
-    for mode in LightBarMode::ALL {
+    for mode in LightBarMode::available() {
         let btn = gtk::ToggleButton::with_label(crate::i18n::t(mode.label_key()));
         btn.add_css_class("mode-button");
         if mode == initial.mode {

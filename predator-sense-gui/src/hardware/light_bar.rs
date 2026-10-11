@@ -49,6 +49,14 @@ pub enum LightBarMode {
     Scanner,
     Strobe,
     Static,
+    // Rear-device effects from the official app's mode table (wire IDs
+    // 0x08..=0x0D). Offered only where `has_extended_effects()` is true.
+    Snake,
+    SnakeRainbow,
+    Lightning,
+    Stack,
+    MotionPoint,
+    ZoomIn,
 }
 
 impl LightBarMode {
@@ -64,6 +72,30 @@ impl LightBarMode {
         Self::Off,
     ];
 
+    /// Effects added on top of [`LightBarMode::ALL`] on chassis whose light
+    /// bar is the rear "Infinity Mirror" device in the official app.
+    pub const EXTENDED: [LightBarMode; 6] = [
+        Self::Snake,
+        Self::SnakeRainbow,
+        Self::Lightning,
+        Self::Stack,
+        Self::MotionPoint,
+        Self::ZoomIn,
+    ];
+
+    /// The modes this chassis offers, in display order (Off last).
+    pub fn available() -> Vec<LightBarMode> {
+        let mut modes: Vec<LightBarMode> = Self::ALL
+            .into_iter()
+            .filter(|mode| *mode != Self::Off)
+            .collect();
+        if has_extended_effects() {
+            modes.extend(Self::EXTENDED);
+        }
+        modes.push(Self::Off);
+        modes
+    }
+
     pub fn wire_id(self) -> u8 {
         match self {
             Self::Off => 0x00,
@@ -75,6 +107,12 @@ impl LightBarMode {
             Self::Scanner => 0x06,
             Self::Strobe => 0x07,
             Self::Static => 0xFF,
+            Self::Snake => 0x08,
+            Self::SnakeRainbow => 0x09,
+            Self::Lightning => 0x0A,
+            Self::Stack => 0x0B,
+            Self::MotionPoint => 0x0C,
+            Self::ZoomIn => 0x0D,
         }
     }
 
@@ -90,11 +128,20 @@ impl LightBarMode {
             Self::Scanner => "light_bar_scanner",
             Self::Strobe => "light_bar_strobe",
             Self::Static => "static_mode",
+            Self::Snake => "light_bar_snake",
+            Self::SnakeRainbow => "light_bar_snake_rainbow",
+            Self::Lightning => "light_bar_lightning",
+            Self::Stack => "light_bar_stack",
+            Self::MotionPoint => "light_bar_motion_point",
+            Self::ZoomIn => "light_bar_zoom_in",
         }
     }
 
     pub fn uses_color(self) -> bool {
-        !matches!(self, Self::Off | Self::Neon | Self::Rainbow)
+        !matches!(
+            self,
+            Self::Off | Self::Neon | Self::Rainbow | Self::SnakeRainbow
+        )
     }
 
     pub fn uses_speed(self) -> bool {
@@ -134,7 +181,17 @@ impl Default for LightBarState {
 /// drive only a keyboard through it. Without this gate a Light bar section
 /// and capability chip appear on chassis that have no bar, where target
 /// `0x02` means nothing.
-const LIGHT_BAR_MODELS: &[&str] = &["PH16-71"];
+const LIGHT_BAR_MODELS: &[&str] = &["PH16-71", "PH16-72", "PH18-72"];
+
+/// Chassis where the official app calls the bar "Infinity Mirror" (7 LEDs,
+/// extra effects). Same `AcerECLightbarController` frame and target byte as
+/// the PH16-71 bar, per the decompile; NOT yet confirmed on real hardware.
+const EXTENDED_EFFECT_MODELS: &[&str] = &["PH16-72", "PH18-72"];
+
+/// Whether this chassis also gets the extra rear-device effects.
+pub fn has_extended_effects() -> bool {
+    crate::hardware::sysinfo::product_matches(EXTENDED_EFFECT_MODELS)
+}
 
 /// The WMI lighting node *and* a chassis known to have the bar.
 ///
@@ -327,6 +384,18 @@ mod tests {
             ..LightBarState::default()
         });
         assert_eq!(f[2], 0, "brightness byte must be zero to blank");
+    }
+
+    #[test]
+    fn extended_effects_use_the_rear_device_wire_ids() {
+        let ids: Vec<u8> = LightBarMode::EXTENDED.iter().map(|m| m.wire_id()).collect();
+        assert_eq!(ids, vec![0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D]);
+        // None of them collides with a mode the PH16-71 bar already has.
+        for mode in LightBarMode::EXTENDED {
+            assert!(!LightBarMode::ALL.iter().any(|m| m.wire_id() == mode.wire_id()));
+        }
+        assert!(!LightBarMode::SnakeRainbow.uses_color());
+        assert!(LightBarMode::Snake.uses_color());
     }
 
     #[test]
