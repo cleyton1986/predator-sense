@@ -201,8 +201,8 @@ enum SavedDirection {
 impl SavedDirection {
     fn wire_value(self) -> u8 {
         match self {
-            Self::LeftToRight => hardware::PHN16S71_DIRECTION_LEFT_TO_RIGHT,
-            Self::RightToLeft => hardware::PHN16S71_DIRECTION_RIGHT_TO_LEFT,
+            Self::LeftToRight => hardware::ENEK5130_DIRECTION_LEFT_TO_RIGHT,
+            Self::RightToLeft => hardware::ENEK5130_DIRECTION_RIGHT_TO_LEFT,
             Self::Unsupported => 0,
         }
     }
@@ -1543,14 +1543,15 @@ fn keyboard_dynamic_packet(
     capabilities: TargetCapabilities,
     protocol: KeyboardProtocol,
 ) -> Option<[u8; hardware::HID_FEATURE_REPORT_LEN]> {
-    let mode = match (protocol, saved.mode) {
-        (_, SavedRgbMode::Breath) => hardware::HID_MODE_BREATH,
-        (_, SavedRgbMode::Neon) => hardware::HID_MODE_NEON,
-        (KeyboardProtocol::Phn16s71, SavedRgbMode::Wave) => hardware::PHN16S71_MODE_WAVE,
-        (KeyboardProtocol::Phn16s71, SavedRgbMode::Shifting) => {
-            hardware::PHN16S71_MODE_METEOR
-        }
-        (KeyboardProtocol::Phn16s71, SavedRgbMode::Zoom) => hardware::PHN16S71_MODE_ZOOM,
+    // Wave/Shifting/Zoom wire codes are the ENE K5130 controller's own, not a
+    // model quirk (issue #31): the A3 bitmap check below decides whether this
+    // unit has them. Only the Breath/Neon flag byte stays per-model.
+    let mode = match saved.mode {
+        SavedRgbMode::Breath => hardware::HID_MODE_BREATH,
+        SavedRgbMode::Neon => hardware::HID_MODE_NEON,
+        SavedRgbMode::Wave => hardware::ENEK5130_MODE_WAVE,
+        SavedRgbMode::Shifting => hardware::ENEK5130_MODE_METEOR,
+        SavedRgbMode::Zoom => hardware::ENEK5130_MODE_ZOOM,
         _ => return None,
     };
     if !capabilities.supports(mode) {
@@ -1562,14 +1563,17 @@ fn keyboard_dynamic_packet(
             mode,
             brightness: saved.brightness.min(hardware::RGB_MAX_BRIGHTNESS as u8),
             speed: saved.speed.min(hardware::RGB_MAX_SPEED),
-            flag: match protocol {
-                KeyboardProtocol::Generic => hardware::HID_GENERIC_KEYBOARD_EFFECT_FLAG,
-                KeyboardProtocol::Phn16s71 if saved.mode == SavedRgbMode::Wave => {
-                    saved.direction.wire_value()
+            flag: match saved.mode {
+                SavedRgbMode::Wave => saved.direction.wire_value(),
+                SavedRgbMode::Shifting | SavedRgbMode::Zoom => {
+                    hardware::ENEK5130_KEYBOARD_NEUTRAL_DIRECTION
                 }
-                KeyboardProtocol::Phn16s71 => {
-                    hardware::PHN16S71_KEYBOARD_NEUTRAL_DIRECTION
-                }
+                _ => match protocol {
+                    KeyboardProtocol::Generic => hardware::HID_GENERIC_KEYBOARD_EFFECT_FLAG,
+                    KeyboardProtocol::Phn16s71 => {
+                        hardware::ENEK5130_KEYBOARD_NEUTRAL_DIRECTION
+                    }
+                },
             },
             red: saved.red,
             green: saved.green,
@@ -2135,9 +2139,23 @@ mod tests {
             direction: SavedDirection::LeftToRight,
             ..breath
         };
+        // Not advertised by this unit's A3 bitmap: nothing to restore.
         assert!(
             keyboard_dynamic_packet(&wave, capabilities, KeyboardProtocol::Generic).is_none()
         );
+        // Advertised on a non-PHN16S-71 unit (AN16S-61, issue #31): restored
+        // with the same wire code and direction, not gated by DMI.
+        let generic_packet = keyboard_dynamic_packet(
+            &wave,
+            TargetCapabilities {
+                zone_mask: 0x0f,
+                mode_mask: 0x7fb,
+            },
+            KeyboardProtocol::Generic,
+        )
+        .unwrap();
+        assert_eq!(generic_packet[2], hardware::ENEK5130_MODE_WAVE);
+        assert_eq!(generic_packet[5], hardware::ENEK5130_DIRECTION_LEFT_TO_RIGHT);
         let packet = keyboard_dynamic_packet(
             &wave,
             TargetCapabilities {
@@ -2147,8 +2165,8 @@ mod tests {
             KeyboardProtocol::Phn16s71,
         )
         .unwrap();
-        assert_eq!(packet[2], hardware::PHN16S71_MODE_WAVE);
-        assert_eq!(packet[5], hardware::PHN16S71_DIRECTION_LEFT_TO_RIGHT);
+        assert_eq!(packet[2], hardware::ENEK5130_MODE_WAVE);
+        assert_eq!(packet[5], hardware::ENEK5130_DIRECTION_LEFT_TO_RIGHT);
         let packet = keyboard_dynamic_packet(
             &breath,
             TargetCapabilities {
@@ -2158,7 +2176,7 @@ mod tests {
             KeyboardProtocol::Phn16s71,
         )
         .unwrap();
-        assert_eq!(packet[5], hardware::PHN16S71_KEYBOARD_NEUTRAL_DIRECTION);
+        assert_eq!(packet[5], hardware::ENEK5130_KEYBOARD_NEUTRAL_DIRECTION);
     }
 
     #[test]

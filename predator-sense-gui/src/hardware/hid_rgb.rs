@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Recent Predator generations expose an ENE/Darfon lighting controller as
 /// I2C-HID. The same controller owns multiple independent targets, so target
@@ -24,9 +25,9 @@ const TARGET_COVER_LOGO: u8 = 0x83;
 const MODE_STATIC: u8 = 0x02;
 const MODE_BREATH: u8 = 0x04;
 const MODE_NEON: u8 = 0x05;
-const PHN16S71_MODE_WAVE: u8 = 0x07;
-const PHN16S71_MODE_ZOOM: u8 = 0x09;
-const PHN16S71_MODE_METEOR: u8 = 0x0a;
+const ENEK5130_MODE_WAVE: u8 = 0x07;
+const ENEK5130_MODE_ZOOM: u8 = 0x09;
+const ENEK5130_MODE_METEOR: u8 = 0x0a;
 
 const REPORT_LIGHTING_LEN: usize = 11;
 const REPORT_TARGET_LIST_MAX_LEN: usize = 11;
@@ -38,9 +39,9 @@ const REPORT_TARGET_CAPS_MIN_LEN: usize = 6;
 const COVER_LOGO_STATIC_FLAG: u8 = 0x01;
 const COVER_LOGO_EFFECT_FLAG: u8 = 0x02;
 const GENERIC_KEYBOARD_EFFECT_FLAG: u8 = 0x02;
-const PHN16S71_KEYBOARD_NEUTRAL_DIRECTION: u8 = 0x00;
-const PHN16S71_DIRECTION_LEFT_TO_RIGHT: u8 = 0x01;
-const PHN16S71_DIRECTION_RIGHT_TO_LEFT: u8 = 0x02;
+const ENEK5130_KEYBOARD_NEUTRAL_DIRECTION: u8 = 0x00;
+const ENEK5130_DIRECTION_LEFT_TO_RIGHT: u8 = 0x01;
+const ENEK5130_DIRECTION_RIGHT_TO_LEFT: u8 = 0x02;
 
 const DMI_PRODUCT_NAME: &str = "/sys/class/dmi/id/product_name";
 const VERIFIED_PHN16S71_MODEL: &str = "PHN16S-71";
@@ -79,7 +80,7 @@ fn generic_wire_mode(mode: RgbMode) -> Option<u8> {
         RgbMode::Breath => Some(MODE_BREATH),
         RgbMode::Neon => Some(MODE_NEON),
         // `Shifting` already IS this chip's native "meteor-like sweep"
-        // (`PHN16S71_MODE_METEOR` below) under a different label chosen
+        // (`ENEK5130_MODE_METEOR` below) under a different label chosen
         // before that was known - a distinct `RgbMode::Meteor` variant
         // (added for the separate, older WMI/EC keyboard path in
         // `hardware::rgb`) has no confirmed wire code of its own here, nor
@@ -90,43 +91,75 @@ fn generic_wire_mode(mode: RgbMode) -> Option<u8> {
     }
 }
 
-fn keyboard_wire_mode(protocol: KeyboardProtocol, mode: RgbMode) -> Option<u8> {
-    match (protocol, mode) {
-        (_, RgbMode::Static) => None,
-        (_, RgbMode::Breath) => Some(MODE_BREATH),
-        (_, RgbMode::Neon) => Some(MODE_NEON),
-        (KeyboardProtocol::Phn16s71, RgbMode::Wave) => Some(PHN16S71_MODE_WAVE),
-        (KeyboardProtocol::Phn16s71, RgbMode::Shifting) => Some(PHN16S71_MODE_METEOR),
-        (KeyboardProtocol::Phn16s71, RgbMode::Zoom) => Some(PHN16S71_MODE_ZOOM),
-        // See `generic_wire_mode`'s comment: no confirmed native code for
-        // either on this chip, on any product.
-        (_, RgbMode::Meteor | RgbMode::Twinkling) => None,
-        (KeyboardProtocol::Generic, _) => None,
+/// Wire code of the native effects the ENE K5130 keyboard controller shares
+/// across models. PHN16S-71 was verified against kbrgb and AN16S-61 was probed
+/// by hand (issue #31): the codes mean the same thing on both, so they are
+/// offered whenever the unit's own A3 bitmap advertises them, not by DMI.
+fn native_effect_wire_mode(mode: RgbMode) -> Option<u8> {
+    match mode {
+        RgbMode::Wave => Some(ENEK5130_MODE_WAVE),
+        RgbMode::Shifting => Some(ENEK5130_MODE_METEOR),
+        RgbMode::Zoom => Some(ENEK5130_MODE_ZOOM),
+        _ => None,
     }
 }
 
-/// Whether the current model has a verified native mapping for this effect.
+fn keyboard_wire_mode(mode: RgbMode) -> Option<u8> {
+    match mode {
+        RgbMode::Static => None,
+        RgbMode::Breath => Some(MODE_BREATH),
+        RgbMode::Neon => Some(MODE_NEON),
+        // See `generic_wire_mode`'s comment: no confirmed native code for
+        // either on this chip, on any product.
+        RgbMode::Meteor | RgbMode::Twinkling => None,
+        RgbMode::Wave | RgbMode::Shifting | RgbMode::Zoom => native_effect_wire_mode(mode),
+    }
+}
+
+/// A3 capabilities of the keyboard target, cached after the first successful
+/// read: they cannot change while the app runs, and the UI asks per click.
+fn keyboard_capabilities() -> Option<TargetCapabilities> {
+    static CACHE: Mutex<Option<TargetCapabilities>> = Mutex::new(None);
+    if let Some(caps) = *CACHE.lock().ok()? {
+        return Some(caps);
+    }
+    let (file, _) = open_controller().ok()?;
+    let caps = query_target_capabilities(&file, TARGET_KEYBOARD).ok()??;
+    *CACHE.lock().ok()? = Some(caps);
+    Some(caps)
+}
+
+/// Whether this keyboard has a native single-write mapping for this effect.
+/// Breath/Neon always do; Wave/Shifting/Zoom need the PHN16S-71 verified
+/// model or an A3 bitmap that advertises the wire code.
 pub fn keyboard_supports_effect(mode: RgbMode) -> bool {
-    keyboard_wire_mode(keyboard_protocol(), mode).is_some()
+    let Some(wire_mode) = keyboard_wire_mode(mode) else {
+        return false;
+    };
+    if matches!(mode, RgbMode::Breath | RgbMode::Neon) {
+        return true;
+    }
+    keyboard_protocol() == KeyboardProtocol::Phn16s71
+        || keyboard_capabilities().is_some_and(|caps| caps.supports_wire_mode(wire_mode))
 }
 
-/// Direction is verified only for Wave on the PHN16S-71 mapping.
+/// Direction is verified only for Wave (PHN16S-71 kbrgb mapping).
 pub fn keyboard_effect_supports_direction(mode: RgbMode) -> bool {
-    keyboard_protocol() == KeyboardProtocol::Phn16s71 && mode == RgbMode::Wave
+    mode == RgbMode::Wave && keyboard_supports_effect(mode)
 }
 
-fn keyboard_effect_byte(
-    protocol: KeyboardProtocol,
-    mode: RgbMode,
-    direction: Direction,
-) -> u8 {
-    match protocol {
-        KeyboardProtocol::Generic => GENERIC_KEYBOARD_EFFECT_FLAG,
-        KeyboardProtocol::Phn16s71 if mode == RgbMode::Wave => match direction {
-            Direction::LeftToRight => PHN16S71_DIRECTION_LEFT_TO_RIGHT,
-            Direction::RightToLeft => PHN16S71_DIRECTION_RIGHT_TO_LEFT,
+fn keyboard_effect_byte(protocol: KeyboardProtocol, mode: RgbMode, direction: Direction) -> u8 {
+    match mode {
+        RgbMode::Wave => match direction {
+            Direction::LeftToRight => ENEK5130_DIRECTION_LEFT_TO_RIGHT,
+            Direction::RightToLeft => ENEK5130_DIRECTION_RIGHT_TO_LEFT,
         },
-        KeyboardProtocol::Phn16s71 => PHN16S71_KEYBOARD_NEUTRAL_DIRECTION,
+        RgbMode::Shifting | RgbMode::Zoom => ENEK5130_KEYBOARD_NEUTRAL_DIRECTION,
+        // Breath/Neon keep the per-model byte they were confirmed with.
+        _ => match protocol {
+            KeyboardProtocol::Generic => GENERIC_KEYBOARD_EFFECT_FLAG,
+            KeyboardProtocol::Phn16s71 => ENEK5130_KEYBOARD_NEUTRAL_DIRECTION,
+        },
     }
 }
 
@@ -455,8 +488,8 @@ pub fn set_zone_color(
     write_lighting_packet(&file, &path, packet)
 }
 
-/// Apply a native hardware-driven keyboard effect whose wire mapping is known
-/// for this model. The A3 bitmap is checked before the A4 report is sent.
+/// Apply a native hardware-driven keyboard effect with a known wire mapping.
+/// The A3 bitmap is checked before the A4 report is sent.
 pub fn set_effect(
     mode: RgbMode,
     brightness_pct: u8,
@@ -467,8 +500,8 @@ pub fn set_effect(
     blue: u8,
 ) -> Result<(), String> {
     let protocol = keyboard_protocol();
-    let wire_mode = keyboard_wire_mode(protocol, mode)
-        .ok_or_else(|| t("hid_rgb_err_unsupported_mode").to_string())?;
+    let wire_mode =
+        keyboard_wire_mode(mode).ok_or_else(|| t("hid_rgb_err_unsupported_mode").to_string())?;
     let (file, path) = open_controller()?;
     let caps = query_target_capabilities(&file, TARGET_KEYBOARD)?
         .ok_or_else(|| t("hid_rgb_err_unsupported_mode").to_string())?;
@@ -559,37 +592,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn phn16s71_effect_mapping_is_model_gated() {
+    fn native_effect_wire_codes_are_model_independent() {
         let verified = keyboard_protocol_for_product("Predator PHN16S-71");
         let other = keyboard_protocol_for_product("Predator PHN16-73");
         assert_eq!(verified, KeyboardProtocol::Phn16s71);
         assert_eq!(other, KeyboardProtocol::Generic);
-        assert_eq!(keyboard_wire_mode(verified, RgbMode::Wave), Some(0x07));
-        assert_eq!(keyboard_wire_mode(verified, RgbMode::Shifting), Some(0x0a));
-        assert_eq!(keyboard_wire_mode(verified, RgbMode::Zoom), Some(0x09));
-        assert_eq!(keyboard_wire_mode(other, RgbMode::Wave), None);
+        assert_eq!(keyboard_wire_mode(RgbMode::Wave), Some(0x07));
+        assert_eq!(keyboard_wire_mode(RgbMode::Shifting), Some(0x0a));
+        assert_eq!(keyboard_wire_mode(RgbMode::Zoom), Some(0x09));
         // Meteor/Twinkling (`hardware::rgb`'s WMI/EC-path additions) have no
         // confirmed native code on this HID chip, on any product.
-        assert_eq!(keyboard_wire_mode(verified, RgbMode::Meteor), None);
-        assert_eq!(keyboard_wire_mode(verified, RgbMode::Twinkling), None);
-        assert_eq!(keyboard_wire_mode(other, RgbMode::Meteor), None);
-        assert_eq!(keyboard_wire_mode(other, RgbMode::Twinkling), None);
+        assert_eq!(keyboard_wire_mode(RgbMode::Meteor), None);
+        assert_eq!(keyboard_wire_mode(RgbMode::Twinkling), None);
+        // Breath/Neon keep the per-model flag byte; native effects do not.
         assert_eq!(
             keyboard_effect_byte(verified, RgbMode::Breath, Direction::RightToLeft),
             0
         );
         assert_eq!(
-            keyboard_effect_byte(verified, RgbMode::Wave, Direction::RightToLeft),
-            2
-        );
-        assert_eq!(
             keyboard_effect_byte(other, RgbMode::Breath, Direction::RightToLeft),
             2
         );
+        for protocol in [verified, other] {
+            assert_eq!(
+                keyboard_effect_byte(protocol, RgbMode::Wave, Direction::LeftToRight),
+                1
+            );
+            assert_eq!(
+                keyboard_effect_byte(protocol, RgbMode::Wave, Direction::RightToLeft),
+                2
+            );
+            assert_eq!(
+                keyboard_effect_byte(protocol, RgbMode::Zoom, Direction::RightToLeft),
+                0
+            );
+            assert_eq!(
+                keyboard_effect_byte(protocol, RgbMode::Shifting, Direction::RightToLeft),
+                0
+            );
+        }
         assert_eq!(
             keyboard_protocol_for_product("Predator PHN16S-71X"),
             KeyboardProtocol::Generic
         );
+    }
+
+    #[test]
+    fn native_effects_are_gated_by_the_a3_bitmap() {
+        // Real AN16S-61 keyboard dump (issue #31): mode_mask 0x7fb.
+        let report = [0xa3, 0x21, 0x01, 0x09, 0x04, 0xfb, 0x07, 0x00, 0x00];
+        let caps = parse_target_capabilities(0x21, &report).unwrap();
+        for mode in [RgbMode::Wave, RgbMode::Shifting, RgbMode::Zoom] {
+            let wire = keyboard_wire_mode(mode).unwrap();
+            assert!(caps.supports_wire_mode(wire), "{mode:?}");
+        }
+        // Breath/Neon/Static only (0x1a): no native effect is offered.
+        let report = [0xa3, 0x21, 0x01, 0x09, 0x04, 0x1a, 0x00, 0x00, 0x00];
+        let caps = parse_target_capabilities(0x21, &report).unwrap();
+        for mode in [RgbMode::Wave, RgbMode::Shifting, RgbMode::Zoom] {
+            let wire = keyboard_wire_mode(mode).unwrap();
+            assert!(!caps.supports_wire_mode(wire), "{mode:?}");
+        }
     }
 
     #[test]
