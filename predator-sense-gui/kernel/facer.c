@@ -625,7 +625,29 @@ static struct quirk_entry quirk_acer_predator_ph16_71 = {
 };
 
 
+/*
+ * PHN16-71 (issue #82): mainline acer-wmi marks it predator_v4, and the
+ * official Windows app never writes EC fan bytes on this generation, it only
+ * calls the WMI fan-behavior/fan-speed methods (same ones the PH16-71 sibling
+ * above needed). Without .predator_v4/.pwm the reporter saw fan writes flash
+ * the keyboard and move no air, and the mode key do nothing, because
+ * ACER_CAP_PWM and ACER_CAP_PLATFORM_PROFILE were never set. Same-family
+ * inference, not yet confirmed on a PHN16-71: the calls are firmware-gated,
+ * a rejected one is a no-op.
+ */
 static struct quirk_entry quirk_acer_predator_phn16_71 = {
+	.turbo = 1,
+	.cpu_fans = 1,
+	.gpu_fans = 1,
+	.predator_v4 = 1,
+	.pwm = 1,
+};
+
+/*
+ * PHN16S-71 keeps the EC-preset quirk it always had. The Windows data puts it
+ * in a newer generation than PHN16-71, so it must not follow that change.
+ */
+static struct quirk_entry quirk_acer_predator_phn16s_71 = {
 	.turbo = 1,
 	.cpu_fans = 1,
 	.gpu_fans = 1,
@@ -882,7 +904,7 @@ static const struct dmi_system_id acer_quirks[] __initconst = {
 			DMI_MATCH(DMI_SYS_VENDOR,"Acer"),
 			DMI_MATCH(DMI_PRODUCT_NAME,"Predator PHN16S-71"),
 		},
-		.driver_data = &quirk_acer_predator_phn16_71,
+		.driver_data = &quirk_acer_predator_phn16s_71,
 	},
 	{
 		.callback = dmi_matched,
@@ -1238,15 +1260,6 @@ static const struct dmi_system_id acer_quirks[] __initconst = {
 			DMI_MATCH(DMI_PRODUCT_NAME, "Nitro AN515-58"),
 		},
 		.driver_data = &quirk_acer_nitro_an515_58,
-	},
-	{
-		.callback = dmi_matched,
-		.ident = "Acer Predator PHN16-71",
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "Predator PHN16-71"),
-		},
-		.driver_data = &quirk_acer_predator_v4,
 	},
 	{
 		.callback = dmi_matched,
@@ -3205,8 +3218,9 @@ static DEVICE_ATTR_RO(turbo_state);
 #define ACER_BACKLIGHT_TIMEOUT_GET_ARG		0x88401ULL
 #define ACER_BACKLIGHT_TIMEOUT_ON		0x1E0000088402ULL
 #define ACER_BACKLIGHT_TIMEOUT_OFF		0x88402ULL
-#define ACER_BACKLIGHT_TIMEOUT_ON_RESULT	0x1E0000080000ULL
-#define ACER_BACKLIGHT_TIMEOUT_OFF_RESULT	0x80000ULL
+#define ACER_BACKLIGHT_TIMEOUT_SHIFT		40
+#define ACER_BACKLIGHT_TIMEOUT_SECONDS		0x1E
+#define ACER_BACKLIGHT_BRIGHTNESS_SHIFT		32
 
 static acpi_status WMI_function_execute_u64(u32 method_id, u64 in, u64 *out)
 {
@@ -3247,11 +3261,23 @@ static ssize_t backlight_timeout_show(struct device *dev, struct device_attribut
 	if (ACPI_FAILURE(status))
 		return -ENODEV;
 
-	if (result == ACER_BACKLIGHT_TIMEOUT_ON_RESULT)
+	/*
+	 * Decoded the way the Windows app does it: byte 0 is the status, byte 4
+	 * is the brightness the firmware reports, byte 5 is the timeout in
+	 * seconds (30 = auto-off on, 0 = off). Comparing the whole u64 against
+	 * a fixed pattern returned -ENODATA whenever the brightness byte was
+	 * not zero.
+	 */
+	if (result & 0xFF)
+		return -ENODATA;
+	switch ((result >> ACER_BACKLIGHT_TIMEOUT_SHIFT) & 0xFF) {
+	case ACER_BACKLIGHT_TIMEOUT_SECONDS:
 		return sysfs_emit(buf, "1\n");
-	if (result == ACER_BACKLIGHT_TIMEOUT_OFF_RESULT)
+	case 0:
 		return sysfs_emit(buf, "0\n");
-	return -ENODATA;
+	default:
+		return -ENODATA;
+	}
 }
 
 static ssize_t backlight_timeout_store(struct device *dev, struct device_attribute *attr,
@@ -3259,15 +3285,26 @@ static ssize_t backlight_timeout_store(struct device *dev, struct device_attribu
 {
 	acpi_status status;
 	u64 result;
+	u64 arg;
 	bool enable;
 
 	if (kstrtobool(buf, &enable))
 		return -EINVAL;
 
-	status = WMI_function_execute_u64(ACER_WMID_SET_FUNCTION,
-					   enable ? ACER_BACKLIGHT_TIMEOUT_ON
-						  : ACER_BACKLIGHT_TIMEOUT_OFF,
-					   &result);
+	arg = enable ? ACER_BACKLIGHT_TIMEOUT_ON : ACER_BACKLIGHT_TIMEOUT_OFF;
+
+	/*
+	 * Carry the brightness the firmware reports instead of always writing
+	 * 0, like the Windows app's read-modify-write. If the read fails the
+	 * original constant is used unchanged.
+	 */
+	status = WMI_function_execute_u64(ACER_WMID_GET_FUNCTION,
+					   ACER_BACKLIGHT_TIMEOUT_GET_ARG, &result);
+	if (ACPI_SUCCESS(status) && !(result & 0xFF))
+		arg |= ((result >> ACER_BACKLIGHT_BRIGHTNESS_SHIFT) & 0xFFULL)
+			<< ACER_BACKLIGHT_BRIGHTNESS_SHIFT;
+
+	status = WMI_function_execute_u64(ACER_WMID_SET_FUNCTION, arg, &result);
 	if (ACPI_FAILURE(status))
 		return -ENODEV;
 
@@ -3394,6 +3431,27 @@ static void acer_toggle_turbo(void)
 		WMID_gaming_set_u64(0x205, ACER_CAP_TURBO_OC);
 		WMID_gaming_set_u64(0x207, ACER_CAP_TURBO_OC);
 	}
+}
+
+/*
+ * Seed turbo_state from the firmware instead of assuming "off". The Windows
+ * app reads the LED state back (GetGamingLED, input 1) and treats
+ * (r >> 8) & 3 == 1 as turbo on, the value being written at bit 16 shifted
+ * down by 8. Without this the state was stale after boot or resume and the
+ * first key press could toggle the wrong way. Read-only and best-effort: if
+ * the call fails, the current value is left alone.
+ */
+static void acer_sync_turbo_state(void)
+{
+	u64 value;
+
+	if (!has_cap(ACER_CAP_TURBO_LED))
+		return;
+	if (ACPI_FAILURE(WMID_gaming_get_u64(&value, ACER_CAP_TURBO_LED)))
+		return;
+	if (value & 0xFF)
+		return;
+	turbo_state = ((value >> 8) & 0x3) == 1;
 }
 
 #if RTLNX_VER_MIN(6, 14, 0)
@@ -4560,6 +4618,7 @@ static int acer_platform_probe(struct platform_device *device)
 	 * not something anything else here depends on. */
 	if (device_create_file(&device->dev, &dev_attr_turbo_state))
 		dev_warn(&device->dev, "failed to create turbo_state sysfs attribute\n");
+	acer_sync_turbo_state();
 
 	/* Best-effort too - see the comment above backlight_timeout_show(). */
 	if (device_create_file(&device->dev, &dev_attr_backlight_timeout))
@@ -4672,6 +4731,8 @@ static int acer_resume(struct device *dev)
 
 	if (acer_wmi_accel_dev)
 		acer_gsensor_init();
+
+	acer_sync_turbo_state();
 
 	return 0;
 }
