@@ -206,6 +206,7 @@ enum acer_wmi_gaming_fan_mode {
 };
 
 enum acer_wmi_gaming_misc_setting {
+	ACER_WMID_MISC_SETTING_GPU_MODE			= 0x0002,
 	ACER_WMID_MISC_SETTING_OC_1			= 0x0005,
 	ACER_WMID_MISC_SETTING_OC_2			= 0x0007,
 	ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES	= 0x000A,
@@ -3406,6 +3407,53 @@ static ssize_t thermal_profile_supported_show(struct device *dev, struct device_
 }
 static DEVICE_ATTR_RO(thermal_profile_supported);
 
+/*
+ * GPU mux switch (hybrid vs discrete-only), the same misc-setting index the
+ * Windows app uses (Set_System_GPUMode / Get_GPUMode_Support, index 2): 1 is
+ * hybrid, 2 is discrete only. The attribute is only created when the
+ * firmware answers the read with one of those two values, so machines
+ * without a mux never get it. The firmware takes the request now but the GPU
+ * routing only changes on the next boot, same as on Windows.
+ *
+ * UNCONFIRMED on real hardware: written from decompiled Windows source.
+ */
+#define ACER_GPU_MODE_HYBRID		1
+#define ACER_GPU_MODE_DISCRETE		2
+
+static ssize_t discrete_gpu_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	u8 value;
+	int err;
+
+	err = WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_GPU_MODE, &value);
+	if (err)
+		return err;
+	if (value != ACER_GPU_MODE_HYBRID && value != ACER_GPU_MODE_DISCRETE)
+		return -ENODATA;
+
+	return sysfs_emit(buf, "%u\n", value);
+}
+
+static ssize_t discrete_gpu_mode_store(struct device *dev, struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	u8 value;
+	int err;
+
+	err = kstrtou8(buf, 0, &value);
+	if (err)
+		return err;
+	if (value != ACER_GPU_MODE_HYBRID && value != ACER_GPU_MODE_DISCRETE)
+		return -EINVAL;
+
+	err = WMID_gaming_set_misc_setting(ACER_WMID_MISC_SETTING_GPU_MODE, value);
+	if (err)
+		return err;
+
+	return count;
+}
+static DEVICE_ATTR_RW(discrete_gpu_mode);
+
 static void acer_toggle_turbo(void)
 {
 	if (turbo_state) {
@@ -4625,6 +4673,21 @@ static int acer_platform_probe(struct platform_device *device)
 		dev_warn(&device->dev, "failed to create backlight_timeout sysfs attribute\n");
 
 	/*
+	 * GPU mux: created only when the firmware answers the read with a valid
+	 * mode, see discrete_gpu_mode_show().
+	 */
+	{
+		u8 gpu_mode;
+
+		if (!WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_GPU_MODE, &gpu_mode) &&
+		    (gpu_mode == ACER_GPU_MODE_HYBRID || gpu_mode == ACER_GPU_MODE_DISCRETE)) {
+			if (device_create_file(&device->dev, &dev_attr_discrete_gpu_mode))
+				dev_warn(&device->dev,
+					 "failed to create discrete_gpu_mode sysfs attribute\n");
+		}
+	}
+
+	/*
 	 * Gated on the machine actually answering the WMI call, unlike the two
 	 * above: creating these unconditionally puts two attributes on every
 	 * Acer laptop the driver binds to - Aspire and Swift included - that can
@@ -4677,6 +4740,7 @@ static void acer_platform_remove(struct platform_device *device)
 {
 	device_remove_file(&device->dev, &dev_attr_turbo_state);
 	device_remove_file(&device->dev, &dev_attr_backlight_timeout);
+	device_remove_file(&device->dev, &dev_attr_discrete_gpu_mode);
 	device_remove_file(&device->dev, &dev_attr_thermal_profile);
 	device_remove_file(&device->dev, &dev_attr_thermal_profile_supported);
 	/* No-ops when predator_v4 was false and these were never created. */
