@@ -203,8 +203,44 @@ fn is_known(kind: DeviceKind, vendor: u16, product: u16) -> bool {
     }
 }
 
-fn find_hidraw(kind: DeviceKind) -> Option<PathBuf> {
+/// Usage page of the first top-level item in a HID report descriptor, or
+/// `None` if it cannot be read or parsed. The Windows driver opens only the
+/// vendor collection with usage page `0xFF02` (`RGBDevice.ini`), so this is
+/// how the same node is picked out of the several interfaces one USB
+/// keyboard exposes.
+fn descriptor_usage_page(descriptor: &[u8]) -> Option<u16> {
+    let mut i = 0;
+    while i < descriptor.len() {
+        let prefix = descriptor[i];
+        // Long items (0xFE) are not used by lighting collections; give up.
+        if prefix == 0xFE {
+            return None;
+        }
+        let size = match prefix & 0x03 {
+            3 => 4,
+            n => n as usize,
+        };
+        let item_type = (prefix >> 2) & 0x03;
+        let tag = prefix >> 4;
+        // Global item, tag 0 = Usage Page.
+        if item_type == 1 && tag == 0 {
+            let data = descriptor.get(i + 1..i + 1 + size)?;
+            return Some(match data {
+                [a] => u16::from(*a),
+                [a, b, ..] => u16::from_le_bytes([*a, *b]),
+                [] => return None,
+            });
+        }
+        i += 1 + size;
+    }
+    None
+}
+
+const VENDOR_USAGE_PAGE: u16 = 0xFF02;
+
+fn find_hidraw_with_product(kind: DeviceKind) -> Option<(PathBuf, u16)> {
     let entries = fs::read_dir("/sys/class/hidraw").ok()?;
+    let mut first: Option<(PathBuf, u16)> = None;
     for entry in entries.flatten() {
         let uevent_path = entry.path().join("device/uevent");
         let Ok(content) = fs::read_to_string(&uevent_path) else {
@@ -213,11 +249,30 @@ fn find_hidraw(kind: DeviceKind) -> Option<PathBuf> {
         let Some((vendor, product)) = parse_hid_id(&content) else {
             continue;
         };
-        if is_known(kind, vendor, product) {
-            return Some(PathBuf::from("/dev").join(entry.file_name()));
+        if !is_known(kind, vendor, product) {
+            continue;
+        }
+        let path = PathBuf::from("/dev").join(entry.file_name());
+        // Prefer the vendor collection the official driver opens. Only the
+        // keyboard is checked this way; the logo's interfaces were never
+        // traced. With no such node the first match is kept, as before.
+        if kind == DeviceKind::Keyboard {
+            let usage_page = fs::read(entry.path().join("device/report_descriptor"))
+                .ok()
+                .and_then(|descriptor| descriptor_usage_page(&descriptor));
+            if usage_page == Some(VENDOR_USAGE_PAGE) {
+                return Some((path, product));
+            }
+        }
+        if first.is_none() {
+            first = Some((path, product));
         }
     }
-    None
+    first
+}
+
+fn find_hidraw(kind: DeviceKind) -> Option<PathBuf> {
+    find_hidraw_with_product(kind).map(|(path, _)| path)
 }
 
 pub fn is_keyboard_available() -> bool {
@@ -229,20 +284,9 @@ pub fn is_logo_available() -> bool {
 }
 
 fn find_hidraw_direct_keyboard() -> Option<PathBuf> {
-    let entries = fs::read_dir("/sys/class/hidraw").ok()?;
-    for entry in entries.flatten() {
-        let uevent_path = entry.path().join("device/uevent");
-        let Ok(content) = fs::read_to_string(&uevent_path) else {
-            continue;
-        };
-        let Some((vendor, product)) = parse_hid_id(&content) else {
-            continue;
-        };
-        if vendor == KEYBOARD_VENDOR && DIRECT_KEYBOARD_PRODUCTS.contains(&product) {
-            return Some(PathBuf::from("/dev").join(entry.file_name()));
-        }
-    }
-    None
+    find_hidraw_with_product(DeviceKind::Keyboard)
+        .filter(|(_, product)| DIRECT_KEYBOARD_PRODUCTS.contains(product))
+        .map(|(path, _)| path)
 }
 
 /// Whether the connected keyboard is confirmed to be part of the one
@@ -254,24 +298,34 @@ pub fn is_keyboard_direct_available() -> bool {
 }
 
 /// The 9-byte "priming" feature report `SunrexUSBKeyboard.dll` sends before
-/// any Direct-mode (per-key, wire code 0x4F) color data. Decoded from
-/// `FUN_180001530` in a full Ghidra decompile of the real driver (issue
-/// #44) - byte 1 and byte 8 move together, and this is the Direct-specific
-/// pair; every other wire mode uses `0x12`/`0xE5` instead (not needed here,
-/// this path only ever sends Direct).
-const DIRECT_PRIMING: [u8; REPORT_LEN] = [0x00, 0x13, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0xE4];
+/// any non-Direct LED frame (per-key colour data). Byte 1 and byte 8 move
+/// together: Direct (`MAG_Direct`, 0x4F) uses `0x13`/`0xE4`, every other
+/// mode `0x12`/`0xE5`.
+const PER_KEY_PRIMING: [u8; REPORT_LEN] = [0x00, 0x12, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0xE5];
 
-/// Number of 4-byte per-key slots in the Direct color buffer sent to the
-/// device. `138` (552 bytes total) is the allocated buffer size the real
-/// driver bound-checks writes against; only slots `0..=DIRECT_MAX_VALID_SLOT`
-/// are known to land on a real key for this family - the rest are sent as
-/// zero, matching the diagnostic script already shared on issue #44.
-const DIRECT_BUFFER_SLOTS: usize = 138;
-const DIRECT_MAX_VALID_SLOT: usize = 101;
+/// Number of 4-byte `[00, R, G, B]` LED slots in the frame the driver sends:
+/// 126 slots, 504 bytes, written as 8 output reports of 64 bytes (the last
+/// one short). Only slots `0..=PER_KEY_MAX_VALID_SLOT` land on a real key
+/// for this family; the rest are sent as zero.
+const PER_KEY_BUFFER_SLOTS: usize = 126;
+const PER_KEY_MAX_VALID_SLOT: usize = 101;
 
-fn direct_color_buffer(color: (u8, u8, u8)) -> Vec<u8> {
-    let mut buffer = vec![0u8; DIRECT_BUFFER_SLOTS * 4];
-    for slot in 0..=DIRECT_MAX_VALID_SLOT {
+/// Brightness range of every mode in the driver's tables: 0..=0x32, default
+/// 0x1E. The terminator report carries it, it is not a speed. Sending 0 here
+/// is a black frame that every write still reports as successful.
+const BRIGHTNESS_MAX: u8 = 0x32;
+
+/// Wire mode byte the terminator carries for a non-Direct LED frame.
+const PER_KEY_MODE: u8 = 0x33;
+
+/// Scales the 0-100% the UI uses to the driver's 0..=0x32 range.
+fn brightness_byte(brightness_pct: u8) -> u8 {
+    ((u16::from(brightness_pct.min(100)) * u16::from(BRIGHTNESS_MAX)) / 100) as u8
+}
+
+fn per_key_color_buffer(color: (u8, u8, u8)) -> Vec<u8> {
+    let mut buffer = vec![0u8; PER_KEY_BUFFER_SLOTS * 4];
+    for slot in 0..=PER_KEY_MAX_VALID_SLOT {
         let offset = slot * 4;
         buffer[offset] = 0x00;
         buffer[offset + 1] = color.0;
@@ -281,44 +335,62 @@ fn direct_color_buffer(color: (u8, u8, u8)) -> Vec<u8> {
     buffer
 }
 
-/// The terminator feature report sent after all Direct-mode color data, same
-/// source as `DIRECT_PRIMING`. `speed_param` is the real driver's own 4th
-/// argument to `FUN_180001530`, read there from a per-effect config field -
-/// most likely the speed byte, though the decompile was not traced far
-/// enough to confirm that with certainty. Always `0` from
-/// `set_keyboard_direct_color`, since a static per-key color has no
-/// animation to speed up or down.
-fn direct_terminator(speed_param: u8) -> [u8; REPORT_LEN] {
-    /// `'g'`, confirmed as a literal `char` constant in the decompile - the
-    /// checksum base for Direct specifically (non-Direct modes use `'K'`,
-    /// `0x4B`, not needed here since this path only ever sends Direct).
-    const DIRECT_CHECKSUM_BASE: u8 = 0x67;
+/// The terminator feature report after the LED frame: mode, then the
+/// brightness byte, then the NOT of the sum of bytes 1..=7 (`0x18 + mode +
+/// brightness`, i.e. base `'K'` 0x4B for 0x33 and `'g'` 0x67 for 0x4F).
+fn per_key_terminator(mode: u8, brightness: u8) -> [u8; REPORT_LEN] {
+    let brightness = brightness.min(BRIGHTNESS_MAX);
     [
         0x00,
         0x08,
         0x02,
-        0x4F, // Direct's own wire code, same as DIRECT_PRIMING's mode byte
+        mode,
         0x05,
-        speed_param,
+        brightness,
         0x08,
         0x01,
-        !DIRECT_CHECKSUM_BASE.wrapping_add(speed_param),
+        !0x18u8.wrapping_add(mode).wrapping_add(brightness),
     ]
 }
 
-/// Applies one solid color to every key this family's Direct-mode buffer
-/// covers, via the per-key protocol (issue #44) instead of the zone/effect
-/// one `set_keyboard_effect` uses. Only available on the one confirmed
-/// per-key product family - see `DIRECT_KEYBOARD_PRODUCTS` and
-/// `is_keyboard_direct_available`.
+/// The 65-byte output report the driver writes once when it opens the
+/// controller, before any other command (`00 41 01` then zeros), followed by
+/// a 2 ms pause. `magic_rgb.rs` never sent it before.
+fn init_report() -> [u8; 65] {
+    let mut report = [0u8; 65];
+    report[1] = 0x41;
+    report[2] = 0x01;
+    report
+}
+
+const WRITE_GAP: Duration = Duration::from_millis(2);
+
+fn write_output_report(file: &mut File, path: &Path, packet: &[u8]) -> Result<(), String> {
+    file.write_all(packet).map_err(|error| {
+        crate::hardware::applog::error(&format!(
+            "Keyboard HID write failed on {}: {}",
+            path.display(),
+            error
+        ));
+        tf(
+            "magic_rgb_err_write_device",
+            &[&path.display().to_string(), &error.to_string()],
+        )
+    })
+}
+
+/// Applies one solid color to every key of this family with the driver's own
+/// per-key frame (issue #44/#76): init report, priming, 126 LED slots as 8
+/// output reports, terminator carrying the brightness. Only available on the
+/// per-key product family - see `DIRECT_KEYBOARD_PRODUCTS`.
 ///
-/// EXPERIMENTAL: every byte here comes from decompiling the real Windows
-/// driver, and the priming/terminator formulas both reproduce known-correct
-/// constants exactly (see the module doc and the tests below) - but nobody
-/// who owns this keyboard family has confirmed it lights up real hardware
-/// yet. Call sites must not present this as a working feature without
-/// saying so.
-pub fn set_keyboard_direct_color(color: (u8, u8, u8)) -> Result<(), String> {
+/// This replaces the earlier `0x4F` Direct frame. The decompile shows that
+/// `MAG_Direct` is a 48-byte frame for just four keys (WASD, the magnetic
+/// keys), so it never could cover the whole keyboard, and its terminator
+/// carried 0 as brightness. EXPERIMENTAL: every byte comes from the real
+/// driver, but nobody who owns this keyboard family has confirmed it lights
+/// real hardware yet.
+pub fn set_keyboard_direct_color(color: (u8, u8, u8), brightness_pct: u8) -> Result<(), String> {
     let path = find_hidraw_direct_keyboard()
         .ok_or_else(|| t("magic_rgb_err_device_not_found").to_string())?;
     let mut file = OpenOptions::new()
@@ -337,33 +409,29 @@ pub fn set_keyboard_direct_color(color: (u8, u8, u8)) -> Result<(), String> {
             )
         })?;
 
-    let mut priming = DIRECT_PRIMING;
-    crate::hardware::hid_rgb::set_feature(&file, &mut priming)?;
+    write_output_report(&mut file, &path, &init_report())?;
+    std::thread::sleep(WRITE_GAP);
 
-    let buffer = direct_color_buffer(color);
+    let mut priming = PER_KEY_PRIMING;
+    crate::hardware::hid_rgb::set_feature(&file, &mut priming)?;
+    std::thread::sleep(REPORT_GAP);
+
+    let buffer = per_key_color_buffer(color);
     for chunk in buffer.chunks(64) {
         let mut packet = Vec::with_capacity(65);
         packet.push(0x00); // report ID, same convention as the zone/effect path
         packet.extend_from_slice(chunk);
         packet.resize(65, 0); // pad a short final chunk, never truncate a full one
-        file.write_all(&packet).map_err(|error| {
-            crate::hardware::applog::error(&format!(
-                "Direct keyboard HID write failed on {}: {}",
-                path.display(),
-                error
-            ));
-            tf(
-                "magic_rgb_err_write_device",
-                &[&path.display().to_string(), &error.to_string()],
-            )
-        })?;
+        write_output_report(&mut file, &path, &packet)?;
+        std::thread::sleep(WRITE_GAP);
     }
 
-    let mut terminator = direct_terminator(0);
+    std::thread::sleep(REPORT_GAP);
+    let mut terminator = per_key_terminator(PER_KEY_MODE, brightness_byte(brightness_pct));
     crate::hardware::hid_rgb::set_feature(&file, &mut terminator)?;
 
     crate::hardware::applog::info(&format!(
-        "Direct (per-key) HID lighting command applied via {}",
+        "Per-key HID lighting frame applied via {}",
         path.display()
     ));
     Ok(())
@@ -482,7 +550,24 @@ pub fn set_keyboard_effect(
     blue: u8,
 ) -> Result<(), String> {
     let (file, path) = open(DeviceKind::Keyboard)?;
-    let reports = keyboard_reports(effect, brightness_pct, speed, reverse, (red, green, blue));
+    let per_key_family = find_hidraw_direct_keyboard().is_some();
+    // On the 766A-766E family the driver sends the init output report first,
+    // sends the whole effect sequence twice 15 ms apart and keeps brightness
+    // in 0..=0x32 (issue #76). Other keyboards keep the single sequence that
+    // was confirmed on them.
+    let brightness = if per_key_family {
+        brightness_byte(brightness_pct)
+    } else {
+        brightness_pct
+    };
+    let reports = keyboard_reports(effect, brightness, speed, reverse, (red, green, blue));
+    if per_key_family {
+        let mut writer = file.try_clone().map_err(|e| e.to_string())?;
+        write_output_report(&mut writer, &path, &init_report())?;
+        std::thread::sleep(WRITE_GAP);
+        send_sequence(DeviceKind::Keyboard, &file, &path, &reports)?;
+        std::thread::sleep(REPORT_GAP);
+    }
     send_sequence(DeviceKind::Keyboard, &file, &path, &reports)
 }
 
@@ -576,67 +661,56 @@ mod tests {
         assert!(!is_known(DeviceKind::Keyboard, 0x0D62, 0x666A)); // right PID, wrong vendor
     }
 
-    // Issue #44 (G-911, PT14-51/Aethon 700): MAG_Direct per-key protocol,
-    // decoded from a full Ghidra decompile of SunrexUSBKeyboard.dll.
+    // Issues #44/#76 (G-911, PT14-51/Aethon 700): per-key frame, from the
+    // decompile of SunrexUSBKeyboard.dll.
 
     #[test]
-    fn direct_priming_matches_the_known_correct_bytes() {
-        // Same constant already confirmed in PROTOCOLO-HARDWARE.md section
-        // 1.1 by independent disassembly - this is the cross-check that the
-        // decompile-derived constant here did not drift from it.
+    fn per_key_priming_is_the_non_direct_pair_and_checksummed() {
         assert_eq!(
-            DIRECT_PRIMING,
-            [0x00, 0x13, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0xE4]
+            PER_KEY_PRIMING,
+            [0x00, 0x12, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0xE5]
         );
-    }
-
-    #[test]
-    fn direct_priming_is_a_valid_checksummed_report() {
-        // The same NOT(sum of bytes 1-7) rule every other 9-byte report in
-        // this protocol family follows (section 1.3-bis) - a second,
-        // independent way of catching a transcription error in the constant
-        // above, not just comparing it to another copy of the same number.
-        let sum = DIRECT_PRIMING[1..8]
+        let sum = PER_KEY_PRIMING[1..8]
             .iter()
             .fold(0u8, |acc, b| acc.wrapping_add(*b));
-        assert_eq!(DIRECT_PRIMING[8], !sum);
+        assert_eq!(PER_KEY_PRIMING[8], !sum);
     }
 
     #[test]
-    fn direct_terminator_checksum_matches_the_decompiled_formula() {
-        // P=0 (static color, no animation speed) is what
-        // set_keyboard_direct_color always sends.
-        let terminator = direct_terminator(0);
-        assert_eq!(
-            terminator,
-            [0x00, 0x08, 0x02, 0x4F, 0x05, 0x00, 0x08, 0x01, 0x98]
-        );
-        // And the same cross-check as priming: byte 8 really is NOT(sum of
-        // 1-7), not just a value that happens to match by construction.
-        let sum = terminator[1..8]
-            .iter()
-            .fold(0u8, |acc, b| acc.wrapping_add(*b));
-        assert_eq!(terminator[8], !sum);
+    fn per_key_terminator_carries_brightness_and_the_driver_checksum() {
+        // Default brightness 0x1E, mode 0x33: ~(0x4B + 0x1E).
+        let t = per_key_terminator(PER_KEY_MODE, 0x1E);
+        assert_eq!(&t[..8], &[0x00, 0x08, 0x02, 0x33, 0x05, 0x1E, 0x08, 0x01]);
+        assert_eq!(t[8], !(0x4Bu8.wrapping_add(0x1E)));
+        // Direct 0x4F uses base 0x67 in the driver: same formula.
+        let d = per_key_terminator(0x4F, 0x1E);
+        assert_eq!(d[8], !(0x67u8.wrapping_add(0x1E)));
+        // Never a zero brightness by accident of the caller, and clamped.
+        assert_eq!(per_key_terminator(PER_KEY_MODE, 0x7F)[5], BRIGHTNESS_MAX);
     }
 
     #[test]
-    fn direct_terminator_checksum_tracks_a_nonzero_speed_param() {
-        // Confirms the checksum is computed from speed_param, not a
-        // hardcoded constant that happens to equal 0x98 - if this ever
-        // wires up to a real speed control, the checksum must move with it.
-        let terminator = direct_terminator(5);
-        assert_eq!(terminator[5], 5);
-        assert_eq!(terminator[8], !(0x67u8.wrapping_add(5)));
-        assert_ne!(terminator[8], direct_terminator(0)[8]);
+    fn brightness_scales_percent_to_the_driver_range() {
+        assert_eq!(brightness_byte(0), 0);
+        assert_eq!(brightness_byte(100), 0x32);
+        assert_eq!(brightness_byte(60), 0x1E);
+        assert_eq!(brightness_byte(250), 0x32);
     }
 
     #[test]
-    fn direct_color_buffer_only_fills_the_confirmed_valid_slots() {
-        let buffer = direct_color_buffer((0x11, 0x22, 0x33));
-        assert_eq!(buffer.len(), DIRECT_BUFFER_SLOTS * 4);
+    fn init_report_is_65_bytes_41_01() {
+        let r = init_report();
+        assert_eq!(r.len(), 65);
+        assert_eq!(&r[..4], &[0x00, 0x41, 0x01, 0x00]);
+        assert!(r[3..].iter().all(|b| *b == 0));
+    }
 
-        // Every valid slot gets [0x00, R, G, B].
-        for slot in 0..=DIRECT_MAX_VALID_SLOT {
+    #[test]
+    fn per_key_buffer_is_126_slots_and_only_fills_the_valid_ones() {
+        let buffer = per_key_color_buffer((0x11, 0x22, 0x33));
+        assert_eq!(buffer.len(), 504);
+        assert_eq!(buffer.chunks(64).count(), 8);
+        for slot in 0..=PER_KEY_MAX_VALID_SLOT {
             let offset = slot * 4;
             assert_eq!(
                 &buffer[offset..offset + 4],
@@ -644,11 +718,25 @@ mod tests {
                 "slot {slot} not colored"
             );
         }
-        // Padding past the confirmed range is left zeroed, not colored -
-        // sending a color into a slot nobody has confirmed maps to a real
-        // key is not something to do by default.
-        let padding_start = (DIRECT_MAX_VALID_SLOT + 1) * 4;
+        let padding_start = (PER_KEY_MAX_VALID_SLOT + 1) * 4;
         assert!(buffer[padding_start..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn descriptor_usage_page_reads_the_first_global_item() {
+        // 06 02 FF = Usage Page (0xFF02), 09 01 = Usage, A1 01 = Collection.
+        assert_eq!(
+            descriptor_usage_page(&[0x06, 0x02, 0xFF, 0x09, 0x01, 0xA1, 0x01]),
+            Some(0xFF02)
+        );
+        // 05 01 = Usage Page (Generic Desktop), one data byte.
+        assert_eq!(
+            descriptor_usage_page(&[0x05, 0x01, 0x09, 0x06]),
+            Some(0x0001)
+        );
+        assert_eq!(descriptor_usage_page(&[]), None);
+        // A long item is not parsed.
+        assert_eq!(descriptor_usage_page(&[0xFE, 0x01, 0x02]), None);
     }
 
     #[test]

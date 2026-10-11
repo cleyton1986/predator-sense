@@ -565,12 +565,15 @@ fn build_keyboard_section() -> gtk::Box {
             let state = state.clone();
             let direct_btn = direct_btn.clone();
             direct_btn.clone().connect_clicked(move |_| {
-                let color = state.borrow().color;
+                let (color, brightness) = {
+                    let st = state.borrow();
+                    (st.color, st.brightness)
+                };
                 let status = state.borrow().status.clone();
                 direct_btn.set_sensitive(false);
                 let result_btn = direct_btn.clone();
                 background::run(
-                    move || magic_rgb::set_keyboard_direct_color(color),
+                    move || magic_rgb::set_keyboard_direct_color(color, brightness),
                     move |result| {
                         apply_result(&status, result);
                         result_btn.set_sensitive(true);
