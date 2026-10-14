@@ -299,9 +299,13 @@ pub fn is_blanked() -> bool {
 /// 300 ms sleep, which matters because the idle watcher calls it from the UI
 /// thread the moment a key is pressed.
 pub fn unblank() {
-    let Some(saved) = crate::config::load_app_config().light_bar else {
-        return;
-    };
+    // The same fallback `blank` uses, as keyboard_rgb does in both. Returning
+    // early here instead left the flag set after `blank` had darkened the bar
+    // from the default, so on a machine with no saved light bar setting the
+    // idle tick called this four times a second and the bar never relit.
+    let saved = crate::config::load_app_config()
+        .light_bar
+        .unwrap_or_default();
     // Through `on_wire`, not raw: a saved `Off` written literally relights the
     // bar, since its mode id does not blank this firmware.
     let _ = BLANKING.set(false, || write_frame(&on_wire(&saved)));
