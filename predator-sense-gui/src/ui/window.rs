@@ -319,48 +319,32 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             );
         }
         crate::hardware::applog::set_enabled(cfg.debug_logging);
-        crate::hardware::profile::set_keep_fan_auto_in_performance(
-            cfg.keep_fan_auto_in_performance,
-        );
         crate::hardware::profile::set_manage_cpu_power(cfg.manage_cpu_power);
         crate::hardware::game_sync::set_enabled(cfg.game_sync_enabled);
 
-        // Fan Control page (ui::fan_control_page): CoolBoost and fan mode
-        // used to only ever be written straight to the EC with nothing
-        // remembering the choice, so closing Predator Sense (or a reboot
-        // resetting the EC) silently dropped them - reapply them here on
-        // every start. Off the GTK thread since each helper write costs
-        // roughly 150ms and can trigger a polkit prompt.
+        // Fan Control page (ui::fan_control_page): CoolBoost used to only
+        // ever be written straight to the EC with nothing remembering the
+        // choice, so closing Predator Sense (or a reboot resetting the EC)
+        // silently dropped it - reapply it here on every start. Off the GTK
+        // thread since each helper write costs roughly 150ms and can trigger
+        // a polkit prompt.
+        //
+        // This used to also reapply `cfg.fan_mode` straight to the EC here,
+        // which raced the reconciler tick below: instrumentation on
+        // 2026-09-15 caught exactly that disagreeing inside one startup
+        // sequence, `set_fan_mode(Auto)` handing the fans to the firmware and
+        // the curve taking them back a few seconds later. The reconciler
+        // already applies whichever plan is bound to the active mode on its
+        // first tick, so there is nothing left for startup to do here.
         let coolboost_enabled = cfg.coolboost_enabled;
-        // Not while the software curve owns the fans. Reapplying the saved EC
-        // preset here and then letting the curve timer below take the fans
-        // back about three seconds later is two owners writing the same
-        // hardware on every launch, and the preset never survives long enough
-        // to be the thing the user asked for. CoolBoost is unaffected: it is a
-        // separate EC byte the curve never touches.
-        let fan_mode = cfg
-            .fan_mode
-            .clone()
-            .filter(|_| !cfg.fan_auto_curve_enabled);
-        if crate::hardware::capabilities::get().ec && (coolboost_enabled || fan_mode.is_some()) {
+        // This supersedes the narrower guard merged upstream as #73, which
+        // skipped the preset only while `fan_auto_curve_enabled` was set. The
+        // reconciler owns the fans under every plan, not just the curve, so
+        // there is no case left where startup should write them.
+        if crate::hardware::capabilities::get().ec && coolboost_enabled {
             background::run(
                 move || {
-                    if coolboost_enabled {
-                        let _ = crate::hardware::fan::set_coolboost(true);
-                    }
-                    match fan_mode.as_deref() {
-                        Some("max") => {
-                            let _ = crate::hardware::fan::set_fan_mode(
-                                crate::hardware::fan::FanMode::Max,
-                            );
-                        }
-                        Some("auto") => {
-                            let _ = crate::hardware::fan::set_fan_mode(
-                                crate::hardware::fan::FanMode::Auto,
-                            );
-                        }
-                        _ => {}
-                    }
+                    let _ = crate::hardware::fan::set_coolboost(true);
                 },
                 |()| {},
             );
@@ -605,44 +589,216 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             glib::ControlFlow::Continue
         });
 
-        // Software auto fan-curve (fan_control_page.rs "fan_auto_curve"
-        // switch): runs globally rather than only while that page is open,
-        // since pages here are built lazily on first navigation - a
-        // page-local timer would never restart the curve after a fresh
-        // launch until the user visited Fan Control again. Re-reads the
-        // config every tick, same as the game list above: toggling the
-        // switch takes effect on the next tick, no restart needed.
-        if crate::hardware::capabilities::get().fan_pwm {
-            // The write goes through the persistent privileged helper (see
-            // hardware::helper), which holds a mutex shared with every other
-            // privileged caller in the app - calling it straight from this
-            // timer would block the main thread (and every other feature's
-            // privileged call) for the length of a pkexec auth prompt or a
-            // full session respawn, so it runs on a worker thread instead.
-            // `applying` skips a tick instead of queuing a second write if
-            // the previous one is still in flight.
-            let applying = Rc::new(Cell::new(false));
-            glib::timeout_add_seconds_local(3, move || {
-                let cfg = config::load_app_config();
-                if cfg.fan_auto_curve_enabled && !applying.get() {
-                    // Whichever die is hotter. The GPU reading was dropped
-                    // here, so a GPU-bound load with an idle CPU got no fan
-                    // response at all. See fan::curve_input_temp for why this
-                    // stays one speed for both fans.
-                    let (cpu, gpu) = sensors::read_critical_temps();
-                    if let Some(t) = crate::hardware::fan::curve_input_temp(cpu, gpu) {
-                        let pct = crate::hardware::fan::fan_curve_pct(t, &cfg.fan_curve_points);
-                        applying.set(true);
-                        let applying_done = applying.clone();
-                        background::run(
-                            move || crate::hardware::fan::set_pwm_percent(pct, pct),
-                            move |_| applying_done.set(false),
-                        );
+        // The fan reconciler: the one owner of the fan hardware, applying the
+        // active power mode's `FanPlan` from config. It runs globally rather
+        // than only while the Fan Control page is open, since pages here are
+        // built lazily on first navigation - a page-local timer would never
+        // reapply a plan after a fresh launch until the user visited Fan
+        // Control again. Re-reads the config every tick, same as the game
+        // list above: a plan written by the page, by the AI assistant or by a
+        // settings change takes effect on the next tick, no restart needed.
+        // The write goes through the persistent privileged helper (see
+        // hardware::helper), which holds a mutex shared with every other
+        // privileged caller in the app - calling it straight from this
+        // timer would block the main thread (and every other feature's
+        // privileged call) for the length of a pkexec auth prompt or a
+        // full session respawn, so it runs on a worker thread instead.
+        // `applying` skips a tick instead of queuing a second write if
+        // the previous one is still in flight.
+        let applying = Rc::new(Cell::new(false));
+        // What the curve last managed to apply. Both a memory, so a tick
+        // that would change nothing writes nothing, and the answer to
+        // "does the firmware hold the fans", which decides whether a
+        // temperature near the boundary is left alone or taken back. It
+        // only advances on a write that actually succeeded.
+        let fan_state = Rc::new(Cell::new(crate::hardware::fan::FanState::Unknown));
+        // Consecutive failed writes, and how many ticks have passed since the
+        // last attempt. See `fan::may_attempt_write`: without this a write
+        // that can never succeed costs a privileged call, and on an
+        // unreachable helper a polkit dialog, every three seconds forever.
+        let failures = Rc::new(Cell::new(0u32));
+        let ticks_since_attempt = Rc::new(Cell::new(0u32));
+        // Whether the "could not save the migrated plans" line has been
+        // logged, so a config that can never be written says so once instead
+        // of on every tick.
+        let migration_warned = Rc::new(Cell::new(false));
+        // Whether `fan_state` has been read back from the hardware yet. The
+        // read goes out through the unprivileged read helper, which is still a
+        // process spawn and a round trip, so it belongs on the worker thread
+        // like any other helper call. That is why it is a tick of its own
+        // rather than a value fetched before the timer starts.
+        let seeded = Rc::new(Cell::new(false));
+        glib::timeout_add_seconds_local(crate::hardware::fan::RECONCILE_TICK_S, move || {
+            use crate::hardware::fan::{CurveAction, FanState};
+
+            // An unparseable config.json hands back the same defaults a fresh
+            // install does, empty `fan_plans` included, which is exactly the
+            // migration trigger below. Persisting that would replace every
+            // lighting scheme, game profile, macro and setting still in the
+            // file, unasked, within three seconds of launch. So the tick runs
+            // on the defaults but is not allowed to write them back.
+            let (mut cfg, may_persist) = match config::load_app_config_source() {
+                config::AppConfigSource::Loaded(cfg) => (cfg, true),
+                config::AppConfigSource::Missing => (config::AppConfig::default(), true),
+                config::AppConfigSource::Unreadable(_) => (config::AppConfig::default(), false),
+            };
+            // Migrate on first sight, then use plans only. An empty list
+            // means either a fresh install or a config from before this
+            // feature, and both want the pre-existing global settings
+            // carried forward unchanged rather than reset to Automatic.
+            if cfg.fan_plans.is_empty() {
+                cfg.fan_plans = crate::hardware::fan::migrate_plans(&cfg);
+                if may_persist {
+                    match config::save_app_config(&cfg) {
+                        Ok(()) => crate::hardware::applog::info(
+                            "fan: migrated the global fan settings to per-mode plans",
+                        ),
+                        // Fan control must not depend on a successful config
+                        // write. A config dir left owned by root, a full disk
+                        // or an immutable home would otherwise make Max,
+                        // Fixed and Curve permanently inert on every later
+                        // tick too. Logged once, since the tick would
+                        // otherwise repeat it every three seconds.
+                        Err(error) => {
+                            if !migration_warned.replace(true) {
+                                crate::hardware::applog::error(&format!(
+                                    "fan: per-mode plans could not be saved, applying them \
+                                     from memory instead: {error}"
+                                ));
+                            }
+                        }
                     }
                 }
-                glib::ControlFlow::Continue
-            });
-        }
+                // Fall through with the migrated plans in hand: this tick
+                // applies them either way.
+            }
+
+            if applying.get() {
+                return glib::ControlFlow::Continue;
+            }
+
+            // Observe before asserting anything. FanState::Unknown reads as a
+            // disagreement with every plan, so the first tick used to write on
+            // every machine at every launch, including one whose plan is
+            // Automatic and whose fans the firmware already has.
+            if !seeded.get() {
+                seeded.set(true);
+                applying.set(true);
+                let applying_done = applying.clone();
+                let state = fan_state.clone();
+                let pwm = crate::hardware::capabilities::get().fan_pwm;
+                background::run(
+                    move || crate::hardware::fan::observe_fan_state(pwm),
+                    move |observed| {
+                        applying_done.set(false);
+                        state.set(observed);
+                    },
+                );
+                return glib::ControlFlow::Continue;
+            }
+
+            let active = crate::hardware::profile::get_current_profile();
+            let plan = crate::hardware::fan::plan_for_hardware(
+                crate::hardware::fan::plan_for(active, &cfg.fan_plans),
+                crate::hardware::capabilities::get().fan_pwm,
+            );
+            // Whichever die is hotter. The GPU reading used to be dropped
+            // here, so a GPU-bound load with an idle CPU got no fan
+            // response at all. See fan::curve_input_temp for why this
+            // stays one speed for both fans.
+            let (cpu, gpu) = sensors::read_critical_temps();
+            let temp = crate::hardware::fan::curve_input_temp(cpu, gpu);
+            let applied = fan_state.get();
+            let target = crate::hardware::fan::plan_target(
+                plan,
+                temp,
+                applied == FanState::Firmware,
+            );
+            if !crate::hardware::fan::needs_write(target, applied) {
+                return glib::ControlFlow::Continue;
+            }
+
+            let pwm = crate::hardware::capabilities::get().fan_pwm;
+            let Some(write) = crate::hardware::fan::write_for(target, pwm) else {
+                return glib::ControlFlow::Continue;
+            };
+            if !crate::hardware::fan::may_attempt_write(
+                failures.get(),
+                ticks_since_attempt.get(),
+            ) {
+                ticks_since_attempt.set(ticks_since_attempt.get().saturating_add(1));
+                return glib::ControlFlow::Continue;
+            }
+            ticks_since_attempt.set(0);
+            // The decision, not the write, and only for a write about to be
+            // dispatched: the reason a fan speed changed was exactly what went
+            // missing when an unexplained manual write at 48 C could not be
+            // attributed afterwards. fan.rs logs the write itself, so this
+            // deliberately carries what that line cannot (the mode, the plan
+            // and the temperature the decision came from) and deliberately
+            // does not repeat its wording.
+            crate::hardware::applog::info(&format!(
+                "fan decision: mode={} plan={:?} temp={} target={:?} (was {:?})",
+                active.map_or_else(|| "unknown".to_string(), |p| p.to_id().to_string()),
+                plan,
+                temp.map_or_else(|| "none".to_string(), |t| format!("{t:.1}C")),
+                target,
+                applied
+            ));
+            applying.set(true);
+            let applying_done = applying.clone();
+            let state = fan_state.clone();
+            let failed = failures.clone();
+            let intended = target;
+            background::run(
+                move || match write {
+                    crate::hardware::fan::FanWrite::PwmAuto => {
+                        crate::hardware::fan::set_pwm_auto()
+                    }
+                    crate::hardware::fan::FanWrite::PwmPercent(percent) => {
+                        crate::hardware::fan::set_pwm_percent(percent, percent)
+                    }
+                    // Without the EC dynamic-curve wake: from here it would
+                    // bounce the same firmware profile index this tick reads
+                    // to pick a plan, so a fan write would move the user's
+                    // visible power mode. See fan::set_fan_mode.
+                    crate::hardware::fan::FanWrite::PresetAuto => {
+                        crate::hardware::fan::set_fan_mode(
+                            crate::hardware::fan::FanMode::Auto,
+                        )
+                    }
+                    crate::hardware::fan::FanWrite::PresetMax => {
+                        crate::hardware::fan::set_fan_mode(
+                            crate::hardware::fan::FanMode::Max,
+                        )
+                    }
+                },
+                move |result| {
+                    applying_done.set(false);
+                    match result {
+                        // FanState tracks the target, not the call: a
+                        // preset Auto and a pwm_enable=2 are both "the
+                        // firmware has them" as far as needs_write cares.
+                        Ok(()) => {
+                            failed.set(0);
+                            state.set(match intended {
+                                CurveAction::Firmware => FanState::Firmware,
+                                CurveAction::Manual(percent) => FanState::Manual(percent),
+                                CurveAction::Hold => FanState::Unknown,
+                            });
+                        }
+                        Err(error) => {
+                            failed.set(failed.get().saturating_add(1));
+                            state.set(FanState::Unknown);
+                            crate::hardware::applog::error(&format!(
+                                "fan: {write:?} not applied: {error}"
+                            ));
+                        }
+                    }
+                },
+            );
+            glib::ControlFlow::Continue
+        });
     }
 
     // AI assistant background monitor (opt-in, off unless ai_assistant_enabled).
@@ -677,7 +833,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
     // patch). The key itself only ever toggles fan mode/OC/LED at the WMI
     // level - it never touches cpufreq governor/EPP/min_perf, so on its own
     // it can never make the "Modo" page show Turbo. Polling this attribute
-    // and calling our own set_profile()/set_fan_mode() on a transition is
+    // and calling our own set_profile() on a transition is
     // what makes the key match "press it, everything becomes consistently
     // Turbo" - both pages then update on their own via the live-refresh
     // polling already in fan_page.rs/fan_control_page.rs, no direct
@@ -708,9 +864,10 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 // startup - only react to an actual transition from here on.
                 return glib::ControlFlow::Continue;
             }
-            // set_profile() now applies the matching fan mode itself (Max
-            // for Turbo, Auto otherwise), so this only needs to pick the
-            // profile - no separate fan::set_fan_mode call to keep in sync.
+            // set_profile() no longer touches the fan directly; the reconciler
+            // tick above reads the plan bound to whichever profile this leaves
+            // active (Max for Turbo by default, unless the user rebinds it)
+            // and applies it, so this only needs to pick the profile.
             if now {
                 // Snapshot whichever profile is coherently active right now,
                 // before overwriting it - None (no single coherent profile
@@ -720,22 +877,20 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 // nothing truthful to go back to.
                 before_turbo.set(profile::coherent_profile());
                 let _ = profile::set_profile(profile::PowerProfile::Turbo);
-                crate::hardware::applog::info("Turbo key: pressed, forced profile=Turbo fan=Max");
+                // Only the profile is claimed here. What the fans do is
+                // whatever plan Turbo is bound to, and the reconciler logs
+                // that decision itself when it acts on it.
+                crate::hardware::applog::info(
+                    "Turbo key: pressed, forced profile=Turbo, fan follows that mode's plan",
+                );
             } else {
                 let restore = before_turbo
                     .get()
                     .unwrap_or(profile::PowerProfile::Balanced);
                 let _ = profile::set_profile(restore);
                 crate::hardware::applog::info(&format!(
-                    "Turbo key: released, restored profile={} fan={}",
-                    restore.to_id(),
-                    if restore == profile::PowerProfile::Turbo
-                        || restore == profile::PowerProfile::Performance
-                    {
-                        "Max"
-                    } else {
-                        "Auto"
-                    }
+                    "Turbo key: released, restored profile={}, fan follows that mode's plan",
+                    restore.to_id()
                 ));
             }
             glib::ControlFlow::Continue
@@ -1886,12 +2041,11 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     page.append(&log_row);
 
     // Keep fan on Auto in Performance/Turbo (issue #41, TongkyakHermit) - off
-    // by default, matches the physical Predator/Turbo key forcing Max. The
-    // physical-key handler and the "Modo" page both go through
-    // hardware::profile::set_profile(), which reads this same in-memory
-    // flag, so no daemon restart is needed here (unlike debug_logging
-    // above): the change takes effect on the very next profile switch,
-    // whichever path triggers it.
+    // by default, matching what the physical Predator/Turbo key does to the
+    // firmware. Fan behaviour is a property of each mode's plan now, so the
+    // switch rebinds the two modes it speaks for rather than being consulted
+    // at profile-switch time; the reconciler picks the new plan up on its next
+    // tick, so no daemon restart is needed here (unlike debug_logging above).
     let fan_auto_row = create_setting_row(
         t("keep_fan_auto_in_performance"),
         t("keep_fan_auto_in_performance_desc"),
@@ -1902,8 +2056,8 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     fan_auto_switch.connect_state_set(move |_, active| {
         let mut c = config::load_app_config();
         c.keep_fan_auto_in_performance = active;
+        c.fan_plans = crate::hardware::fan::plans_with_keep_fan_auto(&c);
         let _ = config::save_app_config(&c);
-        crate::hardware::profile::set_keep_fan_auto_in_performance(active);
         glib::Propagation::Proceed
     });
     fan_auto_row.append(&fan_auto_switch);
