@@ -3,7 +3,8 @@ use crate::hardware::profile::PowerProfile;
 use crate::hardware::rgb::{EffectParams, RgbConfig, RgbMode};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Last-applied 2024+ HID keyboard lighting state (`hardware::magic_rgb`,
 /// issues #25/#26) - same "the app forgets which effect was last applied and
@@ -146,6 +147,30 @@ pub struct ModeBinding {
     pub scheme: String,
 }
 
+/// What the fans should do while a given power mode is active.
+///
+/// `Automatic` leaves them to the firmware, which is the only thing that can
+/// stop them: a manual pwm of 0 is not off, the EC holds a floor, measured at
+/// ~1670 RPM on a PH16-71. See `fan::CurveAction::Firmware`, which carries the
+/// rest of that measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FanPlan {
+    Automatic,
+    Curve { steps: [u8; 6] },
+    Fixed { percent: u8 },
+    Max,
+}
+
+/// Binds a fan plan to a power mode, keyed by `PowerProfile::to_id()` for the
+/// same reason `ModeBinding` is: the map stays readable in config.json and
+/// survives an unknown mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanBinding {
+    pub mode: String,
+    pub plan: FanPlan,
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -156,6 +181,18 @@ pub struct AppConfig {
     pub start_on_boot: bool,
     #[serde(default = "default_true")]
     pub temp_alerts: bool,
+    /// The temperature a critical alert fires at, in Celsius.
+    ///
+    /// Configurable because "critical" is a judgement, not a property of the
+    /// silicon: this CPU reports `high` and `crit` at 100 C and throttles
+    /// itself there, so anything below that is the user deciding when they
+    /// want to be told. A gaming chassis sits in the high eighties under load
+    /// by design, which is why the default is 90 rather than something that
+    /// would cry wolf every session. The UI offers 70 to 100; the alert path
+    /// clamps to the same range, so a hand-edited 5 or 200 cannot make the
+    /// alert fire constantly or never.
+    #[serde(default = "default_temp_alert_c")]
+    pub temp_alert_c: u8,
     #[serde(default)]
     pub auto_profile_ac: bool,
     #[serde(default = "default_profile_ac")]
@@ -167,9 +204,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub debug_logging: bool,
     /// Issue #41 (TongkyakHermit): keep the fan on Auto even when
-    /// Performance/Turbo is selected, instead of forcing Max like the
-    /// physical Predator/Turbo key does. Off by default - preserves the
-    /// existing safety-first behavior for everyone who doesn't touch it.
+    /// Performance/Turbo is selected, instead of Max like the physical
+    /// Predator/Turbo key does. Off by default - preserves the existing
+    /// safety-first behavior for everyone who doesn't touch it. Expressed by
+    /// binding those two modes' `fan_plans` entries (see
+    /// `fan::plans_with_keep_fan_auto`), which is what the fans actually
+    /// follow; this field is what the switch shows and what migration reads.
     #[serde(default)]
     pub keep_fan_auto_in_performance: bool,
     /// Fan Control page (`ui::fan_control_page`): CoolBoost and the selected
@@ -197,6 +237,11 @@ pub struct AppConfig {
     /// this setting sees any behavior change.
     #[serde(default = "default_fan_curve_points")]
     pub fan_curve_points: [u8; 6],
+    /// One fan plan per power mode. Empty means "not migrated yet", which
+    /// `hardware::fan::migrate_plans` fills from the pre-existing global fan
+    /// settings on first run.
+    #[serde(default)]
+    pub fan_plans: Vec<FanBinding>,
     /// Last-applied static RGB zone colors (issue #11: nothing persisted this
     /// before, so a full power cycle always reset the keyboard to its default
     /// pulsing effect). Reapplied after login/resume by the Rust hotkey service.
@@ -311,6 +356,31 @@ pub struct AppConfig {
     pub auto_eco_enabled: bool,
     #[serde(default = "default_auto_eco_threshold")]
     pub auto_eco_threshold: u32,
+
+    /// Tell the desktop's power-mode control which of its three profiles the
+    /// active mode corresponds to, so its indicator stops contradicting the
+    /// app. Off by default: it writes to a daemon this app does not own.
+    ///
+    /// The desktop API has three profiles and this app has five, so the map is
+    /// lossy by construction and the user picks which way it folds - see
+    /// `PpdMap`.
+    /// Post a desktop notification whenever the active mode changes, from any
+    /// source: the mode key, this app, the desktop's own power menu, or the
+    /// battery rules.
+    /// What a plug or unplug does - see [`PowerSourceAction`].
+    ///
+    /// `None` means a config written before this existed, and is resolved
+    /// through [`AppConfig::power_source_action`] from the old boolean so an
+    /// upgrade keeps behaving as it did rather than silently switching a
+    /// feature on.
+    #[serde(default)]
+    pub power_source_action: Option<PowerSourceAction>,
+    #[serde(default)]
+    pub notify_mode_changes: bool,
+    #[serde(default)]
+    pub ppd_sync_enabled: bool,
+    #[serde(default)]
+    pub ppd_sync_map: PpdMap,
 
     /// What the dedicated PredatorSense key does: `app` (open Predator Sense,
     /// the default), `command` (run `predator_key_command`), or `none`.
@@ -449,12 +519,76 @@ fn default_idle_secs() -> u32 {
     30
 }
 
+/// What a plug or unplug does to the active mode.
+///
+/// Replaces the older `auto_profile_ac` boolean, which could only say "leave it
+/// alone" or "do the clever thing", and left the two configured targets on
+/// screen doing nothing whenever the mode-key lists were set - which is almost
+/// always. Each variant now decides whether those targets apply at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum PowerSourceAction {
+    /// Never move the mode. Plugging in and unplugging change nothing.
+    #[serde(rename = "keep")]
+    Keep,
+    /// Move only when the new source does not allow the current mode, landing
+    /// on the nearest mode both mode-key lists allow. Balanced survives an
+    /// unplug; Turbo does not.
+    #[default]
+    #[serde(rename = "move-if-disallowed")]
+    MoveIfDisallowed,
+    /// Always switch to the mode configured for that source, whatever the
+    /// current one is. The only variant where `profile_ac` and
+    /// `profile_battery` mean anything.
+    #[serde(rename = "always-set")]
+    AlwaysSet,
+}
+
+/// How the app's five modes fold onto the desktop's three power profiles.
+///
+/// Both variants agree at the ends, Eco to power-saver and Turbo to
+/// performance, and differ only in where Quiet lands, which is the one that
+/// genuinely reads either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum PpdMap {
+    /// Eco and Quiet both read as the desktop's power saver.
+    #[default]
+    #[serde(rename = "quiet-saves-power")]
+    QuietSavesPower,
+    /// Quiet sits with Balanced instead, leaving power saver for Eco alone.
+    #[serde(rename = "quiet-is-balanced")]
+    QuietIsBalanced,
+}
+
+impl AppConfig {
+    /// What a plug or unplug should do, resolving a config that predates the
+    /// setting.
+    ///
+    /// Before this was a choice it was the `auto_profile_ac` boolean, so a
+    /// config without the new key is read through the old one: off meant "do
+    /// not touch my mode", on meant what is now `MoveIfDisallowed`. Without
+    /// this an upgrade would hand everyone the enum's default and quietly turn
+    /// the feature on for anyone who had deliberately turned it off.
+    pub fn power_source_action(&self) -> PowerSourceAction {
+        self.power_source_action.unwrap_or(if self.auto_profile_ac {
+            PowerSourceAction::MoveIfDisallowed
+        } else {
+            PowerSourceAction::Keep
+        })
+    }
+}
+
 fn default_auto_eco_threshold() -> u32 {
     30
 }
 
 fn default_predator_key_action() -> String {
     "app".to_string()
+}
+
+/// 90 C: below the 100 C this CPU throttles at, above the high eighties a
+/// gaming chassis reaches under sustained load by design.
+fn default_temp_alert_c() -> u8 {
+    90
 }
 
 fn default_rgb_brightness() -> u8 {
@@ -489,6 +623,7 @@ impl Default for AppConfig {
             minimize_on_close: true,
             start_on_boot: false,
             temp_alerts: true,
+            temp_alert_c: default_temp_alert_c(),
             auto_profile_ac: true,
             profile_ac: default_profile_ac(),
             profile_battery: default_profile_battery(),
@@ -499,6 +634,7 @@ impl Default for AppConfig {
             fan_mode: None,
             fan_auto_curve_enabled: false,
             fan_curve_points: default_fan_curve_points(),
+            fan_plans: Vec::new(),
             rgb_static_zones: None,
             rgb_brightness: 100,
             rgb_is_static: true,
@@ -527,6 +663,10 @@ impl Default for AppConfig {
             mode_default: None,
             auto_eco_enabled: false,
             auto_eco_threshold: default_auto_eco_threshold(),
+            power_source_action: None,
+            notify_mode_changes: false,
+            ppd_sync_enabled: false,
+            ppd_sync_map: PpdMap::default(),
             predator_key_action: default_predator_key_action(),
             predator_key_command: String::new(),
             cover_logo: None,
@@ -641,12 +781,63 @@ pub fn list_profiles() -> Vec<String> {
         .collect()
 }
 
+/// What reading `config.json` actually found.
+///
+/// `load_app_config` collapses every failure into the default config, which is
+/// indistinguishable from a fresh install. Any background writer holding that
+/// default is one save away from replacing every lighting scheme, game
+/// profile, macro and setting the file still holds, so a caller that writes
+/// without the user asking has to be able to tell the two apart.
+pub enum AppConfigSource {
+    /// No config file yet: a fresh install, and the only state where writing
+    /// a default config back loses nothing.
+    Missing,
+    Loaded(AppConfig),
+    /// The file is there but could not be read or parsed. The user's settings
+    /// are still in it, so nothing may be written over them unasked.
+    Unreadable(String),
+}
+
+pub fn read_app_config_at(path: &Path) -> AppConfigSource {
+    let json = match fs::read_to_string(path) {
+        Ok(json) => json,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return AppConfigSource::Missing,
+        // Unreadable for any other reason (permissions, I/O) is still a file
+        // that exists and holds the user's settings.
+        Err(e) => return AppConfigSource::Unreadable(e.to_string()),
+    };
+    match serde_json::from_str(&json) {
+        Ok(config) => AppConfigSource::Loaded(config),
+        Err(e) => AppConfigSource::Unreadable(e.to_string()),
+    }
+}
+
+/// Logged at most once per session: the callers below run on timers a few
+/// seconds apart, and a damaged config stays damaged.
+static CONFIG_UNREADABLE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// `load_app_config`, but saying where the config came from.
+pub fn load_app_config_source() -> AppConfigSource {
+    let source = read_app_config_at(&config_dir().join("config.json"));
+    if let AppConfigSource::Unreadable(error) = &source {
+        if !CONFIG_UNREADABLE_LOGGED.swap(true, Ordering::Relaxed) {
+            // `error_always`, not `error`: `debug_logging` comes from the
+            // file that just failed to parse, so the gate is off exactly when
+            // this needs saying.
+            crate::hardware::applog::error_always(&format!(
+                "config: config.json exists but could not be loaded, running on defaults \
+                 without overwriting it: {error}"
+            ));
+        }
+    }
+    source
+}
+
 /// Load app config
 pub fn load_app_config() -> AppConfig {
-    let path = config_dir().join("config.json");
-    match fs::read_to_string(&path) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
-        Err(_) => AppConfig::default(),
+    match load_app_config_source() {
+        AppConfigSource::Loaded(config) => config,
+        AppConfigSource::Missing | AppConfigSource::Unreadable(_) => AppConfig::default(),
     }
 }
 
@@ -706,6 +897,96 @@ pub fn save_app_config(config: &AppConfig) -> Result<(), String> {
     fs::write(&path, json).map_err(|e| format!("Erro ao salvar config: {}", e))
 }
 
+/// A timestamp shaped for a filename, `2026-09-18-1611`.
+///
+/// The same `localtime_r` approach `applog::timestamp` uses, for the same
+/// reason: nothing in this crate pulls in a date library for two format
+/// strings.
+fn file_timestamp() -> String {
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        format!(
+            "{:04}-{:02}-{:02}-{:02}{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min
+        )
+    }
+}
+
+/// The name an exported settings file is offered under.
+pub fn suggested_export_filename() -> String {
+    format!("predator-sense-settings-{}.json", file_timestamp())
+}
+
+/// Write a config to an arbitrary path, pretty printed.
+pub fn write_app_config_to(path: &Path, config: &AppConfig) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| e.to_string())
+}
+
+/// Write the settings currently in force to `path`.
+///
+/// Serializes the loaded config rather than copying config.json byte for
+/// byte, so an exported file is always one this build can read back.
+///
+/// The `Unreadable` arm is why this returns a `Result` at all. A config.json
+/// this build cannot parse leaves the app running on defaults, deliberately,
+/// so that the file is not overwritten; exporting those defaults under the
+/// user's own filename would hand them a backup with none of their settings
+/// in it and no hint anything was wrong. `Missing` is a different case and not
+/// an error: with no file at all the app really is running on defaults, so
+/// defaults are honestly what there is to export.
+pub fn export_app_config_to(path: &Path) -> Result<(), String> {
+    let config = match load_app_config_source() {
+        AppConfigSource::Loaded(config) => config,
+        AppConfigSource::Missing => AppConfig::default(),
+        AppConfigSource::Unreadable(error) => return Err(error),
+    };
+    write_app_config_to(path, &config)
+}
+
+/// Read a settings file back, without changing anything yet.
+///
+/// Validated through the very `read_app_config_at` the app starts up with, so
+/// a file that would send the app to defaults is rejected here, while the
+/// user's own settings are still on disk, rather than after it has replaced
+/// them.
+pub fn import_app_config_from(path: &Path) -> Result<AppConfig, String> {
+    match read_app_config_at(path) {
+        AppConfigSource::Loaded(config) => Ok(config),
+        AppConfigSource::Missing => Err("no such file".to_string()),
+        AppConfigSource::Unreadable(error) => Err(error),
+    }
+}
+
+/// Copy `from` into `dir` under a timestamped name, if it exists at all.
+///
+/// A byte copy, not a re-serialize: a backup exists to hold exactly what was
+/// there, and that includes a file this build cannot parse - which is the one
+/// it matters most not to lose, since it is still the only record of what the
+/// user had set.
+pub fn backup_config_file(from: &Path, dir: &Path) -> Result<Option<PathBuf>, String> {
+    if !from.exists() {
+        return Ok(None);
+    }
+    let to = dir.join(format!("config-backup-{}.json", file_timestamp()));
+    fs::copy(from, &to).map_err(|e| e.to_string())?;
+    Ok(Some(to))
+}
+
+/// Put the current config aside before something replaces it wholesale.
+///
+/// `None` means there was no config file yet, so there was nothing to lose.
+pub fn backup_app_config() -> Result<Option<PathBuf>, String> {
+    ensure_dirs();
+    backup_config_file(&config_dir().join("config.json"), &config_dir())
+}
+
 fn sanitize_filename(name: &str) -> String {
     name.chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == ' ')
@@ -715,6 +996,40 @@ fn sanitize_filename(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unparseable config used to be indistinguishable from a fresh
+    /// install: both handed the caller `AppConfig::default()`, with an empty
+    /// `fan_plans`, which is exactly what makes the reconciler migrate and
+    /// save. That saved the defaults over a file still holding every lighting
+    /// scheme, game profile, macro and setting the user had.
+    #[test]
+    fn an_unreadable_config_is_not_reported_as_a_fresh_install() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-config-source-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.json");
+        let _ = fs::remove_file(&path);
+
+        assert!(
+            matches!(read_app_config_at(&path), AppConfigSource::Missing),
+            "no file at all is the one case where writing defaults back is safe"
+        );
+
+        let saved = serde_json::to_string(&AppConfig::default()).expect("serialize");
+        fs::write(&path, &saved).expect("write");
+        assert!(matches!(read_app_config_at(&path), AppConfigSource::Loaded(_)));
+
+        fs::write(&path, "{ not json at all").expect("write");
+        match read_app_config_at(&path) {
+            AppConfigSource::Unreadable(error) => assert!(!error.is_empty()),
+            _ => panic!("a present but unparseable file must not read as Missing or Loaded"),
+        }
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
 
     /// A macro saved before `MacroStep::delay_only` existed has no such key
     /// in its JSON at all - `#[serde(default)]` must still load it, not
@@ -739,5 +1054,212 @@ mod tests {
         let back: MacroStep = serde_json::from_str(&json).expect("step should deserialize");
         assert_eq!(back.delay_ms, 500);
         assert!(back.delay_only);
+    }
+
+    /// A settings file exported before a field existed must still import.
+    ///
+    /// This is the compatibility direction the export/import feature creates
+    /// and then has to keep: someone exports, updates the app, and imports
+    /// their own file back. `temp_alert_c` is the first field added after the
+    /// feature shipped, so it stands in for every field added later.
+    #[test]
+    fn a_settings_file_exported_before_a_field_existed_still_imports() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-oldexport-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("old-export.json");
+
+        let mut value =
+            serde_json::to_value(AppConfig::default()).expect("serialize the current shape");
+        value
+            .as_object_mut()
+            .expect("a config is a JSON object")
+            .remove("temp_alert_c")
+            .expect("the field must be there to remove, or this test proves nothing");
+        fs::write(&path, serde_json::to_string_pretty(&value).expect("json")).expect("write");
+
+        let imported = import_app_config_from(&path).expect("an older export must still import");
+        assert_eq!(
+            imported.temp_alert_c,
+            default_temp_alert_c(),
+            "a field the file predates has to come back as its default, not fail the import"
+        );
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    /// And the other direction: a file from a newer build, carrying a key this
+    /// one has never heard of, must not be rejected. In a project where users
+    /// are on whatever version their distro or a release page gave them, an
+    /// export from a newer app landing on an older one is ordinary, and
+    /// refusing it would be a worse failure than ignoring one key.
+    #[test]
+    fn a_settings_file_with_an_unknown_key_still_imports() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-newexport-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("new-export.json");
+
+        let mut value = serde_json::to_value(AppConfig::default()).expect("serialize");
+        value.as_object_mut().expect("object").insert(
+            "a_setting_from_a_later_version".to_string(),
+            serde_json::json!({"nested": [1, 2, 3]}),
+        );
+        fs::write(&path, serde_json::to_string_pretty(&value).expect("json")).expect("write");
+
+        let imported = import_app_config_from(&path).expect("an unknown key must not fail import");
+        assert_eq!(imported.temp_alert_c, default_temp_alert_c());
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    /// The round trip the feature exists for. Not a serde smoke test: the
+    /// fields checked here are the ones that are expensive to rebuild by
+    /// hand - per-mode fan plans, lighting schemes, the mode-key cycles -
+    /// which is exactly what a user would be exporting to keep.
+    #[test]
+    fn an_exported_settings_file_imports_back_unchanged() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-export-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("export.json");
+
+        let mut config = AppConfig::default();
+        config.fan_plans = vec![
+            FanBinding {
+                mode: "quiet".to_string(),
+                plan: FanPlan::Curve {
+                    steps: [15, 25, 35, 50, 80, 100],
+                },
+            },
+            FanBinding {
+                mode: "turbo".to_string(),
+                plan: FanPlan::Max,
+            },
+        ];
+        config.saved_colors = vec!["#ff0000".to_string()];
+        config.font_scale = 1.25;
+
+        write_app_config_to(&path, &config).expect("export");
+        let back = import_app_config_from(&path).expect("import");
+
+        assert_eq!(back.fan_plans.len(), 2);
+        assert_eq!(back.fan_plans[0].mode, "quiet");
+        assert_eq!(
+            back.fan_plans[0].plan,
+            FanPlan::Curve {
+                steps: [15, 25, 35, 50, 80, 100]
+            }
+        );
+        assert_eq!(back.fan_plans[1].plan, FanPlan::Max);
+        assert_eq!(back.saved_colors, vec!["#ff0000".to_string()]);
+        assert!((back.font_scale - 1.25).abs() < f64::EPSILON);
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    /// Import has to refuse before it replaces, not after. A file that does
+    /// not parse is precisely the one that would leave the app running on
+    /// defaults with no visible sign, which is what the feature is meant to
+    /// rescue people from, not to cause.
+    #[test]
+    fn an_unreadable_settings_file_is_rejected_by_import() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-import-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("not-a-config.json");
+
+        // Valid JSON, wrong content: this is the shape that slips past a
+        // parse-only check, and it is also what a hand-edited config looks
+        // like when an enum's tag is written the wrong way round.
+        fs::write(&path, r#"{"fan_plans": [{"mode": "quiet", "plan": {"Curve": {"steps": [0, 0, 0, 0, 0, 0]}}}]}"#).expect("write");
+        assert!(
+            import_app_config_from(&path).is_err(),
+            "a file the app would silently fall back on must not be importable"
+        );
+
+        fs::write(&path, "{ not json at all").expect("write");
+        assert!(import_app_config_from(&path).is_err());
+
+        let _ = fs::remove_file(&path);
+        assert!(
+            import_app_config_from(&path).is_err(),
+            "no file at all is an error to import from, not a silent set of defaults"
+        );
+        let _ = fs::remove_dir(&dir);
+    }
+
+    /// The backup taken before an import has to hold a file this build
+    /// cannot parse, because that is the case where it is the user's only
+    /// remaining record of what they had set.
+    #[test]
+    fn a_backup_keeps_the_bytes_of_an_unparseable_config() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-backup-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let source = dir.join("config.json");
+
+        assert!(
+            matches!(backup_config_file(&source, &dir), Ok(None)),
+            "no config to back up is not a failure"
+        );
+
+        let original = "{ half written and unparseable";
+        fs::write(&source, original).expect("write");
+        let backup = backup_config_file(&source, &dir)
+            .expect("backup")
+            .expect("there was a file, so there must be a backup");
+        assert_eq!(
+            fs::read_to_string(&backup).expect("read back"),
+            original
+        );
+
+        let _ = fs::remove_file(&backup);
+        let _ = fs::remove_file(&source);
+        let _ = fs::remove_dir(&dir);
+    }
+}
+
+#[cfg(test)]
+mod fan_plan_tests {
+    use super::*;
+
+    #[test]
+    fn a_curve_plan_survives_a_config_round_trip() {
+        let binding = FanBinding {
+            mode: "balanced".into(),
+            plan: FanPlan::Curve { steps: [0, 35, 50, 65, 80, 100] },
+        };
+        let json = serde_json::to_string(&binding).expect("serialize");
+        let back: FanBinding = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.mode, "balanced");
+        assert_eq!(back.plan, FanPlan::Curve { steps: [0, 35, 50, 65, 80, 100] });
+    }
+
+    #[test]
+    fn every_plan_variant_round_trips() {
+        for plan in [
+            FanPlan::Automatic,
+            FanPlan::Max,
+            FanPlan::Fixed { percent: 40 },
+            FanPlan::Curve { steps: crate::hardware::fan::DEFAULT_FAN_CURVE },
+        ] {
+            let json = serde_json::to_string(&plan).expect("serialize");
+            let back: FanPlan = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, plan);
+        }
     }
 }

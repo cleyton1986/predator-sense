@@ -60,17 +60,45 @@ pub fn build() -> gtk::ScrolledWindow {
     });
     page.append(&open_btn);
 
-    if let Some(path) = crate::ui::window::find_resource("find-serial-number.svg") {
+    // A photo of a real label rather than the upstream line drawing.
+    //
+    // Scaled during decode, and never upscaled. `GtkPicture` reports its
+    // image's full size as its natural size and a size request is a minimum
+    // rather than a cap, so a photo taller than this made the widget that tall
+    // and pushed the rest of the page out of view. Capping at decode time
+    // fixes that; refusing to scale up keeps a smaller image pixel-exact
+    // instead of softening it, which is what happened to the drawing this
+    // replaced (its 443x84 viewBox was stretched to the request and went
+    // blurry).
+    //
+    // `find-serial-number.svg` is still here if the drawing is ever wanted;
+    // it needs width/height attributes to render sharp.
+    if let Some(path) = crate::ui::window::find_resource("find-serial-number.png") {
         let caption = gtk::Label::new(Some(crate::i18n::t("find_serial_number_caption")));
         caption.add_css_class("info-note");
         caption.set_halign(gtk::Align::Start);
         caption.set_margin_top(10);
         page.append(&caption);
 
-        let picture = gtk::Picture::for_filename(path);
+        const MAX_IMAGE_HEIGHT: i32 = 260;
+        let natural_height = gtk4::gdk_pixbuf::Pixbuf::file_info(&path).map(|(_, _, h)| h);
+        let picture = match natural_height {
+            // Taller than we draw: scale it down while decoding, so the
+            // texture is already the size the widget asks for.
+            Some(height) if height > MAX_IMAGE_HEIGHT => {
+                gtk4::gdk_pixbuf::Pixbuf::from_file_at_scale(&path, -1, MAX_IMAGE_HEIGHT, true)
+                    .ok()
+                    .map(|scaled| {
+                        gtk::Picture::for_paintable(&gtk::gdk::Texture::for_pixbuf(&scaled))
+                    })
+                    .unwrap_or_else(|| gtk::Picture::for_filename(&path))
+            }
+            // Already at or under the drawn height: leave it alone. Asking for
+            // more would scale it up and soften it.
+            _ => gtk::Picture::for_filename(&path),
+        };
         picture.set_can_shrink(true);
         picture.set_halign(gtk::Align::Start);
-        picture.set_size_request(-1, 260);
         page.append(&picture);
     }
 

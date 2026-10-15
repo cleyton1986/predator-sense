@@ -32,6 +32,25 @@
    status dots, and monospace entries are intentionally left outside this
    system - they read as icons/chips, not prose. */
 
+/* libadwaita 1.6+ paints every stock widget (GtkSwitch, GtkCheckButton, entry
+   focus rings, dropdown arrows) from the system accent colour, not from
+   anything defined below - on this machine `gsettings get
+   org.gnome.desktop.interface accent-color` is 'red', which has nothing to do
+   with this app's palette. Defining the accent variables ourselves is what
+   makes those stock widgets follow the app instead of the desktop. The
+   literal here is the plain cyan on purpose, matching `cyan`/`cyan_dark`
+   above: `brand_theme::recolor` rewrites this literal along with every other
+   cyan one, so stock widgets end up following the active power mode's accent
+   too. */
+:root {
+    --accent-bg-color: #00cce6;
+    --accent-fg-color: #050505;
+    --accent-color: #00cce6;
+}
+@define-color accent_bg_color #00cce6;
+@define-color accent_fg_color #050505;
+@define-color accent_color #00cce6;
+
 @define-color cyan #00cce6;
 @define-color cyan_dark #008899;
 @define-color bg_body #050505;
@@ -295,6 +314,16 @@ viewport {
     font-weight: 700;
 }
 
+/* Real GtkToggleButtons (the keyboard Direction toggles) rely on GTK's own
+   :checked state rather than the hand-managed .mode-active class - without
+   this rule they have no visible selected state at all. */
+.mode-button:checked {
+    background: linear-gradient(90deg, @cyan, @cyan_dark);
+    color: #ffffff;
+    border-color: @cyan;
+    font-weight: 700;
+}
+
 /* === Lighting device switcher / rear cover logo === */
 .lighting-device-switcher {
     padding: 3px;
@@ -476,7 +505,24 @@ viewport {
     font-size: 12px;
     font-weight: 600;
     color: @cyan;
-    min-width: 30px;
+    min-width: 34px;
+}
+
+/* Small delete affordance on a colour swatch chip - corner overlay, not a
+   full-size button. */
+.swatch-delete {
+    min-width: 16px;
+    min-height: 16px;
+    padding: 0;
+    background-color: rgba(0, 0, 0, 0.55);
+    color: #cccccc;
+    border: none;
+    -gtk-icon-size: 10px;
+}
+
+.swatch-delete:hover {
+    background-color: @danger;
+    color: #ffffff;
 }
 
 /* === Direction Buttons === */

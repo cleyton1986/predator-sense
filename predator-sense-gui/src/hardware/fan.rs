@@ -10,9 +10,25 @@ pub enum FanMode {
     Custom(u8, u8), // cpu_percent, gpu_percent
 }
 
-/// Set fan mode using the predator-sense-helper (requires pkexec)
-/// Auto and Max use firmware modes (safe). Custom is disabled for safety.
+/// Sets the EC's own fan preset through the privileged helper.
+///
+/// Auto and Max are firmware modes and safe; Custom is refused, see
+/// `set_fan_mode_inner`.
+///
+/// This used to have a waking sibling that bounced the WMI ThermalProfile
+/// index to kick the EC's dynamic curve into life. That wake is gone. It was a
+/// workaround for a fan stall this project measured and then retracted (0 RPM
+/// at idle is the firmware curve working, not a stall), and the only caller
+/// that still used it was the reconciler, where bouncing the index would have
+/// moved the user's visible power mode as a side effect of a background fan
+/// write, and a failed restore would have left the machine in a different
+/// mode whose different plan the next tick would then apply.
 pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
+    set_fan_mode_inner(mode)
+}
+
+fn set_fan_mode_inner(mode: FanMode) -> Result<(), String> {
+    crate::hardware::applog::info(&format!("fan: mode {mode:?}"));
     use crate::hardware::capabilities::FanPresetStatus;
 
     let action = match mode {
@@ -70,53 +86,9 @@ pub fn set_fan_mode(mode: FanMode) -> Result<(), String> {
     // is a real transition on the WMI `ThermalProfile` index - confirmed by
     // hand, see `PROTOCOLO-HARDWARE.md` §9.2. Only Auto needs this: Max is
     // supposed to sit at its fixed setpoint, not follow a curve.
-    if mode == FanMode::Auto {
-        wake_dynamic_fan_curve();
-    }
     crate::hardware::helper::execute(action, &[])
 }
 
-/// Bounces the firmware thermal-profile index off itself through another
-/// supported one and back, as a side effect that wakes the EC's real fan
-/// curve - see `set_fan_mode`'s doc comment. Round-trips back to the same
-/// index so the "Mode" page's firmware profile never actually changes from
-/// the user's point of view.
-///
-/// Best-effort and silent on the common failure paths (unavailable, or only
-/// one supported index to begin with - nothing to bounce through) since this
-/// is a bonus wake-up, not the fan mode change itself. Logs if the bounce
-/// left the profile somewhere other than where it started, since that *is* a
-/// real, visible side effect a caller did not ask for.
-/// Only reached from the EC-preset path in `set_fan_mode`, which a PH16-71
-/// never takes - it is `KnownIncompatible` there, so Auto/Max route through
-/// PWM instead. The PWM path's own use of this was removed after the stall it
-/// worked around turned out not to exist; that measurement does not cover the
-/// EC path on the models that do use it, so this is left alone rather than
-/// deleted on a guess.
-pub fn wake_dynamic_fan_curve() {
-    use crate::hardware::thermal_profile;
-    if !thermal_profile::is_available() {
-        return;
-    }
-    let Some(current) = thermal_profile::current() else {
-        return;
-    };
-    let Some(&other) = thermal_profile::supported().iter().find(|&&i| i != current) else {
-        return;
-    };
-    if let Err(e) = thermal_profile::set(other) {
-        crate::hardware::applog::info(&format!(
-            "fan auto-curve wake skipped: could not set thermal profile {other}: {e}"
-        ));
-        return;
-    }
-    if let Err(e) = thermal_profile::set(current) {
-        crate::hardware::applog::error(&format!(
-            "fan auto-curve wake left the firmware power profile at {other} instead of \
-             restoring {current}: {e}"
-        ));
-    }
-}
 
 /// Reads back the firmware fan mode actually active right now (EC offsets
 /// 0x21/0x22, the same ones `set_fan_mode`'s Auto/Max write) - `None` if
@@ -155,6 +127,9 @@ pub fn pwm_available() -> bool {
 /// Set CPU/GPU fan speed as a percentage (0-100). Writes hwmon pwm (0-255).
 /// Switches the fan to manual/custom mode first.
 pub fn set_pwm_percent(cpu_pct: u8, gpu_pct: u8) -> Result<(), String> {
+    crate::hardware::applog::info(&format!(
+        "fan: manual pwm cpu={cpu_pct}% gpu={gpu_pct}%"
+    ));
     let manual = PwmControlMode::Manual.as_str();
     crate::hardware::helper::execute(HelperAction::PwmCpuEnable, &[manual])?;
     crate::hardware::helper::execute(HelperAction::PwmGpuEnable, &[manual])?;
@@ -176,6 +151,7 @@ pub fn set_pwm_percent(cpu_pct: u8, gpu_pct: u8) -> Result<(), String> {
 /// 91 C under load). The bounce was a visible mode-key flicker and a chance of
 /// being left in the wrong profile, bought nothing, and is gone.
 pub fn set_pwm_auto() -> Result<(), String> {
+    crate::hardware::applog::info("fan: firmware curve (pwm_enable=2)");
     let automatic = PwmControlMode::Automatic.as_str();
     crate::hardware::helper::execute(HelperAction::PwmCpuEnable, &[automatic])?;
     crate::hardware::helper::execute(HelperAction::PwmGpuEnable, &[automatic])?;
@@ -219,7 +195,7 @@ pub fn curve_input_temp(cpu: Option<f64>, gpu: Option<f64>) -> Option<f64> {
 /// The 6 fixed temperature breakpoints (<45/<55/<65/<75/<85/85+ °C) the
 /// software auto-curve steps through. Not user-editable, only the percent
 /// each step applies is (see `config::fan_curve_points`, issue #59).
-const FAN_CURVE_BREAKPOINTS_C: [f64; 5] = [45.0, 55.0, 65.0, 75.0, 85.0];
+pub const FAN_CURVE_BREAKPOINTS_C: [f64; 5] = [45.0, 55.0, 65.0, 75.0, 85.0];
 
 /// Original hardcoded curve, kept as the default for anyone who never opens
 /// the new per-step editor in Fan Control.
@@ -237,6 +213,205 @@ pub fn fan_curve_pct(temp_c: f64, steps: &[u8; 6]) -> u8 {
     steps[5]
 }
 
+/// Temperature at which the curve takes manual control back after handing the
+/// fans to the firmware, or `None` for a curve that is zero everywhere.
+///
+/// Deliberately not the boundary of the zero region, and not that boundary
+/// plus a couple of degrees. With the fans stopped the temperature climbs past
+/// any small buffer on its own, and the first non-zero step then pulls it
+/// straight back below the boundary, so the machine alternates between silence
+/// and a spinning fan for as long as it sits idle. Measured on a PH16-71 with
+/// a 3 C buffer and a `[0, 35, ...]` curve: 0 RPM at 45 C, 2500 RPM at 48 C,
+/// back to 0 RPM at 45 C, on a roughly one-minute cycle. A fan that cycles is
+/// worse than a fan that holds a low speed.
+///
+/// So the whole first non-zero band is left to the firmware, whose own ramp is
+/// gentler than any step here, and the curve resumes at the top of that band.
+/// The result is the wide asymmetric gap that hardware zero-RPM modes use
+/// (stop low, start high): with `[0, 35, 50, ...]` the fans are the firmware's
+/// below 55 C and the curve's above it, and once the curve has them it keeps
+/// them until the temperature falls back under 45 C. At idle the firmware
+/// simply holds the temperature inside that band and nothing cycles; under a
+/// real load the temperature crosses the top in seconds.
+pub fn curve_resume_c(steps: &[u8; 6]) -> Option<f64> {
+    let first_active = steps.iter().position(|&pct| pct != 0)?;
+    // A curve whose only non-zero step is the top one resumes at that step's
+    // own boundary: there is no band above it to defer to.
+    Some(FAN_CURVE_BREAKPOINTS_C[first_active.min(FAN_CURVE_BREAKPOINTS_C.len() - 1)])
+}
+
+/// The temperature below which this curve leaves the fans to the firmware
+/// whatever state they are already in.
+///
+/// Not the same as [`curve_resume_c`], and anything that draws a curve
+/// needs the difference. Below the value returned here `fan_curve_pct` is
+/// zero, so `curve_action` hands the fans over however they are running.
+/// Between here and `curve_resume_c` the firmware keeps them only if it
+/// already has them; otherwise the curve drives its first non-zero step.
+///
+/// `None` both when the first step is not zero and when every step is
+/// zero. A caller that cares must tell those apart: an all-zero curve is
+/// the firmware's at every temperature.
+pub fn curve_zero_region_top_c(steps: &[u8; 6]) -> Option<f64> {
+    if steps[0] != 0 {
+        return None;
+    }
+    // `steps[0] == 0` puts the first non-zero step at index 1 or later, so
+    // the subtraction cannot underflow.
+    steps
+        .iter()
+        .position(|&pct| pct != 0)
+        .map(|first| FAN_CURVE_BREAKPOINTS_C[first - 1])
+}
+
+/// What the software curve should do on this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurveAction {
+    /// Hand both fans to the firmware curve.
+    ///
+    /// This is the only way to reach 0 RPM. A manual `pwm` of 0 is not off:
+    /// the EC holds a floor, measured at ~1670 RPM on a PH16-71 at idle and
+    /// under load alike, so a user who sets a step to 0% gets a spinning fan
+    /// unless the firmware takes over. Below its own threshold the firmware
+    /// runs the machine genuinely fanless (0 RPM up to ~48 C on that chassis),
+    /// which is what 0% is asking for.
+    Firmware,
+    /// Drive both fans at this percentage.
+    Manual(u8),
+    /// Write nothing. Either the firmware already has the fans and the curve
+    /// still wants 0%, or the temperature has not yet cleared the hysteresis
+    /// band, and taking manual control back would undo the silence.
+    Hold,
+}
+
+/// What the curve last successfully applied to the hardware.
+///
+/// `Unknown` covers startup and any write that failed. The hardware then holds
+/// whatever the firmware, a previous session or another writer left, so the
+/// curve has to assert itself rather than trust a value it never managed to
+/// apply. That distinction is load-bearing: a flag saying "handed off" while
+/// the write actually failed is how the curve and the hardware came to
+/// disagree silently, with the app convinced it had done something it had not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanState {
+    Unknown,
+    Firmware,
+    Manual(u8),
+}
+
+/// Whether `action` still needs to reach the hardware.
+///
+/// The curve runs every few seconds and its answer rarely changes, so without
+/// this check every tick spent four privileged helper round trips restating
+/// the percentage already in force: 84 writes in 6.5 idle minutes, measured.
+pub fn needs_write(action: CurveAction, applied: FanState) -> bool {
+    match (action, applied) {
+        (CurveAction::Hold, _) => false,
+        (CurveAction::Firmware, FanState::Firmware) => false,
+        (CurveAction::Manual(wanted), FanState::Manual(in_force)) => wanted != in_force,
+        _ => true,
+    }
+}
+
+/// How often the reconciler tick runs. Shared with the back-off below so the
+/// two cannot drift apart if one of them is ever retuned.
+pub const RECONCILE_TICK_S: u32 = 3;
+
+/// Consecutive failed writes after which the reconciler stops trying on every
+/// tick.
+pub const BACKOFF_AFTER_FAILURES: u32 = 3;
+
+/// Ticks between attempts once backed off, i.e. 30 s.
+pub const BACKOFF_TICKS: u32 = 30 / RECONCILE_TICK_S;
+
+/// Whether the reconciler may attempt a hardware write on this tick.
+///
+/// Some failures never clear on their own, and the reconciler cannot tell
+/// those apart from a transient one: a model whose EC refuses the preset bytes
+/// rejects every attempt, and an unreachable privileged helper means each
+/// attempt spawns a fresh pkexec, so a fresh authentication dialog, for a fan
+/// write the user never asked for. Retrying that every three seconds for the
+/// life of the session is the harm; slowing to one attempt every 30 s keeps
+/// the retry without the cost. Only a write that actually succeeded resets the
+/// counter, since anything else would restart the storm.
+pub fn may_attempt_write(consecutive_failures: u32, ticks_since_attempt: u32) -> bool {
+    consecutive_failures < BACKOFF_AFTER_FAILURES || ticks_since_attempt >= BACKOFF_TICKS
+}
+
+/// Decides between the firmware curve and a manual percentage, given where the
+/// temperature is and whether the firmware currently has control.
+///
+/// A step of 0% means "stop", which only the firmware can do. Coming back out
+/// of that needs the hysteresis buffer, or a temperature hovering at the
+/// boundary would hand the fans back and forth every tick.
+pub fn curve_action(temp_c: f64, steps: &[u8; 6], handed_off: bool) -> CurveAction {
+    if fan_curve_pct(temp_c, steps) == 0 {
+        // Nothing to write once the firmware already has it.
+        return if handed_off {
+            CurveAction::Hold
+        } else {
+            CurveAction::Firmware
+        };
+    }
+    // Once the firmware has them, it keeps them until the temperature clears
+    // the whole first non-zero band. See curve_resume_c for why that is the
+    // band and not the boundary.
+    //
+    // `steps[0] == 0` guards the case where the user edits the zero step away
+    // while the firmware holds the fans: there is no longer a band to defer,
+    // they have asked for manual control at this temperature, and making them
+    // wait for a boundary their curve no longer has would look like the
+    // setting being ignored.
+    if handed_off
+        && steps[0] == 0
+        && curve_resume_c(steps).map_or(true, |resume| temp_c < resume)
+    {
+        return CurveAction::Hold;
+    }
+    CurveAction::Manual(fan_curve_pct(temp_c, steps))
+}
+
+/// Resolves a mode's plan into what the reconciler should do this tick.
+///
+/// `temp_c` is the hotter die from `curve_input_temp`. `handed_off` is whether
+/// the firmware currently holds the fans, which only `Curve` and `Automatic`
+/// care about.
+pub fn plan_target(
+    plan: crate::config::FanPlan,
+    temp_c: Option<f64>,
+    handed_off: bool,
+) -> CurveAction {
+    use crate::config::FanPlan;
+    match plan {
+        FanPlan::Automatic => {
+            if handed_off {
+                CurveAction::Hold
+            } else {
+                CurveAction::Firmware
+            }
+        }
+        FanPlan::Max => CurveAction::Manual(100),
+        // 0% means "stop", and a manual pwm of 0 is not off (see
+        // `CurveAction::Firmware`), so a fixed 0 takes the same handoff a 0%
+        // curve step does. Without it the Custom slider at 0 left the fans
+        // spinning at the EC floor for good, while the same 0 as a curve step
+        // reached true 0 RPM.
+        FanPlan::Fixed { percent: 0 } => {
+            if handed_off {
+                CurveAction::Hold
+            } else {
+                CurveAction::Firmware
+            }
+        }
+        FanPlan::Fixed { percent } => CurveAction::Manual(percent.min(100)),
+        FanPlan::Curve { steps } => match temp_c {
+            Some(temp_c) => curve_action(temp_c, &steps, handed_off),
+            // No sensor: writing a guessed percentage is how fans get pinned.
+            None => CurveAction::Hold,
+        },
+    }
+}
+
 /// Read current CPU/GPU fan PWM as percentage (0-100), if available.
 pub fn get_pwm_percent() -> Option<(u8, u8)> {
     let cpu: u16 = crate::hardware::helper::read(HelperAction::PwmCpuRead)?
@@ -249,6 +424,249 @@ pub fn get_pwm_percent() -> Option<(u8, u8)> {
         ((cpu * PERCENT_MAX) / PWM_VALUE_MAX) as u8,
         ((gpu * PERCENT_MAX) / PWM_VALUE_MAX) as u8,
     ))
+}
+
+/// What holds the fans right now, read back from the hardware.
+///
+/// The reconciler's `FanState` starts `Unknown`, which reads as a
+/// disagreement, so its first tick wrote unconditionally even for an
+/// `Automatic` plan on a machine the firmware was already governing: a
+/// pointless `pwm_enable=2` on PWM hardware, and on EC-only hardware a preset
+/// write seconds after every launch for a user who configured nothing.
+///
+/// `Unknown` is still the answer whenever the reading does not map onto
+/// something the reconciler itself could have written, because then it has to
+/// assert rather than assume. A manual duty read back can also be a percent
+/// off what was written, since the percent-to-pwm conversion is lossy, which
+/// costs one corrective write and no more.
+pub fn observe_fan_state(pwm_available: bool) -> FanState {
+    if pwm_available {
+        let enable = crate::hardware::helper::read(HelperAction::PwmCpuEnableRead);
+        return match enable.as_deref().map(str::trim) {
+            Some(mode) if mode == PwmControlMode::Automatic.as_str() => FanState::Firmware,
+            Some(mode) if mode == PwmControlMode::Manual.as_str() => {
+                match get_pwm_percent() {
+                    Some((cpu, _)) => FanState::Manual(cpu),
+                    None => FanState::Unknown,
+                }
+            }
+            // Full speed, or anything unrecognised: not a state the
+            // reconciler writes on this hardware, so it is not a state it may
+            // claim to be holding.
+            _ => FanState::Unknown,
+        };
+    }
+    match get_fan_mode() {
+        Some(FanMode::Auto) => FanState::Firmware,
+        // The Max preset is what `write_for` sends for any manual target on
+        // this hardware, and 100 is the only manual target that can reach it.
+        Some(FanMode::Max) => FanState::Manual(100),
+        _ => FanState::Unknown,
+    }
+}
+
+/// The plan bound to a raw mode id, for callers that already have the id.
+pub fn plan_for_id(
+    plans: &[crate::config::FanBinding],
+    mode: &str,
+) -> Option<crate::config::FanPlan> {
+    plans
+        .iter()
+        .find(|binding| binding.mode == mode)
+        .map(|binding| binding.plan)
+}
+
+/// `plans` with `mode` bound to `plan`, adding the binding if it is new.
+pub fn with_plan(
+    plans: &[crate::config::FanBinding],
+    mode: &str,
+    plan: crate::config::FanPlan,
+) -> Vec<crate::config::FanBinding> {
+    let mut updated: Vec<crate::config::FanBinding> = plans
+        .iter()
+        .filter(|binding| binding.mode != mode)
+        .cloned()
+        .collect();
+    updated.push(crate::config::FanBinding {
+        mode: mode.to_string(),
+        plan,
+    });
+    updated
+}
+
+/// Writes a plan for `profile` into the config. Intent only: the reconciler
+/// notices on its next tick and performs any hardware write.
+pub fn set_plan_for(
+    profile: Option<crate::hardware::profile::PowerProfile>,
+    plan: crate::config::FanPlan,
+) -> Result<(), String> {
+    let Some(profile) = profile else {
+        return Err("fan plan: no active power mode".into());
+    };
+    let mut cfg = crate::config::load_app_config();
+    cfg.fan_plans = with_plan(&cfg.fan_plans, profile.to_id(), plan);
+    crate::config::save_app_config(&cfg)
+}
+
+/// The plan bound to `profile`, or `Automatic` when there is none.
+///
+/// `Automatic` is the safe fallback in every unknown case: the firmware can
+/// always cool the machine, and it is also what an un-migrated config means.
+pub fn plan_for(
+    profile: Option<crate::hardware::profile::PowerProfile>,
+    plans: &[crate::config::FanBinding],
+) -> crate::config::FanPlan {
+    let Some(profile) = profile else {
+        return crate::config::FanPlan::Automatic;
+    };
+    plan_for_id(plans, profile.to_id()).unwrap_or(crate::config::FanPlan::Automatic)
+}
+
+/// Builds the initial per-mode plans from the pre-existing global fan
+/// settings.
+///
+/// The aim is that migrating leaves the machine behaving as it would have
+/// after its next profile switch, rather than literally unchanged in the
+/// instant it runs: a stored `fan_mode` of "max" was always going to be
+/// overwritten by the next `set_profile`, so it is not preserved. See the
+/// comment in the body for why that is the honest reading.
+///
+/// The only writer of `fan_plans` that reads the legacy global fields, so the
+/// reconciler itself never has to consult two sources. `fan_curve_points` has
+/// one other reader, the Fan Control page, which uses it as the seed for a
+/// mode that has never had a curve; `fan_auto_curve_enabled` has no reader
+/// outside this function and nothing writes it but the tests below, so it is
+/// only ever whatever an older config.json already held.
+pub fn migrate_plans(cfg: &crate::config::AppConfig) -> Vec<crate::config::FanBinding> {
+    use crate::config::{FanBinding, FanPlan};
+    use crate::hardware::profile::PowerProfile;
+
+    // The software curve was global: its timer wrote whichever mode was
+    // active, every tick, so Curve on all five modes is exactly the old
+    // steady state.
+    //
+    // A saved `fan_mode` is not, and carrying it to every mode would be the
+    // worse error. `set_profile` wrote a fan mode on every profile switch, so
+    // a stored "max" survived only until the next switch, and on Eco, Quiet
+    // and Balanced the behaviour a user actually had was Auto. Carrying it
+    // across would leave the two modes whose purpose is silence running at
+    // full speed for someone who changed nothing. So everything except the
+    // curve resolves per mode through `fan_mode_for`, which is precisely what
+    // a profile switch used to force.
+    let global = cfg
+        .fan_auto_curve_enabled
+        .then(|| FanPlan::Curve { steps: cfg.fan_curve_points });
+
+    [
+        PowerProfile::Eco,
+        PowerProfile::Quiet,
+        PowerProfile::Balanced,
+        PowerProfile::Performance,
+        PowerProfile::Turbo,
+    ]
+    .into_iter()
+    .map(|profile| FanBinding {
+        mode: profile.to_id().to_string(),
+        plan: global.unwrap_or_else(|| {
+            plan_from_fan_mode(crate::hardware::profile::fan_mode_for(
+                profile,
+                cfg.keep_fan_auto_in_performance,
+            ))
+        }),
+    })
+    .collect()
+}
+
+/// The mode plans this config should have once its "keep the fan on Auto in
+/// Performance and Turbo" setting has changed (issue #41).
+///
+/// Only those two modes are rebound: they are the only ones the setting has
+/// ever spoken for, and every other mode's plan is the user's own. Migration
+/// reads the same setting, but it runs once, so without this the switch would
+/// be remembered and never acted on for anyone whose plans already exist.
+pub fn plans_with_keep_fan_auto(
+    cfg: &crate::config::AppConfig,
+) -> Vec<crate::config::FanBinding> {
+    use crate::hardware::profile::PowerProfile;
+
+    if cfg.fan_plans.is_empty() {
+        // Nothing to rebind yet. Migration answers the same question and also
+        // carries the other three modes' legacy settings across, which
+        // rebinding two modes here would strand.
+        return migrate_plans(cfg);
+    }
+    let mut updated = cfg.fan_plans.clone();
+    for profile in [PowerProfile::Performance, PowerProfile::Turbo] {
+        let plan = plan_from_fan_mode(crate::hardware::profile::fan_mode_for(
+            profile,
+            cfg.keep_fan_auto_in_performance,
+        ));
+        updated = with_plan(&updated, profile.to_id(), plan);
+    }
+    updated
+}
+
+/// The plan that expresses a firmware fan mode, for the callers that have to
+/// bridge the two vocabularies.
+fn plan_from_fan_mode(mode: FanMode) -> crate::config::FanPlan {
+    match mode {
+        FanMode::Auto => crate::config::FanPlan::Automatic,
+        FanMode::Max => crate::config::FanPlan::Max,
+        // `fan_mode_for` never returns Custom. Automatic is the safe answer
+        // for anything this mapping cannot express, the same fallback
+        // `plan_for` uses for an unknown mode.
+        FanMode::Custom(_, _) => crate::config::FanPlan::Automatic,
+    }
+}
+
+/// Narrows a plan to what this machine can actually do.
+///
+/// `Curve` and `Fixed` need per-fan PWM. Without `ACER_CAP_PWM` there is no
+/// `pwm1` to write, so they are unreachable through the UI, but they can still
+/// arrive in a config copied from a machine that has it. Resolving to
+/// `Automatic` keeps the fans governed by something rather than leaving a plan
+/// that silently does nothing.
+pub fn plan_for_hardware(
+    plan: crate::config::FanPlan,
+    pwm_available: bool,
+) -> crate::config::FanPlan {
+    use crate::config::FanPlan;
+    match plan {
+        FanPlan::Curve { .. } | FanPlan::Fixed { .. } if !pwm_available => FanPlan::Automatic,
+        other => other,
+    }
+}
+
+/// Which hardware call a resolved target needs on this machine.
+///
+/// Two families of Acer hardware reach this point. Models with
+/// `ACER_CAP_PWM` take a duty cycle per fan; everything else has only the EC's
+/// own Auto and Max presets. Keeping the choice in one pure function means the
+/// reconciler does not grow a second decision path, and it stays testable
+/// without hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanWrite {
+    /// `pwm_enable = 2` on both fans: hand them to the firmware curve.
+    PwmAuto,
+    /// A manual duty on both fans.
+    PwmPercent(u8),
+    /// The EC's Auto preset, for models with no per-fan PWM.
+    PresetAuto,
+    /// The EC's Max preset.
+    PresetMax,
+}
+
+pub fn write_for(target: CurveAction, pwm_available: bool) -> Option<FanWrite> {
+    match (target, pwm_available) {
+        (CurveAction::Hold, _) => None,
+        (CurveAction::Firmware, true) => Some(FanWrite::PwmAuto),
+        (CurveAction::Manual(percent), true) => Some(FanWrite::PwmPercent(percent)),
+        // Without per-fan PWM, plan_for_hardware has already narrowed every
+        // plan to Automatic or Max, so a manual target can only have come from
+        // Max. There is no EC preset for an arbitrary percentage.
+        (CurveAction::Firmware, false) => Some(FanWrite::PresetAuto),
+        (CurveAction::Manual(_), false) => Some(FanWrite::PresetMax),
+    }
 }
 
 #[cfg(test)]
@@ -319,5 +737,487 @@ mod tests {
             80
         );
         assert_eq!(fan_curve_pct(idle_cpu.unwrap(), &steps), 25);
+    }
+    #[test]
+    fn a_zero_step_hands_the_fans_to_the_firmware() {
+        let steps = [0, 35, 50, 65, 80, 100];
+        // Only the firmware can actually stop them; manual 0 still spins.
+        assert_eq!(curve_action(40.0, &steps, false), CurveAction::Firmware);
+        // Once it has them, there is nothing to write each tick.
+        assert_eq!(curve_action(40.0, &steps, true), CurveAction::Hold);
+    }
+
+    #[test]
+    fn the_firmware_keeps_the_fans_through_the_whole_first_band() {
+        let steps = [0, 35, 50, 65, 80, 100];
+        // The measured failure mode: resuming just above 45 C made the fans
+        // cycle between 0 and 2500 RPM every minute, because stopped fans
+        // warm the machine past the boundary and 35% cools it back under.
+        assert_eq!(curve_action(46.0, &steps, true), CurveAction::Hold);
+        assert_eq!(curve_action(50.0, &steps, true), CurveAction::Hold);
+        assert_eq!(curve_action(54.9, &steps, true), CurveAction::Hold);
+        // At the top of that band the curve takes over, at the step for the
+        // temperature it actually reached.
+        assert_eq!(curve_action(55.0, &steps, true), CurveAction::Manual(50));
+        assert_eq!(curve_action(80.0, &steps, true), CurveAction::Manual(80));
+    }
+
+    #[test]
+    fn once_the_curve_has_them_it_keeps_them_until_the_zero_step() {
+        let steps = [0, 35, 50, 65, 80, 100];
+        // The other half of the asymmetric gap: manual control is held all
+        // the way down to the zero region rather than handing back at 55 C.
+        assert_eq!(curve_action(54.0, &steps, false), CurveAction::Manual(35));
+        assert_eq!(curve_action(45.0, &steps, false), CurveAction::Manual(35));
+        assert_eq!(curve_action(44.0, &steps, false), CurveAction::Firmware);
+    }
+
+    #[test]
+    fn the_band_follows_whichever_steps_are_zero() {
+        // Two zero steps: the firmware owns everything below 65 C.
+        let steps = [0, 0, 50, 65, 80, 100];
+        assert_eq!(curve_action(50.0, &steps, true), CurveAction::Hold);
+        assert_eq!(curve_action(64.0, &steps, true), CurveAction::Hold);
+        assert_eq!(curve_action(65.0, &steps, true), CurveAction::Manual(65));
+    }
+
+    #[test]
+    fn a_curve_that_is_zero_until_the_top_step_resumes_at_its_boundary() {
+        let steps = [0, 0, 0, 0, 0, 100];
+        assert_eq!(curve_action(80.0, &steps, true), CurveAction::Hold);
+        assert_eq!(curve_action(85.0, &steps, true), CurveAction::Manual(100));
+    }
+
+    #[test]
+    fn a_curve_without_zeros_never_hands_off() {
+        let steps = DEFAULT_FAN_CURVE;
+        assert_eq!(curve_action(20.0, &steps, false), CurveAction::Manual(25));
+        assert_eq!(curve_action(90.0, &steps, false), CurveAction::Manual(100));
+    }
+
+    #[test]
+    fn editing_the_zero_step_away_takes_the_fans_back_immediately() {
+        // The firmware is holding them from a previous `[0, ...]` curve and
+        // the user has just set the first step to 25%. Waiting for a band the
+        // curve no longer has would read as the setting being ignored.
+        let steps = DEFAULT_FAN_CURVE;
+        assert_eq!(curve_action(20.0, &steps, true), CurveAction::Manual(25));
+    }
+
+    #[test]
+    fn an_all_zero_curve_just_means_leave_it_to_the_firmware() {
+        let steps = [0; 6];
+        assert_eq!(curve_action(95.0, &steps, false), CurveAction::Firmware);
+        assert_eq!(curve_action(95.0, &steps, true), CurveAction::Hold);
+    }
+
+    #[test]
+    fn an_unchanged_manual_percentage_is_not_rewritten() {
+        // The defect this fixes: the curve rewrote the same percentage every
+        // tick, four privileged helper calls at a time, 84 writes in 6.5
+        // minutes of a machine doing nothing.
+        assert!(!needs_write(CurveAction::Manual(35), FanState::Manual(35)));
+    }
+
+    #[test]
+    fn a_changed_manual_percentage_is_written() {
+        assert!(needs_write(CurveAction::Manual(50), FanState::Manual(35)));
+    }
+
+    #[test]
+    fn hold_never_writes() {
+        assert!(!needs_write(CurveAction::Hold, FanState::Firmware));
+        assert!(!needs_write(CurveAction::Hold, FanState::Manual(35)));
+        assert!(!needs_write(CurveAction::Hold, FanState::Unknown));
+    }
+
+    #[test]
+    fn a_repeated_handoff_is_not_rewritten() {
+        assert!(!needs_write(CurveAction::Firmware, FanState::Firmware));
+    }
+
+    #[test]
+    fn switching_between_firmware_and_manual_is_written() {
+        assert!(needs_write(CurveAction::Firmware, FanState::Manual(35)));
+        assert!(needs_write(CurveAction::Manual(35), FanState::Firmware));
+    }
+
+    #[test]
+    fn nothing_is_assumed_before_the_first_successful_write() {
+        // Startup, or after a write failed: the hardware is whatever the
+        // firmware or a previous session left, so the curve has to assert
+        // itself rather than trusting a value it never applied.
+        assert!(needs_write(CurveAction::Manual(35), FanState::Unknown));
+        assert!(needs_write(CurveAction::Firmware, FanState::Unknown));
+    }
+
+    #[test]
+    fn automatic_leaves_the_fans_to_the_firmware() {
+        use crate::config::FanPlan;
+        assert_eq!(
+            plan_target(FanPlan::Automatic, Some(70.0), false),
+            CurveAction::Firmware
+        );
+        // Already handed off: nothing to write every tick.
+        assert_eq!(
+            plan_target(FanPlan::Automatic, Some(70.0), true),
+            CurveAction::Hold
+        );
+    }
+
+    #[test]
+    fn fixed_and_max_are_flat_percentages() {
+        use crate::config::FanPlan;
+        assert_eq!(
+            plan_target(FanPlan::Fixed { percent: 40 }, Some(70.0), false),
+            CurveAction::Manual(40)
+        );
+        assert_eq!(
+            plan_target(FanPlan::Max, Some(30.0), false),
+            CurveAction::Manual(100)
+        );
+    }
+
+    #[test]
+    fn a_curve_plan_uses_the_curve_rules() {
+        use crate::config::FanPlan;
+        let plan = FanPlan::Curve { steps: [0, 35, 50, 65, 80, 100] };
+        // Below the zero step: hand off, exactly as curve_action decides.
+        assert_eq!(plan_target(plan, Some(40.0), false), CurveAction::Firmware);
+        // Inside the firmware band after a handoff: hold.
+        assert_eq!(plan_target(plan, Some(50.0), true), CurveAction::Hold);
+        // Above the band: the curve takes over.
+        assert_eq!(plan_target(plan, Some(70.0), true), CurveAction::Manual(65));
+    }
+
+    #[test]
+    fn no_temperature_reading_means_write_nothing() {
+        use crate::config::FanPlan;
+        // A curve cannot be evaluated without a sensor, and guessing a
+        // percentage for hardware whose temperature is unknown is how fans end
+        // up pinned. Flat plans do not need one.
+        assert_eq!(
+            plan_target(FanPlan::Curve { steps: DEFAULT_FAN_CURVE }, None, false),
+            CurveAction::Hold
+        );
+        assert_eq!(
+            plan_target(FanPlan::Max, None, false),
+            CurveAction::Manual(100)
+        );
+    }
+
+    #[test]
+    fn the_plan_for_the_active_mode_is_used() {
+        use crate::config::{FanBinding, FanPlan};
+        use crate::hardware::profile::PowerProfile;
+        let plans = vec![
+            FanBinding { mode: "balanced".into(), plan: FanPlan::Automatic },
+            FanBinding { mode: "turbo".into(), plan: FanPlan::Max },
+        ];
+        assert_eq!(plan_for(Some(PowerProfile::Balanced), &plans), FanPlan::Automatic);
+        assert_eq!(plan_for(Some(PowerProfile::Turbo), &plans), FanPlan::Max);
+    }
+
+    #[test]
+    fn a_mode_with_no_plan_falls_back_to_automatic() {
+        use crate::config::{FanBinding, FanPlan};
+        use crate::hardware::profile::PowerProfile;
+        let plans = vec![FanBinding { mode: "turbo".into(), plan: FanPlan::Max }];
+        // Automatic is the safe fallback: the firmware is always able to cool
+        // the machine, and it is what an un-migrated config means.
+        assert_eq!(plan_for(Some(PowerProfile::Quiet), &plans), FanPlan::Automatic);
+        assert_eq!(plan_for(None, &plans), FanPlan::Automatic);
+    }
+
+    #[test]
+    fn an_unbound_mode_id_has_no_plan() {
+        use crate::config::{FanBinding, FanPlan};
+        let plans = vec![FanBinding { mode: "turbo".into(), plan: FanPlan::Max }];
+        assert_eq!(plan_for_id(&plans, "turbo"), Some(FanPlan::Max));
+        assert_eq!(plan_for_id(&plans, "eco"), None);
+    }
+
+    #[test]
+    fn the_curve_migrates_to_every_mode() {
+        use crate::config::{AppConfig, FanPlan};
+        let mut cfg = AppConfig::default();
+        cfg.fan_auto_curve_enabled = true;
+        cfg.fan_curve_points = [0, 35, 50, 65, 80, 100];
+        let plans = migrate_plans(&cfg);
+        assert_eq!(plans.len(), 5);
+        for binding in &plans {
+            assert_eq!(binding.plan, FanPlan::Curve { steps: [0, 35, 50, 65, 80, 100] });
+        }
+    }
+
+    #[test]
+    fn a_disabled_curve_migrates_to_the_saved_fan_mode() {
+        use crate::config::{AppConfig, FanPlan};
+        // A stored "max" is not carried across: set_profile overwrote it on
+        // the next switch, so Eco, Quiet and Balanced were on Auto in
+        // practice, and making them permanently full speed would be a change,
+        // not a preservation.
+        let mut cfg = AppConfig::default();
+        cfg.fan_auto_curve_enabled = false;
+        cfg.fan_mode = Some("max".into());
+        let plans = migrate_plans(&cfg);
+        for mode in ["eco", "quiet", "balanced"] {
+            assert_eq!(plan_for_id(&plans, mode), Some(FanPlan::Automatic));
+        }
+        for mode in ["performance", "turbo"] {
+            assert_eq!(plan_for_id(&plans, mode), Some(FanPlan::Max));
+        }
+
+        // A saved "auto" is not the whole story: set_profile forced Max on
+        // Performance and Turbo on top of it, so those two keep it.
+        let mut cfg = AppConfig::default();
+        cfg.fan_auto_curve_enabled = false;
+        cfg.fan_mode = Some("auto".into());
+        let plans = migrate_plans(&cfg);
+        assert_eq!(plan_for_id(&plans, "balanced"), Some(FanPlan::Automatic));
+        assert_eq!(plan_for_id(&plans, "performance"), Some(FanPlan::Max));
+        assert_eq!(plan_for_id(&plans, "turbo"), Some(FanPlan::Max));
+    }
+
+    #[test]
+    fn nothing_configured_keeps_what_a_profile_switch_used_to_force() {
+        use crate::config::{AppConfig, FanPlan};
+        // set_profile forced Max on Performance and Turbo and Auto on the
+        // rest. Migrating a default config to Automatic everywhere would drop
+        // that silently: Turbo would stop raising the fans at all.
+        let plans = migrate_plans(&AppConfig::default());
+        assert_eq!(plans.len(), 5);
+        assert_eq!(plan_for_id(&plans, "performance"), Some(FanPlan::Max));
+        assert_eq!(plan_for_id(&plans, "turbo"), Some(FanPlan::Max));
+        for mode in ["eco", "quiet", "balanced"] {
+            assert_eq!(plan_for_id(&plans, mode), Some(FanPlan::Automatic));
+        }
+    }
+
+    #[test]
+    fn keeping_the_fan_on_auto_in_performance_migrates_those_modes_to_automatic() {
+        use crate::config::{AppConfig, FanPlan};
+        // The Settings toggle (issue #41): it decided what set_profile forced,
+        // so it has to decide what migration binds, or turning it on before
+        // this feature existed would be forgotten.
+        let mut cfg = AppConfig::default();
+        cfg.keep_fan_auto_in_performance = true;
+        for binding in migrate_plans(&cfg) {
+            assert_eq!(binding.plan, FanPlan::Automatic, "mode {}", binding.mode);
+        }
+    }
+
+    #[test]
+    fn migration_covers_every_mode_exactly_once() {
+        use crate::config::AppConfig;
+        let plans = migrate_plans(&AppConfig::default());
+        let mut modes: Vec<&str> = plans.iter().map(|b| b.mode.as_str()).collect();
+        modes.sort_unstable();
+        assert_eq!(modes, vec!["balanced", "eco", "performance", "quiet", "turbo"]);
+    }
+
+    #[test]
+    fn pwm_plans_are_unavailable_without_pwm() {
+        use crate::config::FanPlan;
+        // Reachable from a config copied off a machine that does have PWM.
+        // Resolving to Automatic beats doing nothing silently.
+        assert_eq!(
+            plan_for_hardware(FanPlan::Curve { steps: DEFAULT_FAN_CURVE }, false),
+            FanPlan::Automatic
+        );
+        assert_eq!(
+            plan_for_hardware(FanPlan::Fixed { percent: 40 }, false),
+            FanPlan::Automatic
+        );
+        // These two work through the EC preset path on any model.
+        assert_eq!(plan_for_hardware(FanPlan::Max, false), FanPlan::Max);
+        assert_eq!(plan_for_hardware(FanPlan::Automatic, false), FanPlan::Automatic);
+    }
+
+    #[test]
+    fn setting_a_plan_replaces_only_that_modes_binding() {
+        use crate::config::{FanBinding, FanPlan};
+        let existing = vec![
+            FanBinding { mode: "balanced".into(), plan: FanPlan::Automatic },
+            FanBinding { mode: "turbo".into(), plan: FanPlan::Max },
+        ];
+        let updated = with_plan(&existing, "balanced", FanPlan::Max);
+        assert_eq!(updated.len(), 2);
+        assert_eq!(plan_for_id(&updated, "balanced"), Some(FanPlan::Max));
+        assert_eq!(plan_for_id(&updated, "turbo"), Some(FanPlan::Max));
+    }
+
+    #[test]
+    fn setting_a_plan_for_an_unbound_mode_adds_it() {
+        use crate::config::{FanBinding, FanPlan};
+        let existing = vec![FanBinding { mode: "turbo".into(), plan: FanPlan::Max }];
+        let updated = with_plan(&existing, "eco", FanPlan::Automatic);
+        assert_eq!(updated.len(), 2);
+        assert_eq!(plan_for_id(&updated, "eco"), Some(FanPlan::Automatic));
+    }
+
+    #[test]
+    fn every_plan_survives_on_hardware_with_pwm() {
+        use crate::config::FanPlan;
+        for plan in [
+            FanPlan::Automatic,
+            FanPlan::Max,
+            FanPlan::Fixed { percent: 40 },
+            FanPlan::Curve { steps: DEFAULT_FAN_CURVE },
+        ] {
+            assert_eq!(plan_for_hardware(plan, true), plan);
+        }
+    }
+
+    #[test]
+    fn pwm_hardware_gets_pwm_writes() {
+        assert_eq!(write_for(CurveAction::Firmware, true), Some(FanWrite::PwmAuto));
+        assert_eq!(
+            write_for(CurveAction::Manual(35), true),
+            Some(FanWrite::PwmPercent(35))
+        );
+    }
+
+    #[test]
+    fn ec_only_hardware_gets_preset_writes() {
+        // plan_for_hardware narrows Curve and Fixed to Automatic when there is
+        // no PWM, so only Automatic and Max can reach here, which is why
+        // Manual maps to the Max preset rather than a duty cycle.
+        assert_eq!(write_for(CurveAction::Firmware, false), Some(FanWrite::PresetAuto));
+        assert_eq!(write_for(CurveAction::Manual(100), false), Some(FanWrite::PresetMax));
+    }
+
+    #[test]
+    fn hold_writes_nothing_on_either_kind_of_hardware() {
+        assert_eq!(write_for(CurveAction::Hold, true), None);
+        assert_eq!(write_for(CurveAction::Hold, false), None);
+    }
+
+    #[test]
+    fn turning_keep_fan_auto_on_rebinds_only_performance_and_turbo() {
+        use crate::config::{AppConfig, FanBinding, FanPlan};
+        let mut cfg = AppConfig::default();
+        cfg.fan_plans = vec![
+            FanBinding {
+                mode: "balanced".into(),
+                plan: FanPlan::Curve { steps: DEFAULT_FAN_CURVE },
+            },
+            FanBinding { mode: "performance".into(), plan: FanPlan::Max },
+            FanBinding { mode: "turbo".into(), plan: FanPlan::Max },
+        ];
+        cfg.keep_fan_auto_in_performance = true;
+        let plans = plans_with_keep_fan_auto(&cfg);
+        assert_eq!(plan_for_id(&plans, "performance"), Some(FanPlan::Automatic));
+        assert_eq!(plan_for_id(&plans, "turbo"), Some(FanPlan::Automatic));
+        assert_eq!(
+            plan_for_id(&plans, "balanced"),
+            Some(FanPlan::Curve { steps: DEFAULT_FAN_CURVE }),
+            "a mode the setting does not speak for keeps its own plan"
+        );
+    }
+
+    #[test]
+    fn turning_keep_fan_auto_off_puts_performance_and_turbo_back_on_max() {
+        use crate::config::{AppConfig, FanBinding, FanPlan};
+        let mut cfg = AppConfig::default();
+        cfg.fan_plans = vec![
+            FanBinding { mode: "performance".into(), plan: FanPlan::Automatic },
+            FanBinding { mode: "turbo".into(), plan: FanPlan::Automatic },
+        ];
+        cfg.keep_fan_auto_in_performance = false;
+        let plans = plans_with_keep_fan_auto(&cfg);
+        assert_eq!(plan_for_id(&plans, "performance"), Some(FanPlan::Max));
+        assert_eq!(plan_for_id(&plans, "turbo"), Some(FanPlan::Max));
+    }
+
+    #[test]
+    fn the_setting_migrates_instead_of_rebinding_when_no_plans_exist_yet() {
+        use crate::config::{AppConfig, FanPlan};
+        let mut cfg = AppConfig::default();
+        cfg.keep_fan_auto_in_performance = true;
+        let plans = plans_with_keep_fan_auto(&cfg);
+        assert_eq!(plans.len(), 5, "every mode gets a plan, not just the two");
+        for binding in &plans {
+            assert_eq!(binding.plan, FanPlan::Automatic, "mode {}", binding.mode);
+        }
+    }
+
+    #[test]
+    fn a_fixed_plan_of_zero_hands_the_fans_to_the_firmware() {
+        use crate::config::FanPlan;
+        // The Custom slider goes down to 0 and writes it verbatim into the
+        // plan, so this is the same request a 0% curve step makes: only the
+        // firmware can actually stop the fans.
+        assert_eq!(
+            plan_target(FanPlan::Fixed { percent: 0 }, Some(40.0), false),
+            CurveAction::Firmware
+        );
+        assert_eq!(
+            plan_target(FanPlan::Fixed { percent: 0 }, Some(40.0), true),
+            CurveAction::Hold
+        );
+    }
+
+    #[test]
+    fn a_fixed_plan_above_the_range_is_clamped_to_full_speed() {
+        use crate::config::FanPlan;
+        assert_eq!(
+            plan_target(FanPlan::Fixed { percent: 101 }, None, false),
+            CurveAction::Manual(100)
+        );
+        assert_eq!(
+            plan_target(FanPlan::Fixed { percent: u8::MAX }, None, false),
+            CurveAction::Manual(100)
+        );
+    }
+
+    #[test]
+    fn the_first_three_failures_still_retry_on_the_next_tick() {
+        assert!(may_attempt_write(0, 0));
+        assert!(may_attempt_write(1, 0));
+        assert!(may_attempt_write(2, 0));
+    }
+
+    #[test]
+    fn a_fourth_attempt_waits_thirty_seconds() {
+        assert_eq!(BACKOFF_TICKS * RECONCILE_TICK_S, 30);
+        assert!(!may_attempt_write(BACKOFF_AFTER_FAILURES, 0));
+        assert!(!may_attempt_write(BACKOFF_AFTER_FAILURES, BACKOFF_TICKS - 1));
+        assert!(may_attempt_write(BACKOFF_AFTER_FAILURES, BACKOFF_TICKS));
+    }
+
+    #[test]
+    fn a_permanently_failing_write_never_goes_back_to_every_tick() {
+        // The counter only resets on success, so a helper that can never be
+        // reached stays at one attempt per back-off window however long the
+        // session runs.
+        assert!(!may_attempt_write(500, 0));
+        assert!(!may_attempt_write(500, BACKOFF_TICKS - 1));
+        assert!(may_attempt_write(500, BACKOFF_TICKS));
+    }
+
+    #[test]
+    fn the_unconditional_firmware_region_ends_where_the_zero_steps_do() {
+        assert_eq!(curve_zero_region_top_c(&[0, 35, 50, 65, 80, 100]), Some(45.0));
+        assert_eq!(curve_zero_region_top_c(&[0, 0, 30, 45, 65, 100]), Some(55.0));
+    }
+
+    #[test]
+    fn a_curve_that_starts_above_zero_leaves_the_firmware_nothing() {
+        assert_eq!(curve_zero_region_top_c(&DEFAULT_FAN_CURVE), None);
+    }
+
+    #[test]
+    fn an_all_zero_curve_reports_no_boundary() {
+        assert_eq!(curve_zero_region_top_c(&[0; 6]), None);
+    }
+
+    #[test]
+    fn the_band_below_the_resume_point_is_the_firmwares_only_once_it_has_the_fans() {
+        // The band a chart must not draw as plain firmware ownership: same
+        // temperature, opposite answers depending on who holds the fans.
+        let steps = [0, 35, 50, 65, 80, 100];
+        assert_eq!(curve_action(50.0, &steps, true), CurveAction::Hold);
+        assert_eq!(curve_action(50.0, &steps, false), CurveAction::Manual(35));
     }
 }
