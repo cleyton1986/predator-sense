@@ -114,6 +114,13 @@ fn reload_css(scale: f64) {
 }
 
 fn main() {
+    // Claude Code hook: one lighting write, then exit - before GTK, D-Bus or
+    // the single-instance claim, so it never touches a running window.
+    let mut arguments = std::env::args().skip(1);
+    if arguments.next().as_deref() == Some(hardware::claude_code::HOOK_ARGUMENT) {
+        std::process::exit(hardware::claude_code::run_hook(arguments.next().as_deref()));
+    }
+
     STARTUP_STARTED.get_or_init(Instant::now);
     startup_mark("main entered");
     if std::env::args().any(|argument| {
