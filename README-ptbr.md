@@ -514,6 +514,24 @@ Um assistente de IA local e opt-in, via [Ollama](https://ollama.com) rodando int
 
 O assistente lê o estado do hardware em tempo real (temperatura, ventoinha, perfil térmico, bateria) e pode sugerir ou aplicar mudanças através de um conjunto fixo de ações já validadas — nunca acessa hardware/EC diretamente, e cada ação corresponde 1:1 a uma função que esta aplicação já usava antes mesmo da IA existir. O modelo carrega só pra rodar uma análise e depois descarrega — não fica parado consumindo memória. Toda atividade da IA fica registrada num log de ações persistente e revisável, na mesma página.
 
+### Iluminação do Claude Code
+
+Transforma o teclado num indicador de status das sessões do [Claude Code](https://docs.claude.com/en/docs/claude-code). Precisa do controlador I2C-HID ENEK5130 (usa só a regra udev do hidraw que o instalador já instala — sem root, sem helper).
+
+1. Vá em **Ferramentas → Claude Code** e ative **Ativar hooks do Claude Code**
+2. Escolha os dispositivos que acompanham a sessão (teclado e, quando detectado, o logo da tampa)
+3. Abra cada estado para definir efeito, cor, velocidade e som, e use **Testar** para ver no hardware por alguns segundos
+
+| Evento do Claude Code | Estado | Padrão |
+|---|---|---|
+| `UserPromptSubmit`, `PostToolUse` | Executando | azul |
+| `PreToolUse` (`AskUserQuestion`), `Notification` (`permission_prompt`) | Aguardando | laranja |
+| `Stop` | Terminou | verde |
+| `StopFailure` (`rate_limit\|billing_error`) | Limite | vermelho |
+| `SessionEnd` | off — volta a iluminação salva na página Iluminação | |
+
+Os hooks entram em `~/.claude/settings.json` (ou `$CLAUDE_CONFIG_DIR/settings.json`) junto dos que você já tem; desligar a opção remove só os deste app. Cada hook roda `predator-sense --claude-code-hook <estado>`, que grava no controlador em poucos milissegundos e sai antes de qualquer inicialização de GTK ou D-Bus, então a janela do app não precisa estar aberta. Eventos repetidos para o estado que já está aceso não gravam nada, então efeitos animados não reiniciam a cada ferramenta. Os hooks sempre saem com 0: um problema de iluminação nunca bloqueia uma ação do Claude Code. Desligue a opção antes de desinstalar o Predator Sense, senão o Claude Code vai avisar que o comando do hook sumiu.
+
 ---
 
 ## Opções do Instalador
@@ -659,6 +677,7 @@ predator-sense-gui/
 │   │   ├── extras.rs            # Limite de bateria, LCD overdrive, USB charging, boot anim
 │   │   ├── profile.rs           # CPU governor + EPP + GPU power
 │   │   ├── ai_assistant.rs      # Tool-calling do Ollama: allow-list fixa mapeada pras funções hardware:: já existentes
+│   │   ├── claude_code.rs       # Hooks do Claude Code: estado da sessão -> iluminação do teclado/logo
 │   │   ├── ai_snapshot.rs       # Snapshot efêmero do estado, alimentado à IA e apagado a cada leitura
 │   │   ├── ai_actionlog.rs      # Log persistente e revisável de tudo que a IA sugeriu/aplicou
 │   │   └── setup.rs             # Gerenciamento do módulo kernel
@@ -675,6 +694,7 @@ predator-sense-gui/
 │       ├── gpu_page.rs          # Dashboard NVIDIA GPU
 │       ├── monitor_page.rs      # Gráficos detalhados de histórico CPU/GPU
 │       ├── ai_page.rs           # Assistente de IA: chat, gerenciador de modelos, monitor de recurso, log de ações
+│       ├── claude_code_page.rs  # Ferramentas -> Claude Code: hooks, dispositivos, efeito/cor/som por estado
 │       ├── setup_page.rs        # Wizard de setup do módulo kernel
 │       └── gauge_widget.rs      # Widget de gauge circular tracejado
 └── resources/
