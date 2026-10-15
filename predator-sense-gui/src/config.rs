@@ -453,6 +453,11 @@ pub struct AppConfig {
     /// keeps working as before.
     #[serde(default = "default_true")]
     pub manage_cpu_power: bool,
+    /// Claude Code status lighting (`hardware::claude_code`): which devices
+    /// follow the session state and what each state looks like. Only takes
+    /// effect once its hooks are installed from Tools -> Claude Code.
+    #[serde(default)]
+    pub claude_code: crate::hardware::claude_code::ClaudeCodeSettings,
 }
 
 fn default_true() -> bool {
@@ -582,6 +587,7 @@ impl Default for AppConfig {
             eco_mode_saved_brightness_pct: None,
             keep_default_theme_color: false,
             manage_cpu_power: true,
+            claude_code: Default::default(),
         }
     }
 }

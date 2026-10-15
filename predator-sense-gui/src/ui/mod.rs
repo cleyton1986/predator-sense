@@ -4,6 +4,7 @@ pub mod background;
 pub mod badge_widget;
 pub mod battery_page;
 pub mod brand_theme;
+pub mod claude_code_page;
 pub mod color_input;
 pub mod color_picker;
 pub mod dashboard_page;
