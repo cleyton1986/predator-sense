@@ -175,11 +175,12 @@ pub fn apply(state: &KeyboardState) -> Result<(), String> {
     )
 }
 
-static BLANKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static BLANKING: crate::hardware::blanking::Blanking =
+    crate::hardware::blanking::Blanking::new();
 
 /// True while the idle watcher is holding the backlight off.
 pub fn is_blanked() -> bool {
-    BLANKED.load(std::sync::atomic::Ordering::Relaxed)
+    BLANKING.is_blanked()
 }
 
 /// Turns the backlight off without disturbing the stored effect/colour, so the
@@ -188,16 +189,12 @@ pub fn blank() -> Result<(), String> {
     let saved = crate::config::load_app_config()
         .keyboard_rgb
         .unwrap_or_default();
-    // Only after the write lands - see `light_bar::blank`, which had the same
-    // bug. The idle tick treats this flag as the truth about the hardware, so
-    // setting it ahead of a write that then failed latched "already blanked"
-    // over a keyboard that was still lit, and nothing retried.
-    apply(&KeyboardState {
-        effect: Effect::Off,
-        ..saved
-    })?;
-    BLANKED.store(true, std::sync::atomic::Ordering::Relaxed);
-    Ok(())
+    BLANKING.set(true, || {
+        apply(&KeyboardState {
+            effect: Effect::Off,
+            ..saved
+        })
+    })
 }
 
 /// Restores whatever the user last applied.
@@ -205,12 +202,7 @@ pub fn unblank() {
     let saved = crate::config::load_app_config()
         .keyboard_rgb
         .unwrap_or_default();
-    if apply(&saved).is_ok() {
-        // Cleared only on success, so a failed restore stays "blanked" and the
-        // next tick tries again rather than deciding the keyboard is already
-        // showing what the user asked for.
-        BLANKED.store(false, std::sync::atomic::Ordering::Relaxed);
-    }
+    let _ = BLANKING.set(false, || apply(&saved));
 }
 
 /// Re-sends the saved state purely to restart the controller's own sleep
