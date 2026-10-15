@@ -8,6 +8,24 @@ use crate::config;
 use crate::hardware::{fan, sensors};
 use crate::ui::background;
 
+/// Carries an edit of the curve steps into the active mode's plan, so it
+/// reaches the fans on the reconciler's next tick.
+///
+/// Without this the editor is inert: the reconciler reads the steps stored in
+/// the mode's `FanPlan::Curve`, and these spin buttons only write
+/// `fan_curve_points`, so an edit waited for the curve switch to be toggled
+/// off and on before it took effect. A mode on any other plan keeps the edit
+/// in the points alone, ready for the next time the curve is switched on.
+fn apply_steps_to_active_plan(cfg: &mut config::AppConfig) {
+    let Some(profile) = crate::hardware::profile::get_current_profile() else {
+        return;
+    };
+    let current = fan::plan_for(Some(profile), &cfg.fan_plans);
+    if let Some(plan) = fan::plan_with_steps(current, cfg.fan_curve_points) {
+        cfg.fan_plans = fan::with_plan(&cfg.fan_plans, profile.to_id(), plan);
+    }
+}
+
 pub fn build() -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
     page.set_margin_top(14);
@@ -114,26 +132,33 @@ pub fn build() -> gtk::Box {
             .connect_value_changed(move |s| l.set_text(&format!("GPU: {}%", s.value() as i32)));
     }
 
-    // Capability detection already queried PWM once; do not fork the helper a
-    // second time while building the same page.
-    let pwm_ok = caps.fan_pwm;
-
     // Apply custom speeds
     {
         let cs = cpu_scale.clone();
-        let gs = gpu_scale.clone();
         let sl = status_label.clone();
         apply_custom.connect_clicked(move |_| {
             let cpu = cs.value() as u8;
-            let gpu = gs.value() as u8;
-            let result = if pwm_ok {
-                fan::set_pwm_percent(cpu, gpu)
-            } else {
-                fan::set_fan_mode(fan::FanMode::Custom(cpu, gpu))
-            };
+            // Intent only: this writes the mode's plan into config, and the
+            // reconciler tick applies it to the hardware. The reconciler
+            // drives both fans from one percentage (see `plan_target`), so
+            // the CPU slider is the only value that reaches the plan, which is
+            // why the GPU number is not in the confirmation: it would report
+            // a speed nothing was asked to apply.
+            let result = fan::set_plan_for(
+                crate::hardware::profile::get_current_profile(),
+                config::FanPlan::Fixed { percent: cpu },
+            );
             match result {
                 Ok(()) => {
-                    sl.set_text(&format!("CPU: {}%, GPU: {}% ✓", cpu, gpu));
+                    // Not a checkmark: what succeeded is the config write.
+                    // The hardware write happens in the reconciler moments
+                    // later and can still fail there, on a model whose EC
+                    // refuses it or with no helper reachable.
+                    sl.set_text(&format!(
+                        "CPU: {}% ({})",
+                        cpu,
+                        crate::i18n::t("fan_plan_applying")
+                    ));
                     sl.remove_css_class("status-error");
                     sl.add_css_class("status-success");
                 }
@@ -165,9 +190,9 @@ pub fn build() -> gtk::Box {
         let nw = nav_widgets.clone();
 
         btn.connect_clicked(move |clicked_btn| {
-            let fan_mode = match mode.as_str() {
-                "auto" => fan::FanMode::Auto,
-                "max" => fan::FanMode::Max,
+            let plan = match mode.as_str() {
+                "auto" => config::FanPlan::Automatic,
+                "max" => config::FanPlan::Max,
                 _ => {
                     cb.set_visible(true);
                     *active.borrow_mut() = mode.clone();
@@ -185,12 +210,11 @@ pub fn build() -> gtk::Box {
             cb.set_visible(false);
             *active.borrow_mut() = mode.clone();
 
-            // When leaving custom PWM, restore automatic fan control.
-            if mode.as_str() == "auto" && pwm_ok {
-                let _ = fan::set_pwm_auto();
-            }
-
-            match fan::set_fan_mode(fan_mode) {
+            // Intent only: writes the plan into config. The reconciler tick
+            // notices on its next pass and does whatever hardware write is
+            // needed, including handing manual PWM back to the firmware when
+            // leaving Custom for Automatic.
+            match fan::set_plan_for(crate::hardware::profile::get_current_profile(), plan) {
                 Ok(()) => {
                     let mut c = config::load_app_config();
                     c.fan_mode = Some(mode.clone());
@@ -200,7 +224,10 @@ pub fn build() -> gtk::Box {
                         "max" => crate::i18n::t("max"),
                         _ => "",
                     };
-                    sl.set_text(&format!("{} ✓", msg));
+                    // Same reasoning as the Custom button above: the plan is
+                    // recorded, the hardware write is the reconciler's and
+                    // has not happened yet.
+                    sl.set_text(&format!("{} ({})", msg, crate::i18n::t("fan_plan_applying")));
                     sl.remove_css_class("status-error");
                     sl.add_css_class("status-success");
                 }
@@ -353,22 +380,30 @@ pub fn build() -> gtk::Box {
         // launch until the user visited Fan Control again.
         curve_switch.connect_state_set(move |_, active| {
             let mut c = config::load_app_config();
+            // Still kept so the switch shows the right state next time this
+            // page is built; the reconciler itself only reads `fan_plans`.
             c.fan_auto_curve_enabled = active;
             let _ = config::save_app_config(&c);
-            // The curve drives the fans in manual PWM mode; switching it off
-            // used to leave them pinned at the last percentage until the
-            // user also pressed Auto. Hand the fans back to the firmware
-            // curve right away instead.
-            if !active {
-                crate::ui::background::run(|| fan::set_pwm_auto(), |_| {});
-            }
+            // Intent only: writes the active mode's plan into config. The
+            // reconciler tick notices and does whatever hardware write
+            // follows, including handing the fans back to the firmware
+            // right away when the curve is switched off.
+            let plan = if active {
+                config::FanPlan::Curve { steps: c.fan_curve_points }
+            } else {
+                config::FanPlan::Automatic
+            };
+            let _ = fan::set_plan_for(crate::hardware::profile::get_current_profile(), plan);
             glib::Propagation::Proceed
         });
 
         // Per-step editor (issue #59, harry42203): the 6 temperature
         // breakpoints are fixed, only the percent each step applies is
-        // editable. Enforcement still only reads `config::fan_curve_points`
-        // from the global timer in window.rs - this just edits that value.
+        // editable. This edits `config::fan_curve_points` only. The
+        // reconciler reads the steps held inside the active mode's
+        // `FanPlan::Curve`, which the switch above snapshots from this value,
+        // so an edit made while a curve is already running reaches the fans
+        // when that switch is next turned on.
         let edit_title = gtk::Label::new(Some(crate::i18n::t("fan_curve_edit")));
         edit_title.add_css_class("control-label");
         edit_title.set_halign(gtk::Align::Center);
@@ -405,6 +440,7 @@ pub fn build() -> gtk::Box {
             spin.connect_value_changed(move |s| {
                 let mut c = config::load_app_config();
                 c.fan_curve_points[i] = s.value() as u8;
+                apply_steps_to_active_plan(&mut c);
                 let _ = config::save_app_config(&c);
             });
         }
@@ -419,6 +455,7 @@ pub fn build() -> gtk::Box {
             reset_btn.connect_clicked(move |_| {
                 let mut c = config::load_app_config();
                 c.fan_curve_points = fan::DEFAULT_FAN_CURVE;
+                apply_steps_to_active_plan(&mut c);
                 let _ = config::save_app_config(&c);
                 for (spin, &pct) in spin_buttons.iter().zip(fan::DEFAULT_FAN_CURVE.iter()) {
                     spin.set_value(pct as f64);
