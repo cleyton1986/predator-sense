@@ -13,6 +13,7 @@
 
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
+use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -25,6 +26,34 @@ use crate::ui::color_picker;
 const NO_SCHEME: &str = "—";
 /// Coalescing window for live writes while a control is being dragged.
 const APPLY_DEBOUNCE_MS: u32 = 120;
+
+/// Widest the content is ever allowed to get: two of the app's own 460-px
+/// cards plus the gap between them. Past that the page centres instead of
+/// stretching a five-state slider across a 2000-px window.
+const MAX_CONTENT: i32 = 980;
+/// Below this the clamp starts giving width back, so nothing is cut off on a
+/// narrow window.
+const TIGHTENING_THRESHOLD: i32 = 760;
+/// Label + this + the drawn value is about one card wide, which is what makes
+/// every slider on the page start and end at the same x.
+const SLIDER_W: i32 = 280;
+/// Short track for a range with only a handful of steps (light bar speed).
+const DISCRETE_SLIDER_W: i32 = 180;
+/// Every slider label reserves this much, so "Brightness:" and "Speed:" put
+/// their sliders in the same column.
+const SLIDER_LABEL_CHARS: i32 = 11;
+/// Stops a one-line hint stretching into a single very long ribbon.
+const HINT_CHARS: i32 = 84;
+/// Scheme-binding dropdowns, so the column has one right edge instead of one
+/// per longest scheme name.
+const BINDING_DROPDOWN_W: i32 = 220;
+/// Idle delay dropdowns; equal widths, so "after 10 s" and "after 30 s" line
+/// up rather than sizing to their own text.
+const DELAY_DROPDOWN_W: i32 = 160;
+/// Effect and mode grids both use this. No column count divides both 14
+/// keyboard effects and 9 light bar modes, and 5 is the only one that leaves
+/// each grid a single trailing gap - so their right edges agree.
+const GRID_COLUMNS: i32 = 5;
 
 /// Live state of both halves of the page, so a scheme can be captured or
 /// applied without re-reading widgets one by one.
@@ -46,11 +75,25 @@ pub fn build() -> gtk::ScrolledWindow {
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_propagate_natural_width(false);
 
-    let shell = gtk::Box::new(gtk::Orientation::Vertical, 16);
-    shell.set_margin_top(10);
-    shell.set_margin_bottom(14);
-    shell.set_margin_start(16);
-    shell.set_margin_end(16);
+    // Spacing 0: all the vertical air comes from each block's own margin_top,
+    // the way the other pages do it, so a section title sits close to its own
+    // card and far from the previous one.
+    let shell = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    shell.set_margin_top(14);
+    shell.set_margin_bottom(10);
+    shell.set_margin_start(20);
+    shell.set_margin_end(20);
+
+    // One width rule for the whole page, enforced in a single place.
+    let clamp = adw::Clamp::new();
+    clamp.set_maximum_size(MAX_CONTENT);
+    clamp.set_tightening_threshold(TIGHTENING_THRESHOLD);
+    clamp.set_child(Some(&shell));
+
+    let title = gtk::Label::new(Some(crate::i18n::t("lighting")));
+    title.add_css_class("section-title");
+    title.set_halign(gtk::Align::Center);
+    shell.append(&title);
 
     let cfg = config::load_app_config();
     let state = Rc::new(RefCell::new(LightingState {
@@ -67,8 +110,9 @@ pub fn build() -> gtk::ScrolledWindow {
         let note = gtk::Label::new(Some(crate::i18n::t("lighting_no_devices")));
         note.add_css_class("info-note");
         note.set_wrap(true);
+        note.set_margin_top(18);
         shell.append(&note);
-        scroll.set_child(Some(&shell));
+        scroll.set_child(Some(&clamp));
         return scroll;
     }
 
@@ -94,60 +138,133 @@ pub fn build() -> gtk::ScrolledWindow {
 
     shell.append(&build_scheme_bar(&state, refresh_all));
     if let Some(section) = keyboard_section {
-        shell.append(&section_separator());
         shell.append(&section);
     }
     if let Some(section) = bar_section {
-        shell.append(&section_separator());
         shell.append(&section);
     }
-    shell.append(&section_separator());
     shell.append(&build_idle_section(have_keyboard, have_bar));
 
-    scroll.set_child(Some(&shell));
+    scroll.set_child(Some(&clamp));
     scroll
 }
 
-fn section_separator() -> gtk::Separator {
-    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
-    separator.set_margin_top(2);
-    separator
+/// Left-aligned title that sits above a card, as on the GameSync and RGB
+/// pages. `margin_top` is 10 for the first section and 18 for the rest.
+fn section_title(text: &str, margin_top: i32) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.add_css_class("settings-section-title");
+    label.set_halign(gtk::Align::Start);
+    label.set_margin_top(margin_top);
+    label
 }
 
-fn section_title(text: &str) -> gtk::Label {
-    let label = gtk::Label::new(Some(text));
-    label.add_css_class("info-card-title");
-    label.set_halign(gtk::Align::Start);
-    label
+/// The card a section's rows live in. Returns the widget to place and the
+/// content box to fill; cards are the separation on this page, which is why
+/// there are no rules between sections.
+///
+/// `build_simple` rather than `build`: the big tech-panel card is for
+/// fixed-size hardware readouts, and this page is a settings surface.
+fn section_card() -> (gtk::Widget, gtk::Box) {
+    let card = crate::ui::faceted_card::build_simple(crate::ui::brand_theme::accent().bright, None);
+    let content = card.content.clone();
+    content.set_orientation(gtk::Orientation::Vertical);
+    content.set_spacing(10);
+    card.widget.set_margin_top(6);
+    (card.widget.clone(), content)
+}
+
+/// A titled section: the title label and its card, stacked, ready to append.
+fn titled_section(text: &str, margin_top: i32) -> (gtk::Box, gtk::Box) {
+    let wrapper = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    wrapper.append(&section_title(text, margin_top));
+    let (card, content) = section_card();
+    wrapper.append(&card);
+    (wrapper, content)
 }
 
 fn hint(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.add_css_class("cover-logo-hint");
     label.set_wrap(true);
+    label.set_xalign(0.0);
+    label.set_max_width_chars(HINT_CHARS);
     label.set_halign(gtk::Align::Start);
     label
 }
 
+/// The app's own settings-row shape: a horizontal row with room for a leading
+/// control, a title over its own description, and a trailing control.
+///
+/// The text column is already in place, so a caller `prepend`s a leading
+/// check button and `append`s a trailing switch or dropdown. Keeping the
+/// description directly under the title it belongs to is the point: stacked
+/// alternately, a description sits as far from its own control as from the
+/// next one.
+fn settings_row(title: &str, desc: Option<&str>) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    row.set_halign(gtk::Align::Fill);
+
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    text.set_hexpand(true);
+    let title_label = gtk::Label::new(Some(title));
+    title_label.add_css_class("settings-row-title");
+    title_label.set_xalign(0.0);
+    title_label.set_halign(gtk::Align::Start);
+    text.append(&title_label);
+    if let Some(desc) = desc {
+        let desc_label = gtk::Label::new(Some(desc));
+        desc_label.add_css_class("settings-row-desc");
+        desc_label.set_xalign(0.0);
+        desc_label.set_halign(gtk::Align::Start);
+        desc_label.set_wrap(true);
+        desc_label.set_max_width_chars(HINT_CHARS);
+        text.append(&desc_label);
+    }
+    row.append(&text);
+    row
+}
+
+/// Grid shared by the keyboard effect set and the light bar mode set, so the
+/// two read as a pair instead of as two different shapes.
+fn button_grid() -> gtk::Grid {
+    let grid = gtk::Grid::new();
+    grid.set_column_homogeneous(true);
+    grid.set_column_spacing(8);
+    grid.set_row_spacing(6);
+    grid
+}
+
 fn labeled_scale(text: &str, min: f64, max: f64, value: f64) -> (gtk::Box, gtk::Scale) {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.set_halign(gtk::Align::Start);
     let label = gtk::Label::new(Some(text));
     label.add_css_class("rgb-channel-label");
+    label.set_width_chars(SLIDER_LABEL_CHARS);
+    label.set_xalign(0.0);
+    label.set_halign(gtk::Align::Start);
     let scale = gtk::Scale::with_range(gtk::Orientation::Horizontal, min, max, 1.0);
     scale.set_value(value);
-    scale.set_hexpand(true);
+    // Fixed width rather than hexpand: a 0-255 range across a 1250-px window
+    // is precision nobody asked for, and the hex field is the precise path.
+    scale.set_hexpand(false);
+    scale.set_size_request(SLIDER_W, -1);
     scale.set_draw_value(true);
     scale.set_value_pos(gtk::PositionType::Right);
     scale.add_css_class("accent-scale");
+    crate::ui::scroll_guard::redirect_scroll_to_page(&scale);
     row.append(&label);
     row.append(&scale);
     (row, scale)
 }
 
+/// Hidden until it has something to say. An empty one still reserves its own
+/// padding, which is where the dead gaps between sections came from.
 fn status_label() -> gtk::Label {
     let label = gtk::Label::new(None);
     label.add_css_class("status-label");
     label.set_halign(gtk::Align::Start);
+    label.set_visible(false);
     label
 }
 
@@ -156,10 +273,12 @@ fn show_error(status: &gtk::Label, result: Result<(), String>) {
         Ok(()) => {
             status.set_text("");
             status.remove_css_class("status-error");
+            status.set_visible(false);
         }
         Err(error) => {
             status.set_text(&error);
             status.add_css_class("status-error");
+            status.set_visible(true);
         }
     }
 }
@@ -306,8 +425,8 @@ fn build_color_control(
 fn build_keyboard_section(
     state: &Rc<RefCell<LightingState>>,
 ) -> (gtk::Box, Rc<dyn Fn()>) {
-    let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    page.append(&section_title(crate::i18n::t("lighting_keyboard")));
+    let (section, page) = titled_section(crate::i18n::t("lighting_keyboard"), 18);
+    page.append(&hint(crate::i18n::t("lighting_keyboard_note")));
 
     let status = status_label();
     let initial = state.borrow().keyboard;
@@ -336,13 +455,9 @@ fn build_keyboard_section(
     };
     let commit = color_picker::debouncer(APPLY_DEBOUNCE_MS, commit);
 
-    let effects = gtk::FlowBox::new();
-    effects.set_selection_mode(gtk::SelectionMode::None);
-    effects.set_max_children_per_line(7);
-    effects.set_min_children_per_line(3);
-    effects.set_row_spacing(6);
-    effects.set_column_spacing(6);
-    effects.set_homogeneous(true);
+    // 14 effects over 5 columns: 5 / 5 / 4, one trailing gap, matching the
+    // light bar's grid below.
+    let effects = button_grid();
 
     let (speed_row, speed_scale) =
         labeled_scale(crate::i18n::t("speed"), 0.0, 100.0, initial.speed as f64);
@@ -354,8 +469,12 @@ fn build_keyboard_section(
     );
 
     let direction_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    direction_row.set_halign(gtk::Align::Start);
     let direction_label = gtk::Label::new(Some(crate::i18n::t("direction")));
     direction_label.add_css_class("rgb-channel-label");
+    direction_label.set_width_chars(SLIDER_LABEL_CHARS);
+    direction_label.set_xalign(0.0);
+    direction_label.set_halign(gtk::Align::Start);
     let dir_a = gtk::ToggleButton::with_label(crate::i18n::t("right_to_left"));
     let dir_b = gtk::ToggleButton::with_label(crate::i18n::t("left_to_right"));
     dir_a.add_css_class("mode-button");
@@ -411,14 +530,16 @@ fn build_keyboard_section(
     sync_visibility(initial.effect);
 
     let mut buttons = Vec::new();
-    for effect in Effect::ALL {
+    for (index, effect) in Effect::ALL.into_iter().enumerate() {
         let button = gtk::ToggleButton::with_label(crate::i18n::t(effect.label_key()));
         button.add_css_class("mode-button");
+        button.set_hexpand(true);
         if effect == initial.effect {
             button.set_active(true);
             button.add_css_class("mode-active");
         }
-        effects.insert(&button, -1);
+        let index = index as i32;
+        effects.attach(&button, index % GRID_COLUMNS, index / GRID_COLUMNS, 1, 1);
         buttons.push((effect, button));
     }
     let buttons = Rc::new(buttons);
@@ -449,9 +570,15 @@ fn build_keyboard_section(
     }
     page.append(&effects);
     page.append(&color_column);
-    page.append(&bright_row);
-    page.append(&speed_row);
-    page.append(&direction_row);
+
+    // The sliders and the direction toggles belong to each other more than
+    // they belong to the grid above, so they sit closer together than the
+    // card's own 10-px rhythm.
+    let details = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    details.append(&bright_row);
+    details.append(&speed_row);
+    details.append(&direction_row);
+    page.append(&details);
 
     {
         let state = state.clone();
@@ -509,14 +636,13 @@ fn build_keyboard_section(
         })
     };
 
-    (page, refresh)
+    (section, refresh)
 }
 
 fn build_light_bar_section(
     state: &Rc<RefCell<LightingState>>,
 ) -> (gtk::Box, Rc<dyn Fn()>) {
-    let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    page.append(&section_title(crate::i18n::t("light_bar_section")));
+    let (section, page) = titled_section(crate::i18n::t("light_bar_section"), 18);
     page.append(&hint(crate::i18n::t("light_bar_note")));
 
     let status = status_label();
@@ -549,13 +675,9 @@ fn build_light_bar_section(
     };
     let commit = color_picker::debouncer(APPLY_DEBOUNCE_MS, commit);
 
-    let modes = gtk::FlowBox::new();
-    modes.set_selection_mode(gtk::SelectionMode::None);
-    modes.set_max_children_per_line(5);
-    modes.set_min_children_per_line(3);
-    modes.set_row_spacing(6);
-    modes.set_column_spacing(6);
-    modes.set_homogeneous(true);
+    // 9 modes over 5 columns: 5 / 4, one trailing gap in the same place the
+    // keyboard's grid leaves one, so the two right edges agree.
+    let modes = button_grid();
 
     let (speed_row, speed_scale) = labeled_scale(
         crate::i18n::t("speed"),
@@ -563,6 +685,13 @@ fn build_light_bar_section(
         light_bar::SPEED_MAX as f64,
         initial.speed.clamp(light_bar::SPEED_MIN, light_bar::SPEED_MAX) as f64,
     );
+    // Five states, so a short marked track rather than a full-width one.
+    speed_scale.set_size_request(DISCRETE_SLIDER_W, -1);
+    speed_scale.set_digits(0);
+    speed_scale.set_round_digits(0);
+    for step in light_bar::SPEED_MIN..=light_bar::SPEED_MAX {
+        speed_scale.add_mark(step as f64, gtk::PositionType::Bottom, None);
+    }
     let (bright_row, bright_scale) = labeled_scale(
         crate::i18n::t("brightness"),
         0.0,
@@ -599,14 +728,16 @@ fn build_light_bar_section(
     sync_visibility(initial.mode);
 
     let mut buttons = Vec::new();
-    for mode in LightBarMode::available() {
+    for (index, mode) in LightBarMode::available().into_iter().enumerate() {
         let button = gtk::ToggleButton::with_label(crate::i18n::t(mode.label_key()));
         button.add_css_class("mode-button");
+        button.set_hexpand(true);
         if mode == initial.mode {
             button.set_active(true);
             button.add_css_class("mode-active");
         }
-        modes.insert(&button, -1);
+        let index = index as i32;
+        modes.attach(&button, index % GRID_COLUMNS, index / GRID_COLUMNS, 1, 1);
         buttons.push((mode, button));
     }
     let buttons = Rc::new(buttons);
@@ -637,8 +768,11 @@ fn build_light_bar_section(
     }
     page.append(&modes);
     page.append(&color_column);
-    page.append(&bright_row);
-    page.append(&speed_row);
+
+    let details = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    details.append(&bright_row);
+    details.append(&speed_row);
+    page.append(&details);
 
     {
         let state = state.clone();
@@ -686,7 +820,7 @@ fn build_light_bar_section(
         })
     };
 
-    (page, refresh)
+    (section, refresh)
 }
 
 /// Idle settings for both devices.
@@ -698,21 +832,20 @@ fn build_light_bar_section(
 /// firmware timer off and drives both from the app instead, which is the only
 /// way they can actually agree.
 fn build_idle_section(have_keyboard: bool, have_bar: bool) -> gtk::Box {
-    let page = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    page.append(&section_title(crate::i18n::t("lighting_idle")));
+    let (section, page) = titled_section(crate::i18n::t("lighting_idle"), 18);
 
     let cfg = config::load_app_config();
 
-    let master_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let master_row = settings_row(
+        crate::i18n::t("lighting_idle_switch"),
+        Some(crate::i18n::t("lighting_idle_desc")),
+    );
     let master = gtk::Switch::new();
     master.set_valign(gtk::Align::Center);
+    master.set_halign(gtk::Align::End);
     master.set_active(cfg.idle_enabled);
-    let master_label = gtk::Label::new(Some(crate::i18n::t("lighting_idle_switch")));
-    master_label.set_halign(gtk::Align::Start);
     master_row.append(&master);
-    master_row.append(&master_label);
     page.append(&master_row);
-    page.append(&hint(crate::i18n::t("lighting_idle_desc")));
 
     // Deliberately outside `details`, which is greyed out with the master
     // switch: this setting still has an effect there. The keyboard
@@ -720,8 +853,13 @@ fn build_idle_section(have_keyboard: bool, have_bar: bool) -> gtk::Box {
     // anything, so someone who turned idle blanking off and still watched the
     // backlight die is exactly the person who needs to reach this.
     if have_keyboard {
-        let keepalive_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        let keepalive_check = gtk::CheckButton::with_label(crate::i18n::t("idle_keepalive"));
+        let keepalive_row = settings_row(
+            crate::i18n::t("idle_keepalive"),
+            Some(crate::i18n::t("idle_keepalive_desc")),
+        );
+        // No label on the check button: the row title carries the text.
+        let keepalive_check = gtk::CheckButton::new();
+        keepalive_check.set_valign(gtk::Align::Center);
         keepalive_check.set_active(cfg.idle_keyboard_keepalive);
         keepalive_check.connect_toggled(|check| {
             let mut cfg = config::load_app_config();
@@ -740,13 +878,12 @@ fn build_idle_section(have_keyboard: bool, have_bar: bool) -> gtk::Box {
                 }
             }
         });
-        keepalive_row.append(&keepalive_check);
+        keepalive_row.prepend(&keepalive_check);
         page.append(&keepalive_row);
-        page.append(&hint(crate::i18n::t("idle_keepalive_desc")));
     }
 
     // Everything below is meaningless while the master switch is off.
-    let details = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    let details = gtk::Box::new(gtk::Orientation::Vertical, 12);
     details.set_margin_start(12);
     details.set_sensitive(cfg.idle_enabled);
     page.append(&details);
@@ -775,31 +912,37 @@ fn build_idle_section(have_keyboard: bool, have_bar: bool) -> gtk::Box {
     };
 
     // --- sync toggle ---
-    let sync_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let sync_row = settings_row(
+        crate::i18n::t("idle_sync"),
+        Some(crate::i18n::t("idle_sync_desc")),
+    );
     let sync_switch = gtk::Switch::new();
     sync_switch.set_valign(gtk::Align::Center);
+    sync_switch.set_halign(gtk::Align::End);
     sync_switch.set_active(cfg.idle_synced);
-    let sync_label = gtk::Label::new(Some(crate::i18n::t("idle_sync")));
-    sync_label.set_halign(gtk::Align::Start);
     sync_row.append(&sync_switch);
-    sync_row.append(&sync_label);
     details.append(&sync_row);
-    details.append(&hint(crate::i18n::t("idle_sync_desc")));
 
     // --- per-device rows ---
+    // No "after" label beside the dropdown: every item in the list already
+    // reads "after 10 s".
     let device_row = |label_key: &str,
                       enabled: bool,
                       secs: u32|
      -> (gtk::Box, gtk::CheckButton, gtk::DropDown) {
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        let check = gtk::CheckButton::with_label(crate::i18n::t(label_key));
+        let row = settings_row(crate::i18n::t(label_key), None);
+        let check = gtk::CheckButton::new();
+        check.set_valign(gtk::Align::Center);
         check.set_active(enabled);
-        let after = gtk::Label::new(Some(crate::i18n::t("idle_after")));
         let drop = gtk::DropDown::new(Some(delay_model()), gtk::Expression::NONE);
         drop.set_selected(delay_index(secs));
         drop.set_valign(gtk::Align::Center);
-        row.append(&check);
-        row.append(&after);
+        drop.set_halign(gtk::Align::End);
+        // Both delay dropdowns the same width, so the pair lines up instead
+        // of each sizing to its own current text.
+        drop.set_size_request(DELAY_DROPDOWN_W, -1);
+        drop.set_hexpand(false);
+        row.prepend(&check);
         row.append(&drop);
         (row, check, drop)
     };
@@ -827,12 +970,15 @@ fn build_idle_section(have_keyboard: bool, have_bar: bool) -> gtk::Box {
     apply_sync_visibility(cfg.idle_synced);
 
     // --- mouse ---
-    let mouse_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    let mouse_check = gtk::CheckButton::with_label(crate::i18n::t("idle_mouse"));
+    let mouse_row = settings_row(
+        crate::i18n::t("idle_mouse"),
+        Some(crate::i18n::t("idle_mouse_desc")),
+    );
+    let mouse_check = gtk::CheckButton::new();
+    mouse_check.set_valign(gtk::Align::Center);
     mouse_check.set_active(cfg.idle_mouse_wakes);
-    mouse_row.append(&mouse_check);
+    mouse_row.prepend(&mouse_check);
     details.append(&mouse_row);
-    details.append(&hint(crate::i18n::t("idle_mouse_desc")));
 
     // --- wiring ---
     {
@@ -916,7 +1062,7 @@ fn build_idle_section(have_keyboard: bool, have_bar: bool) -> gtk::Box {
         crate::hardware::idle::mark_active();
     });
 
-    page
+    section
 }
 
 /// Writes the just-applied half into whichever scheme is bound to the mode the
@@ -977,14 +1123,19 @@ fn build_scheme_bar(
     state: &Rc<RefCell<LightingState>>,
     refresh_all: Rc<dyn Fn()>,
 ) -> gtk::Box {
-    let box_ = gtk::Box::new(gtk::Orientation::Vertical, 10);
-    box_.append(&section_title(crate::i18n::t("lighting_schemes")));
+    // Two sections, two cards: naming a scheme and binding one to a power
+    // mode are different jobs and should not share a container.
+    let wrapper = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let (schemes_section, box_) = titled_section(crate::i18n::t("lighting_schemes"), 10);
+    wrapper.append(&schemes_section);
     box_.append(&hint(crate::i18n::t("lighting_schemes_desc")));
 
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.set_halign(gtk::Align::Start);
     let name_entry = gtk::Entry::new();
     name_entry.set_placeholder_text(Some(crate::i18n::t("scheme_name_placeholder")));
-    name_entry.set_hexpand(true);
+    name_entry.set_max_width_chars(28);
+    name_entry.set_hexpand(false);
     let save = gtk::Button::with_label(crate::i18n::t("scheme_save"));
     save.add_css_class("accent-button");
     row.append(&name_entry);
@@ -994,6 +1145,8 @@ fn build_scheme_bar(
     let list = gtk::FlowBox::new();
     list.set_selection_mode(gtk::SelectionMode::None);
     list.set_max_children_per_line(4);
+    // Homogeneous, or three chips with three name lengths get three widths.
+    list.set_homogeneous(true);
     list.set_row_spacing(6);
     list.set_column_spacing(6);
     list.set_halign(gtk::Align::Start);
@@ -1003,28 +1156,34 @@ fn build_scheme_bar(
     // there is no way to tell whether a colour change is going into a scheme
     // or just into the live state.
     let editing_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    editing_row.set_halign(gtk::Align::Start);
+    editing_row.set_margin_top(4);
     let editing_label = gtk::Label::new(None);
     editing_label.add_css_class("status-success");
     editing_label.set_halign(gtk::Align::Start);
     let stop_editing = gtk::Button::with_label(crate::i18n::t("scheme_stop_editing"));
+    stop_editing.add_css_class("secondary-button");
     editing_row.append(&editing_label);
     editing_row.append(&stop_editing);
     editing_row.set_visible(false);
     box_.append(&editing_row);
 
-    let bindings_title = gtk::Label::new(Some(crate::i18n::t("mode_bindings")));
-    bindings_title.add_css_class("cover-logo-section-title");
-    bindings_title.set_halign(gtk::Align::Start);
-    box_.append(&bindings_title);
-    box_.append(&hint(crate::i18n::t("mode_bindings_desc")));
+    let (bindings_section, bindings_card) = titled_section(crate::i18n::t("mode_bindings"), 18);
+    wrapper.append(&bindings_section);
+    bindings_card.append(&hint(crate::i18n::t("mode_bindings_desc")));
 
-    let bindings_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    box_.append(&bindings_box);
+    // A grid, not five boxes: one label column and one dropdown column give
+    // the straight right edge the rows were trying to have.
+    let bindings_grid = gtk::Grid::new();
+    bindings_grid.set_row_spacing(6);
+    bindings_grid.set_column_spacing(12);
+    bindings_grid.set_halign(gtk::Align::Start);
+    bindings_card.append(&bindings_grid);
 
     let rebuild: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
     {
         let list = list.clone();
-        let bindings_box = bindings_box.clone();
+        let bindings_grid = bindings_grid.clone();
         let state = state.clone();
         let rebuild_inner = rebuild.clone();
         let editing_row = editing_row.clone();
@@ -1095,25 +1254,33 @@ fn build_scheme_bar(
                 None => editing_row.set_visible(false),
             }
 
-            while let Some(child) = bindings_box.first_child() {
-                bindings_box.remove(&child);
+            while let Some(child) = bindings_grid.first_child() {
+                bindings_grid.remove(&child);
             }
             let mut options = vec![NO_SCHEME.to_string()];
             options.extend(names.iter().cloned());
-            for mode in [
+            for (index, mode) in [
                 PowerProfile::Eco,
                 PowerProfile::Quiet,
                 PowerProfile::Balanced,
                 PowerProfile::Performance,
                 PowerProfile::Turbo,
-            ] {
-                let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let label = gtk::Label::new(Some(mode.label()));
+                label.add_css_class("control-label");
                 label.set_width_chars(14);
                 label.set_xalign(0.0);
+                label.set_halign(gtk::Align::Start);
+                label.set_valign(gtk::Align::Center);
                 let model =
                     gtk::StringList::new(&options.iter().map(String::as_str).collect::<Vec<_>>());
                 let drop = gtk::DropDown::new(Some(model), gtk::Expression::NONE);
+                drop.set_size_request(BINDING_DROPDOWN_W, -1);
+                drop.set_hexpand(false);
+                drop.set_halign(gtk::Align::Start);
                 let current = cfg
                     .mode_bindings
                     .iter()
@@ -1139,9 +1306,9 @@ fn build_scheme_bar(
                     }
                     let _ = config::save_app_config(&cfg);
                 });
-                row.append(&label);
-                row.append(&drop);
-                bindings_box.append(&row);
+                let index = index as i32;
+                bindings_grid.attach(&label, 0, index, 1, 1);
+                bindings_grid.attach(&drop, 1, index, 1, 1);
             }
         });
         *rebuild.borrow_mut() = Some(build);
@@ -1199,7 +1366,7 @@ fn build_scheme_bar(
         });
     }
 
-    box_
+    wrapper
 }
 
 /// Applies a saved scheme to the hardware and remembers it as current.

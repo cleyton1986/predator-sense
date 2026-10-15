@@ -3,7 +3,8 @@ use crate::hardware::profile::PowerProfile;
 use crate::hardware::rgb::{EffectParams, RgbConfig, RgbMode};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Last-applied 2024+ HID keyboard lighting state (`hardware::magic_rgb`,
 /// issues #25/#26) - same "the app forgets which effect was last applied and
@@ -146,6 +147,30 @@ pub struct ModeBinding {
     pub scheme: String,
 }
 
+/// What the fans should do while a given power mode is active.
+///
+/// `Automatic` leaves them to the firmware, which is the only thing that can
+/// stop them: a manual pwm of 0 is not off, the EC holds a floor, measured at
+/// ~1670 RPM on a PH16-71. See `fan::CurveAction::Firmware`, which carries the
+/// rest of that measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FanPlan {
+    Automatic,
+    Curve { steps: [u8; 6] },
+    Fixed { percent: u8 },
+    Max,
+}
+
+/// Binds a fan plan to a power mode, keyed by `PowerProfile::to_id()` for the
+/// same reason `ModeBinding` is: the map stays readable in config.json and
+/// survives an unknown mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanBinding {
+    pub mode: String,
+    pub plan: FanPlan,
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -167,9 +192,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub debug_logging: bool,
     /// Issue #41 (TongkyakHermit): keep the fan on Auto even when
-    /// Performance/Turbo is selected, instead of forcing Max like the
-    /// physical Predator/Turbo key does. Off by default - preserves the
-    /// existing safety-first behavior for everyone who doesn't touch it.
+    /// Performance/Turbo is selected, instead of Max like the physical
+    /// Predator/Turbo key does. Off by default - preserves the existing
+    /// safety-first behavior for everyone who doesn't touch it. Expressed by
+    /// binding those two modes' `fan_plans` entries (see
+    /// `fan::plans_with_keep_fan_auto`), which is what the fans actually
+    /// follow; this field is what the switch shows and what migration reads.
     #[serde(default)]
     pub keep_fan_auto_in_performance: bool,
     /// Fan Control page (`ui::fan_control_page`): CoolBoost and the selected
@@ -197,6 +225,11 @@ pub struct AppConfig {
     /// this setting sees any behavior change.
     #[serde(default = "default_fan_curve_points")]
     pub fan_curve_points: [u8; 6],
+    /// One fan plan per power mode. Empty means "not migrated yet", which
+    /// `hardware::fan::migrate_plans` fills from the pre-existing global fan
+    /// settings on first run.
+    #[serde(default)]
+    pub fan_plans: Vec<FanBinding>,
     /// Last-applied static RGB zone colors (issue #11: nothing persisted this
     /// before, so a full power cycle always reset the keyboard to its default
     /// pulsing effect). Reapplied after login/resume by the Rust hotkey service.
@@ -311,6 +344,31 @@ pub struct AppConfig {
     pub auto_eco_enabled: bool,
     #[serde(default = "default_auto_eco_threshold")]
     pub auto_eco_threshold: u32,
+
+    /// Tell the desktop's power-mode control which of its three profiles the
+    /// active mode corresponds to, so its indicator stops contradicting the
+    /// app. Off by default: it writes to a daemon this app does not own.
+    ///
+    /// The desktop API has three profiles and this app has five, so the map is
+    /// lossy by construction and the user picks which way it folds - see
+    /// `PpdMap`.
+    /// Post a desktop notification whenever the active mode changes, from any
+    /// source: the mode key, this app, the desktop's own power menu, or the
+    /// battery rules.
+    /// What a plug or unplug does - see [`PowerSourceAction`].
+    ///
+    /// `None` means a config written before this existed, and is resolved
+    /// through [`AppConfig::power_source_action`] from the old boolean so an
+    /// upgrade keeps behaving as it did rather than silently switching a
+    /// feature on.
+    #[serde(default)]
+    pub power_source_action: Option<PowerSourceAction>,
+    #[serde(default)]
+    pub notify_mode_changes: bool,
+    #[serde(default)]
+    pub ppd_sync_enabled: bool,
+    #[serde(default)]
+    pub ppd_sync_map: PpdMap,
 
     /// What the dedicated PredatorSense key does: `app` (open Predator Sense,
     /// the default), `command` (run `predator_key_command`), or `none`.
@@ -449,6 +507,64 @@ fn default_idle_secs() -> u32 {
     30
 }
 
+/// What a plug or unplug does to the active mode.
+///
+/// Replaces the older `auto_profile_ac` boolean, which could only say "leave it
+/// alone" or "do the clever thing", and left the two configured targets on
+/// screen doing nothing whenever the mode-key lists were set - which is almost
+/// always. Each variant now decides whether those targets apply at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum PowerSourceAction {
+    /// Never move the mode. Plugging in and unplugging change nothing.
+    #[serde(rename = "keep")]
+    Keep,
+    /// Move only when the new source does not allow the current mode, landing
+    /// on the nearest mode both mode-key lists allow. Balanced survives an
+    /// unplug; Turbo does not.
+    #[default]
+    #[serde(rename = "move-if-disallowed")]
+    MoveIfDisallowed,
+    /// Always switch to the mode configured for that source, whatever the
+    /// current one is. The only variant where `profile_ac` and
+    /// `profile_battery` mean anything.
+    #[serde(rename = "always-set")]
+    AlwaysSet,
+}
+
+/// How the app's five modes fold onto the desktop's three power profiles.
+///
+/// Both variants agree at the ends, Eco to power-saver and Turbo to
+/// performance, and differ only in where Quiet lands, which is the one that
+/// genuinely reads either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum PpdMap {
+    /// Eco and Quiet both read as the desktop's power saver.
+    #[default]
+    #[serde(rename = "quiet-saves-power")]
+    QuietSavesPower,
+    /// Quiet sits with Balanced instead, leaving power saver for Eco alone.
+    #[serde(rename = "quiet-is-balanced")]
+    QuietIsBalanced,
+}
+
+impl AppConfig {
+    /// What a plug or unplug should do, resolving a config that predates the
+    /// setting.
+    ///
+    /// Before this was a choice it was the `auto_profile_ac` boolean, so a
+    /// config without the new key is read through the old one: off meant "do
+    /// not touch my mode", on meant what is now `MoveIfDisallowed`. Without
+    /// this an upgrade would hand everyone the enum's default and quietly turn
+    /// the feature on for anyone who had deliberately turned it off.
+    pub fn power_source_action(&self) -> PowerSourceAction {
+        self.power_source_action.unwrap_or(if self.auto_profile_ac {
+            PowerSourceAction::MoveIfDisallowed
+        } else {
+            PowerSourceAction::Keep
+        })
+    }
+}
+
 fn default_auto_eco_threshold() -> u32 {
     30
 }
@@ -499,6 +615,7 @@ impl Default for AppConfig {
             fan_mode: None,
             fan_auto_curve_enabled: false,
             fan_curve_points: default_fan_curve_points(),
+            fan_plans: Vec::new(),
             rgb_static_zones: None,
             rgb_brightness: 100,
             rgb_is_static: true,
@@ -527,6 +644,10 @@ impl Default for AppConfig {
             mode_default: None,
             auto_eco_enabled: false,
             auto_eco_threshold: default_auto_eco_threshold(),
+            power_source_action: None,
+            notify_mode_changes: false,
+            ppd_sync_enabled: false,
+            ppd_sync_map: PpdMap::default(),
             predator_key_action: default_predator_key_action(),
             predator_key_command: String::new(),
             cover_logo: None,
@@ -641,12 +762,60 @@ pub fn list_profiles() -> Vec<String> {
         .collect()
 }
 
+/// What reading `config.json` actually found.
+///
+/// `load_app_config` collapses every failure into the default config, which is
+/// indistinguishable from a fresh install. Any background writer holding that
+/// default is one save away from replacing every lighting scheme, game
+/// profile, macro and setting the file still holds, so a caller that writes
+/// without the user asking has to be able to tell the two apart.
+pub enum AppConfigSource {
+    /// No config file yet: a fresh install, and the only state where writing
+    /// a default config back loses nothing.
+    Missing,
+    Loaded(AppConfig),
+    /// The file is there but could not be read or parsed. The user's settings
+    /// are still in it, so nothing may be written over them unasked.
+    Unreadable(String),
+}
+
+pub fn read_app_config_at(path: &Path) -> AppConfigSource {
+    let json = match fs::read_to_string(path) {
+        Ok(json) => json,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return AppConfigSource::Missing,
+        // Unreadable for any other reason (permissions, I/O) is still a file
+        // that exists and holds the user's settings.
+        Err(e) => return AppConfigSource::Unreadable(e.to_string()),
+    };
+    match serde_json::from_str(&json) {
+        Ok(config) => AppConfigSource::Loaded(config),
+        Err(e) => AppConfigSource::Unreadable(e.to_string()),
+    }
+}
+
+/// Logged at most once per session: the callers below run on timers a few
+/// seconds apart, and a damaged config stays damaged.
+static CONFIG_UNREADABLE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// `load_app_config`, but saying where the config came from.
+pub fn load_app_config_source() -> AppConfigSource {
+    let source = read_app_config_at(&config_dir().join("config.json"));
+    if let AppConfigSource::Unreadable(error) = &source {
+        if !CONFIG_UNREADABLE_LOGGED.swap(true, Ordering::Relaxed) {
+            crate::hardware::applog::error(&format!(
+                "config: config.json exists but could not be loaded, running on defaults \
+                 without overwriting it: {error}"
+            ));
+        }
+    }
+    source
+}
+
 /// Load app config
 pub fn load_app_config() -> AppConfig {
-    let path = config_dir().join("config.json");
-    match fs::read_to_string(&path) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
-        Err(_) => AppConfig::default(),
+    match load_app_config_source() {
+        AppConfigSource::Loaded(config) => config,
+        AppConfigSource::Missing | AppConfigSource::Unreadable(_) => AppConfig::default(),
     }
 }
 
@@ -716,6 +885,40 @@ fn sanitize_filename(name: &str) -> String {
 mod tests {
     use super::*;
 
+    /// An unparseable config used to be indistinguishable from a fresh
+    /// install: both handed the caller `AppConfig::default()`, with an empty
+    /// `fan_plans`, which is exactly what makes the reconciler migrate and
+    /// save. That saved the defaults over a file still holding every lighting
+    /// scheme, game profile, macro and setting the user had.
+    #[test]
+    fn an_unreadable_config_is_not_reported_as_a_fresh_install() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-config-source-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.json");
+        let _ = fs::remove_file(&path);
+
+        assert!(
+            matches!(read_app_config_at(&path), AppConfigSource::Missing),
+            "no file at all is the one case where writing defaults back is safe"
+        );
+
+        let saved = serde_json::to_string(&AppConfig::default()).expect("serialize");
+        fs::write(&path, &saved).expect("write");
+        assert!(matches!(read_app_config_at(&path), AppConfigSource::Loaded(_)));
+
+        fs::write(&path, "{ not json at all").expect("write");
+        match read_app_config_at(&path) {
+            AppConfigSource::Unreadable(error) => assert!(!error.is_empty()),
+            _ => panic!("a present but unparseable file must not read as Missing or Loaded"),
+        }
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
     /// A macro saved before `MacroStep::delay_only` existed has no such key
     /// in its JSON at all - `#[serde(default)]` must still load it, not
     /// error out or silently corrupt every macro a user already recorded.
@@ -739,5 +942,36 @@ mod tests {
         let back: MacroStep = serde_json::from_str(&json).expect("step should deserialize");
         assert_eq!(back.delay_ms, 500);
         assert!(back.delay_only);
+    }
+}
+
+#[cfg(test)]
+mod fan_plan_tests {
+    use super::*;
+
+    #[test]
+    fn a_curve_plan_survives_a_config_round_trip() {
+        let binding = FanBinding {
+            mode: "balanced".into(),
+            plan: FanPlan::Curve { steps: [0, 35, 50, 65, 80, 100] },
+        };
+        let json = serde_json::to_string(&binding).expect("serialize");
+        let back: FanBinding = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.mode, "balanced");
+        assert_eq!(back.plan, FanPlan::Curve { steps: [0, 35, 50, 65, 80, 100] });
+    }
+
+    #[test]
+    fn every_plan_variant_round_trips() {
+        for plan in [
+            FanPlan::Automatic,
+            FanPlan::Max,
+            FanPlan::Fixed { percent: 40 },
+            FanPlan::Curve { steps: crate::hardware::fan::DEFAULT_FAN_CURVE },
+        ] {
+            let json = serde_json::to_string(&plan).expect("serialize");
+            let back: FanPlan = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, plan);
+        }
     }
 }
