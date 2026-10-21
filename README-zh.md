@@ -634,7 +634,7 @@ predator-sense-gui/
 │       └── i18n.rs              # 类型化的 EN/PT 消息
 ├── protocol/                    # 共享的类型化 GUI/helper 契约
 │   ├── Cargo.toml
-│   └── src/lib.rs               # 操作、路径、限制和二进制文件名
+│   └── src/lib.rs               # 操作、路径、限制、二进制文件名、键盘报告
 ├── src/                         # Rust GTK4 应用程序
 │   ├── main.rs
 │   ├── app_state.rs             # 全局窗口可见性标志（用于控制定时器）

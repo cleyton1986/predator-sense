@@ -654,7 +654,7 @@ predator-sense-gui/
 │       └── i18n.rs              # Mensajes tipados EN/PT
 ├── protocol/                    # Contrato tipado compartido entre GUI y helper
 │   ├── Cargo.toml
-│   └── src/lib.rs               # Acciones, rutas, límites y nombres de binarios
+│   └── src/lib.rs               # Acciones, rutas, límites, nombres de binarios, informes del teclado
 ├── src/                         # Aplicación Rust GTK4
 │   ├── main.rs
 │   ├── app_state.rs             # Flag global de visibilidad de ventana (bloquea temporizadores)

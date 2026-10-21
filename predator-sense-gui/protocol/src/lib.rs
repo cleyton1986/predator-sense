@@ -2564,3 +2564,196 @@ mod dmi_tests {
         assert_eq!(dmi::PREDATOR_KEY_MODELS, &["PH16-71"]);
     }
 }
+
+/// The Chicony 24-bit keyboard (04F2:0117, PH16-71): its wire format and the
+/// values that cross the process boundary.
+///
+/// The privileged helper sends the reports built here. The format was read
+/// from PredatorSense's own USB controller library and tested on a PH16-71
+/// (2026-10-16): feature reports of 8 bytes, with no report IDs.
+pub mod keyboard {
+    /// The controller's own brightness ceiling (`0x32`). Its Fn backlight
+    /// keys step through 0, 12, 25, 37 and 50.
+    pub const BRIGHTNESS_MAX: u8 = 50;
+
+    /// A percent on the controller's scale, rounded down. Above 100 counts as
+    /// 100.
+    pub fn percent_to_raw(percent: u8) -> u8 {
+        ((percent.min(100) as u16 * BRIGHTNESS_MAX as u16) / 100) as u8
+    }
+
+    /// Bytes in every feature report.
+    pub const FEATURE_LEN: usize = 8;
+
+    /// Byte 7 of every feature report: the complement of the sum of bytes
+    /// 0..6. The firmware does not check it, but Acer's software always
+    /// sends it.
+    pub fn checksum(report: &mut [u8; FEATURE_LEN]) {
+        let sum = report[..7].iter().fold(0u8, |acc, byte| acc.wrapping_add(*byte));
+        report[7] = !sum;
+    }
+
+    /// `head` with its checksum appended.
+    fn sealed(head: [u8; 7]) -> [u8; FEATURE_LEN] {
+        let mut report = [0u8; FEATURE_LEN];
+        report[..7].copy_from_slice(&head);
+        checksum(&mut report);
+        report
+    }
+
+    /// The reset the controller expects before a colour and effect.
+    pub const PREAMBLE: [u8; FEATURE_LEN] = [0xB1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4E];
+
+    /// Speed runs 1 (fastest) to 9 (slowest) on the wire.
+    const SPEED_FAST: u8 = 1;
+    const SPEED_SLOW: u8 = 9;
+
+    /// Which palette entry an effect shows: 1 is entry 0, the one
+    /// [`colour_packet`] writes (8 would be a random colour).
+    const COLOUR_FROM_PACKET: u8 = 0x01;
+
+    /// A percent, higher faster, as the wire's speed byte.
+    fn scale_speed(percent: u8) -> u8 {
+        if percent >= 100 {
+            return SPEED_FAST;
+        }
+        let range = (SPEED_SLOW - SPEED_FAST) as u16;
+        (SPEED_SLOW - ((percent as u16 * range) / 100) as u8).max(SPEED_FAST)
+    }
+
+    /// `14 00 00 RR GG BB 00 CK`: palette entry 0 as a real 24-bit colour.
+    /// On its own it changes nothing; the effect report after it shows it.
+    pub fn colour_packet(red: u8, green: u8, blue: u8) -> [u8; FEATURE_LEN] {
+        sealed([0x14, 0x00, 0x00, red, green, blue, 0x00])
+    }
+
+    /// One firmware effect in one colour: the preamble, the colour, then
+    /// `08 02 MODE SPEED BRIGHT 01 DIR CK`. `speed` and `brightness` are
+    /// percents (above 100 counts as 100), `direction` 1..=6 (kept to that
+    /// range). The three go out together, in this order.
+    pub fn effect_packets(
+        opcode: u8,
+        speed: u8,
+        brightness: u8,
+        red: u8,
+        green: u8,
+        blue: u8,
+        direction: u8,
+    ) -> [[u8; FEATURE_LEN]; 3] {
+        let effect = sealed([
+            0x08,
+            0x02,
+            opcode,
+            scale_speed(speed),
+            percent_to_raw(brightness),
+            COLOUR_FROM_PACKET,
+            direction.clamp(1, 6),
+        ]);
+        [PREAMBLE, colour_packet(red, green, blue), effect]
+    }
+
+}
+
+#[cfg(test)]
+mod keyboard_tests {
+    use super::keyboard;
+
+    #[test]
+    fn the_scale_ends_at_the_controllers_own_ceiling() {
+        assert_eq!(keyboard::BRIGHTNESS_MAX, 0x32);
+        assert_eq!(keyboard::percent_to_raw(100), keyboard::BRIGHTNESS_MAX);
+        assert_eq!(keyboard::percent_to_raw(0), 0);
+        // Floored, as the helper always scaled it.
+        assert_eq!(keyboard::percent_to_raw(99), 49);
+        assert_eq!(keyboard::percent_to_raw(255), keyboard::BRIGHTNESS_MAX);
+    }
+
+    fn byte_sum(bytes: &[u8]) -> u8 {
+        bytes.iter().fold(0u8, |acc, byte| acc.wrapping_add(*byte))
+    }
+
+    #[test]
+    fn the_checksum_is_the_complement_of_the_byte_sum() {
+        let cases: [([u8; 7], u8); 4] = [
+            ([0x30, 0x01, 0x00, 0, 0, 0, 0], 0xce),
+            ([0x30, 0x01, 0x01, 0, 0, 0, 0], 0xcd),
+            ([0xb1, 0, 0, 0, 0, 0, 0], 0x4e),
+            ([0x08, 0x02, 0x02, 0x07, 0x32, 0x01, 0x01], 0xb8),
+        ];
+        for (head, expected) in cases {
+            let mut packet = [0u8; 8];
+            packet[..7].copy_from_slice(&head);
+            packet[7] = 0x55;
+            keyboard::checksum(&mut packet);
+            assert_eq!(packet[..7], head, "the data bytes are left alone");
+            assert_eq!(packet[7], expected, "{head:02x?}");
+        }
+    }
+
+    #[test]
+    fn the_preamble_is_the_reset_report() {
+        assert_eq!(keyboard::PREAMBLE, [0xb1, 0, 0, 0, 0, 0, 0, 0x4e]);
+    }
+
+    #[test]
+    fn the_colour_packet_writes_palette_entry_zero() {
+        assert_eq!(
+            keyboard::colour_packet(0xff, 0x80, 0x00),
+            [0x14, 0, 0, 0xff, 0x80, 0x00, 0, 0x6c]
+        );
+        assert_eq!(keyboard::colour_packet(1, 2, 3), [0x14, 0, 0, 1, 2, 3, 0, 0xe5]);
+    }
+
+    #[test]
+    fn an_effect_is_the_preamble_the_colour_and_the_effect_report() {
+        assert_eq!(
+            keyboard::effect_packets(0x02, 50, 100, 1, 2, 3, 1),
+            [
+                [0xb1, 0, 0, 0, 0, 0, 0, 0x4e],
+                [0x14, 0, 0, 1, 2, 3, 0, 0xe5],
+                // Breathing, speed 5, brightness 50, palette entry 0, dir 1.
+                [0x08, 0x02, 0x02, 0x05, 0x32, 0x01, 0x01, 0xba],
+            ]
+        );
+        // Static, as the app sends a solid colour.
+        assert_eq!(
+            keyboard::effect_packets(0x01, 0, 100, 0, 174, 199, 1)[2],
+            [0x08, 0x02, 0x01, 0x09, 0x32, 0x01, 0x01, 0xb7]
+        );
+    }
+
+    #[test]
+    fn the_effect_speed_runs_from_slow_to_fast_on_the_wire() {
+        let speed = |percent| keyboard::effect_packets(0x02, percent, 100, 0, 0, 0, 1)[2][3];
+        assert_eq!(speed(0), 9);
+        assert_eq!(speed(50), 5);
+        assert_eq!(speed(99), 2);
+        assert_eq!(speed(100), 1);
+        assert_eq!(speed(255), 1);
+    }
+
+    #[test]
+    fn the_effect_brightness_is_a_percent_on_the_controllers_scale() {
+        for percent in [0u8, 24, 50, 74, 99, 100, 255] {
+            let packets = keyboard::effect_packets(0x01, 0, percent, 0, 0, 0, 1);
+            assert_eq!(packets[2][4], keyboard::percent_to_raw(percent), "{percent} %");
+        }
+    }
+
+    #[test]
+    fn the_effect_direction_is_kept_to_the_six_the_controller_has() {
+        let direction = |dir| keyboard::effect_packets(0x03, 50, 100, 0, 0, 0, dir)[2][6];
+        for dir in 1..=6 {
+            assert_eq!(direction(dir), dir);
+        }
+        assert_eq!(direction(0), 1);
+        assert_eq!(direction(9), 6);
+    }
+
+    #[test]
+    fn every_effect_report_ends_in_its_checksum() {
+        for packet in keyboard::effect_packets(0x29, 37, 74, 9, 8, 7, 4) {
+            assert_eq!(packet[7], !byte_sum(&packet[..7]), "{packet:02x?}");
+        }
+    }
+}

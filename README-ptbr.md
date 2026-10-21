@@ -639,7 +639,7 @@ predator-sense-gui/
 │       └── i18n.rs              # Mensagens EN/PT tipadas
 ├── protocol/                    # Contrato tipado compartilhado entre GUI/helper
 │   ├── Cargo.toml
-│   └── src/lib.rs               # Ações, caminhos, limites e nomes dos binários
+│   └── src/lib.rs               # Ações, caminhos, limites, nomes dos binários, relatórios do teclado
 ├── src/                         # Aplicação Rust GTK4
 │   ├── main.rs
 │   ├── app_state.rs             # Flag global de visibilidade da janela (gate dos timers)

@@ -13,6 +13,7 @@ use predator_sense_protocol::helper::{
     Action as HelperAction, CpuGovernor, EnergyPreference, Switch, OPTIONAL_VALUE_SKIP,
 };
 use predator_sense_protocol::internal;
+use predator_sense_protocol::keyboard;
 use predator_sense_protocol::process as bounded;
 use predator_sense_protocol::temp_limit::{self, Bound, Capability};
 use predator_sense_protocol::thermal_profile;
@@ -89,31 +90,8 @@ fn chicony_rgb_apply(effect: u8, brightness: u8, color: u8, speed: u8) -> AppRes
     ])
 }
 
-/// Preamble this controller expects before a colour/effect packet.
-const CHICONY_PREAMBLE: [u8; 8] = [0xB1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4E];
-/// Terminator of the effect packet in the per-key generation's command family.
-const CHICONY_EFFECT_TERMINATOR: u8 = 0x9B;
-/// The controller's own brightness ceiling (percentages are scaled to this).
-const CHICONY_BRIGHT_MAX: u8 = 0x32;
-/// Speed runs 1 (fastest) to 9 (slowest) on the wire.
-const CHICONY_SPEED_FAST: u8 = 1;
-const CHICONY_SPEED_SLOW: u8 = 9;
 /// Effect opcode for a solid colour.
 const CHICONY_EFFECT_STATIC: u8 = 0x01;
-/// Colour source: 0x01 = the colour staged by the 0x14 packet, 0x08 = random.
-const CHICONY_COLOR_FROM_PACKET: u8 = 0x01;
-
-fn chicony_scale_brightness(percent: u8) -> u8 {
-    ((percent.min(100) as u16 * CHICONY_BRIGHT_MAX as u16) / 100) as u8
-}
-
-fn chicony_scale_speed(percent: u8) -> u8 {
-    if percent >= 100 {
-        return CHICONY_SPEED_FAST;
-    }
-    let range = (CHICONY_SPEED_SLOW - CHICONY_SPEED_FAST) as u16;
-    (CHICONY_SPEED_SLOW - ((percent as u16 * range) / 100) as u8).max(CHICONY_SPEED_FAST)
-}
 
 /// Solid 24-bit colour on the whole keyboard.
 ///
@@ -146,20 +124,9 @@ fn chicony_effect_apply(
     blue: u8,
     direction: u8,
 ) -> AppResult {
-    chicony_send_many(&[
-        CHICONY_PREAMBLE,
-        [0x14, 0x00, 0x00, red, green, blue, 0x00, 0x00],
-        [
-            0x08,
-            0x02,
-            opcode,
-            chicony_scale_speed(speed),
-            chicony_scale_brightness(brightness),
-            CHICONY_COLOR_FROM_PACKET,
-            direction.clamp(1, 2),
-            CHICONY_EFFECT_TERMINATOR,
-        ],
-    ])
+    chicony_send_many(&keyboard::effect_packets(
+        opcode, speed, brightness, red, green, blue, direction,
+    ))
 }
 
 /// Writes one mode-key cycle to facer. `skip` leaves the list untouched; an
@@ -673,7 +640,7 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
             let red = parse_u16("red", &args[4], 0, 255)? as u8;
             let green = parse_u16("green", &args[5], 0, 255)? as u8;
             let blue = parse_u16("blue", &args[6], 0, 255)? as u8;
-            let direction = parse_u16("direction", &args[7], 1, 2)? as u8;
+            let direction = parse_u16("direction", &args[7], 1, 6)? as u8;
             chicony_effect_apply(opcode, speed, brightness, red, green, blue, direction)
         }
         HelperAction::GrubSplashApply => grub_splash_apply(&args[1], &args[2], sysfs),
@@ -3283,5 +3250,58 @@ mod tests {
             fs::read_to_string(fixture.path().join("etc/default/grub")).unwrap(),
             "GRUB_TIMEOUT=5\n"
         );
+    }
+
+    #[test]
+    fn chicony_effect_accepts_all_six_wave_directions() {
+        for direction in 1..=6u16 {
+            assert!(parse_u16("direction", &direction.to_string(), 1, 6).is_ok());
+        }
+        assert!(parse_u16("direction", "7", 1, 6).is_err());
+    }
+
+    #[test]
+    fn chicony_checksum_is_the_complement_of_the_byte_sum() {
+        let cases: [([u8; 7], u8); 4] = [
+            ([0x30, 0x01, 0x00, 0, 0, 0, 0], 0xce),
+            ([0x30, 0x01, 0x01, 0, 0, 0, 0], 0xcd),
+            ([0xb1, 0, 0, 0, 0, 0, 0], 0x4e),
+            ([0x08, 0x02, 0x02, 0x07, 0x32, 0x01, 0x01], 0xb8),
+        ];
+        for (head, expected) in cases {
+            let mut packet = [0u8; 8];
+            packet[..7].copy_from_slice(&head);
+            keyboard::checksum(&mut packet);
+            assert_eq!(packet[7], expected, "{head:02x?}");
+        }
+    }
+
+    #[test]
+    fn chicony_effect_packets_carry_computed_checksums() {
+        let packets = keyboard::effect_packets(0x02, 50, 100, 1, 2, 3, 1);
+        assert_eq!(packets[0], keyboard::PREAMBLE);
+        assert_eq!(packets[1], [0x14, 0, 0, 1, 2, 3, 0, 0xe5]);
+        let effect = packets[2];
+        assert_eq!(effect[..7], [0x08, 0x02, 0x02, 0x05, 0x32, 0x01, 0x01]);
+        let sum = effect[..7].iter().fold(0u8, |a, b| a.wrapping_add(*b));
+        assert_eq!(effect[7], !sum);
+        assert_ne!(effect[7], 0x9b);
+    }
+
+    #[test]
+    fn chicony_color_packet_ends_in_its_checksum() {
+        assert_eq!(
+            keyboard::colour_packet(0xff, 0x80, 0x00),
+            [0x14, 0, 0, 0xff, 0x80, 0x00, 0, 0x6c]
+        );
+    }
+
+    #[test]
+    fn chicony_brightness_is_scaled_on_the_protocol_scale() {
+        for percent in [0u8, 24, 50, 74, 99, 100, 255] {
+            let packets = keyboard::effect_packets(0x01, 0, percent, 0, 0, 0, 1);
+            let raw = keyboard::percent_to_raw(percent);
+            assert_eq!(packets[2][4], raw, "{percent} %");
+        }
     }
 }

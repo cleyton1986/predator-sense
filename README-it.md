@@ -651,7 +651,7 @@ predator-sense-gui/
 │       └── i18n.rs              # Messaggi tipizzati EN/PT
 ├── protocol/                    # Contratto tipizzato condiviso tra GUI e helper
 │   ├── Cargo.toml
-│   └── src/lib.rs               # Azioni, percorsi, limiti e nomi dei binari
+│   └── src/lib.rs               # Azioni, percorsi, limiti, nomi dei binari, report della tastiera
 ├── src/                         # Applicazione Rust GTK4
 │   ├── main.rs
 │   ├── app_state.rs             # Flag globale di visibilità della finestra (blocca i timer)

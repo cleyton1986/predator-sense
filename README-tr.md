@@ -637,7 +637,7 @@ predator-sense-gui/
 │       └── i18n.rs              # Tipli EN/PT mesajları
 ├── protocol/                    # Paylaşılan tipli GUI/helper sözleşmesi
 │   ├── Cargo.toml
-│   └── src/lib.rs               # Eylemler, yollar, limitler ve binary adları
+│   └── src/lib.rs               # Eylemler, yollar, limitler, binary adları, klavye raporları
 ├── src/                         # Rust GTK4 uygulaması
 │   ├── main.rs
 │   ├── app_state.rs             # Global pencere-görünürlüğü bayrağı (zamanlayıcıları kapatır)
