@@ -819,6 +819,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // band border does not flip the fans between two speeds. See
         // `fan::CURVE_HYSTERESIS_C`.
         let curve_memory = Rc::new(Cell::new(None::<crate::hardware::fan::CurveMemory>));
+        // The curve's recent inputs, whose mean decides a step down.
+        let curve_readings =
+            Rc::new(RefCell::new(crate::hardware::fan::CurveReadings::default()));
         // Consecutive failed writes, and how many ticks have passed since the
         // last attempt. See `fan::may_attempt_write`: without this a write
         // that can never succeed costs a privileged call, and on an
@@ -916,20 +919,34 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             let (cpu, gpu) = sensors::read_critical_temps();
             let temp = crate::hardware::fan::curve_input_temp(cpu, gpu);
             let applied = fan_state.get();
-            let applied_band = match plan {
-                config::FanPlan::Curve { steps } => crate::hardware::fan::remembered_band(
-                    curve_memory.get(),
-                    active,
-                    &steps,
-                    applied,
-                ),
-                _ => None,
+            let now_s = glib::monotonic_time() as f64 / 1e6;
+            let hold = match (plan, temp) {
+                (config::FanPlan::Curve { steps }, Some(t)) => {
+                    let mean_c = curve_readings.borrow_mut().push(active, &steps, t);
+                    crate::hardware::fan::remembered_band(
+                        curve_memory.get(),
+                        active,
+                        &steps,
+                        applied,
+                    )
+                    .zip(curve_memory.get())
+                    .map(|(band, memory)| crate::hardware::fan::CurveHold {
+                        band,
+                        applied_at_s: memory.applied_at_s,
+                        now_s,
+                        mean_c,
+                    })
+                }
+                _ => {
+                    curve_readings.borrow_mut().clear();
+                    None
+                }
             };
             let target = crate::hardware::fan::plan_target_held(
                 plan,
                 temp,
                 applied == FanState::Firmware,
-                applied_band,
+                hold,
             );
             if !crate::hardware::fan::needs_write(target, applied) {
                 return glib::ControlFlow::Continue;
@@ -972,7 +989,8 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     Some(crate::hardware::fan::CurveMemory {
                         mode: active,
                         steps,
-                        band: crate::hardware::fan::curve_band_held(t, &steps, applied_band),
+                        band: crate::hardware::fan::curve_band_target(t, &steps, hold),
+                        applied_at_s: now_s,
                     })
                 }
                 _ => None,
@@ -1009,7 +1027,11 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         // firmware has them" as far as needs_write cares.
                         Ok(()) => {
                             failed.set(0);
-                            memory.set(remember);
+                            // The hold runs from the write, not the decision.
+                            memory.set(remember.map(|m| crate::hardware::fan::CurveMemory {
+                                applied_at_s: glib::monotonic_time() as f64 / 1e6,
+                                ..m
+                            }));
                             state.set(match intended {
                                 CurveAction::Firmware => FanState::Firmware,
                                 CurveAction::Manual(percent) => FanState::Manual(percent),

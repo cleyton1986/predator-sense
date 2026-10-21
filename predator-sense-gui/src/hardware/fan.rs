@@ -453,15 +453,96 @@ pub fn curve_band_held(temp_c: f64, steps: &[u8; 6], applied_band: Option<usize>
     }
 }
 
-/// `plan_target` with band hysteresis for a curve. See `curve_band_held`.
+/// Readings the down-step decision averages: about 15 s at the 3 s tick.
+pub const CURVE_SMOOTHING_READINGS: usize = 5;
+
+/// Seconds a curve step is kept after it was written before the curve may
+/// step down from it.
+///
+/// Hysteresis alone was not enough. Measured on a PH16-71 on 2026-10-21
+/// over 30 minutes of normal use (Balanced, `[25, 40, 50, 60, 90, 100]`):
+/// with the 3 C margin still 19 changes between pwm 64 and 102 in 17
+/// minutes, because the hottest core jumps several degrees on small loads.
+/// So a step down also waits a minute and looks at the mean of the last
+/// `CURVE_SMOOTHING_READINGS` readings. A step up still uses the current
+/// reading at once.
+pub const CURVE_MIN_HOLD_S: f64 = 60.0;
+
+/// The step a curve applied, and what the down-step decision needs about it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CurveHold {
+    pub band: usize,
+    /// Monotonic seconds of the write that applied `band`.
+    pub applied_at_s: f64,
+    pub now_s: f64,
+    /// Mean of the last readings, see `CurveReadings`.
+    pub mean_c: f64,
+}
+
+/// The step the curve should apply: up at once on the current reading;
+/// down only after `CURVE_MIN_HOLD_S`, and then by `curve_band_held` on the
+/// mean. A fall into a 0 % band is not held (see `CURVE_HYSTERESIS_C`).
+pub fn curve_band_target(temp_c: f64, steps: &[u8; 6], hold: Option<CurveHold>) -> usize {
+    let band = curve_band(temp_c);
+    let Some(hold) = hold else {
+        return band;
+    };
+    if band >= hold.band || steps[band] == 0 {
+        return band;
+    }
+    if hold.now_s - hold.applied_at_s < CURVE_MIN_HOLD_S {
+        return hold.band;
+    }
+    // Never below the current reading's band: a cool mean must not undercut
+    // a temperature that is already climbing again. Never above the applied
+    // one: this is the down path, and only the current reading steps up.
+    curve_band_held(hold.mean_c, steps, Some(hold.band)).max(band).min(hold.band)
+}
+
+/// The last `CURVE_SMOOTHING_READINGS` curve inputs, for one mode and curve.
+#[derive(Debug, Default)]
+pub struct CurveReadings {
+    key: Option<(Option<crate::hardware::profile::PowerProfile>, [u8; 6])>,
+    readings: std::collections::VecDeque<f64>,
+}
+
+impl CurveReadings {
+    /// Adds a reading and returns the mean of the window, starting over
+    /// when the mode or the curve changed.
+    pub fn push(
+        &mut self,
+        mode: Option<crate::hardware::profile::PowerProfile>,
+        steps: &[u8; 6],
+        temp_c: f64,
+    ) -> f64 {
+        if self.key != Some((mode, *steps)) {
+            self.clear();
+            self.key = Some((mode, *steps));
+        }
+        if self.readings.len() == CURVE_SMOOTHING_READINGS {
+            self.readings.pop_front();
+        }
+        self.readings.push_back(temp_c);
+        self.readings.iter().sum::<f64>() / self.readings.len() as f64
+    }
+
+    /// For a tick that is not running a curve, so a later one starts fresh.
+    pub fn clear(&mut self) {
+        self.key = None;
+        self.readings.clear();
+    }
+}
+
+/// `plan_target` with hysteresis, smoothing and a minimum hold for a curve.
+/// See `curve_band_target`.
 pub fn plan_target_held(
     plan: crate::config::FanPlan,
     temp_c: Option<f64>,
     handed_off: bool,
-    applied_band: Option<usize>,
+    hold: Option<CurveHold>,
 ) -> CurveAction {
     if let (crate::config::FanPlan::Curve { steps }, Some(temp_c)) = (plan, temp_c) {
-        let band = curve_band_held(temp_c, &steps, applied_band);
+        let band = curve_band_target(temp_c, &steps, hold);
         if band != curve_band(temp_c) {
             return CurveAction::Manual(steps[band]);
         }
@@ -470,11 +551,13 @@ pub fn plan_target_held(
 }
 
 /// The curve step the reconciler last applied, and for which mode and curve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CurveMemory {
     pub mode: Option<crate::hardware::profile::PowerProfile>,
     pub steps: [u8; 6],
     pub band: usize,
+    /// Monotonic seconds of the write.
+    pub applied_at_s: f64,
 }
 
 /// The band to hold against, or `None` when the memory no longer describes
@@ -893,15 +976,20 @@ mod tests {
         assert_eq!(curve_action(95.0, &steps, true), CurveAction::Hold);
     }
 
-    // An illustrative curve, not a measured one.
+    // An illustrative curve, not the measured Balanced one (`BALANCED`).
     const WOBBLE: [u8; 6] = [25, 40, 55, 70, 85, 100];
+
+    // Long past the minimum hold, with a steady reading: hysteresis alone.
+    fn settled(band: usize, temp_c: f64) -> CurveHold {
+        CurveHold { band, applied_at_s: 0.0, now_s: 1000.0, mean_c: temp_c }
+    }
 
     fn held(temp_c: f64, steps: [u8; 6], applied_band: Option<usize>) -> CurveAction {
         plan_target_held(
             crate::config::FanPlan::Curve { steps },
             Some(temp_c),
             false,
-            applied_band,
+            applied_band.map(|band| settled(band, temp_c)),
         )
     }
 
@@ -947,7 +1035,7 @@ mod tests {
     fn the_remembered_band_is_dropped_on_any_change() {
         use crate::hardware::profile::PowerProfile;
         let mode = Some(PowerProfile::Balanced);
-        let memory = Some(CurveMemory { mode, steps: WOBBLE, band: 1 });
+        let memory = Some(CurveMemory { mode, steps: WOBBLE, band: 1, applied_at_s: 0.0 });
         let applied = FanState::Manual(40);
         assert_eq!(remembered_band(memory, mode, &WOBBLE, applied), Some(1));
         // Curve edited: the new curve takes effect at once.
@@ -971,13 +1059,107 @@ mod tests {
     fn hysteresis_leaves_other_plans_alone() {
         use crate::config::FanPlan;
         assert_eq!(
-            plan_target_held(FanPlan::Fixed { percent: 40 }, Some(44.0), false, Some(3)),
+            plan_target_held(FanPlan::Fixed { percent: 40 }, Some(44.0), false, Some(settled(3, 44.0))),
             CurveAction::Manual(40)
         );
         assert_eq!(
-            plan_target_held(FanPlan::Curve { steps: WOBBLE }, None, false, Some(1)),
+            plan_target_held(FanPlan::Curve { steps: WOBBLE }, None, false, Some(settled(1, 44.0))),
             CurveAction::Hold
         );
+    }
+
+    // A Balanced curve of 25, 40, 50, 60, 90, 100 %.
+    const BALANCED: [u8; 6] = [25, 40, 50, 60, 90, 100];
+
+    /// Runs the reconciler's decision over readings 3 s apart, starting
+    /// with `band` applied at 0 s, and returns the band after each tick.
+    fn run(band: usize, readings: &[f64]) -> Vec<usize> {
+        let mut window = CurveReadings::default();
+        let (mut applied, mut applied_at_s) = (band, 0.0);
+        readings
+            .iter()
+            .enumerate()
+            .map(|(i, &t)| {
+                let now_s = 3.0 * (i + 1) as f64;
+                let mean_c = window.push(None, &BALANCED, t);
+                let hold = CurveHold { band: applied, applied_at_s, now_s, mean_c };
+                let next = curve_band_target(t, &BALANCED, Some(hold));
+                if next != applied {
+                    (applied, applied_at_s) = (next, now_s);
+                }
+                applied
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_spiky_reading_stays_on_the_upper_step() {
+        // The hottest core jumping a few degrees on small loads, for five
+        // minutes: the mean never falls 3 C under the 45 C border.
+        let spikes: Vec<f64> = [42.0, 47.0, 43.0, 46.0, 42.0, 44.0, 41.0]
+            .iter()
+            .copied()
+            .cycle()
+            .take(100)
+            .collect();
+        assert!(run(1, &spikes).iter().all(|&band| band == 1));
+    }
+
+    #[test]
+    fn a_sustained_fall_steps_down_after_the_minimum_hold() {
+        let bands = run(1, &[40.0; 30]);
+        // Ticks 1 to 19 are 3 to 57 s after the write: held.
+        assert!(bands[..19].iter().all(|&band| band == 1));
+        // 60 s, and the last five readings average 40 C.
+        assert_eq!(bands[19], 0);
+    }
+
+    #[test]
+    fn a_cool_mean_does_not_step_down_inside_the_hold() {
+        let hold = CurveHold { band: 1, applied_at_s: 0.0, now_s: 30.0, mean_c: 35.0 };
+        assert_eq!(curve_band_target(35.0, &BALANCED, Some(hold)), 1);
+        // The same reading past the hold steps down.
+        let hold = CurveHold { now_s: 60.0, ..hold };
+        assert_eq!(curve_band_target(35.0, &BALANCED, Some(hold)), 0);
+    }
+
+    #[test]
+    fn the_down_path_never_steps_up() {
+        // A mean hotter than the applied band (readings that fell fast) must
+        // not lift the step: only the current reading may.
+        let hold = CurveHold { band: 1, applied_at_s: 0.0, now_s: 90.0, mean_c: 70.0 };
+        assert_eq!(curve_band_target(42.0, &BALANCED, Some(hold)), 1);
+    }
+
+    #[test]
+    fn a_rise_steps_up_at_once_even_inside_the_hold() {
+        // 3 s after stepping to 25 %.
+        assert_eq!(run(0, &[47.0]), vec![1]);
+        // And not delayed by a cool mean.
+        assert_eq!(run(0, &[40.0, 40.0, 40.0, 40.0, 47.0])[4], 1);
+    }
+
+    #[test]
+    fn the_smoothing_window_starts_over_on_any_change() {
+        use crate::hardware::profile::PowerProfile;
+        let mode = Some(PowerProfile::Balanced);
+        let mut window = CurveReadings::default();
+        assert_eq!(window.push(mode, &BALANCED, 40.0), 40.0);
+        assert_eq!(window.push(mode, &BALANCED, 50.0), 45.0);
+        // Only the last five count.
+        for _ in 0..5 {
+            window.push(mode, &BALANCED, 60.0);
+        }
+        assert_eq!(window.push(mode, &BALANCED, 60.0), 60.0);
+        // Curve edited.
+        let mut edited = BALANCED;
+        edited[1] = 45;
+        assert_eq!(window.push(mode, &edited, 42.0), 42.0);
+        // Mode changed.
+        assert_eq!(window.push(Some(PowerProfile::Quiet), &edited, 44.0), 44.0);
+        // Plan changed away from the curve and back.
+        window.clear();
+        assert_eq!(window.push(Some(PowerProfile::Quiet), &edited, 46.0), 46.0);
     }
 
     #[test]
