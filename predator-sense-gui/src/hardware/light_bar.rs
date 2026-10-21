@@ -24,6 +24,8 @@ use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
+use crate::hardware::blanking::Blanking;
+use crate::hardware::lighting_renderer::{renderer, Light, LightingRenderer};
 use crate::i18n::tf;
 
 const DEVICE: &str = "/dev/acer-gkbbl-0";
@@ -50,8 +52,7 @@ pub fn speed_range() -> (u8, u8) {
     }
 }
 
-static BLANKING: crate::hardware::blanking::Blanking =
-    crate::hardware::blanking::Blanking::new();
+static BLANKING: Blanking = Blanking::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LightBarMode {
@@ -97,6 +98,26 @@ impl LightBarMode {
         Self::MotionPoint,
         Self::ZoomIn,
     ];
+
+    pub fn icon_name(self) -> &'static str {
+        match self {
+            Self::Off => "lighting-off-symbolic",
+            Self::Static => "lighting-static-symbolic",
+            Self::Breathing => "lighting-breathing-symbolic",
+            Self::Strobe => "lighting-strobe-symbolic",
+            Self::Wave => "lighting-wave-symbolic",
+            Self::Ripple => "lighting-ripple-symbolic",
+            Self::Scanner => "lighting-scanner-symbolic",
+            Self::Neon => "lighting-neon-symbolic",
+            Self::Rainbow => "lighting-rainbow-symbolic",
+            Self::Snake
+            | Self::SnakeRainbow
+            | Self::Lightning
+            | Self::Stack
+            | Self::MotionPoint
+            | Self::ZoomIn => "lighting-scanner-symbolic",
+        }
+    }
 
     /// The modes this chassis offers, in display order (Off last).
     pub fn available() -> Vec<LightBarMode> {
@@ -366,13 +387,30 @@ pub fn blank() -> Result<(), String> {
     let saved = crate::config::load_app_config()
         .light_bar
         .unwrap_or_default();
+    blank_through(renderer(), &BLANKING, saved, &mut write_frame)
+}
+
+/// [`blank`] with its renderer, flag and writer passed in, for the tests.
+fn blank_through(
+    renderer: &LightingRenderer,
+    blanking: &Blanking,
+    saved: LightBarState,
+    write: &mut dyn FnMut(&LightBarState) -> Result<(), String>,
+) -> Result<(), String> {
     // `Blanking::set` records the flag only after the write lands, which is
     // the rule this used to get wrong in both this module and keyboard_rgb.
-    BLANKING.set(true, || {
-        write_frame(&LightBarState {
-            brightness: 0,
-            ..saved
-        })
+    // The lighting renderer lets go of the bar first, so none of its frames
+    // lands after the dark one.
+    blanking.set(true, || {
+        crate::hardware::blanking::blank_drawn(
+            |blanked| renderer.set_blanked(Light::Bar, blanked),
+            || {
+                write(&LightBarState {
+                    brightness: 0,
+                    ..saved
+                })
+            },
+        )
     })
 }
 
@@ -389,7 +427,18 @@ pub fn unblank() {
     let _ = unblank_checked();
 }
 
-/// [`unblank`], with the failure returned. For app exit, which logs why.
+/// At app exit, once the lighting renderer has stopped: shows `state`
+/// (`lighting::exit_looks`), as the idle unblank when the idle timer has the
+/// bar dark (`blanked`), else as a plain write.
+pub fn show_at_exit(state: &LightBarState, blanked: bool) -> Result<(), String> {
+    if blanked {
+        unblank_through(renderer(), &BLANKING, *state, &mut write_frame)
+    } else {
+        apply(state, false)
+    }
+}
+
+/// [`unblank`], with the failure returned.
 pub fn unblank_checked() -> Result<(), String> {
     // The same fallback `blank` uses, as keyboard_rgb does in both. Returning
     // early here instead left the flag set after `blank` had darkened the bar
@@ -398,14 +447,107 @@ pub fn unblank_checked() -> Result<(), String> {
     let saved = crate::config::load_app_config()
         .light_bar
         .unwrap_or_default();
+    unblank_through(renderer(), &BLANKING, saved, &mut write_frame)
+}
+
+/// [`unblank_checked`] with its renderer, flag and writer passed in, for the tests.
+fn unblank_through(
+    renderer: &LightingRenderer,
+    blanking: &Blanking,
+    saved: LightBarState,
+    write: &mut dyn FnMut(&LightBarState) -> Result<(), String>,
+) -> Result<(), String> {
     // Through `on_wire`, not raw: a saved `Off` written literally relights the
-    // bar, since its mode id does not blank this firmware.
-    BLANKING.set(false, || write_frame(&on_wire(&saved)))
+    // bar, since its mode id does not blank this firmware. When the lighting
+    // renderer draws the bar, its frame is the relight instead.
+    blanking.set(false, || {
+        crate::hardware::blanking::unblank_drawn(
+            || renderer.unblank(Light::Bar),
+            || write(&on_wire(&saved)),
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod through_the_renderer {
+        use super::*;
+        use crate::hardware::lighting_renderer::testing;
+        use std::cell::RefCell;
+
+        fn saved() -> LightBarState {
+            LightBarState {
+                mode: LightBarMode::Static,
+                brightness: 70,
+                ..LightBarState::default()
+            }
+        }
+
+        #[test]
+        fn the_blank_lets_the_renderer_go_first_and_takes_it_back_on_a_failure() {
+            let renderer = testing::drawing("test.time");
+            let blanking = Blanking::new();
+            let seen = RefCell::new(Vec::new());
+            let result = blank_through(&renderer, &blanking, saved(), &mut |state| {
+                seen.borrow_mut()
+                    .push((state.brightness, testing::blanked(&renderer, Light::Bar)));
+                Ok(())
+            });
+            assert!(result.is_ok() && blanking.is_blanked());
+            assert_eq!(
+                *seen.borrow(),
+                [(0, true)],
+                "dark, with the renderer let go first"
+            );
+            let blanking = Blanking::new();
+            renderer.set_blanked(Light::Bar, false);
+            let failed = blank_through(&renderer, &blanking, saved(), &mut |_| Err("EIO".into()));
+            assert!(failed.is_err() && !blanking.is_blanked());
+            assert!(
+                !testing::blanked(&renderer, Light::Bar),
+                "the renderer has it back"
+            );
+        }
+
+        #[test]
+        fn the_unblank_of_a_drawn_bar_is_the_renderers_frame_and_otherwise_the_record() {
+            let renderer = testing::drawing("test.time");
+            let blanking = Blanking::new();
+            blanking.record(true);
+            renderer.set_blanked(Light::Bar, true);
+            let redraws = testing::redraws(&renderer, Light::Bar);
+            let wrote = RefCell::new(Vec::new());
+            let mut write = |state: &LightBarState| {
+                wrote.borrow_mut().push(*state);
+                Ok(())
+            };
+            assert!(unblank_through(&renderer, &blanking, saved(), &mut write).is_ok());
+            assert!(
+                wrote.borrow().is_empty(),
+                "the record is not written over the renderer"
+            );
+            assert!(!blanking.is_blanked());
+            assert!(!testing::blanked(&renderer, Light::Bar));
+            assert_eq!(testing::redraws(&renderer, Light::Bar), redraws + 1);
+            // Nothing drawn: the record, as before.
+            let idle = testing::renderer();
+            blanking.record(true);
+            assert!(unblank_through(&idle, &blanking, saved(), &mut write).is_ok());
+            assert_eq!(*wrote.borrow(), [saved()]);
+        }
+    }
+
+    #[test]
+    fn the_wmi_frame_keeps_speed_in_its_own_range() {
+        let slowest_on_the_zone_node = LightBarState { speed: 0, ..LightBarState::default() };
+        assert_eq!(frame(&slowest_on_the_zone_node)[1], SPEED_MIN);
+        let too_fast = LightBarState { speed: 9, ..LightBarState::default() };
+        assert_eq!(frame(&too_fast)[1], SPEED_MAX);
+        let normal = LightBarState { speed: 3, ..LightBarState::default() };
+        assert_eq!(frame(&normal)[1], 3);
+    }
 
     #[test]
     fn off_goes_on_the_wire_as_static_at_zero_brightness() {
@@ -550,5 +692,12 @@ mod tests {
     fn only_wave_and_rainbow_take_a_direction() {
         let directional: Vec<_> = LightBarMode::ALL.into_iter().filter(|m| m.uses_direction()).collect();
         assert_eq!(directional, vec![LightBarMode::Rainbow, LightBarMode::Wave]);
+    }
+
+    #[test]
+    fn mode_icons() {
+        assert_eq!(LightBarMode::Static.icon_name(), "lighting-static-symbolic");
+        assert_eq!(LightBarMode::Strobe.icon_name(), "lighting-strobe-symbolic");
+        assert_eq!(LightBarMode::Snake.icon_name(), "lighting-scanner-symbolic");
     }
 }

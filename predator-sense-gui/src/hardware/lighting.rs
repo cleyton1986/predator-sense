@@ -14,6 +14,27 @@
 
 use crate::config;
 use crate::hardware::keyboard_rgb::KeyboardState;
+use crate::hardware::lighting_model::Drawn;
+
+/// Where a setup's app-drawn looks go: `lighting_renderer::LightingRenderer` implements it,
+/// and `lighting_renderer::renderer()` is the app's.
+pub trait Renderer {
+    /// Draw `drawn` from now on, in place of whatever was drawn before; an empty `drawn`
+    /// stops drawing. A light `drawn` does not name must not be drawn on once this
+    /// returns: [`apply_setup`] writes that light's firmware look next, and a late frame
+    /// would cover it.
+    fn show(&self, drawn: &Drawn);
+}
+
+/// Draws nothing: for tests that apply a setup without a renderer. The app passes
+/// `lighting_renderer::renderer()`.
+#[cfg(test)]
+pub struct NoRenderer;
+
+#[cfg(test)]
+impl Renderer for NoRenderer {
+    fn show(&self, _drawn: &Drawn) {}
+}
 
 /// Reapplies the saved keyboard and light-bar state, and on the 24-bit
 /// keyboard path switches the keyboard's own idle timer off again.

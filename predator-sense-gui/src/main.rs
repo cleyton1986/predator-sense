@@ -212,7 +212,7 @@ fn main() {
         // more for the bar).
         hardware::keyboard_rgb::hand_back_firmware_timer(
             std::time::Duration::from_secs(2),
-            looks.keyboard,
+            looks.keyboard.map(hardware::keyboard_rgb::ExitLook::Effect),
         );
         if let Some(rx) = bar_done {
             match rx.recv_timeout(std::time::Duration::from_millis(500)) {

@@ -27,6 +27,7 @@ pub mod light_bar;
 pub mod light_bar_zones;
 pub mod lighting;
 pub mod lighting_model;
+pub mod lighting_renderer;
 pub mod macro_player;
 pub mod magic_rgb;
 pub mod nvidia;

@@ -13,22 +13,31 @@
 //! Order52/ph16-71-rgb, both of which target this exact keyboard; the bytes
 //! are built in `predator_sense_protocol::keyboard`.
 //!
-//! Every write goes to the keyboard's hidraw node from this process
+//! Every write and read goes to the keyboard's hidraw node from this process
 //! ([`chicony_hid`](super::chicony_hid)) when the user can open it (the
 //! installer's udev rule, for the active session's user), and to the privileged
-//! helper's actions otherwise ([`route`]). Both send the same reports.
+//! helper's actions otherwise ([`route`]). Both send the same reports. The
+//! per-key picture and its brightness commit have no helper action, so they
+//! need the node.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
-use predator_sense_protocol::keyboard;
+use predator_sense_protocol::keyboard::{self, EffectReading};
 use serde::{Deserialize, Serialize};
 
 use super::blanking::Blanking;
 use super::chicony_hid::{self, Keyboard, Node};
+use super::lighting_renderer::{renderer, Light, LightingRenderer};
 use crate::config::AppConfig;
 
-/// The highest direction the effect packet takes (Wave's six).
 pub const DIRECTION_MAX: u8 = 6;
+pub const DIR_RIGHT: u8 = 1;
+pub const DIR_LEFT: u8 = 2;
+pub const DIR_UP: u8 = 3;
+pub const DIR_DOWN: u8 = 4;
+pub const DIR_CLOCKWISE: u8 = 5;
+pub const DIR_COUNTER_CLOCKWISE: u8 = 6;
 
 /// One entry of the controller's effect table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -120,6 +129,25 @@ impl Effect {
 
     pub fn uses_direction(self) -> bool {
         matches!(self, Self::Wave)
+    }
+
+    pub fn icon_name(self) -> &'static str {
+        match self {
+            Self::Off => "lighting-off-symbolic",
+            Self::Static => "lighting-static-symbolic",
+            Self::Breathing => "lighting-breathing-symbolic",
+            Self::Wave => "lighting-wave-symbolic",
+            Self::Snake => "lighting-snake-symbolic",
+            Self::Ripple => "lighting-ripple-symbolic",
+            Self::Rainbow => "lighting-rainbow-symbolic",
+            Self::Rain => "lighting-rain-symbolic",
+            Self::Lightning => "lighting-lightning-symbolic",
+            Self::Spot => "lighting-spot-symbolic",
+            Self::Stars => "lighting-stars-symbolic",
+            Self::Fireball => "lighting-fireball-symbolic",
+            Self::Snow => "lighting-snow-symbolic",
+            Self::Heartbeat => "lighting-heartbeat-symbolic",
+        }
     }
 }
 
@@ -248,29 +276,91 @@ fn on_keyboard<T>(
     )
 }
 
-/// Whether the node in `slot` is writable, without waiting. A slot that is
-/// busy answers true: a transfer holds it, or a call deciding its route
-/// (perhaps over an open that fails). True is safe either way, because
-/// every caller of this goes on to a call that brings up no
-/// authentication dialog on either route.
-fn slot_is_writable<N: Node>(slot: &Mutex<Keyboard<N>>) -> bool {
-    match slot.try_lock() {
-        Ok(mut node) => node.is_writable(),
-        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().is_writable(),
-        Err(TryLockError::WouldBlock) => true,
+/// What a slot's node last answered, for the moments the slot is busy (a
+/// transfer holds it, or a call deciding its route, perhaps over an open that
+/// fails): then the answer stays the last one, so the Lighting page's "need
+/// keyboard access" or "password request cancelled" does not drop out for a
+/// check. Before any answer, writable and not refused.
+struct Answers {
+    writable: AtomicBool,
+    denied: AtomicBool,
+}
+
+impl Answers {
+    const fn new() -> Answers {
+        Answers {
+            writable: AtomicBool::new(true),
+            denied: AtomicBool::new(false),
+        }
     }
 }
 
+/// [`HIDRAW`]'s last answers.
+static HIDRAW_ANSWERS: Answers = Answers::new();
+
+/// Whether the node in `slot` is writable, without waiting. A busy slot
+/// answers as it did last ([`Answers`]); true before any answer, which is safe
+/// either way, because every caller of this goes on to a call that brings up
+/// no authentication dialog on either route.
+fn slot_is_writable<N: Node>(slot: &Mutex<Keyboard<N>>, answers: &Answers) -> bool {
+    let writable = match slot.try_lock() {
+        Ok(mut node) => node.is_writable(),
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().is_writable(),
+        Err(TryLockError::WouldBlock) => return answers.writable.load(Ordering::Relaxed),
+    };
+    answers.writable.store(writable, Ordering::Relaxed);
+    writable
+}
+
+/// Whether the last open of the node in `slot` was refused for permission,
+/// without waiting: a busy slot answers as it did last ([`Answers`]).
+fn slot_denied<N: Node>(slot: &Mutex<Keyboard<N>>, answers: &Answers) -> bool {
+    let denied = match slot.try_lock() {
+        Ok(node) => node.denied(),
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().denied(),
+        Err(TryLockError::WouldBlock) => return answers.denied.load(Ordering::Relaxed),
+    };
+    answers.denied.store(denied, Ordering::Relaxed);
+    denied
+}
+
 /// [`slot_is_writable`] where `capable`, false without looking elsewhere.
-fn slot_is_writable_if<N: Node>(capable: bool, slot: &Mutex<Keyboard<N>>) -> bool {
-    capable && slot_is_writable(slot)
+fn slot_is_writable_if<N: Node>(
+    capable: bool,
+    slot: &Mutex<Keyboard<N>>,
+    answers: &Answers,
+) -> bool {
+    capable && slot_is_writable(slot, answers)
 }
 
 /// Whether this process writes the keyboard through its hidraw node. Never
 /// waits, and false without looking on a machine without the `keyboard_rgb`
 /// capability.
 pub fn is_hidraw_writable() -> bool {
-    slot_is_writable_if(crate::hardware::capabilities::get().keyboard_rgb, &HIDRAW)
+    slot_is_writable_if(
+        crate::hardware::capabilities::get().keyboard_rgb,
+        &HIDRAW,
+        &HIDRAW_ANSWERS,
+    )
+}
+
+/// Whether this user was refused the keyboard's hidraw node for permission the
+/// last time it was opened: the node is there, and no udev rule gives it to
+/// this user (the installer's gives it to the active local session's user).
+/// Never waits: a busy node answers as
+/// it did last. False on a machine without the `keyboard_rgb` capability.
+pub fn hidraw_denied() -> bool {
+    crate::hardware::capabilities::get().keyboard_rgb && slot_denied(&HIDRAW, &HIDRAW_ANSWERS)
+}
+
+/// Whether the keyboard's lighting interface has a hidraw node now (the USB
+/// device is there and usbhid bound to it), found in sysfs as every open finds
+/// it. False on a machine without the `keyboard_rgb` capability, and in the
+/// tests, which never look at the real machine.
+pub fn hidraw_node_present() -> bool {
+    !cfg!(test)
+        && crate::hardware::capabilities::get().keyboard_rgb
+        && chicony_hid::Hidraw::SYSTEM.find().is_some()
 }
 
 /// Whether the keyboard can be written now without an authentication
@@ -282,6 +372,16 @@ pub fn writable_without_prompt() -> bool {
 
 fn hidraw_error(error: std::io::Error) -> String {
     format!("keyboard (hidraw): {error}")
+}
+
+/// What a per-key write answers without the node: the helper has no per-key
+/// action, so a user who cannot open the node gets no per-key picture and no
+/// app-drawn effects on the keyboard.
+pub const PER_KEY_NEEDS_HIDRAW: &str =
+    "per-key lighting needs the keyboard's hidraw node, which this user cannot open";
+
+fn no_per_key_fallback() -> Result<(), String> {
+    Err(PER_KEY_NEEDS_HIDRAW.to_string())
 }
 
 /// The reports the node gets for `state`: what the helper sends for
@@ -306,17 +406,66 @@ fn send_auto_off<N: Node>(node: &mut Keyboard<N>, on: bool) -> Result<(), String
     node.send_feature(&keyboard::auto_off_packet(on)).map_err(hidraw_error)
 }
 
+/// The effect query and its reply, checked as the helper checks it (a full
+/// report whose byte 0 echoes the query; the checksum is never looked at)
+/// and against the controller's scale, as a line from the helper is.
+fn read_effect<N: Node>(node: &mut Keyboard<N>) -> Result<EffectReading, String> {
+    let query = keyboard::effect_query();
+    let reply = node.query(&query).map_err(hidraw_error)?;
+    keyboard::check_reply_echo(query[0], &reply)?;
+    EffectReading::from_reply(&reply).checked()
+}
+
+fn send_frame<N: Node>(
+    node: &mut Keyboard<N>,
+    colours_by_slot: &[[u8; 3]; keyboard::SLOTS],
+    brightness: u8,
+) -> Result<(), String> {
+    let (enter, reports, commit) = keyboard::per_key_reports(colours_by_slot, brightness);
+    node.send_frame(&enter, &reports, &commit).map_err(hidraw_error)
+}
+
+fn send_brightness<N: Node>(node: &mut Keyboard<N>, brightness: u8) -> Result<(), String> {
+    node.send_feature(&keyboard::brightness_commit(brightness)).map_err(hidraw_error)
+}
+
 /// Applies `state`. `Off` is the static opcode at zero brightness, which is how
 /// this controller expresses "backlight off".
 pub fn apply(state: &KeyboardState) -> Result<(), String> {
-    on_keyboard(|node| send_effect(node, state), || {
-        let arguments = effect_arguments(state);
-        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-        crate::hardware::helper::execute(
-            predator_sense_protocol::helper::Action::ChiconyEffect,
-            &arguments,
+    counted(|| {
+        on_keyboard(|node| send_effect(node, state), || {
+            let arguments = effect_arguments(state);
+            let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+            crate::hardware::helper::execute(
+                predator_sense_protocol::helper::Action::ChiconyEffect,
+                &arguments,
+            )
+        })
+    })
+}
+
+/// Shows `colours_by_slot` (one colour per key slot, as
+/// `keyboard::per_key_reports` lays them out) at `brightness`, on the
+/// controller's scale (0..=`keyboard::BRIGHTNESS_MAX`). A static picture:
+/// the keyboard keeps it until the next write. Through the hidraw node only
+/// ([`PER_KEY_NEEDS_HIDRAW`]).
+pub fn write_per_key(
+    colours_by_slot: &[[u8; 3]; keyboard::SLOTS],
+    brightness: u8,
+) -> Result<(), String> {
+    counted(|| {
+        on_keyboard(
+            |node| send_frame(node, colours_by_slot, brightness),
+            no_per_key_fallback,
         )
     })
+}
+
+/// Shows the per-key picture last written at `brightness`, on the
+/// controller's scale: one feature report, which is how a per-key picture
+/// fades or breathes. Through the hidraw node only ([`PER_KEY_NEEDS_HIDRAW`]).
+pub fn commit_brightness(brightness: u8) -> Result<(), String> {
+    counted(|| on_keyboard(|node| send_brightness(node, brightness), no_per_key_fallback))
 }
 
 /// The brightness percent sent for `state`: `Off` at zero, and never above
@@ -347,6 +496,53 @@ fn effect_arguments(state: &KeyboardState) -> Vec<String> {
     ]
 }
 
+/// How many keyboard writes the app has started and finished. Every lighting
+/// write is counted: [`apply`] (blank, unblank, restore and the relight in
+/// [`apply_keyboard_idle`] all call it), [`write_per_key`] and
+/// [`commit_brightness`]. A read of the keyboard compares a count taken when
+/// it starts with one taken when it returns, to tell whether the app may
+/// have changed the keyboard under it ([`read_is_current`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WriteCount {
+    pub started: u64,
+    pub finished: u64,
+}
+
+static WRITES_STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WRITES_FINISHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The count now. `finished` is loaded first, so a write that starts or ends
+/// between the two loads shows as running, never as not having happened.
+pub fn write_count() -> WriteCount {
+    use std::sync::atomic::Ordering::SeqCst;
+    let finished = WRITES_FINISHED.load(SeqCst);
+    let started = WRITES_STARTED.load(SeqCst);
+    WriteCount { started, finished }
+}
+
+/// Runs one keyboard write, counted as running until it returns, whether it
+/// succeeds, fails or panics. A failed write is counted too: it may still
+/// have reached the keyboard.
+fn counted<T>(write: impl FnOnce() -> T) -> T {
+    struct Finished;
+    impl Drop for Finished {
+        fn drop(&mut self) {
+            WRITES_FINISHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    WRITES_STARTED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let _finished = Finished;
+    write()
+}
+
+/// Whether a keyboard read that started at `at` and returned at `now` saw
+/// the keyboard as the app last left it: no app write started or finished
+/// in between, and none is running now. A write still running at either end
+/// may have reached the keyboard after the read did.
+pub fn read_is_current(at: WriteCount, now: WriteCount) -> bool {
+    at == now && now.started == now.finished
+}
+
 /// Direction byte, on either route. Confirmed on this keyboard (PH16-71) for
 /// Wave: 1 left to right, 2 right to left, 3 bottom to top, 4 top to bottom,
 /// 5 clockwise, 6 counter-clockwise.
@@ -362,25 +558,43 @@ pub fn is_blanked() -> bool {
 }
 
 /// Turns the backlight off without disturbing the stored effect/colour, so the
-/// idle watcher can restore exactly what was showing.
+/// idle watcher can restore exactly what was showing. The lighting renderer
+/// lets go of the keyboard first, so none of its frames lands after the Off.
 pub fn blank() -> Result<(), String> {
     let saved = crate::config::load_app_config()
         .keyboard_rgb
         .unwrap_or_default();
-    BLANKING.set(true, || {
-        apply(&KeyboardState {
-            effect: Effect::Off,
-            ..saved
-        })
+    blank_through(renderer(), &BLANKING, saved, &mut apply)
+}
+
+/// [`blank`] with its renderer, flag and writer passed in, for the tests.
+fn blank_through(
+    renderer: &LightingRenderer,
+    blanking: &Blanking,
+    saved: KeyboardState,
+    write: &mut dyn FnMut(&KeyboardState) -> Result<(), String>,
+) -> Result<(), String> {
+    blanking.set(true, || {
+        crate::hardware::blanking::blank_drawn(
+            |blanked| renderer.set_blanked(Light::Keyboard, blanked),
+            || {
+                write(&KeyboardState {
+                    effect: Effect::Off,
+                    ..saved
+                })
+            },
+        )
     })
 }
 
 /// Applies `state` outside the idle watcher and records the keyboard as lit,
 /// which it then is. For the restore after boot and resume, so a flag left
-/// over from before cannot claim the keyboard is still blanked.
+/// over from before cannot claim the keyboard is still blanked (nor the
+/// lighting renderer's copy of it).
 pub fn restore(state: &KeyboardState) -> Result<(), String> {
     apply(state)?;
     BLANKING.record(false);
+    renderer().set_blanked(Light::Keyboard, false);
     Ok(())
 }
 
@@ -389,13 +603,81 @@ pub fn unblank() {
     let _ = unblank_checked();
 }
 
-/// The saved state sent again, and the keyboard recorded as lit. This is also
-/// the idle step's relight ([`relight`]).
+/// The keyboard lit again: by the lighting renderer's frame when it draws the
+/// keyboard, else by the saved state. This is also the idle step's relight
+/// ([`relight`]), so a relight never puts the saved state, an older look, over
+/// what the renderer draws.
 fn unblank_checked() -> Result<(), String> {
     let saved = crate::config::load_app_config()
         .keyboard_rgb
         .unwrap_or_default();
-    BLANKING.set(false, || apply(&saved))
+    unblank_with(saved)
+}
+
+/// [`unblank_checked`] with `saved` as the state to light the keyboard with when the
+/// renderer does not draw it.
+fn unblank_with(saved: KeyboardState) -> Result<(), String> {
+    unblank_through(renderer(), &BLANKING, saved, &mut apply)
+}
+
+/// [`unblank_checked`] with its renderer, flag and writer passed in, for the tests.
+fn unblank_through(
+    renderer: &LightingRenderer,
+    blanking: &Blanking,
+    saved: KeyboardState,
+    write: &mut dyn FnMut(&KeyboardState) -> Result<(), String>,
+) -> Result<(), String> {
+    blanking.set(false, || {
+        crate::hardware::blanking::unblank_drawn(
+            || renderer.unblank(Light::Keyboard),
+            || write(&saved),
+        )
+    })
+}
+
+/// Whether there is something to relight with: a saved state, or a look the
+/// lighting renderer draws on the keyboard.
+fn relight_source(renderer: &LightingRenderer, saved: bool) -> bool {
+    saved || renderer.draws(Light::Keyboard)
+}
+
+/// Whether [`apply_keyboard_idle`]'s step relights: [`should_relight`] with a
+/// drawn keyboard counting as something to relight with.
+fn idle_relight_wanted(renderer: &LightingRenderer, app_blanked: bool, saved: bool) -> bool {
+    should_relight(app_blanked, relight_source(renderer, saved))
+}
+
+/// Whether a timer-off retry relights: [`retry_relights`] with a drawn keyboard
+/// counting as something to relight with.
+fn retry_relight_wanted(renderer: &LightingRenderer, app_blanked: bool, saved: bool) -> bool {
+    retry_relights(app_blanked, relight_source(renderer, saved))
+}
+
+/// The brightness in a `chicony-effect-read` line, as the percent the app
+/// stores. The line and the controller's 0..=50 scale are the protocol
+/// crate's (`predator_sense_protocol::keyboard`), shared with the helper that
+/// prints the line and scales the percent back down. A line that does not
+/// parse is an error, so a reply this does not understand is never saved.
+pub fn percent_from_effect_read(line: &str) -> Result<u8, String> {
+    EffectReading::parse(line).map(|reading| keyboard::raw_to_percent(reading.brightness))
+}
+
+/// The keyboard state to store after the keyboard reached `percent` by
+/// itself (its Fn keys), or `None` when nothing should be stored: the app has
+/// the keyboard blanked (it then reads 0, and the saved level is what the
+/// unblank brings back), nothing is saved yet (a whole default state would
+/// have the next startup repaint a keyboard the app never wrote), or the
+/// saved level is already this one.
+pub fn brightness_edit(
+    saved: Option<KeyboardState>,
+    app_blanked: bool,
+    percent: u8,
+) -> Option<KeyboardState> {
+    let saved = saved.filter(|_| !app_blanked)?;
+    (saved.brightness != percent).then_some(KeyboardState {
+        brightness: percent,
+        ..saved
+    })
 }
 
 /// Whether the app's idle tick blanks the keyboard. Nothing else
@@ -499,6 +781,14 @@ fn relight() -> Result<(), String> {
     })
 }
 
+/// [`relight`] with `saved` as the state sent.
+fn relight_with(saved: KeyboardState) -> Result<(), String> {
+    retry_once_after_backoff(
+        || unblank_with(saved),
+        || std::thread::sleep(crate::hardware::blanking::RETRY_AFTER),
+    )
+}
+
 /// What [`apply_keyboard_idle`] did.
 #[derive(Debug)]
 pub struct KeyboardIdleApplied {
@@ -541,7 +831,7 @@ pub const TIMER_OFF_RETRY_AFTER: std::time::Duration = std::time::Duration::from
 /// Whether the timer-off write is owed a retry, and when.
 ///
 /// Nothing else would notice it failed: the write goes out at startup, on
-/// resume and after a helper restart, so a failed
+/// resume, on an idle setting change and after a helper restart, so a failed
 /// one would leave the keyboard's 30 s timer on for the rest of the session,
 /// which is exactly what "Turn off when idle" off forbids. A keyboard that is
 /// not back yet when the write goes out (after a resume from hibernate, say;
@@ -676,7 +966,7 @@ fn retry_timer_off() {
     }
     crate::hardware::applog::info("keyboard idle: timer switched off on a retry");
     let saved = crate::config::load_app_config().keyboard_rgb.is_some();
-    if retry_relights(is_blanked(), saved) {
+    if retry_relight_wanted(renderer(), is_blanked(), saved) {
         if let Err(e) = relight() {
             crate::hardware::applog::error(&format!("keyboard idle: relight after retry: {e}"));
         }
@@ -685,15 +975,18 @@ fn retry_timer_off() {
 
 /// Switches the controller's own idle timer off, whatever the idle settings
 /// say, then sends the saved keyboard state again when one is
-/// saved or the app has the keyboard blanked
+/// saved or the app has the keyboard blanked. When the lighting renderer draws
+/// the keyboard, the renderer sends its frame again instead
 /// ([`unblank_checked`]). `sent_state` says whether that happened. Called at
-/// startup, on resume and after a helper restart; the relight is what wakes
-/// a keyboard the controller or the app had dark. Nothing here reads
+/// startup, on resume and on every idle setting change;
+/// the relight is what wakes a keyboard the controller or the app had dark,
+/// for instance when idle is switched off. Nothing here reads
 /// [`keyboard_idle_mode`]: only the idle tick does.
 ///
 /// Reads the config itself, under a lock, rather than taking it from the
-/// caller: calls come from several worker threads (startup, resume, a helper
-/// restart), and the lock also orders them against the exit hand-back.
+/// caller: calls come from several worker threads (startup, resume, every
+/// idle setting on the Lighting page), and the lock also orders them against
+/// the exit hand-back.
 ///
 /// A timer write that fails is tried again from the idle tick
 /// ([`retry_timer_off_if_due`]); one that lands ends any retry.
@@ -702,6 +995,13 @@ fn retry_timer_off() {
 /// `RETRY_AFTER` longer when the relight has to wait out the blanking
 /// back-off. Call it off the UI thread.
 pub fn apply_keyboard_idle() -> KeyboardIdleApplied {
+    apply_keyboard_idle_with(None)
+}
+
+/// [`apply_keyboard_idle`], relighting with `state` when it is given rather than with the
+/// saved one: for the restore, which is putting the active mode's state on the keyboard
+/// and records it only afterwards, on the UI thread (`lighting::restore_saved`).
+pub fn apply_keyboard_idle_with(state: Option<KeyboardState>) -> KeyboardIdleApplied {
     let _serial = KEYBOARD_IDLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if EXITING.load(std::sync::atomic::Ordering::SeqCst) {
         return KeyboardIdleApplied {
@@ -709,8 +1009,13 @@ pub fn apply_keyboard_idle() -> KeyboardIdleApplied {
             result: Err("the app is exiting".to_string()),
         };
     }
-    let saved = crate::config::load_app_config().keyboard_rgb.is_some();
-    run_keyboard_idle_steps(should_relight(is_blanked(), saved), relight, || {
+    let saved = state.or_else(|| crate::config::load_app_config().keyboard_rgb);
+    let relight_wanted = idle_relight_wanted(renderer(), is_blanked(), saved.is_some());
+    let relight = || match state {
+        Some(state) => relight_with(state),
+        None => relight(),
+    };
+    run_keyboard_idle_steps(relight_wanted, relight, || {
         let result = set_firmware_auto_off(false);
         timer_off_retry().record(result.is_ok(), std::time::Instant::now());
         result
@@ -751,6 +1056,21 @@ pub fn reapply_keyboard_idle_in_background() {
     });
 }
 
+/// What the exit sends the keyboard before it hands the controller's timer back
+/// (`lighting::exit_looks`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExitLook {
+    /// One of the keyboard's own effects.
+    Effect(KeyboardState),
+    /// A still picture by key slot (a per-key painting, or a theme's still picture) at
+    /// `brightness` on the controller's scale, as the lighting renderer sent it. Through the
+    /// hidraw node only ([`PER_KEY_NEEDS_HIDRAW`]).
+    Picture {
+        colours: Box<[[u8; 3]; keyboard::SLOTS]>,
+        brightness: u8,
+    },
+}
+
 /// At app exit: switches the controller's own timer back on, so that quitting
 /// or logging out leaves the keyboard with its stock behaviour instead of lit
 /// until the next boot.
@@ -759,10 +1079,11 @@ pub fn reapply_keyboard_idle_in_background() {
 /// helper session that is already open (no authentication dialog at exit;
 /// with neither, the timer was never switched off by this process either,
 /// unless the session broke), and it waits at most `timeout` before letting
-/// the exit go on. With a `keyboard` state (`lighting::exit_looks`: the
+/// the exit go on. With a `keyboard` look (`lighting::exit_looks`: the
+/// active look's firmware fallback where the app animated the keyboard, or the
 /// relight of a keyboard its idle timer has dark) it first sends that, inside
 /// the same budget.
-pub fn hand_back_firmware_timer(timeout: std::time::Duration, keyboard: Option<KeyboardState>) {
+pub fn hand_back_firmware_timer(timeout: std::time::Duration, keyboard: Option<ExitLook>) {
     if !crate::hardware::capabilities::get().keyboard_rgb {
         return;
     }
@@ -773,26 +1094,42 @@ pub fn hand_back_firmware_timer(timeout: std::time::Duration, keyboard: Option<K
         let _serial = KEYBOARD_IDLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         EXITING.store(true, std::sync::atomic::Ordering::SeqCst);
         timer_off_retry().stop();
-        if let Some(state) = keyboard {
-            // The idle timer blanked the keyboard with the Off effect, which
-            // a key press does not wake, so it has to be lit before the app
-            // goes. Through the node or the open session only, like the
-            // hand-back.
-            let relit = on_keyboard(|node| Some(send_effect(node, &state)), || {
-                let arguments = effect_arguments(&state);
-                let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-                crate::hardware::helper::execute_in_open_session(
-                    predator_sense_protocol::helper::Action::ChiconyEffect,
-                    &arguments,
-                )
-            });
+        if let Some(look) = keyboard {
+            // An animation the app drew would stay on the keyboard as a frozen
+            // frame once the app is gone, and the idle timer blanked it with the
+            // Off effect, which a key press does not wake: either way the
+            // keyboard gets a look of its own before the app goes. Through the
+            // node or the open session only, like the hand-back (a picture
+            // through the node only).
+            //
+            // Deliberately not through `counted()`: that counter lets a
+            // keyboard read tell whether an app write overlapped it, and at
+            // exit no read outlives the process. Anything that moves this
+            // write to a path where the app keeps running must count it.
+            let relit = match look {
+                ExitLook::Effect(state) => on_keyboard(|node| Some(send_effect(node, &state)), || {
+                    let arguments = effect_arguments(&state);
+                    let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+                    crate::hardware::helper::execute_in_open_session(
+                        predator_sense_protocol::helper::Action::ChiconyEffect,
+                        &arguments,
+                    )
+                }),
+                ExitLook::Picture {
+                    colours,
+                    brightness,
+                } => on_keyboard(
+                    |node| Some(send_frame(node, &colours, brightness)),
+                    || Some(no_per_key_fallback()),
+                ),
+            };
             match relit {
                 Some(Ok(())) => BLANKING.record(false),
                 Some(Err(e)) => crate::hardware::applog::error(&format!(
-                    "exit: the app did not relight the keyboard ({e})"
+                    "exit: the app did not write the keyboard's look ({e})"
                 )),
                 None => crate::hardware::applog::error(
-                    "exit: the app did not relight the keyboard (no helper session is open)",
+                    "exit: the app did not write the keyboard's look (no helper session is open)",
                 ),
             }
         }
@@ -824,6 +1161,107 @@ pub fn hand_back_firmware_timer(timeout: std::time::Duration, keyboard: Option<K
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod through_the_renderer {
+        use super::*;
+        use crate::hardware::lighting_renderer::testing;
+        use std::cell::RefCell;
+
+        fn saved() -> KeyboardState {
+            KeyboardState {
+                effect: Effect::Wave,
+                brightness: 60,
+                ..KeyboardState::default()
+            }
+        }
+
+        #[test]
+        fn the_blank_lets_the_renderer_go_first_and_takes_it_back_on_a_failure() {
+            let renderer = testing::drawing("test.time");
+            let blanking = Blanking::new();
+            let seen = RefCell::new(Vec::new());
+            let result = blank_through(&renderer, &blanking, saved(), &mut |state| {
+                seen.borrow_mut()
+                    .push((state.effect, testing::blanked(&renderer, Light::Keyboard)));
+                Ok(())
+            });
+            assert!(result.is_ok() && blanking.is_blanked());
+            assert_eq!(
+                *seen.borrow(),
+                [(Effect::Off, true)],
+                "Off, the renderer let go first"
+            );
+            let blanking = Blanking::new();
+            renderer.set_blanked(Light::Keyboard, false);
+            let failed = blank_through(&renderer, &blanking, saved(), &mut |_| Err("EIO".into()));
+            assert!(failed.is_err() && !blanking.is_blanked());
+            assert!(
+                !testing::blanked(&renderer, Light::Keyboard),
+                "the renderer has it back"
+            );
+        }
+
+        #[test]
+        fn the_unblank_and_relight_of_a_drawn_keyboard_are_the_renderers_frame() {
+            let renderer = testing::drawing("test.time");
+            let blanking = Blanking::new();
+            blanking.record(true);
+            renderer.set_blanked(Light::Keyboard, true);
+            let redraws = testing::redraws(&renderer, Light::Keyboard);
+            let wrote = RefCell::new(Vec::new());
+            let mut write = |state: &KeyboardState| {
+                wrote.borrow_mut().push(*state);
+                Ok(())
+            };
+            assert!(unblank_through(&renderer, &blanking, saved(), &mut write).is_ok());
+            assert!(
+                wrote.borrow().is_empty(),
+                "the saved state is not written over it"
+            );
+            assert!(!blanking.is_blanked());
+            assert!(!testing::blanked(&renderer, Light::Keyboard));
+            assert_eq!(testing::redraws(&renderer, Light::Keyboard), redraws + 1);
+            // Nothing drawn: the saved state, as before.
+            let idle = testing::renderer();
+            blanking.record(true);
+            assert!(unblank_through(&idle, &blanking, saved(), &mut write).is_ok());
+            assert_eq!(*wrote.borrow(), [saved()]);
+        }
+
+        #[test]
+        fn a_drawn_keyboard_is_something_to_relight_with() {
+            let drawing = testing::drawing("test.time");
+            let idle = testing::renderer();
+            assert!(relight_source(&drawing, false));
+            assert!(!relight_source(&idle, false));
+            assert!(relight_source(&idle, true));
+            // The idle step relights a drawn keyboard with no saved state (through the
+            // renderer), and so does the timer-off retry unless the app blanked it.
+            assert!(idle_relight_wanted(&drawing, false, false));
+            assert!(!idle_relight_wanted(&idle, false, false));
+            assert!(idle_relight_wanted(&idle, true, false), "blanked: always");
+            assert!(retry_relight_wanted(&drawing, false, false));
+            assert!(!retry_relight_wanted(&drawing, true, false));
+            assert!(!retry_relight_wanted(&idle, false, false));
+            assert!(retry_relight_wanted(&idle, false, true));
+        }
+
+        #[test]
+        fn after_a_renderer_panic_the_unblank_relights_from_the_saved_state() {
+            let renderer = testing::drawing("test.panics");
+            testing::wait_stopped(&renderer);
+            assert!(!relight_source(&renderer, false));
+            let blanking = Blanking::new();
+            blanking.record(true);
+            let wrote = RefCell::new(Vec::new());
+            let relit = unblank_through(&renderer, &blanking, saved(), &mut |state| {
+                wrote.borrow_mut().push(*state);
+                Ok(())
+            });
+            assert!(relit.is_ok() && !blanking.is_blanked());
+            assert_eq!(*wrote.borrow(), [saved()]);
+        }
+    }
 
     #[test]
     fn every_effect_sends_an_opcode_the_helper_takes() {
@@ -862,6 +1300,12 @@ mod tests {
             assert_eq!(effect.uses_speed(), speed, "{effect:?} speed");
             assert_eq!(effect.uses_direction(), effect == Effect::Wave, "{effect:?} direction");
         }
+    }
+
+    #[test]
+    fn icons_are_named_after_the_effect() {
+        assert_eq!(Effect::Spot.icon_name(), "lighting-spot-symbolic");
+        assert_eq!(Effect::Off.icon_name(), "lighting-off-symbolic");
     }
 
     #[test]
@@ -1068,6 +1512,96 @@ mod tests {
         assert_eq!((tries.get(), waits.get()), (1, 0));
     }
 
+    #[test]
+    fn the_effect_read_line_gives_the_percent_the_app_stores() {
+        use predator_sense_protocol::keyboard::EffectReading;
+        // The line as the helper prints it, from the protocol's own type, so
+        // the two ends cannot drift apart on the field order.
+        let line = |brightness| {
+            EffectReading {
+                mode: 37,
+                speed: 6,
+                brightness,
+                sel: 1,
+                dir: 6,
+            }
+            .to_line()
+        };
+        for (raw, percent) in [(0, 0), (12, 24), (25, 50), (37, 74), (50, 100)] {
+            let stored = percent_from_effect_read(&line(raw));
+            assert_eq!(stored, Ok(percent), "{raw} of 50");
+        }
+        assert_eq!(percent_from_effect_read(&format!("{}\n", line(12))), Ok(24));
+        for bad in [
+            "",
+            "37 6 50 1 6",
+            "speed=6 mode=37 brightness=50 sel=1 dir=6",
+            "mode=37 speed=6 brightness=51 sel=1 dir=6",
+        ] {
+            assert!(percent_from_effect_read(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_read_is_current_only_when_no_app_write_ran_during_it() {
+        let idle = WriteCount { started: 3, finished: 3 };
+        assert!(read_is_current(idle, idle));
+        assert!(!read_is_current(idle, WriteCount { started: 4, finished: 3 }), "one running now");
+        assert!(!read_is_current(idle, WriteCount { started: 4, finished: 4 }), "one ran in between");
+        let running = WriteCount { started: 4, finished: 3 };
+        assert!(!read_is_current(running, idle_after(running)), "running at the start, ended since");
+        assert!(!read_is_current(running, running), "running from start to end");
+    }
+
+    fn idle_after(count: WriteCount) -> WriteCount {
+        WriteCount { finished: count.started, ..count }
+    }
+
+    #[test]
+    fn a_write_counts_as_running_until_it_returns_even_by_panicking() {
+        let before = write_count();
+        let during = counted(write_count);
+        assert_eq!(during.started, before.started + 1);
+        assert_eq!(during.finished, before.finished);
+        assert_eq!(write_count(), WriteCount { started: before.started + 1, finished: before.finished + 1 });
+
+        let before = write_count();
+        let result = std::panic::catch_unwind(|| counted(|| panic!("helper went away")));
+        assert!(result.is_err());
+        assert_eq!(write_count(), WriteCount { started: before.started + 1, finished: before.finished + 1 });
+    }
+
+    #[test]
+    fn a_new_fn_level_is_stored_over_the_saved_state() {
+        let saved = KeyboardState {
+            effect: Effect::Breathing,
+            red: 10,
+            green: 20,
+            blue: 30,
+            brightness: 100,
+            speed: 70,
+            direction: 3,
+        };
+        assert_eq!(
+            brightness_edit(Some(saved), false, 74),
+            Some(KeyboardState { brightness: 74, ..saved })
+        );
+    }
+
+    #[test]
+    fn nothing_is_stored_when_there_is_nothing_new_to_keep() {
+        let saved = KeyboardState { brightness: 50, ..Default::default() };
+        // The level the app already has.
+        assert_eq!(brightness_edit(Some(saved), false, 50), None);
+        // The app's own blank: the keyboard reads 0 then, and the saved level
+        // is what comes back at the next unblank.
+        assert_eq!(brightness_edit(Some(saved), true, 0), None);
+        assert_eq!(brightness_edit(Some(saved), true, 74), None);
+        // Nothing saved: storing a whole default state would have the next
+        // startup repaint a keyboard the app has never written.
+        assert_eq!(brightness_edit(None, false, 74), None);
+    }
+
     fn secs(n: u64) -> std::time::Duration {
         std::time::Duration::from_secs(n)
     }
@@ -1128,8 +1662,8 @@ mod tests {
 
     #[test]
     fn a_later_write_outside_the_retry_replaces_what_it_waits_on() {
-        // restore_saved (startup, resume) and a helper restart all write
-        // the timer, and record what happened.
+        // restore_saved (startup, resume), an idle setting change and a
+        // helper restart all write the timer, and record what happened.
         let mut retry = TimerOffRetry::new();
         let t0 = std::time::Instant::now();
         retry.record(false, t0);
@@ -1271,23 +1805,47 @@ mod tests {
         let slot = slot(&node);
         assert_eq!(routed_if(false, &slot, |_| "node", || "helper"), "helper");
         assert_eq!(node.opens(), 0);
-        assert!(!slot_is_writable_if(false, &slot));
+        assert!(!slot_is_writable_if(false, &slot, &Answers::new()));
         assert_eq!(node.opens(), 0);
         assert_eq!(routed_if(true, &slot, |_| "node", || "helper"), "node");
-        assert!(slot_is_writable_if(true, &slot));
+        assert!(slot_is_writable_if(true, &slot, &Answers::new()));
     }
 
     #[test]
     fn writability_is_answered_without_waiting_on_a_busy_node() {
         let open = FakeNode::default();
-        assert!(slot_is_writable(&slot(&open)));
+        assert!(slot_is_writable(&slot(&open), &Answers::new()));
         let locked = FakeNode::locked();
-        assert!(!slot_is_writable(&slot(&locked)));
-        // Busy: writable, as a transfer in flight holds an open node.
+        assert!(!slot_is_writable(&slot(&locked), &Answers::new()));
+        // Busy before any answer: writable, as a transfer in flight holds an open node.
         let busy = slot(&locked);
         let transfer = busy.lock().unwrap();
-        assert!(slot_is_writable(&busy));
+        assert!(slot_is_writable(&busy, &Answers::new()));
         drop(transfer);
+    }
+
+    /// A busy node keeps its last answers (writable or not, refused or not), so the
+    /// Lighting page's notices do not drop out while another thread holds it.
+    #[test]
+    fn a_busy_node_answers_as_it_did_last() {
+        let locked = FakeNode::locked();
+        let refused = slot(&locked);
+        let answers = Answers::new();
+        assert!(!slot_is_writable(&refused, &answers));
+        assert!(slot_denied(&refused, &answers));
+        {
+            let _busy = refused.lock().unwrap();
+            assert!(!slot_is_writable(&refused, &answers), "still not writable");
+            assert!(slot_denied(&refused, &answers), "still refused");
+        }
+        let open = FakeNode::default();
+        let writable = slot(&open);
+        let answers = Answers::new();
+        assert!(slot_is_writable(&writable, &answers));
+        assert!(!slot_denied(&writable, &answers));
+        let _busy = writable.lock().unwrap();
+        assert!(slot_is_writable(&writable, &answers));
+        assert!(!slot_denied(&writable, &answers));
     }
 
     fn sample_state(effect: Effect) -> KeyboardState {
@@ -1382,5 +1940,91 @@ mod tests {
                 Sent::Feature(1, [0x30, 0x01, 1, 0, 0, 0, 0, 0xcd]),
             ]
         );
+    }
+
+    #[test]
+    fn the_effect_is_read_from_the_nodes_reply_to_the_query() {
+        let (node, mut keyboard) = node_and_keyboard();
+        node.0.borrow_mut().reply = [0x88, 0x00, 0x25, 0x06, 0x19, 0x01, 0x06, 0x13];
+        let reading = read_effect(&mut keyboard).unwrap();
+        assert_eq!(
+            reading,
+            EffectReading { mode: 0x25, speed: 6, brightness: 25, sel: 1, dir: 6 }
+        );
+        assert_eq!(keyboard::raw_to_percent(reading.brightness), 50);
+        assert_eq!(
+            node.sent(),
+            [Sent::Feature(1, [0x88, 0, 0, 0, 0, 0, 0, 0x77]), Sent::Get(1)]
+        );
+    }
+
+    #[test]
+    fn a_reply_that_does_not_echo_the_query_is_not_read() {
+        let (node, mut keyboard) = node_and_keyboard();
+        node.0.borrow_mut().reply = [0x94, 0x00, 0x25, 0x06, 0x19, 0x01, 0x06, 0x13];
+        let error = read_effect(&mut keyboard).unwrap_err();
+        assert!(error.contains("0x94") && error.contains("0x88"), "{error}");
+    }
+
+    #[test]
+    fn a_reply_beyond_the_controllers_scale_is_not_read() {
+        let (node, mut keyboard) = node_and_keyboard();
+        node.0.borrow_mut().reply = [0x88, 0x00, 0x25, 0x06, 51, 0x01, 0x06, 0x13];
+        assert!(read_effect(&mut keyboard).is_err());
+    }
+
+    #[test]
+    fn a_failed_read_is_an_error_not_a_level() {
+        let (node, mut keyboard) = node_and_keyboard();
+        node.fail_transfers(&[libc::EIO]);
+        let error = read_effect(&mut keyboard).unwrap_err();
+        assert!(error.contains("hidraw"), "{error}");
+    }
+
+    #[test]
+    fn a_per_key_picture_reaches_the_node_slot_by_slot() {
+        let (node, mut keyboard) = node_and_keyboard();
+        let mut colours = [[0u8; 3]; keyboard::SLOTS];
+        colours[0] = [1, 2, 3];
+        colours[17] = [4, 5, 6];
+        colours[127] = [7, 8, 9];
+        send_frame(&mut keyboard, &colours, 37).unwrap();
+        let sent = node.sent();
+        assert_eq!(sent.len(), 10);
+        assert_eq!(sent[0], Sent::Feature(1, [0x12, 0, 0, 0x08, 0, 0, 0, 0xe5]));
+        let report = |index: usize| match &sent[1 + index] {
+            Sent::Report(1, report) => *report,
+            other => panic!("report {index} is {other:?}"),
+        };
+        assert_eq!(report(0)[..4], [0, 1, 2, 3]);
+        assert_eq!(report(1)[4..8], [0, 4, 5, 6]);
+        assert_eq!(report(7)[60..], [0, 7, 8, 9]);
+        assert_eq!(sent[9], Sent::Feature(1, keyboard::brightness_commit(37)));
+    }
+
+    #[test]
+    fn a_brightness_commit_is_one_report_on_the_node() {
+        let (node, mut keyboard) = node_and_keyboard();
+        send_brightness(&mut keyboard, 25).unwrap();
+        assert_eq!(
+            node.sent(),
+            [Sent::Feature(1, [0x08, 0x02, 0x33, 0x05, 0x19, 0x08, 0x01, 0x9b])]
+        );
+    }
+
+    #[test]
+    fn per_key_writes_without_the_node_fail_and_reach_nothing() {
+        let node = FakeNode::locked();
+        let slot = slot(&node);
+        let colours = [[255u8; 3]; keyboard::SLOTS];
+        let frame = routed(
+            &slot,
+            |keyboard| send_frame(keyboard, &colours, 50),
+            no_per_key_fallback,
+        );
+        assert_eq!(frame, Err(PER_KEY_NEEDS_HIDRAW.to_string()));
+        let commit = routed(&slot, |keyboard| send_brightness(keyboard, 50), no_per_key_fallback);
+        assert_eq!(commit, Err(PER_KEY_NEEDS_HIDRAW.to_string()));
+        assert!(node.sent().is_empty());
     }
 }

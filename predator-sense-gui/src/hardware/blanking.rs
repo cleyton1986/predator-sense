@@ -13,8 +13,10 @@
 //!
 //! That retry backs off. The idle tick runs on the UI thread, and a write
 //! that keeps failing (a light that does not answer, a helper that is gone)
-//! would otherwise be tried, and waited for, on every tick. After a failed
-//! write, the next attempt waits `RETRY_AFTER`.
+//! would otherwise be tried, and waited for, on every tick. A light bar write
+//! on the zone-node path is several WMI calls (method 20, three method 6
+//! calls, and method 2 when needed) and fails with -EIO when one is rejected.
+//! After a failed write, the next attempt waits `RETRY_AFTER`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -103,6 +105,37 @@ impl Default for Blanking {
     }
 }
 
+/// The idle blank of a light the lighting renderer may be drawing: the renderer lets go
+/// of the light first (`hold(true)` returns only once no frame of it can still land), then
+/// `write_off` darkens it. When that write fails the light is not dark, so the renderer
+/// takes it back (`hold(false)`), matching the flag that stays unblanked.
+pub fn blank_drawn(
+    hold: impl Fn(bool),
+    write_off: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    hold(true);
+    let result = write_off();
+    if result.is_err() {
+        hold(false);
+    }
+    result
+}
+
+/// The idle unblank (and the keyboard's relight) of a light the lighting renderer may be
+/// drawing. `renderer_unblank` ends the renderer's blank and has it send its frame again,
+/// and says whether it draws the light: then that frame is the relight, and the config's
+/// record, an older look, is not written over it. Otherwise `write_record` relights it.
+pub fn unblank_drawn(
+    renderer_unblank: impl FnOnce() -> bool,
+    write_record: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if renderer_unblank() {
+        Ok(())
+    } else {
+        write_record()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +215,45 @@ mod tests {
             })
             .is_ok());
         assert_eq!(tries.get(), 1, "a recorded success ends the back-off");
+    }
+
+    #[test]
+    fn a_drawn_light_is_let_go_before_its_blank_and_taken_back_if_it_fails() {
+        let log = std::cell::RefCell::new(Vec::new());
+        let hold = |blanked: bool| log.borrow_mut().push(format!("renderer blanked {blanked}"));
+        let ok = blank_drawn(&hold, || {
+            log.borrow_mut().push("off".into());
+            Ok(())
+        });
+        assert!(ok.is_ok());
+        assert_eq!(*log.borrow(), ["renderer blanked true", "off"]);
+        log.borrow_mut().clear();
+        let failed = blank_drawn(&hold, || {
+            log.borrow_mut().push("off".into());
+            Err("no node".into())
+        });
+        assert_eq!(failed, Err("no node".to_string()));
+        assert_eq!(
+            *log.borrow(),
+            ["renderer blanked true", "off", "renderer blanked false"]
+        );
+    }
+
+    #[test]
+    fn a_light_the_renderer_draws_is_relit_by_its_frame_not_the_record() {
+        let wrote = std::cell::Cell::new(false);
+        let record = || {
+            wrote.set(true);
+            Ok(())
+        };
+        assert!(unblank_drawn(|| true, record).is_ok());
+        assert!(!wrote.get(), "the renderer's frame is the relight");
+        assert!(unblank_drawn(|| false, record).is_ok());
+        assert!(wrote.get(), "nothing drawn: the record relights it");
+        assert_eq!(
+            unblank_drawn(|| false, || Err("EC silent".to_string())),
+            Err("EC silent".to_string())
+        );
     }
 
     #[test]
