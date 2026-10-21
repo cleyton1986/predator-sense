@@ -21,6 +21,7 @@ pub mod gpu_page;
 pub mod grub_splash_page;
 pub mod lighting_page;
 pub mod macros_page;
+pub mod mode_bar;
 pub mod magic_rgb_page;
 pub mod monitor_page;
 pub mod network_page;

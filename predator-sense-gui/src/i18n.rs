@@ -1065,6 +1065,7 @@ fn t_en(key: &str) -> &str {
         "audio_eq_clear" => "Clear (flat)",
         "audio_eq_applying" => "Applying...",
         "fan_plan_applying" => "Applying...",
+        "fan_mode_active" => "Active",
         "audio_eq_applied" => "Preset applied",
         "audio_eq_cleared" => "Equalizer reset",
         "audio_eq_custom_title" => "Custom",
