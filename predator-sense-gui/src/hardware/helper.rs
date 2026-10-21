@@ -12,12 +12,79 @@ pub fn execute(action: Action, arguments: &[&str]) -> Result<(), String> {
     if reply.success {
         Ok(())
     } else {
-        Err(format!(
-            "Hardware helper action '{}' failed: {}",
-            action.as_str(),
-            reply.detail
-        ))
+        Err(failure_message(action, &reply))
     }
+}
+
+/// [`execute`], but only through a privileged session that is already
+/// running. Returns `None` when there is none, and starts nothing, so no
+/// authentication dialog can appear. For app exit, where one would be wrong.
+pub fn execute_in_open_session(action: Action, arguments: &[&str]) -> Option<Result<(), String>> {
+    Some(call_in_open_session(action, arguments)?.map(|_| ()))
+}
+
+/// One call through the open privileged session, or `None` when none is
+/// open. `Ok` carries what the action printed.
+fn call_in_open_session(action: Action, arguments: &[&str]) -> Option<Result<String, String>> {
+    if let Err(error) = validate_arity(action, arguments) {
+        return Some(Err(error));
+    }
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        // Root runs the helper without a broker, so there is no prompt to avoid.
+        return Some(match invoke_session(action, arguments) {
+            Ok(reply) if reply.success => Ok(reply.stdout),
+            Ok(reply) => Err(failure_message(action, &reply)),
+            Err(error) => Err(error),
+        });
+    }
+    call_in_open_slot(&SESSION, action, arguments)
+}
+
+/// The non-root half of [`call_in_open_session`], on any slot so it can be
+/// tested. A session whose helper has exited counts as none: it is taken out
+/// and reaped, here or when a call finds its pipe closed, so a dead helper
+/// fails one call at most instead of every later one. The next ordinary
+/// privileged call starts a new session, as it would have anyway.
+fn call_in_open_slot(
+    slot: &Mutex<Option<(Child, RealSession)>>,
+    action: Action,
+    arguments: &[&str],
+) -> Option<Result<String, String>> {
+    let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // `Ok(None)` is the only answer that means it is still running.
+    if !matches!(guard.as_mut()?.0.try_wait(), Ok(None)) {
+        reap(&mut guard);
+        return None;
+    }
+    let (_, session) = guard.as_mut().expect("checked above");
+    let result = match session.call(action, arguments) {
+        Ok(reply) if reply.success => Ok(reply.stdout),
+        Ok(reply) => Err(failure_message(action, &reply)),
+        Err(SessionBroken) => {
+            reap(&mut guard);
+            Err("Hardware helper session closed".to_string())
+        }
+    };
+    Some(result)
+}
+
+/// Takes a dead session out of its slot and waits for its process, so it
+/// leaves no zombie.
+fn reap(slot: &mut Option<(Child, RealSession)>) {
+    if let Some((mut dead, _)) = slot.take() {
+        let _ = dead.wait();
+    }
+}
+
+/// How a session call the helper rejected reads, the same from [`execute`]
+/// and from a call through the open session.
+fn failure_message(action: Action, reply: &Reply) -> String {
+    format!(
+        "Hardware helper action '{}' failed: {}",
+        action.as_str(),
+        reply.detail
+    )
 }
 
 /// Why a helper call failed, when the caller has to react differently to each.
@@ -410,11 +477,50 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn a_rejected_call_names_the_action_and_the_helpers_reason() {
+        let reply = Reply {
+            success: false,
+            stdout: String::new(),
+            detail: "no fan control on this machine".to_string(),
+        };
+        assert_eq!(
+            failure_message(Action::FanAuto, &reply),
+            "Hardware helper action 'fan-auto' failed: no fan control on this machine"
+        );
+    }
+
+    #[test]
     fn rejects_wrong_argument_count_before_spawning_a_process() {
         assert!(validate_arity(Action::FanAuto, &[]).is_ok());
         assert!(validate_arity(Action::FanAuto, &["unexpected"]).is_err());
         assert!(validate_arity(Action::SetGpuPower, &["80"]).is_ok());
         assert!(validate_arity(Action::SetGpuPower, &[]).is_err());
+    }
+
+    #[test]
+    fn a_session_whose_helper_has_exited_counts_as_none() {
+        let (mut child, session) = spawn_daemon(&mut Command::new("true")).unwrap();
+        child.wait().unwrap();
+        let slot = Mutex::new(Some((child, session)));
+
+        assert!(call_in_open_slot(&slot, Action::FanAuto, &[]).is_none());
+        assert!(slot.lock().unwrap().is_none(), "taken out and reaped");
+    }
+
+    #[test]
+    fn a_session_that_breaks_during_a_call_is_reaped_and_then_counts_as_none() {
+        // Closes its stdout, so the reply never comes, and exits once it has
+        // read the call.
+        let (child, session) =
+            spawn_daemon(Command::new("sh").args(["-c", "exec >&-; read line"])).unwrap();
+        let slot = Mutex::new(Some((child, session)));
+
+        assert_eq!(
+            call_in_open_slot(&slot, Action::FanAuto, &[]),
+            Some(Err("Hardware helper session closed".to_string()))
+        );
+        assert!(slot.lock().unwrap().is_none(), "taken out and reaped");
+        assert!(call_in_open_slot(&slot, Action::FanAuto, &[]).is_none());
     }
 
     #[test]

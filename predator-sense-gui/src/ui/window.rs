@@ -371,11 +371,12 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             |()| {},
         );
 
-        // Idle-off covers the keyboard (firmware timer) and the light bar
-        // (measured by us) as one feature, so the bar half has to follow the
-        // firmware setting even when the user never opens the Lighting page -
-        // pages here are built lazily, and doing this only in the page meant a
-        // machine with the firmware timeout already on never blanked its bar.
+        // Idle-off covers the keyboard and the light bar as one feature, and
+        // it has to start with the app even when the user never opens the
+        // Lighting page - pages here are built lazily, and doing this only in
+        // the page meant a machine with the firmware timeout already on never
+        // blanked its bar. The firmware timeout is read for the inheritance
+        // below.
         background::run(
             || crate::hardware::extras::get_backlight_timeout(),
             |firmware_enabled| {
@@ -397,30 +398,17 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     let _ = config::save_app_config(&cfg);
                 }
                 if cfg.idle_enabled {
-                    // One owner: the firmware's own timer cannot see the mouse
-                    // and runs on its own clock, so it has to be off for the
-                    // two devices to blank together.
-                    //
-                    // On PH16-71 this write is not enough, and not because it
-                    // fails - the function round-trips, and the backlight
-                    // still blanks at ~30 s with it read back as off. The
-                    // Chicony controller keeps a sleep timer of its own that
-                    // this function does not reach, which the keepalive in the
-                    // idle tick below handles. The write stays because it is
-                    // the right lever on the models where it is connected.
+                    // The WMI backlight timeout. Written only where the app
+                    // blanks the keyboard itself (the 24-bit Chicony path),
+                    // and there it does not govern the keyboard: it
+                    // round-trips, and the backlight still blanked at ~30 s
+                    // with it read back as off. Left as it
+                    // was. The timer that does govern this keyboard is the
+                    // Chicony controller's own, which the startup restore
+                    // switches off (`keyboard_rgb::apply_keyboard_idle`).
                     if firmware_enabled && cfg.idle_keyboard_enabled && can_blank_keyboard {
                         let _ = crate::hardware::extras::set_backlight_timeout(false);
                     }
-                }
-                // The watcher backs the keepalive as well, and that is not
-                // part of idle blanking: it runs with the master switch off,
-                // for the user who turned blanking off and still watched the
-                // controller blank the keyboard on its own. So it starts for
-                // either reason, not only the first - otherwise the tick's
-                // `idle_seconds() == None` early return would make the
-                // keepalive setting silently inert in exactly the case it
-                // exists for.
-                if cfg.idle_enabled || (cfg.idle_keyboard_keepalive && can_blank_keyboard) {
                     crate::hardware::idle::start();
                     crate::hardware::idle::mark_active();
                 }
@@ -639,30 +627,18 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             glib::ControlFlow::Continue
         });
 
-        // Idle blanking for BOTH devices from one timer.
+        // Idle blanking for both devices while the app's idle is on.
         //
-        // The keyboard has a timeout of its own, but it only watches key
-        // presses - it cannot see the mouse - and it runs on its own clock, so
-        // the two devices went dark about a second apart and mouse movement
-        // woke only the bar. Driving both from here is the only way they can
-        // actually agree.
-        //
-        // Two separate timers claim the keyboard, and only one of them lets go.
-        // The firmware's is switched off in `apply_idle_setting`. The Chicony
-        // controller's own is not switchable at all from here, so it is kept
-        // from ever expiring instead - see the keepalive at the end of the
-        // tick.
+        // The keyboard's controller has a timer of its own, but it only
+        // watches presses on its own keys - it cannot see the mouse - and it
+        // runs on its own clock, so with both timers running the two devices
+        // went dark apart and mouse movement woke only the bar. That timer is
+        // kept off while the app runs, so this tick is the only
+        // thing that blanks the keyboard, when
+        // `keyboard_rgb::keyboard_idle_mode` says App. With idle off, or the
+        // keyboard's own switch off, nothing does. The bar is always this
+        // tick's.
         {
-            /// How long the keyboard controller's own ~30 s sleep timer is
-            /// allowed to run before a write restarts it. Comfortably inside
-            /// the window, with room for a tick delayed under load.
-            const KEYBOARD_KEEPALIVE_SECS: u64 = 20;
-
-            // Cadence guard. `key_idle` keeps climbing after a keepalive -
-            // the write is not a keystroke and must not pretend to be one, or
-            // the controller's clock and ours would disagree - so without
-            // this the threshold would be met on every tick from then on.
-            let last_keepalive: Rc<Cell<Option<std::time::Instant>>> = Rc::new(Cell::new(None));
             glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
                 // Resume from suspend, checked before anything else in here:
                 // the early return below fires whenever idle tracking is off,
@@ -694,6 +670,11 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         |()| {},
                     );
                 }
+                // Also before the early return: with idle off this is what
+                // keeps the keyboard's own timer off after a write failed.
+                if crate::hardware::capabilities::get().keyboard_rgb {
+                    crate::hardware::keyboard_rgb::retry_timer_off_if_due();
+                }
 
                 // Cached, not re-parsed: this runs four times a second and the
                 // settings it reads change only when the user edits them, which
@@ -712,16 +693,22 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     cfg.idle_bar_secs as u64
                 };
 
-                let want_keyboard_off = cfg.idle_enabled
-                    && cfg.idle_keyboard_enabled
-                    && crate::hardware::capabilities::get().keyboard_rgb
-                    && idle >= keyboard_limit;
+                // With the mode Never the keyboard is left alone entirely: not
+                // blanked, and not unblanked either. The Lighting page relights
+                // a keyboard the app had blanked when idle, or the keyboard's
+                // own switch, is turned off.
+                let app_blanks_keyboard = crate::hardware::keyboard_rgb::keyboard_idle_mode(&cfg)
+                    == crate::hardware::keyboard_rgb::KeyboardIdleMode::App
+                    && crate::hardware::capabilities::get().keyboard_rgb;
+                let want_keyboard_off = app_blanks_keyboard && idle >= keyboard_limit;
                 let want_bar_off = cfg.idle_enabled
                     && cfg.idle_bar_enabled
                     && crate::hardware::capabilities::get().light_bar
                     && idle >= bar_limit;
 
-                if want_keyboard_off != crate::hardware::keyboard_rgb::is_blanked() {
+                if app_blanks_keyboard
+                    && want_keyboard_off != crate::hardware::keyboard_rgb::is_blanked()
+                {
                     if want_keyboard_off {
                         let _ = crate::hardware::keyboard_rgb::blank();
                     } else {
@@ -736,51 +723,6 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     }
                 }
 
-                // Keyboard controller keepalive.
-                //
-                // The controller sleeps its backlight after ~30 s without a
-                // press on its own matrix. It cannot see a USB mouse or the
-                // I2C touchpad, so a stretch of mouse-only work blanked the
-                // keyboard at 30 s while the bar - which this timer really
-                // does own - stayed lit, which is the two devices coming apart
-                // for a reason no setting here controls. Any write restarts
-                // that timer, so one re-apply inside the window holds it open.
-                //
-                // Costs nothing in the common cases: while the user types,
-                // their own keys reset the controller's timer and `key_idle`
-                // never reaches the threshold; while the lighting is
-                // deliberately blanked, `is_blanked` skips it. It is not gated
-                // on `idle_enabled` - a user who switched idle-off *off* wants
-                // the keyboard lit, and the controller blanks it regardless.
-                //
-                // The write needs the privileged helper, whose mutex is shared
-                // with every other privileged caller, so it goes off-thread
-                // for the same reason the fan curve below does.
-                if cfg.idle_keyboard_keepalive
-                    && !want_keyboard_off
-                    && !crate::hardware::keyboard_rgb::is_blanked()
-                    && crate::hardware::capabilities::get().keyboard_rgb
-                {
-                    let key_idle = crate::hardware::idle::key_idle_seconds().unwrap_or(0);
-                    // `map_or` rather than `is_none_or`: the sibling crates
-                    // declare rust-version 1.80 and that method landed in 1.82.
-                    let due = last_keepalive
-                        .get()
-                        .map_or(true, |sent| sent.elapsed().as_secs() >= KEYBOARD_KEEPALIVE_SECS);
-                    if key_idle >= KEYBOARD_KEEPALIVE_SECS && due {
-                        last_keepalive.set(Some(std::time::Instant::now()));
-                        background::run(
-                            || {
-                                if let Err(error) = crate::hardware::keyboard_rgb::refresh() {
-                                    crate::hardware::applog::info(&format!(
-                                        "keyboard keepalive failed: {error}"
-                                    ));
-                                }
-                            },
-                            |()| {},
-                        );
-                    }
-                }
                 glib::ControlFlow::Continue
             });
         }

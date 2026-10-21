@@ -772,6 +772,25 @@ Pre-existing upstream behaviour, not introduced by this branch.
 
 ## 24. The keyboard went dark on its own while the light bar stayed lit
 
+> **Since this change the keepalive described below is gone.** The Chicony
+> controller's own 30 s timer turned out to be switchable after all, over USB
+> rather than WMI: feature report `30 01 ST 00 00 00 00 CK` on interface 3,
+> ST 0 = off and 1 = on, which is what the keyboard comes up with at every
+> boot. Tested on a PH16-71: with 1 the backlight went dark at 30 s, with 0
+> it was still lit at 40 s. The app switches the timer off (`30 01 00 ..`)
+> whenever it runs: at startup, on resume, and on a retry while a write
+> has failed. It switches it back on
+> (`30 01 01 ..`) when the app exits, and the helper does the same itself
+> when it is stopped with the session. So "Turn off when idle" off now means
+> nothing turns the keyboard off, and with it on the app's own timer, which
+> sees the mouse and the touchpad, is the only thing that blanks it. Tested
+> on a PH16-71: with idle off the keyboard and the bar stayed lit for 40 s
+> with no input; with idle on both went dark together at the 10 s delay, and
+> mouse and key input woke them. The "Keep the keyboard backlight awake"
+> setting went with the keepalive (a config that still carries it loads).
+> The rest of this section is the record of what was measured and built
+> before that.
+
 **Symptom:** working with the mouse or the touchpad and never touching a key,
 the keyboard backlight blanked after ~30 s while the light bar stayed on - the
 two devices that section 12 made one feature coming apart. Moving the mouse brought
@@ -2366,7 +2385,7 @@ USB id, and a model joins the list only once someone has confirmed it.
 | PredatorSense key rebind | **Working** (user-confirmed) |
 | Headless start / resident on close | Working |
 | Lighting across suspend/resume | **Working** (3 cycles; bar readback-verified, keyboard user-confirmed) |
-| Keyboard blanking on its own (mouse-only use) | **Fixed** - keepalive; 76 s pointer-only held lit (24) |
+| Keyboard blanking on its own (mouse-only use) | **Fixed** - keepalive; 76 s pointer-only held lit (24). Since then the keepalive is gone: the keyboard's own timer is switched off over USB while the app runs, and with idle off it stayed lit 40 s with no input (24, note) |
 | Idle blanking still honoured when blanked | **Working** - 59 s hands-off stayed dark (24) |
 | Mode key on upstream builds | **Dead on this chassis** - no input event at all (25) |
 | Fan curve sees the GPU | **Fixed** - hotter die drives it; coupling measured (26) |

@@ -107,20 +107,6 @@ pub fn idle_seconds(pointer_counts: bool) -> Option<u64> {
     Some(monotonic_secs().saturating_sub(last))
 }
 
-/// Seconds since the last press on a keyboard matrix, ignoring mouse buttons
-/// and the touchpad, or `None` when the watcher never opened a device.
-///
-/// This is the keyboard controller's own view of the machine, and the only
-/// clock its sleep timer runs on. Measured on PH16-71: mouse-only use blanks
-/// the backlight at ~30 s no matter what the rest of the system is doing, and
-/// the WMI `backlight_timeout` function does not govern it (CHANGELOG §24).
-pub fn key_idle_seconds() -> Option<u64> {
-    if !WATCHING.load(Ordering::Relaxed) {
-        return None;
-    }
-    Some(monotonic_secs().saturating_sub(LAST_KEY_ACTIVITY.load(Ordering::Relaxed)))
-}
-
 /// Marks the machine as active right now. Called after the app itself changes
 /// lighting, so a fresh apply is never immediately blanked by a stale idle
 /// reading.

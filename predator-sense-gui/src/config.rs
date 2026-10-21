@@ -326,17 +326,9 @@ pub struct AppConfig {
     /// a click is as deliberate as a keystroke - this is only about motion.
     #[serde(default = "default_true")]
     pub idle_mouse_wakes: bool,
-    /// Hold the keyboard backlight awake against the controller's own sleep
-    /// timer (CHANGELOG §24).
-    ///
-    /// Deliberately not under `idle_enabled`: this is what the controller does
-    /// on its own, so it applies whether or not this app blanks anything -
-    /// and it matters most to someone who turned idle blanking off and still
-    /// found the keyboard going dark. Defaults on, because a keyboard that
-    /// blanks while the light bar stays lit is the two devices disagreeing;
-    /// off restores the factory behaviour for anyone who prefers it.
-    #[serde(default = "default_true")]
-    pub idle_keyboard_keepalive: bool,
+    // `idle_keyboard_keepalive` was here. The keepalive went when the
+    // controller's own sleep timer became switchable; a file that
+    // still carries the key loads, since this struct ignores unknown keys.
 
     /// Which modes the physical mode key steps through, in order, as
     /// `PowerProfile::to_id()` values. Separate lists per power source: the
@@ -657,7 +649,6 @@ impl Default for AppConfig {
             idle_bar_enabled: true,
             idle_bar_secs: default_idle_secs(),
             idle_mouse_wakes: true,
-            idle_keyboard_keepalive: true,
             mode_cycle_ac: Vec::new(),
             mode_cycle_battery: Vec::new(),
             mode_default: None,
@@ -1156,6 +1147,54 @@ mod tests {
 
         let imported = import_app_config_from(&path).expect("an unknown key must not fail import");
         assert_eq!(imported.temp_alert_c, default_temp_alert_c());
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
+    /// `idle_keyboard_keepalive` was removed with the keepalive itself. A
+    /// config.json written before that still carries the key, and a config
+    /// that fails to parse silently runs the whole app on defaults, so this
+    /// pins that the old file loads with everything else intact and that the
+    /// key is not written back.
+    #[test]
+    fn a_config_saved_with_the_keepalive_setting_still_loads() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-keepalive-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.json");
+
+        let mut old = AppConfig::default();
+        old.idle_enabled = true;
+        old.idle_keyboard_secs = 60;
+        old.idle_mouse_wakes = false;
+        old.font_scale = 1.25;
+        let mut value = serde_json::to_value(&old).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("a config is a JSON object")
+            .insert("idle_keyboard_keepalive".to_string(), serde_json::json!(true));
+        fs::write(&path, serde_json::to_string_pretty(&value).expect("json")).expect("write");
+
+        let loaded = match read_app_config_at(&path) {
+            AppConfigSource::Loaded(config) => config,
+            AppConfigSource::Missing => panic!("the file was written"),
+            AppConfigSource::Unreadable(error) => {
+                panic!("an old config must not fall back to defaults: {error}")
+            }
+        };
+        assert!(loaded.idle_enabled);
+        assert_eq!(loaded.idle_keyboard_secs, 60);
+        assert!(!loaded.idle_mouse_wakes);
+        assert!((loaded.font_scale - 1.25).abs() < f64::EPSILON);
+
+        let resaved = serde_json::to_value(&loaded).expect("serialize");
+        assert!(
+            resaved.get("idle_keyboard_keepalive").is_none(),
+            "the removed setting must not be saved again"
+        );
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(&dir);

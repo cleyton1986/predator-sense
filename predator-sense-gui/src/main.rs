@@ -191,6 +191,11 @@ fn main() {
     // producing data, i.e. forever.
     app.connect_shutdown(|_| {
         hardware::audio_sync::stop();
+        // The app keeps the controller's own keyboard timer off while it
+        // runs, and the controller keeps that until the next boot. Switched
+        // back on here, or a quit or logout would leave the keyboard lit for
+        // good. Bounded: at most 2 s.
+        hardware::keyboard_rgb::hand_back_firmware_timer(std::time::Duration::from_secs(2));
     });
 
     app.connect_activate(|app| {
@@ -241,9 +246,9 @@ fn main() {
     // SIGTERM (tray Quit, logout, `kill`), SIGINT (Ctrl+C) and SIGHUP (a
     // closed terminal) end the app through `quit()`, so `connect_shutdown`
     // runs. `quit()` ignores the hold `hide_to_tray` takes. Each handler
-    // stays installed: a second signal while shutdown still runs asks for
-    // the same thing again rather than killing the process halfway. SIGKILL
-    // still ends it at once.
+    // stays installed: a second signal while shutdown is still handing the
+    // keyboard timer back (at most 2 s) asks for the same thing again rather
+    // than killing the process halfway. SIGKILL still ends it at once.
     for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
         let app = app.clone();
         glib::unix_signal_add_local(signal, move || {

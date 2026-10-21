@@ -14,7 +14,8 @@
 
 use crate::config;
 
-/// Reapplies the saved keyboard and light-bar state.
+/// Reapplies the saved keyboard and light-bar state, and on the 24-bit
+/// keyboard path switches the keyboard's own idle timer off again.
 ///
 /// `wake` is passed through to the light bar: after a real power cycle the
 /// firmware needs one Breathing frame before any other mode becomes visible.
@@ -29,13 +30,30 @@ use crate::config;
 pub fn restore_saved(wake: bool, context: &str) {
     let cfg = config::load_app_config();
 
+    // The bar first: the keyboard's step below can wait out a 5 s blanking
+    // back-off, and that must not hold the bar dark.
+    if let Some(saved) = cfg.light_bar {
+        if let Err(e) = super::light_bar::apply(&saved, wake) {
+            super::applog::error(&format!("{context}: light bar not restored: {e}"));
+        }
+    }
+
     // The two keyboard paths drive the same controller with different command
     // families, so exactly one of them may run. The 24-bit path is the better
     // one where it applies; `chicony_rgb` is the older palette command kept
     // for the generation this fork does not claim.
     if super::capabilities::get().keyboard_rgb {
-        if let Some(saved) = cfg.keyboard_rgb {
-            if let Err(e) = super::keyboard_rgb::apply(&saved) {
+        // The controller's own sleep timer comes back on at every boot, and
+        // the app keeps it off while it runs. A failure leaves the lighting
+        // restore to go ahead.
+        let applied = super::keyboard_rgb::apply_keyboard_idle();
+        if let Err(e) = &applied.result {
+            super::applog::error(&format!("{context}: keyboard idle: {e}"));
+        }
+        // Not sent twice: the timer step has usually just sent the saved
+        // state already.
+        if let Some(saved) = cfg.keyboard_rgb.filter(|_| !applied.sent_state) {
+            if let Err(e) = super::keyboard_rgb::restore(&saved) {
                 super::applog::error(&format!("{context}: keyboard lighting not restored: {e}"));
             }
         }
@@ -51,12 +69,6 @@ pub fn restore_saved(wake: bool, context: &str) {
                     "{context}: Chicony keyboard lighting not restored: {e}"
                 ));
             }
-        }
-    }
-
-    if let Some(saved) = cfg.light_bar {
-        if let Err(e) = super::light_bar::apply(&saved, wake) {
-            super::applog::error(&format!("{context}: light bar not restored: {e}"));
         }
     }
 }

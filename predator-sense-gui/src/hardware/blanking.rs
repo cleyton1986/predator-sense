@@ -61,6 +61,18 @@ impl Blanking {
         self.set_at(blanked, Instant::now(), write)
     }
 
+    /// Records `blanked` after a write that was made outside [`set`] and
+    /// returned `Ok`, such as the restore after boot or resume. Like a
+    /// successful `set`, it ends any back-off. Never call it for a write that
+    /// failed or was not made.
+    ///
+    /// [`set`]: Self::set
+    pub fn record(&self, blanked: bool) {
+        let mut retry_at = self.retry_at.lock().unwrap_or_else(|e| e.into_inner());
+        *retry_at = None;
+        self.blanked.store(blanked, Ordering::Relaxed);
+    }
+
     fn set_at(
         &self,
         blanked: bool,
@@ -148,6 +160,28 @@ mod tests {
         // A success clears the back-off.
         assert!(b.set_at(false, start + RETRY_AFTER, || Ok(())).is_ok());
         assert!(!b.is_blanked());
+    }
+
+    #[test]
+    fn a_write_made_elsewhere_is_recorded_and_ends_the_back_off() {
+        // The restore after boot and resume writes the keyboard itself; once
+        // it lands, the flag has to say lit, back-off or not.
+        let b = Blanking::new();
+        let start = Instant::now();
+        assert!(b.set_at(true, start, || Ok(())).is_ok());
+        assert!(b
+            .set_at(false, start, || Err("USB not back".to_string()))
+            .is_err());
+        b.record(false);
+        assert!(!b.is_blanked());
+        let tries = std::cell::Cell::new(0);
+        assert!(b
+            .set_at(true, start + Duration::from_millis(250), || {
+                tries.set(tries.get() + 1);
+                Ok(())
+            })
+            .is_ok());
+        assert_eq!(tries.get(), 1, "a recorded success ends the back-off");
     }
 
     #[test]
