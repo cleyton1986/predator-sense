@@ -972,11 +972,51 @@ pub fn policy_view() -> PolicyView {
 /// it as one would let the policy call a machine compliant while the CPU sits
 /// somewhere else entirely.
 fn cpu_belief() -> Option<PowerProfile> {
-    cpu_belief_for(
-        manage_cpu_power(),
-        || read_cpu_reading_at(Path::new(SYSFS_ROOT)),
-        cached_selection,
-    )
+    cpu_belief_for(manage_cpu_power(), recent_cpu_reading, cached_selection)
+}
+
+/// How long one reading of the cpufreq policies serves every caller.
+///
+/// A reading is a sweep of every policy (24 on a PH16-71: about 100 file
+/// opens, 1 ms), and the mode is asked for by the mode tick, the power policy
+/// and the fan reconciler on their own timers, and by each page's tick while
+/// it is shown, several times a second in all. A change made outside the app
+/// (the desktop's power daemon after an unplug, say) is seen up to this much
+/// later; the app's own switches drop the reading ([`forget_cpu_reading`]).
+const CPU_READING_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
+
+static CPU_READING: Mutex<Option<(std::time::Instant, CpuReading)>> = Mutex::new(None);
+
+/// The cpufreq reading, at most [`CPU_READING_TTL`] old.
+fn recent_cpu_reading() -> CpuReading {
+    let mut cached = CPU_READING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((taken, reading)) = cached.as_ref() {
+        if reading_is_fresh(taken.elapsed()) {
+            return reading.clone();
+        }
+    }
+    let reading = read_cpu_reading_at(Path::new(SYSFS_ROOT));
+    *cached = Some((std::time::Instant::now(), reading.clone()));
+    reading
+}
+
+fn reading_is_fresh(age: std::time::Duration) -> bool {
+    age < CPU_READING_TTL
+}
+
+/// Drops the remembered cpufreq reading: the app has just changed what it
+/// would read.
+fn forget_cpu_reading() {
+    *CPU_READING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Drops the remembered cpufreq reading when a switch ends, however it ends.
+struct ForgetCpuReading;
+
+impl Drop for ForgetCpuReading {
+    fn drop(&mut self) {
+        forget_cpu_reading();
+    }
 }
 
 /// The decision behind [`cpu_belief`], split out to be testable without real
@@ -1290,6 +1330,9 @@ impl InOrder {
 
 fn apply_profile(profile: PowerProfile, write: ModeWrite) -> Result<(), String> {
     let _in_flight = ApplyGuard::new();
+    // Declared after the guard above, so dropped before it: the reading is
+    // gone by the time the switch stops counting as in flight.
+    let _forget = ForgetCpuReading;
 
     // First, before this function writes anything of its own.
     //
@@ -1637,6 +1680,13 @@ mod tests {
             assert!(apply_in_flight(), "an inner switch ending is not the outer one ending");
         }
         assert!(!apply_in_flight());
+    }
+
+    #[test]
+    fn a_cpufreq_reading_serves_callers_for_a_moment_only() {
+        assert!(reading_is_fresh(std::time::Duration::ZERO));
+        assert!(reading_is_fresh(std::time::Duration::from_millis(1499)));
+        assert!(!reading_is_fresh(CPU_READING_TTL));
     }
 
     #[test]
