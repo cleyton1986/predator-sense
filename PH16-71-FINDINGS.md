@@ -229,7 +229,7 @@ looked like a stall instead of an idle curve.
 not there. It drives the firmware power profile to a neighbouring value and
 back, which the user sees as the mode-key LED blinking, and a failed restore
 leaves the machine in the wrong profile. It should be removed rather than
-merely gated by model (§21), and must not go upstream.
+merely gated by model (21), and must not go upstream.
 
 **5d. `set_fan_mode()` routing.** On a `KnownIncompatible` model that does have
 PWM, Auto/Max now route through the PWM path (fan-behavior auto / full-speed)
@@ -666,7 +666,7 @@ firmware power profile to a neighbouring value and back, to wake a dynamic
 curve this chassis's EC was believed to leave stalled. Elsewhere that is a
 visible mode change nobody asked for, and a failed restore leaves the wrong
 profile. Limited here to the model it was measured on - and subsequently
-retracted entirely, since the stall turned out not to exist (§5c).
+retracted entirely, since the stall turned out not to exist (5c).
 
 **`on_ac_power()` gave the wrong answer with a wireless mouse attached.** A `?`
 inside the `/sys/class/power_supply` loop returned `None` for the whole
@@ -772,7 +772,7 @@ Pre-existing upstream behaviour, not introduced by this branch.
 
 **Symptom:** working with the mouse or the touchpad and never touching a key,
 the keyboard backlight blanked after ~30 s while the light bar stayed on - the
-two devices that §12 made one feature coming apart. Moving the mouse brought
+two devices that section 12 made one feature coming apart. Moving the mouse brought
 the keyboard back, but only if the machine had been fully idle first.
 
 **The false lead.** That "moving the mouse restores it" looked like proof the
@@ -917,15 +917,15 @@ and the press is received and discarded. The key is also never mapped to an
 input event, which is why the 26-node sweep saw nothing and why the hotkey
 daemon could never have helped.
 
-This is the same one-line quirk gap as §5b seen through a different feature:
+This is the same one-line quirk gap as section 5b seen through a different feature:
 `.predator_v4 = 1, .pwm = 1` is what makes the mode key work *and* what exposes
 `pwm1`/`pwm2`. Mainline `acer-wmi` already marks this model `predator_v4`, so
 upstream `facer` is behind mainline here.
 
 **Why it works on this branch.** The quirk carries `predator_v4`, so the
 capability is granted and the in-kernel handler runs; the user-defined cycle
-(`acer_mode_cycle_next()`) then replaces its fixed ladder, which is what §14
-and §15 were built on. The mode key working at all on a PH16-71 is therefore a
+(`acer_mode_cycle_next()`) then replaces its fixed ladder, which is what section 14
+and section 15 were built on. The mode key working at all on a PH16-71 is therefore a
 property of this branch's kernel patch, not of the app.
 
 > **Retracted before it reached anyone.** The first explanation offered here was
@@ -935,10 +935,10 @@ property of this branch's kernel patch, not of the app.
 > descriptor bug is real and measured
 > (below) but has nothing to do with this. It was caught by instrumenting the
 > input layer instead of arguing from a plausible mechanism - the same mistake
-> as the fan stall in §5c, and the same cure.
+> as the fan stall in section 5c, and the same cure.
 
 *Files:* none - this is a finding about upstream behaviour, already covered here
-by §14/§15.
+by section 14/section 15.
 
 ---
 
@@ -999,7 +999,150 @@ measure power or clocks, never temperature.
 
 ---
 
+## 27. Two controls wrote the same fan setting, and one deleted the other
+
+**Symptom:** a working software curve stopped working after a click that looked
+unrelated, and from then on editing the curve steps did nothing at all.
+
+**What the log shows.** The curve was tracking correctly, then:
+
+```
+19:31:42  fan decision: mode=balanced plan=Curve { steps: [25,35,50,65,80,100] } temp=66.0C target=Manual(65)
+19:31:45  fan decision: mode=balanced plan=Curve { steps: [25,35,50,65,80,100] } temp=54.0C target=Manual(35)
+19:31:51  fan decision: mode=balanced plan=Automatic temp=53.0C target=Firmware (was Manual(35))
+```
+
+**Cause:** the Fan Control page had two controls bound to one setting. An
+"Auto curve" switch and an "Automatic" button both wrote the active mode's
+`FanPlan`, and the config confirms which one fired: `fan_mode` had become
+`"auto"`, and the only production writer of that field was the
+Automatic/Max/Custom button handler. Clicking Automatic therefore replaced
+`Curve { steps }` with `Automatic`, and the step editor only updates a mode
+whose plan is already a `Curve`, so every later edit landed in
+`fan_curve_points` and reached nothing. Both controls were reasonable on their
+own; neither could see what the other had done.
+
+**Fix:** one mode picker, one four-way plan selector (Automatic / Curve /
+Fixed / Max), and the curve as a chart. The switch and the
+Automatic/Max/Custom row are gone, which is what removes the undefined
+combinations rather than papering over them.
+
+**The structural part, which matters more than the layout.** Mode chips and
+plan buttons are `gtk::Button` with `accent-button`/`secondary-button` swapped
+to show selection, never `ToggleButton` or `Switch`. A `connect_clicked`
+cannot be emitted by a programmatic refresh, whereas the old switch's
+`connect_state_set` could, and that is what let a page refresh write config.
+Where a programmatic update genuinely does fire a handler (`SpinButton::
+set_value`), a `syncing` flag brackets every such write and every handler
+returns early while it is set. A `debug_assert!` pins the one invariant that
+lives in another module: `fan_curve_widget::set_steps` must never invoke the
+change callback.
+
+**The shaded band was corrected before shipping, and this is the interesting
+part.** The chart shades the temperatures the firmware owns. The obvious
+boundary is `fan::curve_resume_c`, and it is wrong: `curve_action` only hands
+the fans over unconditionally where `fan_curve_pct` is **zero**. Between the
+end of the zero steps and `curve_resume_c` the firmware keeps them *only if it
+already has them*, and otherwise the curve drives its first non-zero step:
+
+```rust
+assert_eq!(curve_action(50.0, &[0, 35, 50, 65, 80, 100], true),  CurveAction::Hold);
+assert_eq!(curve_action(50.0, &[0, 35, 50, 65, 80, 100], false), CurveAction::Manual(35));
+```
+
+Same curve, same temperature, opposite answers. Switching a mode from Max to
+that curve at 50 °C leaves the fans on a manual 35% duty while the wider band
+would have claimed firmware control. The page cannot tell the two apart, because
+`fan_state` belongs to the reconciler, so it now shades only where
+`fan_curve_pct` is zero (`fan::curve_zero_region_top_c`), plus the whole axis
+for an all-zero curve, which really is the firmware's everywhere. The
+hysteresis region is no longer drawn at all: showing it honestly needs state
+the page cannot read, and a chart label has no room to explain "whoever has
+them keeps them here".
+
+**Two config-safety fixes found in the same review.** `write_plan` and
+`write_curve` used `config::load_app_config()`, which answers an unreadable
+config with `AppConfig::default()`, so one click on a plan button would have
+rewritten the whole file from defaults, taking every lighting scheme, game
+profile and macro with it. They now go through `load_app_config_source()` and
+refuse, which is the rule the reconciler already followed. Separately, the
+chart fired a save on every 5% a drag crossed, and `save_app_config` is a
+non-atomic `fs::write`: one bar dragged top to bottom was up to 20 whole-file
+rewrites. Drag edits now coalesce into one save 250 ms after the drag settles.
+
+**Still not claimed:** the status line says "Applying…", never "Applied". The
+page writes intent; the reconciler owns the hardware and reports to the log,
+not back to the page. It clears itself after one reconciler tick plus a margin
+rather than implying work still in flight. An error stays until replaced.
+
+*Files:* `ui/fan_control_page.rs`, `ui/fan_curve_widget.rs` (new),
+`ui/fan_curve_geometry.rs` (new), `hardware/fan.rs`, `ui/window.rs`, `i18n.rs`
+
+---
+
 ## Also worth flagging to upstream (not fixed here)
+
+- **CoolBoost has no measurable effect on a PH16-71, and the register is not
+  the user's to own.** The helper writes `EcRegister::CoolBoost`, EC offset
+  `0x10`, derived from the PH315-54. On this chassis that byte is live but
+  managed by the EC itself: write bit 0 as 1 and the EC sets bit 7, so it reads
+  back `0x81`; write `0x00` under load and the EC restored `0x81` on its own
+  about fifteen seconds later, mid-run. So the UI switch writes a byte the
+  firmware overwrites.
+
+  Fan speed does not respond to it in any state reachable here. The strongest
+  test was `balanced` with BOTH dies genuinely hot (24 AVX workers holding the
+  package at 91 to 93 °C, the GPU at 100% and 85 to 88 °C drawing about 50 W),
+  fans handed to the firmware, app stopped, 30 samples stepped off, on, off:
+
+  | byte | samples | fan1 mean | fan2 mean |
+  |---|---|---|---|
+  | `0x00` | 13 | 3274 | 3264 |
+  | `0x81` | 17 | 3273 | 3271 |
+
+  Under 0.3%, with overlapping ranges. Same null result at idle, and at the
+  `performance` ceiling where the fans run 5811 to 5843 and 6006 to 6039, which
+  is about 96% of what manual PWM reaches (26).
+
+  **Two earlier attempts at this were invalid, which is worth recording because
+  the failure modes are easy to repeat.** The first ran with the fans already
+  on a manual PWM duty, so a firmware fan feature had nothing to act on. The
+  second silently stayed in `balanced` because the sudo helper's own `echo`
+  clobbered the pipe feeding `tee`, and every `intel-rapl` reading was `0.0 W`
+  because `energy_uj` is root-only. Acer's own documentation says CoolBoost
+  raises the *maximum* fan speed and engages only once the fans hit max RPM,
+  so a test where the fans sit at half their range proves nothing either way.
+
+  **Limits on the claim.** Only `balanced` and `performance` were tested, not
+  the fifth turbo state, and under firmware control in `balanced` the fans
+  never reach their mechanical maximum, so the documented trigger condition may
+  simply never occur there. Linuwu-Sense, the most complete driver for this
+  hardware family, does not implement CoolBoost at all, so there is no second
+  implementation to check the register against. The ACPI tables say nothing
+  useful either: the `EmbeddedControl` region on this machine is `VERM`, which
+  declares exactly one byte (`LNPS` at `0x00`), while the richer `ERAM` field
+  that looks like an EC map is `SystemMemory` at `0xFE708500`, so ACPI's
+  silence about `0x10` is not evidence about it.
+
+- **The firmware's `balanced` fan table gives up about half the fan range, and
+  it reads both dies.** Measured with the app stopped and the fans firmware
+  owned:
+
+  | Profile | Load | fan1 | fan2 |
+  |---|---|---|---|
+  | balanced | CPU only, 91 to 94 °C for 6 min | 2925 | 2929 |
+  | balanced | CPU + GPU, both near 90 °C | 3275 | 3271 |
+  | performance | CPU only, 93 °C | 5827 | 6039 |
+
+  In `balanced` the EC holds around 2925 no matter how long the CPU sits at its
+  thermal limit, and adding GPU heat moves it only to about 3275, roughly half
+  of the 6056 and 6250 manual PWM reaches. Switching to `performance` reaches
+  5827 and 6039 within fifteen seconds of the same CPU load. Two consequences
+  worth passing on: a user who wants real airflow in a quiet profile cannot get
+  it from the firmware at all, which is the case for software curves existing;
+  and the firmware plainly treats the two dies as one thermal problem, which is
+  independent support for `max(cpu, gpu)` driving both fans (26) rather than a
+  per-fan curve.
 
 - **`linuwu-sense-dkms` no longer builds on kernel 7.x.** `strncpy()` has been
   removed from `linux/string.h`; the driver still calls it, and with a
@@ -1021,13 +1164,13 @@ measure power or clocks, never temperature.
   restart recovers it. This fires on his own installer's `--reload-module` and
   on every DKMS rebuild after a kernel upgrade, and it silently disables
   whatever those watches serve (on other chassis, the mode key; here, nothing,
-  per §25). The idle watcher in `hardware/idle.rs` reopens its nodes on a timer
+  per section 25). The idle watcher in `hardware/idle.rs` reopens its nodes on a timer
   for exactly this reason.
 - **`predator-sense-boot-apply.service`** covers thermal/temp-limit/battery only.
   Lighting restore currently depends on the GUI autostarting with
   `auto_apply_on_start`; a `boot-reapply-lighting` helper action would make it
   work headlessly, like the other three. Boot is now covered in practice by
-  §17 (the GUI starts in the background), but the service itself still does
+  section 17 (the GUI starts in the background), but the service itself still does
   not own lighting.
 
 ---
@@ -1042,15 +1185,21 @@ measure power or clocks, never temperature.
 | Light bar: Static + effects | **Working** (user-confirmed) |
 | Light bar across reboot | Restored at startup |
 | Fan PWM 255 / 128 / auto | **Working** (~6000 / ~3450 / curve) |
-| Fan stall returning to auto | **Retracted** - not a stall; idle curve (§5c) |
+| Fan stall returning to auto | **Retracted** - not a stall; idle curve (5c) |
 | Custom mode-key cycle (AC / battery) | **Working** (user-confirmed) |
 | Auto-Eco at 30% battery | Working |
 | PredatorSense key rebind | **Working** (user-confirmed) |
 | Headless start / resident on close | Working |
 | Lighting across suspend/resume | **Working** (3 cycles; bar readback-verified, keyboard user-confirmed) |
-| Keyboard blanking on its own (mouse-only use) | **Fixed** - keepalive; 76 s pointer-only held lit (§24) |
-| Idle blanking still honoured when blanked | **Working** - 59 s hands-off stayed dark (§24) |
-| Mode key on upstream builds | **Dead on this chassis** - no input event at all (§25) |
-| Fan curve sees the GPU | **Fixed** - hotter die drives it; coupling measured (§26) |
-| Unit tests | 212 GUI + 82 installer + 54 protocol passed, 0 failed |
+| Keyboard blanking on its own (mouse-only use) | **Fixed** - keepalive; 76 s pointer-only held lit (24) |
+| Idle blanking still honoured when blanked | **Working** - 59 s hands-off stayed dark (24) |
+| Mode key on upstream builds | **Dead on this chassis** - no input event at all (25) |
+| Fan curve sees the GPU | **Fixed** - hotter die drives it; coupling measured (26) |
+| Fan Control: one control per setting | **Fixed**, user-confirmed on hardware (27) |
+| Curve step edit reaching the fans | **Working**: a dragged `[25,30,45,60,75,95]` drove pwm 30% then 45% as the die hit 56 C |
+| Fixed 50%, then Fixed 0% | **Working**: `Manual(50)` and a 50% duty, then `target=Firmware` and `pwm_enable=2`, not a manual 0 |
+| Shaded band matches `curve_zero_region_top_c` | **Working**, user-confirmed: band stops at 45 for `[0,30,...]`, and the log wrote `Manual(30)` at 50 C, inside the range the old band would have called firmware |
+| Idle cost of the rebuilt page | 1.90% CPU over 30 s, zero fan writes while nothing changed |
+| CoolBoost toggling without a fan write | **Working**: no fan decision line, plan untouched. CoolBoost itself has no measurable fan effect here and the EC overwrites the byte |
+| Unit tests | 275 GUI + 84 installer + 54 protocol passed, 0 failed |
 
