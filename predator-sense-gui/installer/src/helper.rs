@@ -129,6 +129,20 @@ fn chicony_effect_apply(
     ))
 }
 
+/// A `chicony-effect` opcode: a byte, and one the controller is known to
+/// take (`keyboard::EFFECT_OPCODES`). Anything else would reach its firmware
+/// as root as an untested command.
+fn parse_effect_opcode(value: &str) -> AppResult<u8> {
+    let opcode = parse_u16("opcode", value, 0, 255)? as u8;
+    if keyboard::is_effect_opcode(opcode) {
+        Ok(opcode)
+    } else {
+        Err(fail(format!(
+            "opcode: {opcode:#04x} is not a keyboard effect"
+        )))
+    }
+}
+
 /// Writes one mode-key cycle to facer. `skip` leaves the list untouched; an
 /// empty value clears it, which returns the key to the driver's built-in
 /// ladder. Values are validated as plain u8s here so a malformed config can
@@ -634,7 +648,7 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
             write_mode_cycle(sysfs, "mode_cycle_battery", &args[2])
         }
         HelperAction::ChiconyEffect => {
-            let opcode = parse_u16("opcode", &args[1], 0, 255)? as u8;
+            let opcode = parse_effect_opcode(&args[1])?;
             let speed = parse_u16("speed", &args[2], 0, 100)? as u8;
             let brightness = parse_u16("brightness", &args[3], 0, 100)? as u8;
             let red = parse_u16("red", &args[4], 0, 255)? as u8;
@@ -3250,6 +3264,16 @@ mod tests {
             fs::read_to_string(fixture.path().join("etc/default/grub")).unwrap(),
             "GRUB_TIMEOUT=5\n"
         );
+    }
+
+    #[test]
+    fn chicony_effect_takes_only_known_opcodes() {
+        for opcode in keyboard::EFFECT_OPCODES {
+            assert_eq!(parse_effect_opcode(&opcode.to_string()), Ok(opcode));
+        }
+        for value in ["0", "4", "7", "16", "42", "255", "256", "x"] {
+            assert!(parse_effect_opcode(value).is_err(), "{value}");
+        }
     }
 
     #[test]

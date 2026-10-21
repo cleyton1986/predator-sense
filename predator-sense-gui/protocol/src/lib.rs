@@ -2627,6 +2627,20 @@ pub mod keyboard {
         sealed([0x14, 0x00, 0x00, red, green, blue, 0x00])
     }
 
+    /// Every effect opcode the controller is known to take, in the effect
+    /// report's byte 2: static 01, breathing 02, wave 03, snake 05, ripple
+    /// 06, rainbow 08, rain 0A, lightning 12, spot 25, stars 26, fireball
+    /// 27, snow 28, heartbeat 29. The GUI's `keyboard_rgb::Effect` sends
+    /// these and no other, and the privileged helper refuses any other.
+    pub const EFFECT_OPCODES: [u8; 13] = [
+        0x01, 0x02, 0x03, 0x05, 0x06, 0x08, 0x0A, 0x12, 0x25, 0x26, 0x27, 0x28, 0x29,
+    ];
+
+    /// Whether `opcode` is one of [`EFFECT_OPCODES`].
+    pub fn is_effect_opcode(opcode: u8) -> bool {
+        EFFECT_OPCODES.contains(&opcode)
+    }
+
     /// One firmware effect in one colour: the preamble, the colour, then
     /// `08 02 MODE SPEED BRIGHT 01 DIR CK`. `speed` and `brightness` are
     /// percents (above 100 counts as 100), `direction` 1..=6 (kept to that
@@ -2657,6 +2671,20 @@ pub mod keyboard {
 #[cfg(test)]
 mod keyboard_tests {
     use super::keyboard;
+
+    #[test]
+    fn only_the_known_effect_opcodes_are_effects() {
+        for opcode in keyboard::EFFECT_OPCODES {
+            assert!(keyboard::is_effect_opcode(opcode));
+        }
+        for opcode in [0x00, 0x04, 0x07, 0x09, 0x0B, 0x11, 0x13, 0x24, 0x2A, 0xFF] {
+            assert!(!keyboard::is_effect_opcode(opcode), "{opcode:#04x}");
+        }
+        let accepted = (0..=255u8)
+            .filter(|&o| keyboard::is_effect_opcode(o))
+            .count();
+        assert_eq!(accepted, keyboard::EFFECT_OPCODES.len());
+    }
 
     #[test]
     fn the_scale_ends_at_the_controllers_own_ceiling() {

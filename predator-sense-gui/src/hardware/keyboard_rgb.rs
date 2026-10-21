@@ -53,7 +53,9 @@ impl Effect {
     ];
 
     /// Controller opcode. `Off` shares `Static`'s opcode and is expressed by
-    /// sending it at zero brightness.
+    /// sending it at zero brightness. Together these are exactly
+    /// `predator_sense_protocol::keyboard::EFFECT_OPCODES`, the list the
+    /// privileged helper accepts (tested).
     pub fn opcode(self) -> u8 {
         match self {
             Self::Off | Self::Static => 0x01,
@@ -231,6 +233,15 @@ pub fn refresh() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_effect_sends_an_opcode_the_helper_takes() {
+        use predator_sense_protocol::keyboard::EFFECT_OPCODES;
+        let mut sent: Vec<u8> = Effect::ALL.iter().map(|e| e.opcode()).collect();
+        sent.sort_unstable();
+        sent.dedup();
+        assert_eq!(sent, EFFECT_OPCODES.to_vec());
+    }
 
     #[test]
     fn off_and_static_share_an_opcode() {
