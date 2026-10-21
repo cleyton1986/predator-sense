@@ -61,8 +61,9 @@ Se este app/projeto te ajudou e/ou gostou de alguma forma, considere deixar uma 
 <p align="center"><b>Rede</b> — Gráficos de download/upload em tempo real com tracking de picos e detecção automática de interface (Wi-Fi ou Ethernet).</p>
 <p align="center"><img src="assets/psense-4.png" width="800" alt="Rede"></p>
 
-<p align="center"><b>Iluminação</b> — Cores estáticas por zona (4 secções) e efeitos dinâmicos RGB do teclado (Respiração, Neon, Onda, Deslizar, Zoom).</p>
+<p align="center"><b>Iluminação</b>: cada modo de energia tem a sua própria iluminação, com predefinições com nome. Controle de iluminação define os efeitos de cada luz, e as cores por tecla no teclado do PH16-71; Temas define o teclado, a barra de luz e o logo juntos a partir de um de 32 temas embutidos.</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Iluminação"></p>
+<p align="center"><img src="assets/psense-17.png" width="800" alt="Temas de iluminação"></p>
 
 <p align="center"><b>Modos</b> — Perfis de desempenho: Silencioso, Balanceado, Performance e Turbo, mais um Eco exclusivo de bateria (CPU governor + Intel EPP + limite de potência da GPU).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modos"></p>
@@ -201,7 +202,7 @@ Alguns modelos (confirmado: PHN16S-71, PHN16-73, AN16S-61) roteiam o controlador
 |---|---|
 | Cor estática por zona, brilho, desligar luz | ✅ confirmado funcionando (PHN16S-71, AN16S-61) |
 | Efeitos dinâmicos — Respiração, Neon | ✅ confirmado funcionando (PHN16S-71, AN16S-61) — nativo, um único write HID, hardware faz o loop do padrão sozinho. Na unidade PHN16S-71, Respiração ignora a cor escolhida e cicla o arco-íris sozinho; pode variar em outro hardware |
-| Efeitos dinâmicos — Onda, Deslizar, Zoom | Só prévia visual na tela (sem escrita em hardware) — os códigos desses efeitos variam de significado entre gerações de hardware, então ainda não foram ativados |
+| Efeitos dinâmicos: Onda, Deslizar, Zoom | Oferecidos só onde o próprio controlador os executa (o mapeamento verificado do PHN16S-71, ou o efeito anunciado no relatório de capacidades do controlador); os códigos desses efeitos se mostraram diferentes entre gerações de hardware |
 | Logo RGB da tampa — desligar, cor estática, brilho, Respiração, Neon | ✅ confirmado funcionando (PHN16-73) |
 
 O suporte ao logo da tampa não é ativado por uma allow-list de modelos. O controlador precisa anunciar o alvo `0x83` no relatório A1 e retornar capacidades A3 correspondentes e não vazias antes que a interface apareça; o app repete essa verificação imediatamente antes de cada escrita. O daemon de hotkey restaura somente uma configuração que o app aplicou com sucesso após login e retorno do modo de suspensão, e ignora totalmente o logo quando não há configuração salva ou o alvo está ausente.
@@ -354,26 +355,9 @@ As alterações são aplicadas na hora e salvas; não há botão Aplicar. Escolh
 
 **Temas desenhados pelo app.** No teclado com cores por tecla e na barra de luz de três zonas do PH16-71, o app desenha ele mesmo as aparências animadas de um tema. Temas que acendem as teclas pressionadas leem o teclado embutido enquanto rodam, quando **Reagir à digitação** está ligado no painel do tema. Para isso, a sua conta precisa estar no grupo `input`. Em todas as outras luzes, e enquanto o app não consegue desenhar (por exemplo, antes de as regras de dispositivo do instalador darem à sua sessão acesso ao teclado e à barra de luz), um tema mostra o efeito de firmware mais próximo. **Pausar animações na bateria** as pausa na bateria. Quando o app fecha ou você encerra a sessão, as luzes que ele animava passam para a aparência de firmware do tema; uma imagem parada (uma pintura por tecla, ou uma imagem de tema que não se move) fica como está.
 
-### RGB do Teclado
+**Outros modelos.** A mesma página controla as luzes de todos os modelos suportados: teclados de quatro zonas (WMI ou o controlador ENE), o teclado do Helios 300 com as suas 7 cores, o teclado de uma cor e o logo dos modelos de 2024, o logo da tampa ENE e a barra de luz do PH16-72/PH18-72. Ela foi testada apenas no PH16-71.
 
-Nos outros modelos (todos exceto PH16-71, PH16-72 e PH18-72), a página de Iluminação é a anterior, descrita abaixo.
-
-1. Vá em **Iluminação** no menu lateral
-2. Escolha **Estático** (cores por zona) ou **Dinâmico** (efeitos)
-3. **Modo Estático:** ajuste os sliders R/G/B para cada uma das 4 secções do teclado
-4. **Modo Dinâmico:** selecione um efeito (Respiração, Neon, Onda, Deslizar, Zoom) e ajuste a velocidade
-5. Clique em **Aplicar**
-
-> Em hardware só I2C-HID sem o módulo kernel (veja [Compatibilidade](#compatibilidade)), Respiração e Neon animam de verdade; Onda/Deslizar/Zoom mostram só prévia visual, claramente rotulada como tal — o teclado físico ainda não muda pra esses.
-
-### Logo RGB da Tampa
-
-1. Vá em **Iluminação** e selecione **Logo da tampa** (o seletor só aparece quando o alvo HID compatível é detectado)
-2. Use **Iluminação** para ligar ou desligar o emblema
-3. Escolha **Estático**, **Respiração** ou **Neon** e ajuste os controles disponíveis de cor, brilho e velocidade acompanhando a prévia ao vivo
-4. Clique em **Aplicar no logo**
-
-O último estado aplicado com sucesso é restaurado quando o serviço de hotkey do usuário inicia e após suspensão/hibernação. As cores dos efeitos animados são controladas pelo firmware; por isso a prévia representa o comportamento deles e o seletor de cor fica reservado ao modo estático.
+O logo da tampa ENE só aparece quando o relatório de capacidades do controlador tem o alvo dele. O último estado aplicado é restaurado quando o serviço de hotkey do usuário inicia e após suspensão/hibernação. As cores dos efeitos animados são controladas pelo firmware, por isso só o efeito estático aceita uma cor.
 
 > O firmware controla a animação exibida antes de o Linux iniciar o serviço do usuário. Um estado “desligado” salvo é restaurado após o login, mas o app não consegue suprimir a animação anterior do BIOS/boot.
 
@@ -707,7 +691,6 @@ predator-sense-gui/
 │       ├── temperatures_page.rs # Todos os gauges de temperatura
 │       ├── usage_page.rs        # CPU/GPU/Mem/Storage com top processos
 │       ├── network_page.rs      # Download/upload com tracking de pico
-│       ├── rgb_page.rs          # RGB do teclado com zonas visuais
 │       ├── lighting_page.rs     # Página de Iluminação: modos, predefinições, prévia
 │       ├── lighting/            # As abas (Controle de iluminação, Temas), a prévia, as linhas
 │       ├── fan_control_page.rs  # Ventoinhas animadas + CoolBoost

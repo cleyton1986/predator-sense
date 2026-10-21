@@ -61,8 +61,9 @@ If this app/project helped you and/or you liked it in some way, consider leaving
 <p align="center"><b>Network</b> — Real-time download/upload graphs with peak tracking and automatic interface detection (Wi-Fi or Ethernet).</p>
 <p align="center"><img src="assets/psense-4.png" width="800" alt="Network"></p>
 
-<p align="center"><b>Lighting</b> — Static per-zone (4 sections) and dynamic RGB keyboard effects (Breathing, Neon, Wave, Shifting, Zoom).</p>
+<p align="center"><b>Lighting</b>: each power mode has its own lighting, with named presets. Lighting control sets each light's effects, and per-key colours on the PH16-71 keyboard; Themes sets the keyboard, light bar and logo together from 32 built-in themes.</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Lighting"></p>
+<p align="center"><img src="assets/psense-17.png" width="800" alt="Lighting themes"></p>
 
 <p align="center"><b>Modes</b> — Performance profiles: Quiet, Balanced, Performance and Turbo, plus a battery-only Eco tier (CPU governor + Intel EPP + GPU power limit).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modes"></p>
@@ -201,7 +202,7 @@ Some models (confirmed: PHN16S-71, PHN16-73, AN16S-61) route the keyboard's RGB 
 |---|---|
 | Static per-zone color, brightness, backlight-off | ✅ confirmed working (PHN16S-71, AN16S-61) |
 | Dynamic effects — Breathing, Neon | ✅ confirmed working (PHN16S-71, AN16S-61) — native, single HID write, hardware loops the pattern on its own. On the PHN16S-71 unit Breathing ignores the picked color and rainbow-cycles instead; may vary on other hardware |
-| Dynamic effects — Wave, Shifting, Zoom | On-screen preview only (no hardware writes) — the effect codes for these were found to mean different things across hardware generations, so they're not wired up yet |
+| Dynamic effects: Wave, Shifting, Zoom | Offered only where the controller runs them itself (the PHN16S-71's verified mapping, or the effect advertised in the controller's capability report); the effect codes for these were found to mean different things across hardware generations |
 | RGB cover logo — off, solid color, brightness, Breathing, Neon | ✅ confirmed working (PHN16-73) |
 
 Cover-logo support is not enabled from a model-name allow-list. The controller must advertise target `0x83` in its A1 target report and return matching, non-empty A3 capabilities before the UI is exposed; the app repeats that check immediately before every write. The hotkey daemon restores only a setting that the app previously applied successfully after login and resume, and skips the logo entirely when there is no saved setting or the target is absent.
@@ -354,26 +355,9 @@ Changes apply at once and are saved; there is no Apply button. Picking a theme o
 
 **Themes the app draws.** On the PH16-71's per-key keyboard and three-zone light bar the app draws a theme's animated looks itself. Themes that light the keys you press read the built-in keyboard while they run, when **React to typing** is on in the theme's panel; reading it needs your account in the `input` group. On every other light, and while the app cannot draw (before the installer's device rules give your session access to the keyboard and the light bar, for example), a theme shows its nearest firmware effect. **Pause animations on battery** holds them on battery. When the app quits or you log out, the lights it was animating switch to the theme's firmware look; a still picture (a per-key painting, or a theme picture that does not move) stays as it is.
 
-### Keyboard RGB
+**Other models.** The same page drives every supported model's lights: four-zone keyboards (WMI or the ENE controller), the Helios 300 keyboard and its 7 colours, the 2024 models' one-colour keyboard and logo, the ENE cover logo and the PH16-72/PH18-72 light bar. It has been tested only on the PH16-71.
 
-On other models (all but the PH16-71, PH16-72 and PH18-72) the Lighting page is the older one below.
-
-1. Go to **Lighting** in the sidebar
-2. Choose **Static** (per-zone colors) or **Dynamic** (effects)
-3. **Static mode:** adjust R/G/B sliders for each of the 4 keyboard sections
-4. **Dynamic mode:** select an effect (Breathing, Neon, Wave, Shifting, Zoom) and adjust speed
-5. Click **Apply**
-
-> On I2C-HID-only hardware without the kernel module (see [Compatibility](#compatibility)), Breathing and Neon animate for real; Wave/Shifting/Zoom show an on-screen preview only, clearly labeled as such — the physical keyboard doesn't change for those yet.
-
-### RGB Cover Logo
-
-1. Go to **Lighting** and select **Cover logo** (the selector appears only when the compatible HID target is detected)
-2. Use **Lighting** to turn the emblem on or off
-3. Choose **Static**, **Breathing** or **Neon**, then adjust the available color, brightness and speed controls while checking the live preview
-4. Click **Apply to logo**
-
-The last successfully applied state is restored when the user hotkey service starts and after suspend/hibernate. Animated-effect colors are firmware-controlled, so the preview represents their behavior rather than offering a color picker for those modes.
+The ENE cover logo shows only when the controller's capability report has its target. Its last applied state is restored when the user hotkey service starts and after suspend/hibernate. Animated-effect colors are firmware-controlled, so only Static takes a colour.
 
 > The firmware owns the lighting animation shown before Linux starts the user service. A saved “off” state is restored after login, but this app cannot suppress the earlier BIOS/boot animation.
 
@@ -703,7 +687,6 @@ predator-sense-gui/
 │       ├── temperatures_page.rs # All temperature gauges
 │       ├── usage_page.rs        # CPU/GPU/Mem/Storage with top processes
 │       ├── network_page.rs      # Download/upload with peak tracking
-│       ├── rgb_page.rs          # Keyboard RGB with visual zones
 │       ├── lighting_page.rs     # Lighting page: modes, presets, preview
 │       ├── lighting/            # Its tabs (Lighting control, Themes), preview, rows
 │       ├── fan_control_page.rs  # Animated fans + CoolBoost

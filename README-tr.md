@@ -61,8 +61,9 @@ Bu uygulama/proje işinize yaradıysa ve/veya bir şekilde beğendiyseniz, bir y
 <p align="center"><b>Ağ</b> — Zirve takibi ve otomatik arayüz algılamasıyla (Wi-Fi veya Ethernet) gerçek zamanlı indirme/yükleme grafikleri.</p>
 <p align="center"><img src="assets/psense-4.png" width="800" alt="Ağ"></p>
 
-<p align="center"><b>Aydınlatma</b> — Bölge bazlı statik (4 bölge) ve dinamik RGB klavye efektleri (Breathing, Neon, Wave, Shifting, Zoom).</p>
+<p align="center"><b>Aydınlatma</b>: her güç modunun kendi aydınlatması ve adlandırılmış ön ayarları vardır. Aydınlatma kontrolü her ışığın efektlerini, PH16-71 klavyesinde de tuş başına renkleri ayarlar; Temalar klavyeyi, ışık çubuğunu ve logoyu 32 yerleşik temadan biriyle birlikte ayarlar.</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Aydınlatma"></p>
+<p align="center"><img src="assets/psense-17.png" width="800" alt="Aydınlatma temaları"></p>
 
 <p align="center"><b>Modlar</b> — Performans profilleri: Sessiz, Dengeli, Performans ve Turbo, artı yalnızca pilde kullanılabilen bir Eco katmanı (CPU governor + Intel EPP + GPU güç limiti).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modlar"></p>
@@ -201,7 +202,7 @@ Bazı modeller (doğrulanmış: PHN16S-71, PHN16-73, AN16S-61) klavyenin RGB den
 |---|---|
 | Bölge bazlı statik renk, parlaklık, arka ışığı kapatma | ✅ çalıştığı doğrulandı (PHN16S-71, AN16S-61) |
 | Dinamik efektler — Breathing, Neon | ✅ çalıştığı doğrulandı (PHN16S-71, AN16S-61) — yerel, tek bir HID yazımı, donanım deseni kendi başına döngüye alır. PHN16S-71 biriminde Breathing seçilen rengi yok sayıp gökkuşağı döngüsüne giriyor; başka donanımlarda farklı olabilir |
-| Dinamik efektler — Wave, Shifting, Zoom | Yalnızca ekranda önizleme (donanıma yazım yok) — bu efektlerin kodlarının donanım nesilleri arasında farklı anlamlara geldiği tespit edildiği için henüz bağlanmadılar |
+| Dinamik efektler: Wave, Shifting, Zoom | Yalnızca denetleyicinin kendisinin çalıştırdığı yerde sunulur (PHN16S-71'in doğrulanmış eşlemesi veya denetleyicinin yetenek raporunda bildirilen efekt); bu efektlerin kodlarının donanım nesilleri arasında farklı anlamlara geldiği tespit edildi |
 | RGB kapak logosu — kapalı, düz renk, parlaklık, Breathing, Neon | ✅ çalıştığı doğrulandı (PHN16-73) |
 
 Kapak logosu desteği, model adına dayalı bir izin listesinden etkinleştirilmiyor. Arayüz gösterilmeden önce denetleyicinin A1 hedef raporunda `0x83` hedefini bildirmesi ve buna karşılık gelen, boş olmayan A3 yeteneklerini döndürmesi gerekir; uygulama bu kontrolü her yazımdan hemen önce tekrarlar. Hotkey daemon'u yalnızca uygulamanın giriş ve uykudan dönüş sonrasında daha önce başarıyla uyguladığı bir ayarı geri yükler ve kayıtlı bir ayar yoksa ya da hedef mevcut değilse logoyu tamamen atlar.
@@ -354,26 +355,9 @@ Değişiklikler hemen uygulanır ve kaydedilir; Uygula düğmesi yoktur. Kendi a
 
 **Uygulamanın çizdiği temalar.** PH16-71'in tuş başına renkli klavyesinde ve üç bölgeli ışık çubuğunda uygulama bir temanın hareketli görünümlerini kendisi çizer. Basılan tuşları yakan temalar, temanın panelinde **Yazmaya tepki ver** açıksa, çalışırken yerleşik klavyeyi okur. Bunun için hesabınızın `input` grubunda olması gerekir. Diğer tüm ışıklarda ve uygulama çizemediği sürece (örneğin yükleyicinin aygıt kuralları oturumunuza klavye ve ışık çubuğu erişimi vermeden önce) tema en yakın firmware efektini gösterir. **Pilde animasyonları duraklat** pildeyken onları durdurur. Uygulama kapandığında veya oturumu kapattığınızda, uygulamanın canlandırdığı ışıklar temanın firmware görünümüne geçer; hareketsiz bir resim (tuş başına bir boyama veya hareket etmeyen bir tema resmi) olduğu gibi kalır.
 
-### Klavye RGB
+**Diğer modeller.** Aynı sayfa desteklenen tüm modellerin ışıklarını yönetir: dört bölgeli klavyeler (WMI veya ENE denetleyicisi), 7 rengiyle Helios 300 klavyesi, 2024 modellerinin tek renkli klavyesi ve logosu, ENE kapak logosu ve PH16-72/PH18-72 ışık çubuğu. Yalnızca PH16-71'de test edilmiştir.
 
-Diğer modellerde (PH16-71, PH16-72 ve PH18-72 dışındakiler) Aydınlatma sayfası aşağıda anlatılan eski sayfadır.
-
-1. Kenar çubuğundan **Aydınlatma**'ya gidin
-2. **Statik** (bölge başına renkler) veya **Dinamik** (efektler) seçin
-3. **Statik mod:** klavyenin 4 bölümünün her biri için R/G/B kaydırıcılarını ayarlayın
-4. **Dinamik mod:** bir efekt seçin (Breathing, Neon, Wave, Shifting, Zoom) ve hızı ayarlayın
-5. **Uygula**'ya tıklayın
-
-> Çekirdek modülü olmayan, yalnızca I2C-HID kullanan donanımlarda (bkz. [Uyumluluk](#uyumluluk)), Breathing ve Neon gerçekten animasyon yapar; Wave/Shifting/Zoom yalnızca ekranda önizleme gösterir ve açıkça öyle etiketlenir — fiziksel klavye bunlar için henüz değişmez.
-
-### RGB Kapak Logosu
-
-1. **Aydınlatma**'ya gidin ve **Kapak logosu**'nu seçin (seçici yalnızca uyumlu bir HID hedefi algılandığında görünür)
-2. Amblemi açmak veya kapatmak için **Aydınlatma**'yı kullanın
-3. **Statik**, **Breathing** veya **Neon** seçin, ardından mevcut renk, parlaklık ve hız kontrollerini canlı önizlemeye bakarak ayarlayın
-4. **Logoya uygula**'ya tıklayın
-
-Son başarıyla uygulanan durum, kullanıcı hotkey servisi başladığında ve uyku/hazırda beklemeden sonra geri yüklenir. Animasyonlu efekt renkleri firmware tarafından kontrol edilir, bu yüzden önizleme bir renk seçici sunmak yerine bu modların davranışını temsil eder.
+ENE kapak logosu yalnızca denetleyicinin yetenek raporunda hedefi bulunduğunda görünür. Son uygulanan durumu, kullanıcının hotkey servisi başladığında ve uyku/hazırda bekletmeden sonra geri yüklenir. Hareketli efektlerin renklerini firmware belirler, bu yüzden yalnızca statik efekt bir renk alır.
 
 > Linux kullanıcı servisini başlatmadan önce gösterilen aydınlatma animasyonunun sahibi firmware'dir. Kaydedilmiş bir "kapalı" durum girişten sonra geri yüklenir, ancak bu uygulama önceki BIOS/açılış animasyonunu bastıramaz.
 
@@ -705,7 +689,6 @@ predator-sense-gui/
 │       ├── temperatures_page.rs # Tüm sıcaklık göstergeleri
 │       ├── usage_page.rs        # En çok kaynak tüketen süreçlerle CPU/GPU/Bellek/Depolama
 │       ├── network_page.rs      # Zirve takibiyle indirme/yükleme
-│       ├── rgb_page.rs          # Görsel bölgeli klavye RGB'si
 │       ├── lighting_page.rs     # Aydınlatma sayfası: modlar, ön ayarlar, önizleme
 │       ├── lighting/            # Sekmeleri (Aydınlatma kontrolü, Temalar), önizleme, satırlar
 │       ├── fan_control_page.rs  # Animasyonlu fanlar + CoolBoost

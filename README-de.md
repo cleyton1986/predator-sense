@@ -61,8 +61,9 @@ Wenn diese App/dieses Projekt Ihnen geholfen hat und/oder Ihnen auf irgendeine W
 <p align="center"><b>Netzwerk</b>: Echtzeit-Diagramme für Download/Upload mit Spitzenwertverfolgung und automatischer Schnittstellenerkennung (WLAN oder Ethernet).</p>
 <p align="center"><img src="assets/psense-4.png" width="800" alt="Network"></p>
 
-<p align="center"><b>Beleuchtung</b>: Statische Farben pro Zone (4 Bereiche) und dynamische RGB-Tastatureffekte (Breathing, Neon, Wave, Shifting, Zoom).</p>
+<p align="center"><b>Beleuchtung</b>: Jeder Energiemodus hat seine eigene Beleuchtung, mit benannten Voreinstellungen. Beleuchtungssteuerung legt die Effekte jeder Leuchte fest, auf der Tastatur des PH16-71 auch Farben pro Taste; Designs legt Tastatur, Lichtleiste und Logo gemeinsam über eines von 32 eingebauten Designs fest.</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Lighting"></p>
+<p align="center"><img src="assets/psense-17.png" width="800" alt="Lighting themes"></p>
 
 <p align="center"><b>Modi</b>: Leistungsprofile: Quiet, Balanced, Performance und Turbo, dazu eine nur im Akkubetrieb verfügbare Eco-Stufe (CPU-Governor + Intel EPP + GPU-Leistungslimit).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modes"></p>
@@ -201,7 +202,7 @@ Einige Modelle (bestätigt: PHN16S-71, PHN16-73, AN16S-61) leiten den RGB-Contro
 |---|---|
 | Statische Farbe pro Zone, Helligkeit, Hintergrundbeleuchtung aus | ✅ funktioniert bestätigt (PHN16S-71, AN16S-61) |
 | Dynamische Effekte, Breathing, Neon | ✅ funktioniert bestätigt (PHN16S-71, AN16S-61): nativ, ein einzelner HID-Schreibvorgang, die Hardware wiederholt das Muster von selbst. Bei der PHN16S-71-Einheit ignoriert Breathing die gewählte Farbe und durchläuft stattdessen einen Regenbogenzyklus; kann bei anderer Hardware abweichen |
-| Dynamische Effekte, Wave, Shifting, Zoom | Nur Vorschau am Bildschirm (keine Hardware-Schreibzugriffe): Es hat sich herausgestellt, dass die Effektcodes dafür je nach Hardware-Generation unterschiedliche Bedeutungen haben, daher sind sie noch nicht angebunden |
+| Dynamische Effekte: Wave, Shifting, Zoom | Nur angeboten, wo der Controller sie selbst ausführt (die verifizierte Zuordnung des PHN16S-71 oder der im Fähigkeitsbericht des Controllers angegebene Effekt); die Effektcodes dafür haben sich je nach Hardware-Generation als unterschiedlich erwiesen |
 | RGB-Deckel-Logo, aus, Vollfarbe, Helligkeit, Breathing, Neon | ✅ funktioniert bestätigt (PHN16-73) |
 
 Die Unterstützung des Deckel-Logos wird nicht über eine Zulassungsliste von Modellnamen aktiviert. Der Controller muss das Ziel `0x83` in seinem A1-Zielbericht angeben und passende, nicht leere A3-Fähigkeiten zurückgeben, bevor die Oberfläche angezeigt wird; die App wiederholt diese Prüfung unmittelbar vor jedem Schreibvorgang. Der Hotkey-Daemon stellt nur eine Einstellung wieder her, die die App zuvor nach Anmeldung und Ruhezustand/Standby erfolgreich angewendet hat, und überspringt das Logo vollständig, wenn keine gespeicherte Einstellung vorhanden ist oder das Ziel fehlt.
@@ -354,26 +355,9 @@ Jeder Energiemodus hat seine eigene Beleuchtung. Wechselt der Energiemodus, übe
 
 **Designs, die die App zeichnet.** Auf der Tastatur mit Farben pro Taste und der Lichtleiste mit drei Zonen des PH16-71 zeichnet die App die animierten Looks eines Designs selbst. Designs, die gedrückte Tasten aufleuchten lassen, lesen die eingebaute Tastatur, solange sie laufen, wenn **Auf Tippen reagieren** im Bereich des Designs eingeschaltet ist. Dafür muss Ihr Konto in der Gruppe `input` sein. Auf allen anderen Leuchten, und solange die App nicht zeichnen kann (zum Beispiel bevor die Geräteregeln des Installers Ihrer Sitzung Zugriff auf Tastatur und Lichtleiste geben), zeigt ein Design den nächstliegenden Firmware-Effekt. **Animationen im Akkubetrieb pausieren** hält sie im Akkubetrieb an. Wenn die App beendet wird oder Sie sich abmelden, wechseln die Leuchten, die sie animiert hat, zum Firmware-Look des Designs; ein stehendes Bild (eine Bemalung pro Taste oder ein Designbild, das sich nicht bewegt) bleibt, wie es ist.
 
-### Tastatur-RGB
+**Andere Modelle.** Dieselbe Seite steuert die Leuchten aller unterstützten Modelle: Tastaturen mit vier Zonen (WMI oder der ENE-Controller), die Tastatur des Helios 300 mit ihren 7 Farben, die einfarbige Tastatur und das Logo der 2024er-Modelle, das ENE-Deckel-Logo und die Lichtleiste des PH16-72/PH18-72. Getestet wurde sie nur auf dem PH16-71.
 
-Auf anderen Modellen (alle außer PH16-71, PH16-72 und PH18-72) ist die Beleuchtungsseite die ältere unten.
-
-1. Gehen Sie in der Seitenleiste zu **Beleuchtung**
-2. Wählen Sie **Static** (Farben pro Zone) oder **Dynamic** (Effekte)
-3. **Static-Modus:** Passen Sie die R/G/B-Regler für jeden der 4 Tastaturbereiche an
-4. **Dynamic-Modus:** Wählen Sie einen Effekt (Breathing, Neon, Wave, Shifting, Zoom) und passen Sie die Geschwindigkeit an
-5. Klicken Sie auf **Anwenden**
-
-> Auf reiner I2C-HID-Hardware ohne Kernelmodul (siehe [Kompatibilität](#kompatibilität)) animieren Breathing und Neon tatsächlich; Wave/Shifting/Zoom zeigen nur eine Vorschau am Bildschirm, deutlich als solche gekennzeichnet: Die physische Tastatur ändert sich dafür noch nicht.
-
-### RGB-Deckel-Logo
-
-1. Gehen Sie zu **Beleuchtung** und wählen Sie **Deckel-Logo** (die Auswahl erscheint nur, wenn ein kompatibles HID-Ziel erkannt wird)
-2. Nutzen Sie **Beleuchtung**, um das Emblem ein- oder auszuschalten
-3. Wählen Sie **Static**, **Breathing** oder **Neon** und passen Sie dann die verfügbaren Regler für Farbe, Helligkeit und Geschwindigkeit an, während Sie die Live-Vorschau beobachten
-4. Klicken Sie auf **Auf Logo anwenden**
-
-Der zuletzt erfolgreich angewendete Zustand wird beim Start des Benutzer-Hotkey-Dienstes und nach Standby/Ruhezustand wiederhergestellt. Die Farben der animierten Effekte werden von der Firmware gesteuert, daher bildet die Vorschau deren Verhalten ab, statt für diese Modi eine Farbauswahl anzubieten.
+Das ENE-Deckel-Logo erscheint nur, wenn der Fähigkeitsbericht des Controllers sein Ziel enthält. Sein zuletzt angewendeter Zustand wird wiederhergestellt, wenn der Hotkey-Dienst des Benutzers startet, und nach Standby/Ruhezustand. Die Farben animierter Effekte bestimmt die Firmware, daher nimmt nur der statische Effekt eine Farbe an.
 
 > Die Beleuchtungsanimation, die vor dem Start des Linux-Benutzerdienstes angezeigt wird, gehört der Firmware. Ein gespeicherter „Aus"-Zustand wird nach der Anmeldung wiederhergestellt, aber diese App kann die vorherige BIOS-/Boot-Animation nicht unterdrücken.
 
@@ -725,7 +709,6 @@ predator-sense-gui/
 │       ├── temperatures_page.rs # Alle Temperaturanzeigen
 │       ├── usage_page.rs        # CPU/GPU/Speicher/Datenträger mit ressourcenintensivsten Prozessen
 │       ├── network_page.rs      # Download/Upload mit Spitzenwertverfolgung
-│       ├── rgb_page.rs          # Tastatur-RGB mit visuellen Zonen
 │       ├── lighting_page.rs     # Beleuchtungsseite: Modi, Voreinstellungen, Vorschau
 │       ├── lighting/            # Ihre Reiter (Beleuchtungssteuerung, Designs), Vorschau, Zeilen
 │       ├── fan_control_page.rs  # Animierte Lüfter + CoolBoost

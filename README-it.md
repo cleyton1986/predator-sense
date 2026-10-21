@@ -61,8 +61,9 @@ Se questa app/progetto ti è stata utile e/o ti è piaciuta in qualche modo, con
 <p align="center"><b>Rete</b> — Grafici di download/upload in tempo reale con tracciamento dei picchi e rilevamento automatico dell'interfaccia (Wi-Fi o Ethernet).</p>
 <p align="center"><img src="assets/psense-4.png" width="800" alt="Rete"></p>
 
-<p align="center"><b>Illuminazione</b> — Colori statici per zona (4 sezioni) ed effetti RGB dinamici della tastiera (Breathing, Neon, Wave, Shifting, Zoom).</p>
+<p align="center"><b>Illuminazione</b>: ogni modalità di alimentazione ha la propria illuminazione, con preset con nome. Controllo illuminazione imposta gli effetti di ogni luce, e i colori per tasto sulla tastiera del PH16-71; Temi imposta insieme tastiera, barra luminosa e logo da uno di 32 temi integrati.</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Illuminazione"></p>
+<p align="center"><img src="assets/psense-17.png" width="800" alt="Temi di illuminazione"></p>
 
 <p align="center"><b>Modalità</b> — Profili di prestazioni: Silenzioso, Bilanciato, Prestazioni e Turbo, più un livello Eco esclusivo per la batteria (CPU governor + Intel EPP + limite di potenza della GPU).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modalità"></p>
@@ -201,7 +202,7 @@ Alcuni modelli (confermati: PHN16S-71, PHN16-73, AN16S-61) instradano il control
 |---|---|
 | Colore statico per zona, luminosità, spegnimento retroilluminazione | ✅ confermato funzionante (PHN16S-71, AN16S-61) |
 | Effetti dinamici — Breathing, Neon | ✅ confermato funzionante (PHN16S-71, AN16S-61) — nativo, singola scrittura HID, l'hardware ripete il pattern in loop da solo. Sull'unità PHN16S-71, Breathing ignora il colore scelto e cicla l'arcobaleno; può variare su altro hardware |
-| Effetti dinamici — Wave, Shifting, Zoom | Solo anteprima a schermo (nessuna scrittura sull'hardware) — i codici di questi effetti si sono rivelati avere significati diversi tra le generazioni di hardware, quindi non sono ancora collegati |
+| Effetti dinamici: Wave, Shifting, Zoom | Offerti solo dove il controller li esegue da sé (la mappatura verificata del PHN16S-71, o l'effetto annunciato nel rapporto delle capacità del controller); i codici di questi effetti si sono rivelati avere significati diversi tra le generazioni di hardware |
 | Logo RGB della cover — spento, colore fisso, luminosità, Breathing, Neon | ✅ confermato funzionante (PHN16-73) |
 
 Il supporto al logo della cover non viene abilitato tramite una allow-list di nomi di modello. Il controller deve dichiarare il target `0x83` nel suo report A1 dei target e restituire capacità A3 corrispondenti e non vuote prima che l'interfaccia venga mostrata; l'app ripete questo controllo immediatamente prima di ogni scrittura. Il daemon dell'hotkey ripristina solo un'impostazione che l'app ha già applicato con successo dopo il login e il resume, e salta completamente il logo quando non c'è un'impostazione salvata o il target è assente.
@@ -354,26 +355,9 @@ Le modifiche si applicano subito e vengono salvate; non c'è un pulsante Applica
 
 **Temi disegnati dall'app.** Sulla tastiera con colori per tasto e sulla barra luminosa a tre zone del PH16-71, l'app disegna da sé gli aspetti animati di un tema. I temi che illuminano i tasti premuti leggono la tastiera integrata mentre sono in esecuzione, quando **Reagisci alla digitazione** è attivo nel pannello del tema. Per farlo il tuo account deve essere nel gruppo `input`. Su ogni altra luce, e finché l'app non può disegnare (per esempio prima che le regole dei dispositivi dell'installer diano alla tua sessione l'accesso alla tastiera e alla barra luminosa), un tema mostra l'effetto firmware più vicino. **Metti in pausa le animazioni a batteria** le ferma a batteria. Quando l'app si chiude o esci dalla sessione, le luci che animava passano all'aspetto firmware del tema; un'immagine ferma (un disegno per tasto, o un'immagine del tema che non si muove) resta com'è.
 
-### RGB della Tastiera
+**Altri modelli.** La stessa pagina gestisce le luci di tutti i modelli supportati: tastiere a quattro zone (WMI o il controller ENE), la tastiera dell'Helios 300 con i suoi 7 colori, la tastiera a un colore e il logo dei modelli 2024, il logo della cover ENE e la barra luminosa del PH16-72/PH18-72. È stata provata solo sul PH16-71.
 
-Sugli altri modelli (tutti tranne PH16-71, PH16-72 e PH18-72) la pagina Illuminazione è quella precedente, descritta sotto.
-
-1. Vai su **Illuminazione** nella barra laterale
-2. Scegli **Statico** (colori per zona) o **Dinamico** (effetti)
-3. **Modalità Statica:** regola gli slider R/G/B per ciascuna delle 4 sezioni della tastiera
-4. **Modalità Dinamica:** seleziona un effetto (Breathing, Neon, Wave, Shifting, Zoom) e regola la velocità
-5. Clicca su **Applica**
-
-> Su hardware solo I2C-HID senza il modulo kernel (vedi [Compatibilità](#compatibilità)), Breathing e Neon animano davvero; Wave/Shifting/Zoom mostrano solo un'anteprima a schermo, chiaramente etichettata come tale — la tastiera fisica non cambia ancora per questi effetti.
-
-### Logo RGB della Cover
-
-1. Vai su **Illuminazione** e seleziona **Logo della cover** (il selettore appare solo quando viene rilevato un target HID compatibile)
-2. Usa **Illuminazione** per accendere o spegnere l'emblema
-3. Scegli **Statico**, **Breathing** o **Neon**, poi regola i controlli disponibili di colore, luminosità e velocità osservando l'anteprima in tempo reale
-4. Clicca su **Applica al logo**
-
-L'ultimo stato applicato con successo viene ripristinato quando si avvia il servizio hotkey dell'utente e dopo la sospensione/ibernazione. I colori degli effetti animati sono controllati dal firmware, quindi l'anteprima rappresenta il loro comportamento invece di offrire un selettore di colore per queste modalità.
+Il logo della cover ENE compare solo quando il rapporto delle capacità del controller ne contiene il target. Il suo ultimo stato applicato viene ripristinato all'avvio del servizio hotkey dell'utente e dopo sospensione/ibernazione. I colori degli effetti animati sono gestiti dal firmware, quindi solo l'effetto statico accetta un colore.
 
 > Il firmware controlla l'animazione di illuminazione mostrata prima che Linux avvii il servizio utente. Uno stato "spento" salvato viene ripristinato dopo il login, ma questa app non può sopprimere la precedente animazione del BIOS/boot.
 
@@ -719,7 +703,6 @@ predator-sense-gui/
 │       ├── temperatures_page.rs # Tutti i gauge di temperatura
 │       ├── usage_page.rs        # CPU/GPU/Mem/Storage con i processi principali
 │       ├── network_page.rs      # Download/upload con tracciamento dei picchi
-│       ├── rgb_page.rs          # RGB della tastiera con zone visive
 │       ├── lighting_page.rs     # Pagina Illuminazione: modalità, preset, anteprima
 │       ├── lighting/            # Le sue schede (Controllo illuminazione, Temi), anteprima, righe
 │       ├── fan_control_page.rs  # Ventole animate + CoolBoost
