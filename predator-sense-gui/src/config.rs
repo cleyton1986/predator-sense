@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// issues #25/#26) - same "the app forgets which effect was last applied and
 /// always reopens on Static" gap the WMI/ENEK5130 path had, just on the
 /// sibling implementation for this newer hardware generation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MagicRgbKeyboardState {
     pub effect: KeyboardEffect,
     pub brightness: u8,
@@ -23,7 +23,7 @@ pub struct MagicRgbKeyboardState {
 
 /// Last-applied 2024+ HID cover-logo lighting state, independent of the
 /// keyboard above (single LED/zone, its own effect list).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MagicRgbLogoState {
     pub effect: Option<LogoEffect>,
     pub brightness: u8,
@@ -36,7 +36,7 @@ pub struct MagicRgbLogoState {
 /// Last-applied Chicony USB-HID keyboard lighting state (Helios 300/PH317-56
 /// generation, `hardware::chicony_rgb`) - fixed palette, wire-order indices
 /// rather than an enum.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChiconyRgbState {
     pub effect: usize,
     pub color: usize,
@@ -87,7 +87,7 @@ pub struct LightingProfile {
     pub static_zones: Option<Vec<ZoneColor>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZoneColor {
     pub zone: u8,
     pub red: u8,
@@ -109,7 +109,7 @@ pub struct GameProfile {
 /// Last successfully applied state for the independently controlled RGB logo
 /// on the display lid. `RgbConfig` is shared with keyboard lighting so mode,
 /// brightness, speed and color keep one serialization contract.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoverLogoSettings {
     pub enabled: bool,
     pub config: RgbConfig,
@@ -300,6 +300,30 @@ pub struct AppConfig {
     /// Power mode -> scheme name.
     #[serde(default)]
     pub mode_bindings: Vec<ModeBinding>,
+    /// The scheme live lighting edits are written to, if any.
+    #[serde(default)]
+    pub selected_scheme: Option<String>,
+    /// Each power mode's lighting: its setup, the preset it holds and whether it has changed
+    /// since (`hardware::lighting_model`). All five modes after any load,
+    /// keyed in config.json by `PowerProfile::to_id()` as `fan_plans` is.
+    ///
+    /// Replaces `lighting_schemes`, `mode_bindings` and `selected_scheme`, which
+    /// [`AppConfig::migrate_lighting_once`] reads once and which stay readable. Each light's
+    /// own field (`keyboard_rgb`, `light_bar`, `chicony_rgb`, the `rgb_*` fields,
+    /// `magic_rgb_keyboard`, `magic_rgb_logo`, `cover_logo`) is read by it too, and stays
+    /// written as the record of what that light shows.
+    #[serde(
+        default = "crate::hardware::lighting_model::all_modes",
+        with = "crate::hardware::lighting_model::mode_map"
+    )]
+    pub lighting_modes: std::collections::BTreeMap<PowerProfile, crate::hardware::lighting_model::ModeLighting>,
+    /// Named lighting setups ("Presets" on the page). Names are unique and case-sensitive.
+    #[serde(default)]
+    pub lighting_presets: Vec<crate::hardware::lighting_model::LightingPreset>,
+    /// Whether the one-time move into `lighting_modes` and `lighting_presets` has run (see
+    /// [`AppConfig::migrate_lighting_once`]).
+    #[serde(default)]
+    pub lighting_migrated: bool,
     /// Turn the light bar off after `light_bar_idle_secs` without input. The
     /// firmware has no timeout for the bar (unlike the keyboard backlight), so
     /// this is measured by the app - see `hardware::idle`.
@@ -326,6 +350,11 @@ pub struct AppConfig {
     /// a click is as deliberate as a keystroke - this is only about motion.
     #[serde(default = "default_true")]
     pub idle_mouse_wakes: bool,
+    /// "Pause animations on battery" (lighting settings): on battery the
+    /// lighting renderer holds an app-drawn look's current frame instead of streaming it.
+    /// Default on, also for a config written before the setting existed.
+    #[serde(default = "default_true")]
+    pub pause_animations_on_battery: bool,
     /// Whether the start-up idle migration has run (see
     /// [`AppConfig::migrate_idle_once`]). A config written before this field
     /// reads `false` and is migrated once; after that, nothing at start-up
@@ -594,35 +623,88 @@ impl AppConfig {
         self.idle_migrated = true;
         true
     }
+
+    /// The one-time move of the lighting into `lighting_modes` and `lighting_presets`
+    /// (`lighting_model::migrate`). Returns whether it changed the config,
+    /// which the caller then saves.
+    ///
+    /// Only the first time: after that the user's per-mode lighting is what counts, so the
+    /// marker is written even when there was nothing to move, and per-mode lighting a config
+    /// already holds without the marker is kept and only marked.
+    ///
+    /// Not gated on the model or on the lights found. It copies states the config already
+    /// holds, switches nothing on and writes no hardware; what reaches hardware is decided
+    /// each time a setup is applied, from the lights the machine has. A gate would also tie
+    /// the result to one run: a start where a light is not found (the kernel module not yet
+    /// built for a new kernel, say) would migrate without it and mark the config, losing
+    /// that light's settings for good.
+    pub fn migrate_lighting_once(&mut self) -> bool {
+        if self.lighting_migrated {
+            return false;
+        }
+        if crate::hardware::lighting_model::migration::untouched(self) {
+            let (modes, presets) = crate::hardware::lighting_model::migrate(self);
+            self.lighting_modes = modes;
+            self.lighting_presets = presets;
+        }
+        self.lighting_migrated = true;
+        true
+    }
 }
 
-/// Start-up's one-time migration of the idle settings on `source`
-/// ([`AppConfig::migrate_idle_once`]), with the firmware timeout as read.
-/// Returns the config and whether to save it.
+/// The config start-up runs on once the lighting has been migrated
+/// ([`AppConfig::migrate_lighting_once`], then `lighting_model::refresh` for a hand-edited
+/// file), and whether to save it.
 ///
-/// An unreadable config.json is neither migrated nor saved over: the app runs
-/// on defaults and the file keeps the user's settings. A missing file is a
+/// The idle migration's rule: an unreadable config.json is neither migrated nor saved over.
+/// The app runs on defaults and the file keeps the user's settings. A missing file is a
 /// fresh install, with nothing to lose, so the marked defaults are saved.
-fn with_idle_migrated(source: AppConfigSource, firmware_timeout: bool) -> (AppConfig, bool) {
+pub fn with_lighting_migrated(source: AppConfigSource) -> (AppConfig, bool) {
     match source {
         AppConfigSource::Loaded(mut cfg) => {
-            let save = cfg.migrate_idle_once(firmware_timeout);
-            (cfg, save)
+            let migrated = cfg.migrate_lighting_once();
+            let tidied = crate::hardware::lighting_model::refresh(&mut cfg);
+            (cfg, migrated || tidied)
         }
         AppConfigSource::Missing => {
             let mut cfg = AppConfig::default();
-            cfg.migrate_idle_once(firmware_timeout);
+            cfg.migrate_lighting_once();
             (cfg, true)
         }
         AppConfigSource::Unreadable(_) => (AppConfig::default(), false),
     }
 }
 
+/// Start-up's one-time migrations on `source`: the lighting's first
+/// ([`with_lighting_migrated`]), then the idle settings' ([`AppConfig::migrate_idle_once`])
+/// with the firmware timeout as read; with `None` the idle settings are left as they are.
+/// Returns the config and whether to save it.
+///
+/// Start-up runs it twice, each time as one load and one save on the UI thread: at once
+/// without the timeout (`lighting::migrate_at_startup`), so the lighting's restore waits for
+/// nothing, and with it once it is read ([`migrate_idle_at_startup`]), when the lighting's
+/// migration is already saved and a no-op. One after the other on one thread, neither loses
+/// the other's marker, which two loads before either save could (a lost `idle_migrated`
+/// would let idle switch itself back on). An unreadable config.json is migrated by neither
+/// and never saved over.
+pub fn with_startup_migrations(
+    source: AppConfigSource,
+    firmware_timeout: Option<bool>,
+) -> (AppConfig, bool) {
+    let readable = !matches!(source, AppConfigSource::Unreadable(_));
+    let (mut cfg, mut save) = with_lighting_migrated(source);
+    if let Some(on) = firmware_timeout.filter(|_| readable) {
+        save |= cfg.migrate_idle_once(on);
+    }
+    (cfg, save)
+}
+
 /// On the UI thread, once the firmware's backlight timeout is read, on a machine whose
 /// lighting the app can blank: the idle settings' one-time migration
-/// ([`with_idle_migrated`]), saved. Returns the config the idle watcher starts on.
+/// ([`with_startup_migrations`] with the timeout), saved. Returns the config the idle
+/// watcher starts on.
 pub fn migrate_idle_at_startup(firmware_timeout: bool) -> AppConfig {
-    let (cfg, save) = with_idle_migrated(load_app_config_source(), firmware_timeout);
+    let (cfg, save) = with_startup_migrations(load_app_config_source(), Some(firmware_timeout));
     if save {
         if let Err(e) = save_app_config(&cfg) {
             crate::hardware::applog::error(&format!(
@@ -631,6 +713,47 @@ pub fn migrate_idle_at_startup(firmware_timeout: bool) -> AppConfig {
         }
     }
     cfg
+}
+
+/// config.json as the lighting reads and edits it, from `source`: the lighting migrated in
+/// memory ([`with_lighting_migrated`]), and whether it may be saved.
+///
+/// The migration is a no-op once start-up has saved it. It is here for a start whose save
+/// failed: a setup is then still read from what the migration makes, and an edit is never
+/// written into the default setups, which would make the next start take the user's old
+/// lighting as already moved and lose it. Not when config.json could not be read: the app
+/// then runs on defaults, which must not be written over the user's file.
+pub fn lighting_config_from(source: AppConfigSource) -> (AppConfig, bool) {
+    let readable = !matches!(source, AppConfigSource::Unreadable(_));
+    (with_lighting_migrated(source).0, readable)
+}
+
+/// [`lighting_config_from`] config.json as it is now.
+pub fn load_lighting_config() -> (AppConfig, bool) {
+    lighting_config_from(load_app_config_source())
+}
+
+/// Changes one of the lighting settings in config.json with `edit` and saves it, as the
+/// Lighting page's own edits are saved: on the lighting as [`load_lighting_config`] reads it,
+/// and never over a file that could not be read. Returns the config as saved.
+pub fn update_lighting_setting(edit: impl FnOnce(&mut AppConfig)) -> Result<AppConfig, String> {
+    update_lighting_through(load_app_config_source(), edit, save_app_config)
+}
+
+/// [`update_lighting_setting`] on `source`, with the save passed in (the tests pass their
+/// own).
+fn update_lighting_through(
+    source: AppConfigSource,
+    edit: impl FnOnce(&mut AppConfig),
+    save: impl FnOnce(&AppConfig) -> Result<(), String>,
+) -> Result<AppConfig, String> {
+    if let AppConfigSource::Unreadable(error) = &source {
+        return Err(error.clone());
+    }
+    let (mut config, _) = lighting_config_from(source);
+    edit(&mut config);
+    save(&config)?;
+    Ok(config)
 }
 
 fn default_auto_eco_threshold() -> u32 {
@@ -704,6 +827,10 @@ impl Default for AppConfig {
             saved_colors: Vec::new(),
             lighting_schemes: Vec::new(),
             mode_bindings: Vec::new(),
+            selected_scheme: None,
+            lighting_modes: crate::hardware::lighting_model::all_modes(),
+            lighting_presets: Vec::new(),
+            lighting_migrated: false,
             light_bar_idle_enabled: false,
             light_bar_idle_secs: default_light_bar_idle_secs(),
             idle_enabled: false,
@@ -713,6 +840,7 @@ impl Default for AppConfig {
             idle_bar_enabled: true,
             idle_bar_secs: default_idle_secs(),
             idle_mouse_wakes: true,
+            pause_animations_on_battery: true,
             idle_migrated: false,
             mode_cycle_ac: Vec::new(),
             mode_cycle_battery: Vec::new(),
@@ -1019,6 +1147,19 @@ pub fn save_app_config(config: &AppConfig) -> Result<(), String> {
     })
 }
 
+/// The UI thread, which every save of config.json happens on ([`mark_ui_thread`]).
+static UI_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+
+/// Marks the calling thread as the UI thread. `main` calls it first.
+pub fn mark_ui_thread() {
+    let _ = UI_THREAD.set(std::thread::current().id());
+}
+
+/// Whether the calling thread is the one [`mark_ui_thread`] marked.
+pub fn on_ui_thread() -> bool {
+    UI_THREAD.get() == Some(&std::thread::current().id())
+}
+
 /// `save_app_config` with the file write passed in (the tests pass their own).
 fn save_through(
     config: &AppConfig,
@@ -1202,9 +1343,16 @@ pub fn export_app_config_to(path: &Path) -> Result<(), String> {
 /// a file that would send the app to defaults is rejected here, while the
 /// user's own settings are still on disk, rather than after it has replaced
 /// them.
+///
+/// The lighting is migrated as start-up migrates it ([`with_lighting_migrated`]):
+/// a file exported before per-mode lighting has no marker, and saved as it is
+/// the app would read it as the default lighting until the migration at the next
+/// start. One exported since then is only tidied.
 pub fn import_app_config_from(path: &Path) -> Result<AppConfig, String> {
     match read_app_config_at(path) {
-        AppConfigSource::Loaded(config) => Ok(config),
+        AppConfigSource::Loaded(config) => {
+            Ok(with_lighting_migrated(AppConfigSource::Loaded(config)).0)
+        }
         AppConfigSource::Missing => Err("no such file".to_string()),
         AppConfigSource::Unreadable(error) => Err(error),
     }
@@ -1447,19 +1595,6 @@ mod tests {
         assert!(cfg.idle_enabled, "a migration never switches idle off");
     }
 
-    #[test]
-    fn an_unreadable_config_is_neither_migrated_nor_saved_over() {
-        let (cfg, save) = with_idle_migrated(AppConfigSource::Unreadable("bad".into()), true);
-        assert!(!save, "the user's file is left alone");
-        assert!(!cfg.idle_migrated && !cfg.idle_enabled);
-        // A fresh install has nothing to lose: the marked defaults are saved.
-        let (cfg, save) = with_idle_migrated(AppConfigSource::Missing, true);
-        assert!(save && cfg.idle_migrated && cfg.idle_enabled);
-        // A migrated file saves nothing at a later start.
-        let (_, save) = with_idle_migrated(AppConfigSource::Loaded(cfg), true);
-        assert!(!save);
-    }
-
     /// `idle_keyboard_keepalive` was removed with the keepalive itself. A
     /// config.json written before that still carries the key, and a config
     /// that fails to parse silently runs the whole app on defaults, so this
@@ -1508,6 +1643,111 @@ mod tests {
         let _ = fs::remove_dir(&dir);
     }
 
+    /// "Pause animations on battery" is on by default, and a config written before the
+    /// setting existed reads it as on too; switched off it stays off.
+    #[test]
+    fn pausing_animations_on_battery_is_on_unless_switched_off() {
+        assert!(AppConfig::default().pause_animations_on_battery);
+        let mut value = serde_json::to_value(AppConfig::default()).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("a config is a JSON object")
+            .remove("pause_animations_on_battery");
+        let old: AppConfig = serde_json::from_value(value).expect("an older config still reads");
+        assert!(old.pause_animations_on_battery);
+
+        let off = AppConfig {
+            pause_animations_on_battery: false,
+            ..AppConfig::default()
+        };
+        let text = serde_json::to_string(&off).expect("serialize");
+        let back: AppConfig = serde_json::from_str(&text).expect("read back");
+        assert!(!back.pause_animations_on_battery);
+    }
+
+    /// A config.json written by a build that asked a one-time question before flashing looks
+    /// (since removed) still loads, every other setting with it: an unknown field is
+    /// skipped, never a reason to call the file unreadable and run on defaults.
+    #[test]
+    fn a_config_with_the_old_flash_answer_still_loads() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-flash-answer-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.json");
+        let mut value = serde_json::to_value(AppConfig {
+            font_scale: 1.25,
+            pause_animations_on_battery: false,
+            ..AppConfig::default()
+        })
+        .expect("serialize");
+        value
+            .as_object_mut()
+            .expect("a config is a JSON object")
+            .insert("lighting_flash_confirmed".into(), true.into());
+        fs::write(&path, value.to_string()).expect("write");
+        match read_app_config_at(&path) {
+            AppConfigSource::Loaded(config) => {
+                assert_eq!(config.font_scale, 1.25);
+                assert!(!config.pause_animations_on_battery);
+            }
+            AppConfigSource::Missing => panic!("the file is there"),
+            AppConfigSource::Unreadable(error) => panic!("did not load: {error}"),
+        }
+        let saved = serde_json::to_string(&AppConfig::default()).expect("serialize");
+        assert!(
+            !saved.contains("lighting_flash_confirmed"),
+            "no longer written"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A lighting setting is saved over a config that reads, or a missing one, never over
+    /// one that does not read; what is saved keeps every other setting.
+    #[test]
+    fn a_lighting_setting_is_never_saved_over_an_unreadable_config() {
+        use std::cell::RefCell;
+        let saved = RefCell::new(None);
+        let refused = update_lighting_through(
+            AppConfigSource::Unreadable("expected value at line 1".into()),
+            |c| c.pause_animations_on_battery = false,
+            |config| {
+                *saved.borrow_mut() = Some(config.clone());
+                Ok(())
+            },
+        );
+        assert!(refused.is_err());
+        assert!(saved.borrow().is_none(), "nothing written");
+
+        let mine = AppConfig {
+            font_scale: 1.25,
+            ..AppConfig::default()
+        };
+        let done = update_lighting_through(
+            AppConfigSource::Loaded(mine),
+            |c| c.pause_animations_on_battery = false,
+            |config| {
+                *saved.borrow_mut() = Some(config.clone());
+                Ok(())
+            },
+        )
+        .expect("saved");
+        assert!(!done.pause_animations_on_battery);
+        let written = saved.borrow().clone().expect("written");
+        assert_eq!(written.font_scale, 1.25, "the other settings stay");
+        assert!(!written.pause_animations_on_battery);
+
+        let failed = update_lighting_through(
+            AppConfigSource::Missing,
+            |c| c.pause_animations_on_battery = false,
+            |_| Err("disk full".to_string()),
+        );
+        assert_eq!(failed.err().as_deref(), Some("disk full"));
+    }
+
+    /// A temporary directory of its own for one test, new and private (`tempfile`),
+    /// removed by the test.
     fn scratch_dir(name: &str) -> PathBuf {
         tempfile::Builder::new()
             .prefix(&format!("predator-sense-{name}-"))
@@ -1758,6 +1998,46 @@ mod tests {
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(&dir);
+    }
+
+    /// A settings file exported before per-mode lighting holds the old lighting
+    /// fields and no marker: the import moves them, before anything is saved.
+    #[test]
+    fn an_older_export_has_its_lighting_migrated_on_import() {
+        use crate::hardware::profile::PowerProfile;
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/lighting-config");
+
+        let old = fixtures.join("schemes-and-bindings.json");
+        let on_disk = fs::read(&old).expect("fixture");
+        let imported = import_app_config_from(&old).expect("an older export imports");
+        assert!(imported.lighting_migrated);
+        let names: Vec<&str> = imported
+            .lighting_presets
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["Night", "Gaming", "gaming", "Bar only"]);
+        assert_eq!(
+            imported.lighting_modes[&PowerProfile::Quiet]
+                .preset
+                .as_deref(),
+            Some("Night")
+        );
+        assert_eq!(
+            fs::read(&old).expect("fixture"),
+            on_disk,
+            "the file is not changed"
+        );
+
+        // Exported since: the lighting comes back as it was, setups this version cannot
+        // read included.
+        let newer = fixtures.join("newer-setup-kinds.json");
+        let AppConfigSource::Loaded(as_read) = read_app_config_at(&newer) else {
+            panic!("the fixture loads");
+        };
+        let imported = import_app_config_from(&newer).expect("imports");
+        assert_eq!(imported.lighting_modes, as_read.lighting_modes);
+        assert_eq!(imported.lighting_presets, as_read.lighting_presets);
     }
 
     /// Import has to refuse before it replaces, not after. A file that does

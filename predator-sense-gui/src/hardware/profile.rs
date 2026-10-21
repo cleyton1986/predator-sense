@@ -148,6 +148,15 @@ pub enum PowerProfile {
 }
 
 impl PowerProfile {
+    /// Every profile, in declared order.
+    pub const ALL: [PowerProfile; 5] = [
+        Self::Quiet,
+        Self::Balanced,
+        Self::Performance,
+        Self::Turbo,
+        Self::Eco,
+    ];
+
     pub fn label(&self) -> &str {
         match self {
             Self::Quiet => crate::i18n::t("quiet"),
@@ -203,6 +212,21 @@ impl PowerProfile {
             4 => Self::Turbo,
             _ => Self::Balanced,
         }
+    }
+}
+
+/// Ordered by [`PowerProfile::index`], weakest to strongest, so that `a < b` reads "a saves
+/// more power than b" rather than following declaration order. Exists for the lighting
+/// config's per-mode map (`lighting_model`), which is a `BTreeMap` keyed by mode.
+impl Ord for PowerProfile {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.index().cmp(&other.index())
+    }
+}
+
+impl PartialOrd for PowerProfile {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 

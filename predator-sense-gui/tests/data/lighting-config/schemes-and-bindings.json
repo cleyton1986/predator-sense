@@ -1,0 +1,171 @@
+{
+  "last_profile": "balanced",
+  "auto_apply_on_start": false,
+  "minimize_on_close": true,
+  "font_scale": 1.25,
+  "idle_enabled": true,
+  "idle_migrated": true,
+  "saved_colors": [
+    "#ff2000",
+    "#00aec7"
+  ],
+  "fan_plans": [
+    {
+      "mode": "turbo",
+      "plan": {
+        "kind": "max"
+      }
+    }
+  ],
+  "keyboard_rgb": {
+    "effect": "Spot",
+    "red": 255,
+    "green": 32,
+    "blue": 0,
+    "brightness": 70,
+    "speed": 60,
+    "direction": 1
+  },
+  "light_bar": {
+    "mode": "Ripple",
+    "speed": 2,
+    "brightness": 90,
+    "red": 255,
+    "green": 32,
+    "blue": 0,
+    "per_zone": true,
+    "zones": [
+      [255, 32, 0],
+      [0, 174, 199],
+      [255, 32, 0]
+    ],
+    "direction": 1
+  },
+  "lighting_schemes": [
+    {
+      "name": "Night",
+      "keyboard": {
+        "effect": "Static",
+        "red": 0,
+        "green": 40,
+        "blue": 120,
+        "brightness": 20,
+        "speed": 50,
+        "direction": 1
+      },
+      "light_bar": {
+        "mode": "Breathing",
+        "speed": 1,
+        "brightness": 30,
+        "red": 0,
+        "green": 40,
+        "blue": 120
+      }
+    },
+    {
+      "name": "Gaming",
+      "keyboard": {
+        "effect": "Wave",
+        "red": 0,
+        "green": 174,
+        "blue": 199,
+        "brightness": 100,
+        "speed": 80,
+        "direction": 2
+      },
+      "light_bar": {
+        "mode": "Wave",
+        "speed": 4,
+        "brightness": 100,
+        "red": 0,
+        "green": 174,
+        "blue": 199,
+        "per_zone": true,
+        "zones": [
+          [255, 0, 0],
+          [0, 255, 0],
+          [0, 0, 255]
+        ],
+        "direction": 2
+      }
+    },
+    {
+      "name": "gaming",
+      "keyboard": {
+        "effect": "Rainbow",
+        "red": 0,
+        "green": 174,
+        "blue": 199,
+        "brightness": 60,
+        "speed": 30,
+        "direction": 1
+      },
+      "light_bar": null
+    },
+    {
+      "name": "Bar only",
+      "keyboard": null,
+      "light_bar": {
+        "mode": "Static",
+        "speed": 3,
+        "brightness": 50,
+        "red": 128,
+        "green": 0,
+        "blue": 255,
+        "per_zone": false,
+        "zones": null,
+        "direction": 1
+      }
+    },
+    {
+      "name": "Night",
+      "keyboard": {
+        "effect": "Off",
+        "red": 0,
+        "green": 0,
+        "blue": 0,
+        "brightness": 0,
+        "speed": 50,
+        "direction": 1
+      },
+      "light_bar": {
+        "mode": "Off",
+        "speed": 3,
+        "brightness": 0,
+        "red": 0,
+        "green": 0,
+        "blue": 0,
+        "per_zone": false,
+        "zones": null,
+        "direction": 1
+      }
+    }
+  ],
+  "mode_bindings": [
+    {
+      "mode": "quiet",
+      "scheme": "Night"
+    },
+    {
+      "mode": "performance",
+      "scheme": "Gaming"
+    },
+    {
+      "mode": "turbo",
+      "scheme": "gaming"
+    },
+    {
+      "mode": "eco",
+      "scheme": "Deleted scheme"
+    },
+    {
+      "mode": "silent",
+      "scheme": "Night"
+    },
+    {
+      "mode": "performance",
+      "scheme": "Bar only"
+    }
+  ],
+  "selected_scheme": "Gaming"
+}
