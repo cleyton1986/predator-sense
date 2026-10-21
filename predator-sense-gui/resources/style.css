@@ -158,6 +158,11 @@ viewport {
     font-weight: 700;
 }
 
+/* The Lighting item's mark while the Lighting page's Pause holds its animations. */
+.nav-paused-mark {
+    color: @text_label;
+}
+
 /* === Content Area === */
 .content-area {
     background-color: transparent;
@@ -1190,6 +1195,913 @@ scrollbar slider:hover {
 .feature-off .feature-icon { color: #888; }
 .feature-label { font-size: 12px; font-weight: 400; } /* Regular, 12px (label) */
 .info-note { color: #9aa0a6; font-size: 12px; font-weight: 400; } /* Regular, 12px (label) */
+
+/* === Lighting page ("Calm" redesign) ===
+   Sizes, radii and spacing follow the reference design. Every selection tint is
+   drawn from @accent_bg_color, which brand_theme recolours per power mode,
+   so the page follows the active mode without code of its own. */
+.lighting-page-title {
+    font-size: 28px;
+    font-weight: 700;
+    color: @text_main;
+}
+
+.lighting-group-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: @text_main;
+    margin-left: 4px;
+    margin-right: 4px;
+}
+
+/* A boxed group of rows with a 1-px rule between them. GTK matches
+   :first-child against visible siblings only, so a hidden first row never
+   leaves a rule along the top. */
+.lighting-group {
+    border: 1px solid @border_dim;
+    border-radius: 16px;
+    background-color: @bg_card;
+}
+
+.lighting-group > .lighting-row {
+    min-height: 40px;
+    padding: 10px 18px;
+    border-top: 1px solid @border_dim;
+}
+
+.lighting-group > .lighting-row:first-child {
+    border-top: none;
+}
+
+.lighting-row-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: @text_main;
+}
+
+.lighting-row-sub {
+    font-size: 13px;
+    font-weight: 400;
+    color: @text_muted;
+}
+
+.lighting-tag {
+    padding: 3px 8px;
+    border-radius: 999px;
+    background-color: alpha(@accent_bg_color, 0.16);
+    color: mix(@accent_bg_color, #ffffff, 0.45);
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.lighting-row dropdown > button {
+    min-height: 44px;
+    border-radius: 10px;
+}
+
+/* The inline naming form under the preset row. */
+.lighting-inline-form {
+    padding: 12px;
+    border: 1px solid @border_dim;
+    border-radius: 14px;
+    background-color: @bg_dark;
+}
+
+.lighting-form-label {
+    margin: 0 4px;
+    color: @text_label;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.lighting-inline-form entry {
+    min-height: 44px;
+    border: 1px solid @border_mid;
+    border-radius: 10px;
+    background-color: #0b0b0b;
+    font-size: 14px;
+}
+
+.lighting-form-error {
+    color: #ff9aa6;
+    font-size: 12px;
+    font-weight: 400;
+}
+
+/* Idle delay chips. */
+.lighting-delay-chip {
+    min-height: 40px;
+    min-width: 40px;
+    padding: 0 12px;
+    border: 1px solid #2a2a2a;
+    border-radius: 20px;
+    background: @bg_panel;
+    box-shadow: none;
+    color: #cccccc;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.lighting-delay-chip:hover {
+    border-color: #444444;
+}
+
+.lighting-delay-chip:checked {
+    background: alpha(@accent_bg_color, 0.16);
+    border-color: @accent_bg_color;
+    color: @text_main;
+}
+
+.lighting-colour-switch-label {
+    color: @text_label;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+/* Swatches: a 44 px round target around a painted 30 px dot. The dot's
+   CSS colour is the selection ring it draws, so the ring follows the mode. */
+.lighting-swatch {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0;
+    border: none;
+    border-radius: 999px;
+    background: none;
+    box-shadow: none;
+}
+
+.lighting-swatch:hover {
+    background-color: alpha(#ffffff, 0.06);
+}
+
+.lighting-swatch:checked {
+    background-color: alpha(@accent_bg_color, 0.16);
+}
+
+.lighting-swatch-dot {
+    color: @accent_bg_color;
+}
+
+.lighting-swatch-check {
+    color: #ffffff;
+    -gtk-icon-size: 16px;
+}
+
+.lighting-swatch-check.lighting-swatch-check-dark {
+    color: #000000;
+}
+
+.lighting-swatch-plus-icon {
+    min-width: 28px;
+    min-height: 28px;
+    border: 1px dashed #555555;
+    border-radius: 999px;
+    color: @text_label;
+    -gtk-icon-size: 16px;
+}
+
+.lighting-swatch-plus:checked {
+    background-color: alpha(@accent_bg_color, 0.16);
+}
+
+.lighting-swatch-plus:checked .lighting-swatch-plus-icon {
+    border-color: @accent_bg_color;
+    color: @text_main;
+}
+
+/* Zone slots and their actions. */
+.lighting-zone-slot {
+    min-height: 56px;
+    padding: 8px 12px;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    background: @bg_panel;
+    box-shadow: none;
+}
+
+.lighting-zone-slot:hover {
+    border-color: #444444;
+}
+
+.lighting-zone-slot:checked {
+    background: alpha(@accent_bg_color, 0.16);
+    border-color: @accent_bg_color;
+}
+
+.lighting-zone-name {
+    color: @text_main;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.lighting-zone-hex,
+.lighting-hex-entry {
+    font-family: monospace;
+}
+
+.lighting-zone-hex {
+    color: @text_muted;
+    font-size: 12px;
+}
+
+.lighting-chip-button {
+    min-height: 44px;
+    padding: 0 14px;
+    border: 1px solid @border_mid;
+    border-radius: 22px;
+    background: @bg_panel;
+    box-shadow: none;
+    color: #dddddd;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.lighting-chip-button:hover {
+    border-color: #555555;
+}
+
+.lighting-chip-button:disabled {
+    opacity: 0.4;
+}
+
+/* The custom picker. The saturation and shade tracks' gradients are set per
+   row from code, since they follow the colour. */
+.lighting-picker {
+    margin-top: 4px;
+    padding: 14px;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    background-color: @bg_panel;
+}
+
+.lighting-picker-label {
+    color: @text_label;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.lighting-picker-scale {
+    min-height: 44px;
+}
+
+.lighting-picker-scale trough {
+    min-height: 8px;
+    border-radius: 4px;
+    background-color: #ffffff;
+}
+
+.lighting-picker-scale highlight {
+    background: none;
+    border: none;
+    box-shadow: none;
+}
+
+.lighting-picker-scale slider {
+    min-width: 22px;
+    min-height: 22px;
+    margin: -7px;
+    border-radius: 999px;
+    background: #ffffff;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+}
+
+.lighting-picker-scale:focus-visible slider {
+    box-shadow: 0 0 0 4px alpha(@accent_bg_color, 0.6);
+}
+
+.lighting-hue-scale trough {
+    background-image: linear-gradient(to right, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000);
+}
+
+.lighting-hex-entry {
+    min-height: 44px;
+    border: 1px solid @border_mid;
+    border-radius: 10px;
+    background-color: #0b0b0b;
+    font-size: 14px;
+}
+
+.lighting-hex-entry.error {
+    border-color: #ff9aa6;
+}
+
+.lighting-slot-check {
+    color: @text_main;
+    -gtk-icon-size: 14px;
+}
+
+/* Icons on this page are drawn by the app (ui/lighting/effect_icon.rs) in the
+   widget's CSS colour, so `color` here is what tints them. */
+
+.lighting-icon {
+    color: @text_label;
+}
+
+/* Speed and Brightness: a slim track with the accent fill. */
+.lighting-range {
+    min-height: 44px;
+}
+
+.lighting-range trough {
+    min-height: 8px;
+    border-radius: 4px;
+    background-color: @border_mid;
+}
+
+.lighting-range highlight {
+    min-height: 8px;
+    border-radius: 4px;
+    background: @accent_bg_color;
+    border: none;
+    box-shadow: none;
+}
+
+.lighting-range slider {
+    min-width: 22px;
+    min-height: 22px;
+    margin: -7px;
+    border-radius: 999px;
+    background: #ffffff;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+}
+
+.lighting-range:focus-visible slider {
+    box-shadow: 0 0 0 4px alpha(@accent_bg_color, 0.6);
+}
+
+/* === The Lighting page frame (ui/lighting_page.rs), after the reference
+   design. Mode colours are written out per mode: they are each mode's own,
+   not the active accent. === */
+.lighting-for-label {
+    margin: 22px 4px 6px;
+    color: @text_label;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.lighting-modes {
+    padding: 4px;
+    border: 1px solid @border_dim;
+    border-radius: 14px;
+    background-color: @bg_dark;
+}
+
+.lighting-mode-button {
+    min-height: 56px;
+    padding: 6px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: none;
+    box-shadow: none;
+    color: @text_label;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+.lighting-mode-button:hover {
+    color: @text_main;
+}
+
+.lighting-mode-button:checked {
+    color: @text_main;
+}
+
+.lighting-mode-caption {
+    color: @text_muted;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.lighting-mode-button:checked .lighting-mode-caption {
+    color: #cfcfcf;
+}
+
+.lighting-mode-dot {
+    min-width: 10px;
+    min-height: 10px;
+    border-radius: 999px;
+}
+
+.lighting-mode-dot.mode-quiet { background-color: #56f2ce; }
+.lighting-mode-dot.mode-eco { background-color: #6fcf52; }
+.lighting-mode-dot.mode-balanced { background-color: #148bf9; }
+.lighting-mode-dot.mode-performance { background-color: #fa6616; }
+.lighting-mode-dot.mode-turbo { background-color: #fd164c; }
+
+.lighting-mode-button.mode-quiet:checked {
+    background: rgba(86, 242, 206, 0.14);
+    border-color: #56f2ce;
+}
+
+.lighting-mode-button.mode-eco:checked {
+    background: rgba(111, 207, 82, 0.14);
+    border-color: #6fcf52;
+}
+
+.lighting-mode-button.mode-balanced:checked {
+    background: rgba(20, 139, 249, 0.14);
+    border-color: #148bf9;
+}
+
+.lighting-mode-button.mode-performance:checked {
+    background: rgba(250, 102, 22, 0.14);
+    border-color: #fa6616;
+}
+
+.lighting-mode-button.mode-turbo:checked {
+    background: rgba(253, 22, 76, 0.14);
+    border-color: #fd164c;
+}
+
+.lighting-mode-dropdown > button {
+    min-height: 44px;
+    border-radius: 10px;
+}
+
+/* The preset row. */
+.lighting-preset-card {
+    border: 1px solid @border_dim;
+    border-radius: 12px;
+    background-color: @bg_card;
+}
+
+.lighting-preset-row {
+    padding: 8px 8px 8px 14px;
+}
+
+.lighting-preset-what {
+    color: @text_label;
+    font-size: 13px;
+}
+
+.lighting-preset-name {
+    color: @text_main;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.lighting-preset-empty {
+    color: @text_muted;
+    font-size: 13px;
+}
+
+.lighting-preset-card > revealer > .lighting-inline-form {
+    margin: 0 8px 8px;
+}
+
+.lighting-tag.lighting-tag-warn {
+    background-color: rgba(210, 153, 34, 0.16);
+    color: #e6c372;
+}
+
+.lighting-small-button,
+.lighting-menu-button > button {
+    min-height: 36px;
+    padding: 0 14px;
+    border: 1px solid @border_mid;
+    border-radius: 9px;
+    background: #1f2022;
+    box-shadow: none;
+    color: @text_main;
+    font-size: 13.5px;
+    font-weight: 600;
+}
+
+.lighting-menu-button.flat > button {
+    padding: 0 9px;
+    border-color: transparent;
+    background: none;
+}
+
+.lighting-small-button:hover,
+.lighting-menu-button > button:hover {
+    border-color: #4a4a4a;
+}
+
+.lighting-small-button.lighting-primary {
+    background: @accent_bg_color;
+    border-color: @accent_bg_color;
+    color: @accent_fg_color;
+}
+
+.lighting-small-button.lighting-primary:disabled {
+    opacity: 0.5;
+}
+
+splitbutton.lighting-split > button,
+splitbutton.lighting-split > menubutton > button {
+    min-height: 36px;
+    font-size: 13.5px;
+    font-weight: 600;
+}
+
+/* Flow boxes that only lay buttons out (the preset buttons, the idle delays): their cells
+   draw nothing, so each button shows one frame and one hover, its own. */
+.lighting-preset-buttons > flowboxchild,
+.lighting-delay-chips > flowboxchild {
+    padding: 0;
+    border-radius: 0;
+    background: none;
+    outline: none;
+    box-shadow: none;
+}
+
+.lighting-preset-buttons > flowboxchild:hover,
+.lighting-delay-chips > flowboxchild:hover,
+.lighting-preset-buttons > flowboxchild:selected,
+.lighting-delay-chips > flowboxchild:selected {
+    background: none;
+}
+
+.lighting-load-item {
+    min-height: 38px;
+    padding: 6px 12px;
+}
+
+.lighting-load-sub {
+    color: @text_muted;
+    font-size: 12px;
+}
+
+/* The tab strip: a real tab list with an underline, below the mode selector
+   in weight. */
+.lighting-tabs {
+    margin: 20px 4px 0;
+    border-bottom: 1px solid @border_dim;
+}
+
+.lighting-tab {
+    min-height: 0;
+    padding: 10px 2px 9px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    margin-bottom: -1px;
+    background: none;
+    box-shadow: none;
+    color: @text_label;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.lighting-tab:hover {
+    color: @text_main;
+}
+
+.lighting-tab:checked {
+    border-bottom-color: @accent_bg_color;
+    color: @text_main;
+}
+
+.lighting-tab-note {
+    color: @text_muted;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+/* The preview card, shared by both tabs. */
+.lighting-hero {
+    border: 1px solid @border_dim;
+    border-radius: 16px;
+    background-color: @bg_card;
+}
+
+.lighting-hero-head {
+    min-height: 34px;
+    padding: 8px 10px 8px 14px;
+    border-bottom: 1px solid @border_dim;
+    background-color: #0d0e10;
+}
+
+.lighting-hero-note {
+    color: #e9dcb8;
+    font-size: 13px;
+}
+
+/* The page's state notices under its title: only while a state
+   holds. Something that does not work as chosen in the warning colours, the rest in the
+   information ones. */
+.lighting-notice {
+    padding: 10px 12px 10px 14px;
+    border: 1px solid #23354a;
+    border-radius: 12px;
+    background-color: #0e1722;
+}
+
+.lighting-notice-text {
+    color: #cfe3fb;
+    font-size: 13.5px;
+}
+
+.lighting-notice.lighting-notice-problem {
+    border-color: #3a3320;
+    background-color: #17150f;
+}
+
+.lighting-notice.lighting-notice-problem .lighting-notice-text {
+    color: #e9dcb8;
+}
+
+.lighting-show-label {
+    color: #e6e6e6;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.lighting-lights > button {
+    min-height: 32px;
+    padding: 0 12px;
+    border: 1px solid @border_mid;
+    background: none;
+    box-shadow: none;
+    color: @text_label;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.lighting-lights > button:checked {
+    background: alpha(@accent_bg_color, 0.2);
+    color: @text_main;
+}
+
+.lighting-stage-box {
+    padding: 12px 12px 6px;
+    background-color: #0a0b0d;
+}
+
+.lighting-logo-tile {
+    padding: 8px 10px 6px;
+    border: 1px solid #262a30;
+    border-radius: 12px;
+    background-color: #0d0e11;
+}
+
+.lighting-logo-caption {
+    color: #a4aab3;
+    font-size: 11.5px;
+    font-weight: 600;
+}
+
+.lighting-approx {
+    margin: 0 14px 4px;
+    color: #9a9a9a;
+    font-size: 12px;
+}
+
+.lighting-warn-text {
+    color: #e6c372;
+}
+
+.lighting-bri {
+    margin-top: 8px;
+    padding: 8px 16px 10px;
+    border-top: 1px solid @border_dim;
+}
+
+.lighting-bri-label {
+    color: @text_label;
+    font-size: 13.5px;
+}
+
+.lighting-bri-value {
+    color: @text_main;
+    font-weight: 600;
+}
+
+/* === The Lighting control tab (ui/lighting/control.rs), after the
+   reference design: the effect tiles, the colour row's kept colours, the speed
+   row's ends, the brush bar under the preview, and the focus on the drawing. === */
+.lighting-tiles {
+    padding: 18px;
+}
+
+.lighting-tiles > flowboxchild.lighting-tile {
+    min-height: 76px;
+    padding: 8px 4px;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    background: @bg_panel;
+    box-shadow: none;
+    color: #dddddd;
+    font-size: 12.5px;
+    font-weight: 600;
+}
+
+.lighting-tiles > flowboxchild.lighting-tile:hover {
+    border-color: #444444;
+}
+
+.lighting-tiles > flowboxchild.lighting-tile.checked {
+    background: alpha(@accent_bg_color, 0.16);
+    border-color: @accent_bg_color;
+    color: @text_main;
+}
+
+.lighting-tiles > flowboxchild.lighting-tile.checked .lighting-icon {
+    color: @text_main;
+}
+
+.lighting-tiles > flowboxchild.lighting-tile:focus-visible {
+    outline: 2px solid @accent_bg_color;
+    outline-offset: 2px;
+}
+
+.lighting-tiles:disabled > flowboxchild.lighting-tile {
+    opacity: 0.5;
+}
+
+/* The chosen tile's check, on its top left corner. */
+.lighting-tile-check {
+    margin: 4px;
+}
+
+/* A kept colour's x, on the swatch's corner. */
+.lighting-swatch-forget {
+    min-width: 20px;
+    min-height: 20px;
+    padding: 0;
+    border: 1px solid #444444;
+    border-radius: 999px;
+    background: #26272a;
+    box-shadow: none;
+    color: #dddddd;
+    -gtk-icon-size: 10px;
+}
+
+.lighting-swatch-forget:hover {
+    border-color: #6b1f27;
+    background: #3a1216;
+    color: #ffb3bb;
+}
+
+.lighting-speed-end {
+    margin-top: -6px;
+    color: #9a9a9a;
+    font-size: 11.5px;
+}
+
+/* The brush bar (the reference design's ctxbar). */
+.lighting-ctxbar {
+    margin: 4px 12px 0;
+    padding: 10px 12px;
+    border: 1px solid alpha(@accent_bg_color, 0.55);
+    border-radius: 10px;
+    background: alpha(@accent_bg_color, 0.08);
+}
+
+.lighting-ctx-label {
+    color: #e3edf8;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.lighting-pill {
+    min-height: 36px;
+    padding: 0 14px;
+    border: 1px solid @border_mid;
+    border-radius: 18px;
+    background: @bg_panel;
+    box-shadow: none;
+    color: #dddddd;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.lighting-pill:hover {
+    border-color: #555555;
+}
+
+/* The drawing takes the keyboard focus: a ring shows it has it. */
+lighting-stage:focus-visible {
+    outline: 2px solid @accent_bg_color;
+    outline-offset: 2px;
+    border-radius: 10px;
+}
+
+/* === The Themes tab (ui/lighting/themes.rs and theme_gallery.rs),
+   after the reference design: the theme panel's Colours chips, Custom slots and
+   settings, the key choice's options, and the gallery's cards. === */
+.lighting-theme-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: @text_main;
+}
+
+.lighting-theme-settings > .lighting-row {
+    min-height: 40px;
+    padding: 10px 18px;
+    border-top: 1px solid @border_dim;
+}
+
+.lighting-chips > flowboxchild.lighting-chip {
+    min-height: 40px;
+    padding: 0 14px 0 10px;
+    border: 1px solid @border_mid;
+    border-radius: 22px;
+    background: @bg_panel;
+    color: #dddddd;
+    font-size: 13.5px;
+    font-weight: 600;
+}
+
+.lighting-chips > flowboxchild.lighting-chip:hover,
+.lighting-slots > flowboxchild.lighting-slot:hover {
+    border-color: #555555;
+}
+
+.lighting-chips > flowboxchild.lighting-chip.checked,
+.lighting-slots > flowboxchild.lighting-slot.checked {
+    background: alpha(@accent_bg_color, 0.16);
+    border-color: @accent_bg_color;
+    color: @text_main;
+}
+
+.lighting-slots > flowboxchild.lighting-slot {
+    min-height: 52px;
+    padding: 6px 12px 6px 8px;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    background: @bg_panel;
+}
+
+.lighting-chips > flowboxchild.lighting-chip:focus-visible,
+.lighting-slots > flowboxchild.lighting-slot:focus-visible,
+.lighting-gallery > flowboxchild.lighting-card:focus-visible {
+    outline: 2px solid @accent_bg_color;
+    outline-offset: 2px;
+}
+
+.lighting-options > button {
+    min-height: 36px;
+    padding: 0 12px;
+    border: 1px solid @border_mid;
+    background: none;
+    box-shadow: none;
+    color: @text_label;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.lighting-options > button:checked {
+    background: alpha(@accent_bg_color, 0.2);
+    color: @text_main;
+}
+
+.lighting-gallery > flowboxchild.lighting-card {
+    padding: 8px 8px 10px;
+    border: 1px solid @border_dim;
+    border-radius: 14px;
+    background-color: @bg_card;
+}
+
+.lighting-gallery > flowboxchild.lighting-card:hover {
+    border-color: #3a3a3a;
+}
+
+.lighting-gallery > flowboxchild.lighting-card.in-use {
+    border-color: @accent_bg_color;
+    box-shadow: inset 0 0 0 1px @accent_bg_color;
+}
+
+.lighting-gallery:disabled > flowboxchild.lighting-card {
+    opacity: 0.5;
+}
+
+.lighting-card-picture {
+    border-radius: 9px;
+    background-color: #0a0b0d;
+}
+
+.lighting-card-content > box,
+.lighting-card-content > label {
+    margin-left: 4px;
+    margin-right: 4px;
+}
+
+.lighting-card-name {
+    color: @text_main;
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.lighting-card-sub {
+    color: @text_muted;
+    font-size: 12px;
+}
+
+.lighting-card-also {
+    color: #a4aab3;
+    font-size: 12px;
+}
+
+.lighting-more-button {
+    min-height: 42px;
+}
+
+.lighting-card-mood {
+    color: @text_muted;
+    font-size: 12px;
+}
 
 /* "Changed" tag beside Discard on the Fan Control page, styled like the Lighting page's. */
 .fan-tag {

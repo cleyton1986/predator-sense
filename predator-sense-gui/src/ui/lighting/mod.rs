@@ -1,4 +1,5 @@
 pub mod colour_model;
+pub mod effect_icon;
 pub mod frame_model;
 pub mod key_cursor;
 pub mod mode_select;
