@@ -10,12 +10,28 @@
 //! that returned `Ok`.** The idle tick acts on `want != is_blanked()`, which
 //! makes an honest flag its own retry - a failed write leaves the comparison
 //! unequal, so the next tick tries again instead of deciding it is done.
+//!
+//! That retry backs off. The idle tick runs on the UI thread, and a write
+//! that keeps failing (a light that does not answer, a helper that is gone)
+//! would otherwise be tried, and waited for, on every tick. After a failed
+//! write, the next attempt waits `RETRY_AFTER`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+/// How long a failed blank or unblank waits before trying again.
+pub const RETRY_AFTER: Duration = Duration::from_secs(5);
+
+/// The error [`Blanking::set`] returns when it did not run the write because
+/// an earlier one failed less than [`RETRY_AFTER`] ago.
+pub const BACKING_OFF: &str = "backing off after a failed write";
 
 /// The blanked flag for one device.
 pub struct Blanking {
     blanked: AtomicBool,
+    /// Set after a failed write: no new attempt before this moment.
+    retry_at: Mutex<Option<Instant>>,
 }
 
 impl Blanking {
@@ -23,6 +39,7 @@ impl Blanking {
     pub const fn new() -> Self {
         Self {
             blanked: AtomicBool::new(false),
+            retry_at: Mutex::new(None),
         }
     }
 
@@ -34,15 +51,37 @@ impl Blanking {
     /// Runs `write`, and records `blanked` only if it succeeded.
     ///
     /// The error passes through untouched, so a caller that already logs it or
-    /// ignores it keeps doing exactly that.
+    /// ignores it keeps doing exactly that. Within `RETRY_AFTER` of a failed
+    /// write, `write` is not run at all and this returns an error.
     pub fn set(
         &self,
         blanked: bool,
         write: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
-        write()?;
-        self.blanked.store(blanked, Ordering::Relaxed);
-        Ok(())
+        self.set_at(blanked, Instant::now(), write)
+    }
+
+    fn set_at(
+        &self,
+        blanked: bool,
+        now: Instant,
+        write: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut retry_at = self.retry_at.lock().unwrap_or_else(|e| e.into_inner());
+        if retry_at.is_some_and(|at| now < at) {
+            return Err(BACKING_OFF.to_string());
+        }
+        match write() {
+            Ok(()) => {
+                *retry_at = None;
+                self.blanked.store(blanked, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(error) => {
+                *retry_at = Some(now + RETRY_AFTER);
+                Err(error)
+            }
+        }
     }
 }
 
@@ -72,7 +111,9 @@ mod tests {
         // decide there is nothing to do, so a flag that lies about a write
         // that never landed means nothing ever retries.
         let b = Blanking::new();
-        assert!(b.set(true, || Err("helper unreachable".to_string())).is_err());
+        assert!(b
+            .set(true, || Err("helper unreachable".to_string()))
+            .is_err());
         assert!(!b.is_blanked(), "a failed blank must not read as blanked");
     }
 
@@ -81,7 +122,32 @@ mod tests {
         let b = Blanking::new();
         assert!(b.set(true, || Ok(())).is_ok());
         assert!(b.set(false, || Err("nope".to_string())).is_err());
-        assert!(b.is_blanked(), "a failed restore must still read as blanked");
+        assert!(
+            b.is_blanked(),
+            "a failed restore must still read as blanked"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_backs_off_before_trying_again() {
+        let b = Blanking::new();
+        let start = Instant::now();
+        let tries = std::cell::Cell::new(0);
+        let failing = || {
+            tries.set(tries.get() + 1);
+            Err("EC silent".to_string())
+        };
+        assert!(b.set_at(true, start, failing).is_err());
+        // The idle tick comes back 250 ms later: no new attempt.
+        assert!(b
+            .set_at(true, start + Duration::from_millis(250), failing)
+            .is_err());
+        assert_eq!(tries.get(), 1, "no write inside the back-off");
+        assert!(b.set_at(true, start + RETRY_AFTER, || Ok(())).is_ok());
+        assert!(b.is_blanked());
+        // A success clears the back-off.
+        assert!(b.set_at(false, start + RETRY_AFTER, || Ok(())).is_ok());
+        assert!(!b.is_blanked());
     }
 
     #[test]
