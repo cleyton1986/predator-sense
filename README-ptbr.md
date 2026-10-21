@@ -629,6 +629,7 @@ predator-sense-gui/
 │   └── dkms.conf                # Config DKMS para recompilação automática
 ├── installer/                   # Instalador e serviços multicall em Rust
 │   ├── Cargo.toml
+│   ├── assets/                  # Ícone da bandeja em pixmaps (ARGB32, de resources/tray)
 │   └── src/
 │       ├── main.rs              # Dispatch tipado pelo nome do executável instalado
 │       ├── constants.rs         # Caminhos, protocolos e constantes de hardware centrais
@@ -687,8 +688,9 @@ predator-sense-gui/
 │       ├── setup_page.rs        # Wizard de setup do módulo kernel
 │       └── gauge_widget.rs      # Widget de gauge circular tracejado
 └── resources/
+    ├── tray/                    # Fontes do ícone da bandeja (PNG)
     ├── style.css                # Tema escuro gaming
-    └── predator-icon.svg        # Ícone da bandeja
+    └── predator-icon.svg        # Ícone do app
 ```
 
 ---

@@ -654,6 +654,7 @@ predator-sense-gui/
 │   └── dkms.conf                # Конфигурация автоматической пересборки DKMS
 ├── installer/                   # Multicall-установщик и службы на Rust
 │   ├── Cargo.toml
+│   ├── assets/                  # Значок трея в виде pixmap (ARGB32, из resources/tray)
 │   └── src/
 │       ├── main.rs              # Типизированная диспетчеризация по имени установленного исполняемого файла
 │       ├── constants.rs         # Центральные пути, значения протокола и константы оборудования
@@ -712,8 +713,9 @@ predator-sense-gui/
 │       ├── setup_page.rs        # Мастер настройки модуля ядра
 │       └── gauge_widget.rs      # Виджет пунктирного кругового датчика
 └── resources/
+    ├── tray/                    # Исходники значка трея (PNG)
     ├── style.css                # Тёмная игровая тема
-    └── predator-icon.svg        # Значок системного трея
+    └── predator-icon.svg        # Значок приложения
 ```
 
 ---

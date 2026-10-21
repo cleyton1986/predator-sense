@@ -624,6 +624,7 @@ predator-sense-gui/
 │   └── dkms.conf                # DKMS 自动重新编译配置
 ├── installer/                   # Rust multicall 安装程序与服务
 │   ├── Cargo.toml
+│   ├── assets/                  # 托盘图标像素图（ARGB32，来自 resources/tray）
 │   └── src/
 │       ├── main.rs              # 根据已安装可执行文件名进行的类型化分发
 │       ├── constants.rs         # 集中管理的路径、协议值和硬件常量
@@ -682,8 +683,9 @@ predator-sense-gui/
 │       ├── setup_page.rs        # 内核模块安装向导
 │       └── gauge_widget.rs      # 虚线圆形仪表盘控件
 └── resources/
+    ├── tray/                    # 托盘图标源文件（PNG）
     ├── style.css                # 游戏风格深色主题
-    └── predator-icon.svg        # 系统托盘图标
+    └── predator-icon.svg        # 应用图标
 ```
 
 ---

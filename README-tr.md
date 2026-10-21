@@ -627,6 +627,7 @@ predator-sense-gui/
 │   └── dkms.conf                # DKMS otomatik yeniden derleme yapılandırması
 ├── installer/                   # Rust multicall yükleyici ve servisler
 │   ├── Cargo.toml
+│   ├── assets/                  # Tepsi simgesi pixmap olarak (ARGB32, resources/tray'den)
 │   └── src/
 │       ├── main.rs              # Kurulu çalıştırılabilir dosya adına göre tipli dağıtım
 │       ├── constants.rs         # Merkezi yollar, protokol değerleri ve donanım sabitleri
@@ -685,8 +686,9 @@ predator-sense-gui/
 │       ├── setup_page.rs        # Çekirdek modülü kurulum sihirbazı
 │       └── gauge_widget.rs      # Kesikli dairesel gösterge widget'ı
 └── resources/
+    ├── tray/                    # Tepsi simgesi kaynakları (PNG)
     ├── style.css                # Oyuncu koyu teması
-    └── predator-icon.svg        # Sistem tepsisi simgesi
+    └── predator-icon.svg        # Uygulama simgesi
 ```
 
 ---

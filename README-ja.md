@@ -568,6 +568,7 @@ predator-sense-gui/
 │   └── dkms.conf                # DKMS自動再ビルド設定
 ├── installer/                   # Rust製マルチコールインストーラーとサービス
 │   ├── Cargo.toml
+│   ├── assets/                  # トレイアイコンのピクセルマップ（ARGB32、resources/trayから）
 │   └── src/
 │       ├── main.rs              # インストール済みの実行ファイル名による型付きディスパッチ
 │       ├── constants.rs         # 中央集権的なパス、プロトコル値、ハードウェア定数
@@ -626,8 +627,9 @@ predator-sense-gui/
 │       ├── setup_page.rs        # カーネルモジュールセットアップウィザード
 │       └── gauge_widget.rs      # 破線の円形ゲージウィジェット
 └── resources/
+    ├── tray/                    # トレイアイコンの元画像（PNG）
     ├── style.css                # ゲーミングダークテーマ
-    └── predator-icon.svg        # システムトレイアイコン
+    └── predator-icon.svg        # アプリアイコン
 ```
 
 ---

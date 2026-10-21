@@ -647,6 +647,7 @@ predator-sense-gui/
 │   └── dkms.conf                # DKMS-Konfiguration für automatisches Neuerstellen
 ├── installer/                   # Rust-Multicall-Installer und Dienste
 │   ├── Cargo.toml
+│   ├── assets/                  # Tray-Symbol als Pixmaps (ARGB32, aus resources/tray)
 │   └── src/
 │       ├── main.rs              # Typisiertes Dispatch nach installiertem Ausführbarkeitsnamen
 │       ├── constants.rs         # Zentrale Pfade, Protokollwerte und Hardware-Konstanten
@@ -705,8 +706,9 @@ predator-sense-gui/
 │       ├── setup_page.rs        # Einrichtungsassistent für das Kernelmodul
 │       └── gauge_widget.rs      # Widget für gestrichelte runde Anzeige
 └── resources/
+    ├── tray/                    # Quellen des Tray-Symbols (PNG)
     ├── style.css                # Dunkles Gaming-Design
-    └── predator-icon.svg        # System-Tray-Symbol
+    └── predator-icon.svg        # App-Symbol
 ```
 
 ---

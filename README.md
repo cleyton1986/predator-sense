@@ -625,6 +625,7 @@ predator-sense-gui/
 │   └── dkms.conf                # DKMS auto-rebuild config
 ├── installer/                   # Rust multicall installer and services
 │   ├── Cargo.toml
+│   ├── assets/                  # Tray icon pixmaps (ARGB32, from resources/tray)
 │   └── src/
 │       ├── main.rs              # Typed dispatch by installed executable name
 │       ├── constants.rs         # Central paths, protocol values and hardware constants
@@ -683,8 +684,9 @@ predator-sense-gui/
 │       ├── setup_page.rs        # Kernel module setup wizard
 │       └── gauge_widget.rs      # Dashed circular gauge widget
 └── resources/
+    ├── tray/                    # Tray icon sources (PNG)
     ├── style.css                # Gaming dark theme
-    └── predator-icon.svg        # System tray icon
+    └── predator-icon.svg        # App icon
 ```
 
 ---
