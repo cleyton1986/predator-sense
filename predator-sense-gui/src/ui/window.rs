@@ -11,9 +11,27 @@ use crate::hardware::{rgb, sensors, setup};
 use crate::tray::TrayManager;
 use crate::ui::{
     ai_page, background, battery_page, dashboard_page, drivers_page, fan_control_page, fan_page,
-    gpu_page, monitor_page, network_page, rgb_page, setup_page, temperatures_page, tools_page,
-    usage_page,
+    gpu_page, lighting_page, monitor_page, network_page, setup_page, temperatures_page,
+    tools_page, usage_page,
 };
+
+/// How long a Settings slider rests before its value is saved to config.json.
+const SLIDER_SAVE_DEBOUNCE_MS: u32 = 300;
+
+thread_local! {
+    /// The Settings sliders' debounced saves, each run at once by [`flush_pending_saves`].
+    static PENDING_SAVES: RefCell<Vec<Rc<dyn Fn()>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Saves a slider value still waiting out its debounce, now: at exit, so the
+/// last drag is not lost, and before an import replaces config.json, so the
+/// waiting save cannot land on top of the imported file afterwards.
+pub fn flush_pending_saves() {
+    let pending = PENDING_SAVES.with(|pending| pending.borrow().clone());
+    for flush in pending {
+        flush();
+    }
+}
 
 thread_local! {
     static HOLD_GUARD: RefCell<Option<gio::ApplicationHoldGuard>> = const { RefCell::new(None) };
@@ -149,7 +167,7 @@ pub fn build(app: &adw::Application) {
         let last_state: Rc<Cell<ThemeState>> = Rc::new(Cell::new((None, false)));
         let apply_if_changed = move || {
             let now = crate::hardware::profile::get_current_profile();
-            let keep_default = config::load_app_config().keep_default_theme_color;
+            let keep_default = config::load_app_config_cached().keep_default_theme_color;
             let state = (now, keep_default);
             if state != last_state.get() {
                 last_state.set(state);
@@ -164,8 +182,28 @@ pub fn build(app: &adw::Application) {
             }
         };
         apply_if_changed();
+        // Only while the window is on screen: reading the mode is a WMI call
+        // and a sweep of every cpufreq policy, and a colour nobody can see
+        // can wait. Coming back from the tray maps the window again, and
+        // coming back from minimized ends its suspension; both catch up at
+        // once instead of on the next tick.
+        let apply_if_changed: Rc<dyn Fn()> = Rc::new(apply_if_changed);
+        {
+            let apply = apply_if_changed.clone();
+            window.connect_map(move |_| apply());
+        }
+        if window.find_property(SUSPENDED_PROPERTY).is_some() {
+            let apply = apply_if_changed.clone();
+            window.connect_notify_local(Some(SUSPENDED_PROPERTY), move |window, _| {
+                if !window.property::<bool>(SUSPENDED_PROPERTY) {
+                    apply();
+                }
+            });
+        }
         glib::timeout_add_seconds_local(2, move || {
-            apply_if_changed();
+            if crate::app_state::is_window_visible() {
+                apply_if_changed();
+            }
             glib::ControlFlow::Continue
         });
     }
@@ -194,6 +232,97 @@ pub fn build(app: &adw::Application) {
     crate::startup_mark("window present called");
 }
 
+/// The power source and "Pause animations on battery", for the lighting
+/// renderer: on battery with the setting on, app-drawn looks hold their frame.
+/// Reading the supply is a couple of small sysfs reads, as the power policy's
+/// own tick makes. The Lighting page's switch calls it too, so the setting
+/// applies at once.
+pub(crate) fn sync_renderer_battery(cfg: &config::AppConfig) {
+    let on_battery = crate::hardware::power_profile::ac_online() == Some(false);
+    crate::hardware::lighting_renderer::renderer()
+        .set_battery(on_battery, cfg.pause_animations_on_battery);
+}
+
+/// `GtkSettings:gtk-interface-reduced-motion`, GTK 4.20 and up: a
+/// `GtkReducedMotion`, whose `REDUCE` (nick "reduce", value 1) asks for less
+/// motion.
+const REDUCED_MOTION_PROPERTY: &str = "gtk-interface-reduced-motion";
+
+/// `GtkSettings:gtk-interface-contrast`, GTK 4.20 and up: a
+/// `GtkInterfaceContrast`, whose `MORE` (nick "more", value 2) asks for high
+/// contrast; 0 is "unsupported" and 1 "no preference".
+const CONTRAST_PROPERTY: &str = "gtk-interface-contrast";
+
+/// The nick of `settings`' enum property `name`, looked up by name, as
+/// `suspended` is above, so an older GTK (the build targets 4.10) reads no
+/// preference: `None` without the property.
+fn setting_nick(settings: &gtk::Settings, name: &str) -> Option<String> {
+    settings.find_property(name)?;
+    let value = settings.property_value(name);
+    glib::EnumValue::from_value(&value).map(|(_, v)| v.nick().to_string())
+}
+
+/// Whether the desktop asks for less motion. A missing property is off.
+fn reduced_motion(settings: &gtk::Settings) -> bool {
+    setting_nick(settings, REDUCED_MOTION_PROPERTY).is_some_and(|nick| nick == "reduce")
+}
+
+/// Whether the desktop asks for high contrast. A missing property is off.
+fn high_contrast(settings: &gtk::Settings) -> bool {
+    setting_nick(settings, CONTRAST_PROPERTY).is_some_and(|nick| nick == "more")
+}
+
+thread_local! {
+    /// The desktop's reduced-motion preference as last read, for the Lighting page's
+    /// preview, which asks it on every frame.
+    static REDUCED_MOTION: Cell<bool> = const { Cell::new(false) };
+    /// The desktop's high-contrast preference as last read, for the Lighting page's own
+    /// drawing.
+    static HIGH_CONTRAST: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the desktop asks for less motion, as last read (`follow_motion_and_contrast`):
+/// the Lighting page's preview and theme cards then hold still, and the lights run at half
+/// speed with their busiest looks swapped.
+pub fn reduced_motion_now() -> bool {
+    REDUCED_MOTION.with(Cell::get)
+}
+
+/// Whether the desktop asks for high contrast, as last read: the Lighting page's drawing
+/// (key outlines and legends, colour dots) keeps its contrast.
+pub fn high_contrast_now() -> bool {
+    HIGH_CONTRAST.with(Cell::get)
+}
+
+/// Hands the desktop's reduced-motion and contrast preferences to the lighting and the
+/// Lighting page, now and whenever they change.
+fn follow_motion_and_contrast() {
+    let Some(settings) = gtk::Settings::default() else {
+        return;
+    };
+    let motion = |settings: &gtk::Settings, changed: bool| {
+        let reduced = reduced_motion(settings);
+        REDUCED_MOTION.with(|cell| cell.set(reduced));
+        crate::hardware::lighting::set_reduced_motion(reduced);
+        if changed {
+            crate::ui::lighting_page::motion_preference_changed();
+        }
+    };
+    motion(&settings, false);
+    if settings.find_property(REDUCED_MOTION_PROPERTY).is_some() {
+        settings.connect_notify_local(Some(REDUCED_MOTION_PROPERTY), move |settings, _| {
+            motion(settings, true)
+        });
+    }
+    HIGH_CONTRAST.with(|cell| cell.set(high_contrast(&settings)));
+    if settings.find_property(CONTRAST_PROPERTY).is_some() {
+        settings.connect_notify_local(Some(CONTRAST_PROPERTY), |settings, _| {
+            HIGH_CONTRAST.with(|cell| cell.set(high_contrast(settings)));
+            crate::ui::lighting_page::contrast_preference_changed();
+        });
+    }
+}
+
 /// Reads the compositor's current answer into the shared flag.
 ///
 /// Called again after presenting the window, because presenting is a request
@@ -219,6 +348,22 @@ pub fn start_in_background(app: &adw::Application) {
     if let Some(window) = app.active_window() {
         hide_to_tray(&window, app);
     }
+}
+
+/// Logs a switch that failed, once it ends, for a caller that does not wait
+/// for it.
+fn log_switch_failure(
+    what: &'static str,
+    switching: std::sync::mpsc::Receiver<Result<(), String>>,
+) {
+    background::run(
+        move || crate::hardware::profile::wait_for(switching),
+        move |result| {
+            if let Err(e) = result {
+                crate::hardware::applog::error(&format!("{what}: profile switch failed: {e}"));
+            }
+        },
+    );
 }
 
 fn hide_to_tray<W: IsA<gtk::Widget>>(win: &W, app: &adw::Application) {
@@ -266,7 +411,7 @@ fn build_with_setup(
     });
     let setup = setup_page::build(on_complete);
     main_stack.add_named(&setup, Some("setup"));
-    window.set_child(Some(&main_stack));
+    window.set_child(Some(&crate::ui::toasts::host(&main_stack)));
 }
 
 fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
@@ -276,10 +421,23 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
     // Runs every 5s regardless of window visibility (works in the tray too).
     {
         let cfg = config::load_app_config();
+        // First, before anything below can log: this is what opens the log at
+        // all, so every startup line emitted ahead of it was written into a
+        // switched-off logger and lost - including the one that says which
+        // mode-key cycles the power policy came up with.
+        crate::hardware::applog::set_enabled(cfg.debug_logging);
         crate::hardware::alerts::set_enabled(cfg.temp_alerts);
-        crate::hardware::power_profile::set_auto(cfg.auto_profile_ac);
+        crate::hardware::alerts::set_threshold_c(cfg.temp_alert_c);
+        crate::hardware::power_profile::set_action(cfg.power_source_action());
         crate::hardware::power_profile::set_target_profiles(cfg.profile_ac, cfg.profile_battery);
         crate::hardware::power_profile::set_auto_eco(cfg.auto_eco_enabled, cfg.auto_eco_threshold);
+        // The same lists the mode key uses are what a power-source change
+        // moves between, so the policy needs them too, not just the driver.
+        crate::hardware::power_profile::set_cycles(&cfg.mode_cycle_ac, &cfg.mode_cycle_battery);
+        // The lighting renderer's inputs that come from the desktop and the
+        // power supply: before anything is shown, and kept up to date below.
+        sync_renderer_battery(&cfg);
+        follow_motion_and_contrast();
 
         // The cycles live in the kernel module, which forgets them on every
         // reload and every boot, so they are pushed back on each start.
@@ -301,24 +459,33 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // Startup mode. Applied once, off-thread: the firmware picks its own
         // index on every power cycle, so without this the machine comes back
         // wherever the EC left it rather than where the user actually wants to
-        // start.
-        if let Some(default_mode) = cfg
-            .mode_default
-            .as_deref()
-            .and_then(crate::hardware::profile::PowerProfile::from_id)
+        // start. Chosen the way arriving on the current power source would
+        // choose it when that rule is on, so starting unplugged lands where an
+        // unplug would, and the battery rules agree with it before the first
+        // tick asks them (power_profile::startup_mode, which reads the settings
+        // pushed just above). Applied through the startup variant, which does
+        // not rewrite a firmware mode that is already there: the EC flashes the
+        // light bar for every write of it, so an unchanged write is a flash
+        // after every login.
         {
+            let default_mode = cfg
+                .mode_default
+                .as_deref()
+                .and_then(crate::hardware::profile::PowerProfile::from_id);
             background::run(
-                move || crate::hardware::profile::set_profile(default_mode),
+                move || match crate::hardware::power_profile::startup_mode(default_mode) {
+                    Some(mode) => crate::hardware::profile::set_profile_at_startup(mode),
+                    None => Ok(()),
+                },
                 |result| {
                     if let Err(error) = result {
                         crate::hardware::applog::error(&format!(
-                            "startup: default mode not applied: {error}"
+                            "startup: startup mode not applied: {error}"
                         ));
                     }
                 },
             );
         }
-        crate::hardware::applog::set_enabled(cfg.debug_logging);
         crate::hardware::profile::set_manage_cpu_power(cfg.manage_cpu_power);
         crate::hardware::game_sync::set_enabled(cfg.game_sync_enabled);
 
@@ -350,24 +517,31 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             );
         }
 
-        // Lighting has the same "forgot on power cycle" gap: neither the
-        // Chicony USB keyboard nor the WMI channel (the chassis light bar on
-        // the PH16-71 generation) remembers anything across a reboot, and the
-        // hotkey service only replays the ENEK5130 HID path. Restore both
-        // here; the Chicony write goes through the same privileged helper
-        // session the fan-mode reapply above already opened.
-        // `wake: true` - after a power cycle the light bar's firmware needs
-        // one Breathing frame before any other mode becomes visible.
+        // The lighting's one-time migration, then its restore, at once: neither waits for
+        // the firmware's backlight timeout read below.
+        //
+        // Lighting has the same "forgot on power cycle" gap: neither the Chicony USB
+        // keyboard nor the WMI channel (the chassis light bar on the PH16-71 generation)
+        // remembers anything across a reboot, and the hotkey service only replays the
+        // ENEK5130 HID path. Restored after the migration, since what it applies is the
+        // active mode's lighting. The Chicony write goes through its hidraw node, or the
+        // same privileged helper session the fan-mode reapply above already opened.
+        // `wake: true` - after a power cycle the light bar's firmware needs one Breathing
+        // frame before any other mode becomes visible. What it wrote is recorded back
+        // here, on this thread, where every save of config.json happens. An unreadable
+        // config.json runs on defaults and is neither migrated nor saved over.
+        crate::hardware::lighting::migrate_at_startup();
         background::run(
             || crate::hardware::lighting::restore_saved(true, "startup"),
-            |()| {},
+            |()| crate::hardware::lighting::record_written(),
         );
 
-        // Idle-off covers the keyboard (firmware timer) and the light bar
-        // (measured by us) as one feature, so the bar half has to follow the
-        // firmware setting even when the user never opens the Lighting page -
-        // pages here are built lazily, and doing this only in the page meant a
-        // machine with the firmware timeout already on never blanked its bar.
+        // Idle-off covers the keyboard and the light bar as one feature, and
+        // it has to start with the app even when the user never opens the
+        // Lighting page - pages here are built lazily, and doing this only in
+        // the page meant a machine with the firmware timeout already on never
+        // blanked its bar. The firmware timeout is read for the idle settings'
+        // one-time migration (`AppConfig::migrate_idle_once`).
         background::run(
             || crate::hardware::extras::get_backlight_timeout(),
             |firmware_enabled| {
@@ -376,95 +550,291 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 // one-way trade: the firmware timeout goes off, and the timer
                 // meant to replace it declines to blank anything, leaving the
                 // backlight lit for good on a chassis that was working fine.
-                let can_blank_keyboard = crate::hardware::keyboard_rgb::is_available();
-                let can_blank_bar = crate::hardware::light_bar::is_available();
+                let can_blank_keyboard = crate::hardware::capabilities::get().keyboard_rgb;
+                let can_blank_bar = crate::hardware::capabilities::get().light_bar;
                 if !can_blank_keyboard && !can_blank_bar {
                     return;
                 }
-                let mut cfg = config::load_app_config();
-                // Inherit the old single light-bar flag, or the firmware
-                // timeout, the first time this runs.
-                if !cfg.idle_enabled && (cfg.light_bar_idle_enabled || firmware_enabled) {
-                    cfg.idle_enabled = true;
-                    let _ = config::save_app_config(&cfg);
-                }
+                // Inheriting the old single light-bar flag, or the firmware timeout,
+                // the first time this runs, and only then. On this thread, after the
+                // lighting's migration above was saved, so neither loses the other's
+                // marker.
+                let cfg = crate::config::migrate_idle_at_startup(firmware_enabled);
                 if cfg.idle_enabled {
-                    // One owner: the firmware's own timer cannot see the mouse
-                    // and runs on its own clock, so it has to be off for the
-                    // two devices to blank together.
-                    //
-                    // On PH16-71 this write is not enough, and not because it
-                    // fails - the function round-trips, and the backlight
-                    // still blanks at ~30 s with it read back as off. The
-                    // Chicony controller keeps a sleep timer of its own that
-                    // this function does not reach, which the keepalive in the
-                    // idle tick below handles. The write stays because it is
-                    // the right lever on the models where it is connected.
+                    // The WMI backlight timeout. Written only where the app
+                    // blanks the keyboard itself (the 24-bit Chicony path),
+                    // and there it does not govern the keyboard: it
+                    // round-trips, and the backlight still blanked at ~30 s
+                    // with it read back as off. Left as it
+                    // was. The timer that does govern this keyboard is the
+                    // Chicony controller's own, which the startup restore
+                    // switches off (`keyboard_rgb::apply_keyboard_idle`).
                     if firmware_enabled && cfg.idle_keyboard_enabled && can_blank_keyboard {
                         let _ = crate::hardware::extras::set_backlight_timeout(false);
                     }
-                }
-                // The watcher backs the keepalive as well, and that is not
-                // part of idle blanking: it runs with the master switch off,
-                // for the user who turned blanking off and still watched the
-                // controller blank the keyboard on its own. So it starts for
-                // either reason, not only the first - otherwise the tick's
-                // `idle_seconds() == None` early return would make the
-                // keepalive setting silently inert in exactly the case it
-                // exists for.
-                if cfg.idle_enabled || (cfg.idle_keyboard_keepalive && can_blank_keyboard) {
                     crate::hardware::idle::start();
                     crate::hardware::idle::mark_active();
                 }
             },
         );
 
-        // Lighting follows the power mode. Idle blanking is separate, on a
-        // much shorter timer further down - a mode change only needs noticing
-        // promptly, whereas the lights going dark has to look deliberate.
+        // Reacting to the power mode changing, from any source: this app, the
+        // mode key handled inside the kernel, the desktop's power menu, the
+        // battery rules.
+        //
+        // Driven by the driver rather than by a timer. `facer` calls
+        // `sysfs_notify` on the thermal profile attribute whenever the index
+        // moves, so this waits on the file and acts as it happens. The five
+        // second tick below still calls the same closure as a backstop, which
+        // is what keeps this working on an older module that does not notify,
+        // and what covers a change no notification arrives for.
+        //
+        // Polling was not merely slower, it lost changes: a mode held for less
+        // than one interval was never applied at all, so cycling the key
+        // quickly left intermediate modes displayed but never configured.
         let last_mode: Rc<std::cell::RefCell<Option<crate::hardware::profile::PowerProfile>>> =
             Rc::new(std::cell::RefCell::new(crate::hardware::profile::get_current_profile()));
-        glib::timeout_add_seconds_local(5, move || {
-            let (cpu, gpu) = sensors::read_critical_temps();
-            crate::hardware::alerts::check(cpu, gpu);
-            crate::hardware::power_profile::check();
+        let notify_app = app.clone();
+        let notify_app_for_alerts = app.clone();
+        let react_to_mode: Rc<dyn Fn()> = Rc::new({
+            let last_mode = last_mode.clone();
+            move || {
+                // Nothing in here may act while a switch is part-way through. A
+                // profile is applied off-thread in several steps, and with the
+                // desktop-indicator sync on one of those steps deliberately
+                // puts the firmware on a different index for a few milliseconds
+                // before this app writes its own (see hardware::ppd). Acting on
+                // that would mean remembering the wrong mode, applying its
+                // lighting and announcing it. Leaving `last_mode` alone means
+                // the next call sees the settled mode and acts once.
+                if crate::hardware::profile::apply_in_flight() {
+                    return;
+                }
+                let Some(now) = crate::hardware::profile::get_current_profile() else {
+                    return;
+                };
+                let previous = *last_mode.borrow();
+                if previous.map(|previous| previous == now).unwrap_or(false) {
+                    return;
+                }
+                *last_mode.borrow_mut() = Some(now);
 
-            if let Some(now) = crate::hardware::profile::get_current_profile() {
-                let changed = last_mode.borrow().map(|previous| previous != now).unwrap_or(true);
-                if changed {
-                    *last_mode.borrow_mut() = Some(now);
-                    crate::ui::lighting_page::apply_scheme_for_mode(now);
+                // The mode key moves the firmware index and nothing else - see
+                // profile::completion_target. Applying the rest of the mode
+                // here is what stops the power policy from reading a half-moved
+                // machine as "in no mode at all" and overwriting the user's
+                // choice, and what makes a keyed Eco actually save power rather
+                // than only relabelling itself. A no-op for a change this app
+                // made itself.
+                if let Some(target) = crate::hardware::profile::completion_target(
+                    now,
+                    crate::hardware::profile::coherent_profile(),
+                ) {
+                    crate::hardware::applog::info(&format!(
+                        "mode changed outside the app to {}; applying the rest of that mode",
+                        target.to_id()
+                    ));
+                    if let Err(error) = crate::hardware::profile::set_profile(target) {
+                        crate::hardware::applog::error(&format!(
+                            "mode {} not completed: {error}",
+                            target.to_id()
+                        ));
+                    }
+                }
+
+                // Every source lands here, so one call covers them all.
+                crate::hardware::notify::mode_changed(
+                    &notify_app,
+                    previous.map(|p| p.label().to_string()).as_deref(),
+                    now.label(),
+                    config::load_app_config().notify_mode_changes,
+                );
+                crate::ui::lighting_page::apply_lighting_for_mode(now);
+            }
+        });
+
+        // Two event sources, because neither sees every change. Measured with
+        // the app stopped so nothing else could react:
+        //
+        //   writing the acer-wmi attribute  -> notifies it, NOT platform_profile
+        //   writing platform_profile        -> notifies it, NOT the acer attribute
+        //
+        // The first is this app's own writes and the mode key, which the
+        // driver handles in-kernel. The second is anything going through the
+        // standard interface, which is how the desktop's power menu changes the
+        // mode. Watching only one of them leaves the other on the one minute
+        // backstop, so both are watched and the closure is idempotent anyway.
+        //
+        // `platform_profile` is also the portable half: it exists on any
+        // machine with a platform profile driver, including one running a
+        // module without the `sysfs_notify` this fork adds.
+        //
+        // Both also keep the remembered firmware index current (see
+        // thermal_profile::current), which is what lets the timers below ask
+        // for the mode without a WMI read each time.
+        // A switch made by this app ends while the watcher sits it out: the
+        // check runs again the moment the last one ends.
+        crate::hardware::profile::on_switch_settled(react_to_mode.clone());
+        let mut watched = Vec::new();
+        let index_path = crate::hardware::thermal_profile::index_path();
+        for path in [
+            index_path.clone(),
+            std::path::PathBuf::from("/sys/firmware/acpi/platform_profile"),
+        ] {
+            let is_index = path == index_path;
+            match std::fs::File::open(&path) {
+                Ok(file) => {
+                    use std::io::{Read, Seek};
+                    use std::os::unix::io::AsRawFd;
+                    let fd = file.as_raw_fd();
+                    let react = react_to_mode.clone();
+                    let mut file = file;
+                    glib::unix_fd_add_local(fd, glib::IOCondition::PRI, move |_, _| {
+                        // A sysfs attribute re-arms its notification only once
+                        // the new value has been read, so this read is required
+                        // rather than informational: without it the source would
+                        // fire continuously. `file` is owned by this closure,
+                        // which is also what keeps the descriptor alive.
+                        let mut value = String::new();
+                        let _ = file.rewind();
+                        let _ = file.read_to_string(&mut value);
+                        // The index attribute's own value is the new index, so
+                        // it is recorded as read. platform_profile names a
+                        // profile, not an index, so the index is read once by
+                        // whoever asks next.
+                        if is_index {
+                            crate::hardware::thermal_profile::observed(&value);
+                        } else {
+                            crate::hardware::thermal_profile::forget();
+                        }
+                        react();
+                        glib::ControlFlow::Continue
+                    });
+                    watched.push(path.display().to_string());
+                }
+                Err(error) => {
+                    crate::hardware::applog::info(&format!(
+                        "not watching {} ({error}); changes made through it wait for the one minute backstop",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        if watched.is_empty() {
+            crate::hardware::applog::info(
+                "no mode attribute to wait on; mode changes are seen within a minute",
+            );
+        } else {
+            crate::hardware::applog::info(&format!(
+                "mode changes are event-driven on {}; the firmware index is re-read every minute as a backstop",
+                watched.join(" and ")
+            ));
+        }
+
+        // Reinstalling the mode-key cycles the driver forgot.
+        //
+        // Startup pushes them once, but the cycles live only in the kernel
+        // module and it creates both attributes empty. Every module reload
+        // after that - `--reload-module`, and the DKMS rebuild that follows a
+        // kernel upgrade - wipes them with nothing watching, so the mode key
+        // quietly reverts to the driver's own ladder until the app restarts.
+        //
+        // Reading the two attributes is a pair of small sysfs reads, cheap
+        // enough for this tick. The *push* is a privileged helper call, so it
+        // is rate-limited by the same rule the fan reconciler uses: retry
+        // freely at first, then back off, because an unreachable helper spawns
+        // a fresh pkexec per attempt and that is an authentication dialog the
+        // user never asked for.
+        // Shared with the completion callback, which is what moves the
+        // counter: only a push that actually succeeded clears it, and anything
+        // else must raise it, or the back-off never engages.
+        let cycle_failures = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let cycle_ticks = std::cell::Cell::new(u32::MAX / 2);
+        let cycle_pending = std::rc::Rc::new(std::cell::Cell::new(false));
+        glib::timeout_add_seconds_local(5, move || {
+            // Off, the alerts read nothing: the GPU temperature is a driver
+            // call, not worth making for a check that will not look at it.
+            if crate::hardware::alerts::is_enabled() {
+                let (cpu, gpu) = sensors::read_critical_temps();
+                crate::hardware::alerts::check(&notify_app_for_alerts, cpu, gpu);
+            }
+
+            react_to_mode();
+            crate::hardware::power_profile::check();
+            sync_renderer_battery(&crate::config::load_app_config_cached());
+            crate::ui::lighting_page::check_bar_lost();
+
+            cycle_ticks.set(cycle_ticks.get().saturating_add(1));
+            if !cycle_pending.get() {
+                // Cached: this runs every five seconds and only needs the two
+                // cycle lists, which change when the user edits them.
+                let cfg = crate::config::load_app_config_cached();
+                if let Some((kernel_ac, kernel_battery)) =
+                    crate::hardware::profile::read_mode_cycles()
+                {
+                    if crate::hardware::profile::mode_cycles_lost(
+                        &kernel_ac,
+                        &kernel_battery,
+                        &cfg.mode_cycle_ac,
+                        &cfg.mode_cycle_battery,
+                    ) && crate::hardware::fan::may_attempt_write(
+                        cycle_failures.get(),
+                        cycle_ticks.get(),
+                    ) {
+                        cycle_ticks.set(0);
+                        cycle_pending.set(true);
+                        let ac = cfg.mode_cycle_ac.clone();
+                        let battery = cfg.mode_cycle_battery.clone();
+                        let done = cycle_pending.clone();
+                        let failures = cycle_failures.clone();
+                        background::run(
+                            move || crate::hardware::profile::push_mode_cycles(&ac, &battery),
+                            move |result: Result<(), String>| {
+                                done.set(false);
+                                match result {
+                                    Ok(()) => {
+                                        failures.set(0);
+                                        crate::hardware::applog::info(
+                                            "mode-key cycles reinstalled after a module reload",
+                                        );
+                                    }
+                                    Err(error) => {
+                                        failures.set(failures.get().saturating_add(1));
+                                        crate::hardware::applog::error(&format!(
+                                            "mode-key cycles not reinstalled: {error}"
+                                        ));
+                                    }
+                                }
+                            },
+                        );
+                    }
                 }
             }
 
             glib::ControlFlow::Continue
         });
 
-        // Idle blanking for BOTH devices from one timer.
+        // Idle blanking for both devices while the app's idle is on.
         //
-        // The keyboard has a timeout of its own, but it only watches key
-        // presses - it cannot see the mouse - and it runs on its own clock, so
-        // the two devices went dark about a second apart and mouse movement
-        // woke only the bar. Driving both from here is the only way they can
-        // actually agree.
+        // The keyboard's controller has a timer of its own, but it only
+        // watches presses on its own keys - it cannot see the mouse - and it
+        // runs on its own clock, so with both timers running the two devices
+        // went dark apart and mouse movement woke only the bar. That timer is
+        // kept off while the app runs, so this tick is the only
+        // thing that blanks the keyboard, when
+        // `keyboard_rgb::keyboard_idle_mode` says App. With idle off, or the
+        // keyboard's own switch off, nothing does. The bar is always this
+        // tick's.
         //
-        // Two separate timers claim the keyboard, and only one of them lets go.
-        // The firmware's is switched off in `apply_idle_setting`. The Chicony
-        // controller's own is not switchable at all from here, so it is kept
-        // from ever expiring instead - see the keepalive at the end of the
-        // tick.
+        // Once a second, by a seconds timer GLib wakes together with the
+        // app's other ones: it ran every 250 ms, four wakeups a second for as
+        // long as the app ran. Idle is measured in whole seconds, so a blank
+        // comes at most a second later than before; a blanked light comes
+        // back at once, because the idle watcher runs this at the first input
+        // (`idle::on_input_while_blanked`), and a resume is acted on at once
+        // where logind announces the wake (`resume::on_wake`).
         {
-            /// How long the keyboard controller's own ~30 s sleep timer is
-            /// allowed to run before a write restarts it. Comfortably inside
-            /// the window, with room for a tick delayed under load.
-            const KEYBOARD_KEEPALIVE_SECS: u64 = 20;
-
-            // Cadence guard. `key_idle` keeps climbing after a keepalive -
-            // the write is not a keystroke and must not pretend to be one, or
-            // the controller's clock and ours would disagree - so without
-            // this the threshold would be met on every tick from then on.
-            let last_keepalive: Rc<Cell<Option<std::time::Instant>>> = Rc::new(Cell::new(None));
-            glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            let tick: Rc<dyn Fn()> = Rc::new(|| {
                 // Resume from suspend, checked before anything else in here:
                 // the early return below fires whenever idle tracking is off,
                 // and lighting still has to come back on those machines.
@@ -477,26 +847,53 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     crate::hardware::applog::info(
                         "resume from suspend: restoring keyboard and light bar",
                     );
+                    // The firmware does not always keep its mode across a
+                    // suspend, and the remembered index cannot know.
+                    crate::hardware::thermal_profile::forget();
+                    // The fan curve's readings and held step are from
+                    // before the machine cooled in suspend.
+                    crate::hardware::fan::forget_curve_history();
                     // Waking the machine is activity. Without this the idle
                     // watcher still holds whatever it measured before the
                     // suspend and would blank again immediately; it also lets
                     // the blanking logic below undo a blank that was in place
                     // when the lid closed.
                     crate::hardware::idle::mark_active();
+                    // "Show on my laptop" ends with a suspend: the restore below puts the
+                    // active mode's lighting back.
+                    crate::ui::lighting_page::machine_resumed();
+                    // The lighting renderer writes nothing while the restore
+                    // runs, and sends every light whole after it: the
+                    // controllers may have lost what it last drew. The bracket
+                    // closes on the worker when the restore ends, also if it
+                    // panics, and a second resume meanwhile keeps it open.
+                    let bracket = crate::hardware::lighting_renderer::renderer().resume_bracket();
                     // `wake: false` - the light bar's controller stayed
                     // powered, so it does not need the Breathing priming frame
                     // a cold boot does, and skipping it avoids a visible
                     // flicker and 300 ms of sleeping.
                     background::run(
-                        || crate::hardware::lighting::restore_saved(false, "resume"),
-                        |()| {},
+                        move || {
+                            let _bracket = bracket;
+                            crate::hardware::lighting::restore_saved(false, "resume")
+                        },
+                        |()| crate::hardware::lighting::record_written(),
                     );
                 }
+                // Also before the early return: with idle off this is what
+                // keeps the keyboard's own timer off after a write failed.
+                if crate::hardware::capabilities::get().keyboard_rgb {
+                    crate::hardware::keyboard_rgb::retry_timer_off_if_due();
+                }
 
-                let cfg = config::load_app_config();
+                // Cached, not re-parsed: this runs every second and the
+                // settings it reads change only when the user edits them, which
+                // bumps the generation this cache checks. See
+                // `config::load_app_config_cached`.
+                let cfg = config::load_app_config_cached();
                 let idle = crate::hardware::idle::idle_seconds(cfg.idle_mouse_wakes);
                 let Some(idle) = idle else {
-                    return glib::ControlFlow::Continue;
+                    return;
                 };
 
                 let keyboard_limit = cfg.idle_keyboard_secs as u64;
@@ -506,16 +903,22 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     cfg.idle_bar_secs as u64
                 };
 
-                let want_keyboard_off = cfg.idle_enabled
-                    && cfg.idle_keyboard_enabled
-                    && crate::hardware::keyboard_rgb::is_available()
-                    && idle >= keyboard_limit;
+                // With the mode Never the keyboard is left alone entirely: not
+                // blanked, and not unblanked either. `apply_keyboard_idle`,
+                // run on every idle setting change, relights a keyboard the
+                // app had blanked when idle is switched off.
+                let app_blanks_keyboard = crate::hardware::keyboard_rgb::keyboard_idle_mode(&cfg)
+                    == crate::hardware::keyboard_rgb::KeyboardIdleMode::App
+                    && crate::hardware::capabilities::get().keyboard_rgb;
+                let want_keyboard_off = app_blanks_keyboard && idle >= keyboard_limit;
                 let want_bar_off = cfg.idle_enabled
                     && cfg.idle_bar_enabled
-                    && crate::hardware::light_bar::is_available()
+                    && crate::hardware::capabilities::get().light_bar
                     && idle >= bar_limit;
 
-                if want_keyboard_off != crate::hardware::keyboard_rgb::is_blanked() {
+                if app_blanks_keyboard
+                    && want_keyboard_off != crate::hardware::keyboard_rgb::is_blanked()
+                {
                     if want_keyboard_off {
                         let _ = crate::hardware::keyboard_rgb::blank();
                     } else {
@@ -529,73 +932,35 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         crate::hardware::light_bar::unblank();
                     }
                 }
-
-                // Keyboard controller keepalive.
-                //
-                // The controller sleeps its backlight after ~30 s without a
-                // press on its own matrix. It cannot see a USB mouse or the
-                // I2C touchpad, so a stretch of mouse-only work blanked the
-                // keyboard at 30 s while the bar - which this timer really
-                // does own - stayed lit, which is the two devices coming apart
-                // for a reason no setting here controls. Any write restarts
-                // that timer, so one re-apply inside the window holds it open.
-                //
-                // Costs nothing in the common cases: while the user types,
-                // their own keys reset the controller's timer and `key_idle`
-                // never reaches the threshold; while the lighting is
-                // deliberately blanked, `is_blanked` skips it. It is not gated
-                // on `idle_enabled` - a user who switched idle-off *off* wants
-                // the keyboard lit, and the controller blanks it regardless.
-                //
-                // The write needs the privileged helper, whose mutex is shared
-                // with every other privileged caller, so it goes off-thread
-                // for the same reason the fan curve below does.
-                if cfg.idle_keyboard_keepalive
-                    && !want_keyboard_off
-                    && !crate::hardware::keyboard_rgb::is_blanked()
-                    && crate::hardware::keyboard_rgb::is_available()
-                {
-                    let key_idle = crate::hardware::idle::key_idle_seconds().unwrap_or(0);
-                    // `map_or` rather than `is_none_or`: the sibling crates
-                    // declare rust-version 1.80 and that method landed in 1.82.
-                    let due = last_keepalive
-                        .get()
-                        .map_or(true, |sent| sent.elapsed().as_secs() >= KEYBOARD_KEEPALIVE_SECS);
-                    if key_idle >= KEYBOARD_KEEPALIVE_SECS && due {
-                        last_keepalive.set(Some(std::time::Instant::now()));
-                        background::run(
-                            || {
-                                if let Err(error) = crate::hardware::keyboard_rgb::refresh() {
-                                    crate::hardware::applog::info(&format!(
-                                        "keyboard keepalive failed: {error}"
-                                    ));
-                                }
-                            },
-                            |()| {},
-                        );
-                    }
-                }
+            });
+            crate::hardware::resume::on_wake(tick.clone());
+            crate::hardware::idle::on_input_while_blanked(tick.clone());
+            glib::timeout_add_seconds_local(1, move || {
+                tick();
                 glib::ControlFlow::Continue
             });
         }
 
 
         glib::timeout_add_seconds_local(5, move || {
-            // Re-reads the game list from config every tick (cheap: a small
-            // Vec clone), same reasoning as re-reading `ai_check_interval_min`
-            // below - editing the list in the UI takes effect on the next
-            // tick, no restart needed.
-            crate::hardware::game_sync::check(&config::load_app_config().game_profiles);
+            // Re-reads the game list from config every tick, same reasoning
+            // as re-reading `ai_check_interval_min` below - editing the list
+            // in the UI takes effect on the next tick, no restart needed. The
+            // cached copy, which every save of the config invalidates, so the
+            // file is parsed only after a change instead of every five
+            // seconds.
+            crate::hardware::game_sync::check(&config::load_app_config_cached().game_profiles);
             glib::ControlFlow::Continue
         });
 
-        // Software auto fan-curve (fan_control_page.rs "fan_auto_curve"
-        // switch): runs globally rather than only while that page is open,
-        // since pages here are built lazily on first navigation - a
-        // page-local timer would never restart the curve after a fresh
-        // launch until the user visited Fan Control again. Re-reads the
-        // config every tick, same as the game list above: toggling the
-        // switch takes effect on the next tick, no restart needed.
+        // The fan reconciler: the one owner of the fan hardware, applying the
+        // active power mode's `FanPlan` from config. It runs globally rather
+        // than only while the Fan Control page is open, since pages here are
+        // built lazily on first navigation - a page-local timer would never
+        // reapply a plan after a fresh launch until the user visited Fan
+        // Control again. Re-reads the config every tick, same as the game
+        // list above: a plan written by the page, by the AI assistant or by a
+        // settings change takes effect on the next tick, no restart needed.
         // The write goes through the persistent privileged helper (see
         // hardware::helper), which holds a mutex shared with every other
         // privileged caller in the app - calling it straight from this
@@ -611,6 +976,13 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // temperature near the boundary is left alone or taken back. It
         // only advances on a write that actually succeeded.
         let fan_state = Rc::new(Cell::new(crate::hardware::fan::FanState::Unknown));
+        // The curve step behind `fan_state`, so a temperature wobbling at a
+        // band border does not flip the fans between two speeds. See
+        // `fan::CURVE_HYSTERESIS_C`.
+        let curve_memory = Rc::new(Cell::new(None::<crate::hardware::fan::CurveMemory>));
+        // The curve's recent inputs, whose mean decides a step down.
+        let curve_readings =
+            Rc::new(RefCell::new(crate::hardware::fan::CurveReadings::default()));
         // Consecutive failed writes, and how many ticks have passed since the
         // last attempt. See `fan::may_attempt_write`: without this a write
         // that can never succeed costs a privileged call, and on an
@@ -636,16 +1008,16 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             // lighting scheme, game profile, macro and setting still in the
             // file, unasked, within three seconds of launch. So the tick runs
             // on the defaults but is not allowed to write them back.
-            let (mut cfg, may_persist) = match config::load_app_config_source() {
-                config::AppConfigSource::Loaded(cfg) => (cfg, true),
-                config::AppConfigSource::Missing => (config::AppConfig::default(), true),
-                config::AppConfigSource::Unreadable(_) => (config::AppConfig::default(), false),
-            };
+            // Cached and shared: parsed again only after a save, and copied
+            // only for the one-time migration below.
+            let (shared, may_persist) = config::load_app_config_cached_checked();
+            let mut migrated: Option<config::AppConfig> = None;
             // Migrate on first sight, then use plans only. An empty list
             // means either a fresh install or a config from before this
             // feature, and both want the pre-existing global settings
             // carried forward unchanged rather than reset to Automatic.
-            if cfg.fan_plans.is_empty() {
+            if shared.fan_plans.is_empty() {
+                let mut cfg = (*shared).clone();
                 cfg.fan_plans = crate::hardware::fan::migrate_plans(&cfg);
                 if may_persist {
                     match config::save_app_config(&cfg) {
@@ -670,9 +1042,18 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 }
                 // Fall through with the migrated plans in hand: this tick
                 // applies them either way.
+                migrated = Some(cfg);
             }
+            let cfg: &config::AppConfig = migrated.as_ref().unwrap_or(&shared);
 
             if applying.get() {
+                return glib::ControlFlow::Continue;
+            }
+            // Sits out a switch queued or running, as the mode watcher and the
+            // power policy do: part-way through, the firmware can be on the
+            // desktop daemon's index (hardware::ppd) and the tick would write
+            // the plan of a mode the user did not pick.
+            if crate::hardware::profile::apply_in_flight() {
                 return glib::ControlFlow::Continue;
             }
 
@@ -704,14 +1085,48 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             // Whichever die is hotter. The GPU reading used to be dropped
             // here, so a GPU-bound load with an idle CPU got no fan
             // response at all. See fan::curve_input_temp for why this
-            // stays one speed for both fans.
-            let (cpu, gpu) = sensors::read_critical_temps();
-            let temp = crate::hardware::fan::curve_input_temp(cpu, gpu);
+            // stays one speed for both fans. Only a curve asks the GPU: the
+            // other plans ignore the temperature, which then serves the log
+            // line below alone, and the CPU's is a free hwmon read.
+            let gpu = if crate::hardware::fan::plan_reads_temperature(plan) {
+                crate::hardware::gpu::temperature()
+            } else {
+                None
+            };
+            let temp = crate::hardware::fan::curve_input_temp(sensors::read_cpu_temp(), gpu);
             let applied = fan_state.get();
-            let target = crate::hardware::fan::plan_target(
+            if crate::hardware::fan::take_curve_history_stale() {
+                curve_readings.borrow_mut().clear();
+                curve_memory.set(None);
+            }
+            let now_s = glib::monotonic_time() as f64 / 1e6;
+            let hold = match (plan, temp) {
+                (config::FanPlan::Curve { steps }, Some(t)) => {
+                    let mean_c = curve_readings.borrow_mut().push(active, &steps, t);
+                    crate::hardware::fan::remembered_band(
+                        curve_memory.get(),
+                        active,
+                        &steps,
+                        applied,
+                    )
+                    .zip(curve_memory.get())
+                    .map(|(band, memory)| crate::hardware::fan::CurveHold {
+                        band,
+                        applied_at_s: memory.applied_at_s,
+                        now_s,
+                        mean_c,
+                    })
+                }
+                _ => {
+                    curve_readings.borrow_mut().clear();
+                    None
+                }
+            };
+            let target = crate::hardware::fan::plan_target_held(
                 plan,
                 temp,
                 applied == FanState::Firmware,
+                hold,
             );
             if !crate::hardware::fan::needs_write(target, applied) {
                 return glib::ControlFlow::Continue;
@@ -749,6 +1164,19 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             let state = fan_state.clone();
             let failed = failures.clone();
             let intended = target;
+            let remember = match (plan, temp, target) {
+                (config::FanPlan::Curve { steps }, Some(t), CurveAction::Manual(_)) => {
+                    Some(crate::hardware::fan::CurveMemory {
+                        mode: active,
+                        steps,
+                        band: crate::hardware::fan::curve_band_target(t, &steps, hold),
+                        applied_at_s: now_s,
+                    })
+                }
+                _ => None,
+            };
+            let memory = curve_memory.clone();
+            let readings = curve_readings.clone();
             background::run(
                 move || match write {
                     crate::hardware::fan::FanWrite::PwmAuto => {
@@ -780,6 +1208,16 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         // firmware has them" as far as needs_write cares.
                         Ok(()) => {
                             failed.set(0);
+                            // The hold runs from the write, not the decision.
+                            memory.set(remember.map(|m| crate::hardware::fan::CurveMemory {
+                                applied_at_s: glib::monotonic_time() as f64 / 1e6,
+                                ..m
+                            }));
+                            // Taking the curve back after a hand-off starts
+                            // from fresh readings.
+                            if intended == CurveAction::Firmware {
+                                readings.borrow_mut().clear();
+                            }
                             state.set(match intended {
                                 CurveAction::Firmware => FanState::Firmware,
                                 CurveAction::Manual(percent) => FanState::Manual(percent),
@@ -789,6 +1227,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         Err(error) => {
                             failed.set(failed.get().saturating_add(1));
                             state.set(FanState::Unknown);
+                            memory.set(None);
                             crate::hardware::applog::error(&format!(
                                 "fan: {write:?} not applied: {error}"
                             ));
@@ -810,7 +1249,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         let window_c = window.clone();
         let minutes_since_check: Rc<std::cell::Cell<u32>> = Rc::new(std::cell::Cell::new(0));
         glib::timeout_add_seconds_local(60, move || {
-            let cfg = config::load_app_config();
+            let cfg = config::load_app_config_cached();
             if !cfg.ai_assistant_enabled {
                 minutes_since_check.set(0);
                 return glib::ControlFlow::Continue;
@@ -874,8 +1313,15 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 // handles it: the key still gets its Turbo, restoring on
                 // release just falls back to Balanced since there is
                 // nothing truthful to go back to.
-                before_turbo.set(profile::coherent_profile());
-                let _ = profile::set_profile(profile::PowerProfile::Turbo);
+                // The mode it is in or on its way to: a switch still queued
+                // when the key goes down is the one to come back to.
+                before_turbo.set(profile::intended_profile());
+                // Not waited for: the switch runs on its own thread, after
+                // any switch asked for before it.
+                log_switch_failure(
+                    "Turbo key: Turbo",
+                    profile::request_profile(profile::PowerProfile::Turbo),
+                );
                 // Only the profile is claimed here. What the fans do is
                 // whatever plan Turbo is bound to, and the reconciler logs
                 // that decision itself when it acts on it.
@@ -886,7 +1332,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 let restore = before_turbo
                     .get()
                     .unwrap_or(profile::PowerProfile::Balanced);
-                let _ = profile::set_profile(restore);
+                log_switch_failure("Turbo key: restore", profile::request_profile(restore));
                 crate::hardware::applog::info(&format!(
                     "Turbo key: released, restored profile={}, fan follows that mode's plan",
                     restore.to_id()
@@ -906,12 +1352,16 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
     // 5x/second forever — one of the issue #13 idle-CPU culprits. 32 px
     // covers the 4 px core bar plus the widest glow layer (10 px outward,
     // clipped by the window edge exactly like before, and 14 px inward), so
-    // the result is pixel-identical to the old full-window draw.
-    let pulse_phase: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
+    // the result is pixel-identical to the old full-window draw. Kept as pixels, one set
+    // per phase of the pulse (`StillDrawing`): as a Cairo node each tick drew it again on
+    // the CPU.
     let mut neon_bars = Vec::new();
     for left in [true, false] {
-        let bar = gtk::DrawingArea::new();
-        bar.set_content_width(32);
+        let bar = crate::ui::still_drawing::StillDrawing::frames(
+            move |cr, w, h, step| draw_neon_bar(cr, w, h, pulse_phase(step), left),
+            Some(|| crate::ui::brand_theme::accent().bright),
+        );
+        bar.set_size_request(32, -1);
         bar.set_vexpand(true);
         bar.set_halign(if left {
             gtk::Align::Start
@@ -919,10 +1369,6 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             gtk::Align::End
         });
         bar.set_can_target(false);
-        let phase = pulse_phase.clone();
-        bar.set_draw_func(move |_a, cr, w, h| {
-            draw_neon_bar(cr, w as f64, h as f64, *phase.borrow(), left);
-        });
         root_overlay.add_overlay(&bar);
         neon_bars.push(bar);
     }
@@ -930,24 +1376,25 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
     // Animate at ~5fps. The neon edge is a slow background pulse — full 60fps
     // here was visually identical but burned ~30% CPU drawing layered Cairo
     // strokes on every redraw cycle of the entire window.
-    let phase_c = pulse_phase.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+    let step = std::cell::Cell::new(0);
+    // No timer at all while the window sits in the tray, which unmaps it.
+    crate::ui::ticks::while_mapped(&neon_bars[0].clone(), 200, move || {
         if !crate::app_state::is_window_visible() {
             return glib::ControlFlow::Continue;
         }
-        let mut p = phase_c.borrow_mut();
-        *p += 0.12;
-        if *p > 1.0 {
-            *p -= 1.0;
-        }
-        drop(p);
+        step.set(next_pulse_step(step.get()));
+        // While the Lighting page's preview animates, the pulse is drawn in its next frame
+        // rather than in five frames a second of its own.
         for bar in &neon_bars {
-            bar.queue_draw();
+            bar.set_frame(step.get());
+            crate::ui::ticks::queue_draw_carried(bar);
         }
         glib::ControlFlow::Continue
     });
 
-    window.set_child(Some(&root_overlay));
+    // The toasts sit over everything, at window level (Undo through
+    // toasts).
+    window.set_child(Some(&crate::ui::toasts::host(&root_overlay)));
 }
 
 type PageBuilder = Box<dyn FnOnce() -> gtk::Widget>;
@@ -967,6 +1414,24 @@ fn ensure_page_built(stack: &gtk::Stack, pending: &PendingPages, name: &str) {
     }
 }
 
+/// Where the keyboard focus is, for the window's Up and Down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArrowFocus {
+    /// No widget has the focus.
+    Nowhere,
+    /// The focus is in the sidebar.
+    Sidebar,
+    /// A widget on a page has the focus.
+    Elsewhere,
+}
+
+/// Whether Up and Down move the sidebar: with the focus in the sidebar or nowhere. A focused
+/// widget on a page keeps its arrows (the Fan Control curve chart and its mode bar, the
+/// Lighting page's key cursor, effect tiles, sliders, lists and its mode selector all use them).
+fn sidebar_takes_arrows(focus: ArrowFocus) -> bool {
+    focus != ArrowFocus::Elsewhere
+}
+
 /// Build main area matching nova-ui.html: main-area with padding, sidebar + content-panel
 fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -> gtk::Overlay {
     // Main area overlay (for the diagonal stripe background)
@@ -980,55 +1445,14 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     // app): a near-black vertical gradient, a soft cyan glow anchored just
     // above the top-left corner, and a faint 34px technical grid on top.
     // This replaces the previous diagonal-stripe Cairo background - not a
-    // CSS rule, because this DrawingArea (not `.content-panel`, which turned
+    // CSS rule, because this drawing (not `.content-panel`, which turned
     // out to be dead CSS no widget ever applied) is what actually paints
     // behind the whole sidebar+content layout.
-    let stripe_bg = gtk::DrawingArea::new();
+    // Kept as pixels (`StillDrawing`): as a Cairo node it was drawn again on the CPU, for
+    // the part behind it, in every frame of anything animating over it.
+    let stripe_bg = crate::ui::still_drawing::StillDrawing::new(draw_window_background, None);
     stripe_bg.set_hexpand(true);
     stripe_bg.set_vexpand(true);
-    stripe_bg.set_draw_func(|_a, cr, w, h| {
-        let wf = w as f64;
-        let hf = h as f64;
-
-        // Base vertical gradient: #060a0e at top to #05070a at bottom.
-        let base = gtk4::cairo::LinearGradient::new(0.0, 0.0, 0.0, hf);
-        base.add_color_stop_rgb(0.0, 6.0 / 255.0, 10.0 / 255.0, 14.0 / 255.0);
-        base.add_color_stop_rgb(1.0, 5.0 / 255.0, 7.0 / 255.0, 10.0 / 255.0);
-        let _ = cr.set_source(&base);
-        cr.rectangle(0.0, 0.0, wf, hf);
-        let _ = cr.fill();
-
-        // Soft cyan glow centered just above the top-left corner (18%, -8%
-        // of the panel), fading out by 60% of its own radius.
-        let cx = wf * 0.18;
-        let cy = hf * -0.08;
-        let radius = wf.max(hf) * 0.85;
-        let glow = gtk4::cairo::RadialGradient::new(cx, cy, 0.0, cx, cy, radius);
-        glow.add_color_stop_rgba(0.0, 0.0, 0.831, 0.941, 0.07);
-        glow.add_color_stop_rgba(0.6, 0.0, 0.831, 0.941, 0.0);
-        glow.add_color_stop_rgba(1.0, 0.0, 0.831, 0.941, 0.0);
-        let _ = cr.set_source(&glow);
-        cr.rectangle(0.0, 0.0, wf, hf);
-        let _ = cr.fill();
-
-        // Fine 34px grid, discreet on purpose - same alpha as the POC.
-        cr.set_source_rgba(148.0 / 255.0, 177.0 / 255.0, 184.0 / 255.0, 0.05);
-        cr.set_line_width(1.0);
-        let mut x = 0.5;
-        while x < wf {
-            cr.move_to(x, 0.0);
-            cr.line_to(x, hf);
-            let _ = cr.stroke();
-            x += 34.0;
-        }
-        let mut y = 0.5;
-        while y < hf {
-            cr.move_to(0.0, y);
-            cr.line_to(wf, y);
-            let _ = cr.stroke();
-            y += 34.0;
-        }
-    });
     main_overlay.set_child(Some(&stripe_bg));
 
     // Layout box with padding 30px 40px and gap 20px (matching .main-area)
@@ -1080,7 +1504,7 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
             Box::new(|| network_page::build().upcast()),
         );
         pages.insert("usage".into(), Box::new(|| usage_page::build().upcast()));
-        pages.insert("lighting".into(), Box::new(|| rgb_page::build().upcast()));
+        pages.insert("lighting".into(), Box::new(lighting_page::build));
         pages.insert("fan".into(), Box::new(|| fan_page::build().upcast()));
         pages.insert(
             "fan_ctrl".into(),
@@ -1228,6 +1652,9 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
             lbl.add_css_class("nav-label");
         }
         item_overlay.add_overlay(&lbl);
+        if *page_name == "lighting" {
+            item_overlay.add_overlay(&lighting_paused_mark());
+        }
 
         // Click
         let gesture = gtk::GestureClick::new();
@@ -1241,31 +1668,54 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
         sidebar.append(&item_overlay);
     }
 
-    // Up/Down anywhere in the window move the sidebar selection by one,
-    // same as clicking the item above/below the current one - lets
-    // screenshot-automation (and anyone else) drive the whole sidebar from
-    // the keyboard instead of needing exact per-item pixel coordinates,
-    // which drift with window size/placement in a way mouse clicks can't
-    // route around. Capture phase so it fires before any focused child
-    // widget (e.g. a page's own entry/slider) would otherwise eat the key.
+    // Up/Down move the sidebar selection by one, same as clicking the item
+    // above/below the current one - lets screenshot-automation (and anyone
+    // else) drive the whole sidebar from the keyboard instead of needing
+    // exact per-item pixel coordinates, which drift with window
+    // size/placement in a way mouse clicks can't route around. Capture phase
+    // so it fires before any focused child widget would otherwise eat the
+    // key - but only while the keyboard focus is in the sidebar or nowhere:
+    // a focused widget on a page (a slider, a list, a radio group, the Fan
+    // Control curve chart, its mode bar, the Lighting preview's key cursor)
+    // keeps its own Up and Down
+    // (`sidebar_takes_arrows`).
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     {
         let active_for_key = active_idx.clone();
         let navigate_to_key = navigate_to.clone();
         let count = page_names.len();
-        key_controller.connect_key_pressed(move |_, keyval, _, _| match keyval {
-            gtk::gdk::Key::Down => {
-                let cur = *active_for_key.borrow();
-                navigate_to_key((cur + 1).min(count - 1));
-                glib::Propagation::Stop
+        let sidebar_for_key = sidebar.downgrade();
+        key_controller.connect_key_pressed(move |controller, keyval, _, _| {
+            let down = match keyval {
+                gtk::gdk::Key::Down => true,
+                gtk::gdk::Key::Up => false,
+                _ => return glib::Propagation::Proceed,
+            };
+            let focus = controller
+                .widget()
+                .and_downcast::<gtk::Window>()
+                .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window));
+            let at = match (focus, sidebar_for_key.upgrade()) {
+                (None, _) => ArrowFocus::Nowhere,
+                (Some(widget), Some(sidebar))
+                    if widget == *sidebar.upcast_ref::<gtk::Widget>()
+                        || widget.is_ancestor(&sidebar) =>
+                {
+                    ArrowFocus::Sidebar
+                }
+                (Some(_), _) => ArrowFocus::Elsewhere,
+            };
+            if !sidebar_takes_arrows(at) {
+                return glib::Propagation::Proceed;
             }
-            gtk::gdk::Key::Up => {
-                let cur = *active_for_key.borrow();
-                navigate_to_key(cur.saturating_sub(1));
-                glib::Propagation::Stop
-            }
-            _ => glib::Propagation::Proceed,
+            let cur = *active_for_key.borrow();
+            navigate_to_key(if down {
+                (cur + 1).min(count - 1)
+            } else {
+                cur.saturating_sub(1)
+            });
+            glib::Propagation::Stop
         });
     }
     window.add_controller(key_controller);
@@ -1329,7 +1779,7 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
         let dot_pulses = rgb::is_module_loaded();
         let dot_c = dot.clone();
         let phase: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
-        glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+        crate::ui::ticks::while_mapped(&dot, 200, move || {
             if !crate::app_state::is_window_visible() {
                 return glib::ControlFlow::Continue;
             }
@@ -1367,10 +1817,14 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     panel_wrapper.set_vexpand(true);
 
     // Gradient polygon border background
-    let border_bg = gtk::DrawingArea::new();
+    // Kept as pixels, as the window's background is (`StillDrawing`), drawn again when the
+    // accent its gradient takes changes.
+    let border_bg = crate::ui::still_drawing::StillDrawing::new(
+        draw_panel_border,
+        Some(|| crate::ui::brand_theme::accent().bright),
+    );
     border_bg.set_hexpand(true);
     border_bg.set_vexpand(true);
-    border_bg.set_draw_func(|_a, cr, w, h| draw_panel_border(cr, w as f64, h as f64));
     panel_wrapper.set_child(Some(&border_bg));
 
     // Content directly in the panel (no scrollbar on home)
@@ -1391,21 +1845,36 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
 
     main_overlay.add_overlay(&layout);
 
-    // Refresh periódico da página de temperaturas (gauges precisam recalcular).
-    // Gated por visibilidade do window e da aba — evita rebuild quando no tray.
+    // Keeps the Temperatures page current while it is the page shown, in place
+    // (`temperatures_page::update`); nothing is read while the window is not on screen.
     let stack_c = stack.clone();
+    let reading = Rc::new(Cell::new(false));
     glib::timeout_add_seconds_local(2, move || {
         if !crate::app_state::is_window_visible() {
             return glib::ControlFlow::Continue;
         }
-        if stack_c.visible_child_name().as_deref() == Some("temperatures") {
-            let s = sensors::read_all_sensors();
-            let new_temps = temperatures_page::build(&s);
-            if let Some(old) = stack_c.child_by_name("temperatures") {
-                stack_c.remove(&old);
-            }
-            stack_c.add_named(&new_temps, Some("temperatures"));
-            stack_c.set_visible_child_name("temperatures");
+        if stack_c.visible_child_name().as_deref() == Some("temperatures") && !reading.get() {
+            // The full read takes about 15 ms (the NVMe drives): on a worker.
+            reading.set(true);
+            let stack_c = stack_c.clone();
+            let reading = reading.clone();
+            crate::ui::background::run_quick(sensors::read_all_sensors, move |s| {
+                reading.set(false);
+                // The page may have been left while the sensors were read.
+                if stack_c.visible_child_name().as_deref() != Some("temperatures") {
+                    return;
+                }
+                // In place, unless the sensors it shows changed.
+                if temperatures_page::update(&s) {
+                    return;
+                }
+                let new_temps = temperatures_page::build(&s);
+                if let Some(old) = stack_c.child_by_name("temperatures") {
+                    stack_c.remove(&old);
+                }
+                stack_c.add_named(&new_temps, Some("temperatures"));
+                stack_c.set_visible_child_name("temperatures");
+            });
         }
         glib::ControlFlow::Continue
     });
@@ -1453,12 +1922,27 @@ fn find_resource_path(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// The neon edge's pulse has this many phases: it steps 0.12 of a cycle a tick, which comes
+/// back to the start after 25 ticks (3 cycles).
+const PULSE_STEPS: usize = 25;
+
+/// The pulse's step after `step`: 0.12 of a cycle on, as 3 of [`PULSE_STEPS`]. Counted in
+/// whole steps so the phases stay exactly 25 and their kept pixels are reused.
+fn next_pulse_step(step: usize) -> usize {
+    (step + 3) % PULSE_STEPS
+}
+
+/// The pulse's phase (0.0 to 1.0) at `step`.
+fn pulse_phase(step: usize) -> f64 {
+    step as f64 / PULSE_STEPS as f64
+}
+
 /// Draw pulsing cyan neon glow bars on left and right edges
 /// phase: 0.0 to 1.0, controls the pulse intensity
 /// Draw one neon edge bar (left or right) inside its own slim DrawingArea.
 /// Geometry matches the old full-window draw_neon_edges() exactly, just
 /// expressed in the slim area's local coordinates.
-fn draw_neon_bar(cr: &gtk4::cairo::Context, w: f64, h: f64, phase: f64, left: bool) {
+pub(crate) fn draw_neon_bar(cr: &gtk4::cairo::Context, w: f64, h: f64, phase: f64, left: bool) {
     // Smooth sine pulse: oscillates between 0.4 and 1.0
     let pulse = 0.4 + 0.6 * ((phase * 2.0 * PI).sin() * 0.5 + 0.5);
     let (r, g, b) = crate::ui::brand_theme::accent().bright;
@@ -1509,6 +1993,40 @@ fn rounded_rect(cr: &gtk4::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f6
     cr.close_path();
 }
 
+thread_local! {
+    /// The Lighting item's paused mark ([`show_lighting_paused`]).
+    static LIGHTING_PAUSED_MARK: RefCell<Option<gtk::Image>> = const { RefCell::new(None) };
+}
+
+/// The small pause symbol at the end of the sidebar's Lighting item, shown while the
+/// Lighting page's Pause holds the lights' animations, so someone who paused them and went
+/// to another page knows why the lights are still. It sits in the item's
+/// spare room on the right, which the widest label leaves too.
+fn lighting_paused_mark() -> gtk::Image {
+    let words = crate::i18n::t("lighting_paused");
+    let mark = gtk::Image::from_icon_name("media-playback-pause-symbolic");
+    mark.set_pixel_size(12);
+    mark.add_css_class("nav-paused-mark");
+    mark.set_halign(gtk::Align::End);
+    mark.set_valign(gtk::Align::Center);
+    mark.set_margin_end(8);
+    mark.set_tooltip_text(Some(words));
+    mark.update_property(&[gtk::accessible::Property::Label(words)]);
+    mark.set_visible(false);
+    LIGHTING_PAUSED_MARK.with(|slot| *slot.borrow_mut() = Some(mark.clone()));
+    mark
+}
+
+/// The Lighting page's Pause holds the lights' animations, or no longer: the sidebar's
+/// Lighting item shows it.
+pub(crate) fn show_lighting_paused(paused: bool) {
+    LIGHTING_PAUSED_MARK.with(|slot| {
+        if let Some(mark) = slot.borrow().as_ref() {
+            mark.set_visible(paused);
+        }
+    });
+}
+
 /// Left margin the nav label overlay already uses (`lbl.set_margin_start`),
 /// plus breathing room on the right so the widest label's text never
 /// touches the item's own right edge.
@@ -1552,8 +2070,9 @@ fn nav_sidebar_width<'a>(
 /// reuses a child's unless something specifically told that child it
 /// changed, so recoloring the live theme needs this walk to actually reach
 /// every hand-drawn `DrawingArea` (sidebar highlight, gauges, the Mode
-/// cards) rather than just the window's own top-level surface.
-fn queue_draw_recursive(widget: &gtk::Widget) {
+/// cards) rather than just the window's own top-level surface. The Lighting page
+/// redraws itself with it when the desktop's contrast preference changes.
+pub(crate) fn queue_draw_recursive(widget: &gtk::Widget) {
     widget.queue_draw();
     let mut child = widget.first_child();
     while let Some(w) = child {
@@ -1603,8 +2122,52 @@ fn draw_menu_item(cr: &gtk4::cairo::Context, w: f64, h: f64, is_active: bool) {
     }
 }
 
+/// The window's background, behind the sidebar and the content panel: a near-black
+/// vertical gradient, a soft cyan glow just above the top-left corner and a faint 34 px
+/// grid, `wf` by `hf`.
+pub(crate) fn draw_window_background(cr: &gtk4::cairo::Context, wf: f64, hf: f64) {
+    // Base vertical gradient: #060a0e at top to #05070a at bottom.
+    let base = gtk4::cairo::LinearGradient::new(0.0, 0.0, 0.0, hf);
+    base.add_color_stop_rgb(0.0, 6.0 / 255.0, 10.0 / 255.0, 14.0 / 255.0);
+    base.add_color_stop_rgb(1.0, 5.0 / 255.0, 7.0 / 255.0, 10.0 / 255.0);
+    let _ = cr.set_source(&base);
+    cr.rectangle(0.0, 0.0, wf, hf);
+    let _ = cr.fill();
+
+    // Soft cyan glow centered just above the top-left corner (18%, -8%
+    // of the panel), fading out by 60% of its own radius.
+    let cx = wf * 0.18;
+    let cy = hf * -0.08;
+    let radius = wf.max(hf) * 0.85;
+    let glow = gtk4::cairo::RadialGradient::new(cx, cy, 0.0, cx, cy, radius);
+    glow.add_color_stop_rgba(0.0, 0.0, 0.831, 0.941, 0.07);
+    glow.add_color_stop_rgba(0.6, 0.0, 0.831, 0.941, 0.0);
+    glow.add_color_stop_rgba(1.0, 0.0, 0.831, 0.941, 0.0);
+    let _ = cr.set_source(&glow);
+    cr.rectangle(0.0, 0.0, wf, hf);
+    let _ = cr.fill();
+
+    // Fine 34px grid, discreet on purpose - same alpha as the POC.
+    cr.set_source_rgba(148.0 / 255.0, 177.0 / 255.0, 184.0 / 255.0, 0.05);
+    cr.set_line_width(1.0);
+    let mut x = 0.5;
+    while x < wf {
+        cr.move_to(x, 0.0);
+        cr.line_to(x, hf);
+        let _ = cr.stroke();
+        x += 34.0;
+    }
+    let mut y = 0.5;
+    while y < hf {
+        cr.move_to(0.0, y);
+        cr.line_to(wf, y);
+        let _ = cr.stroke();
+        y += 34.0;
+    }
+}
+
 /// Draw content panel polygon gradient border
-fn draw_panel_border(cr: &gtk4::cairo::Context, w: f64, h: f64) {
+pub(crate) fn draw_panel_border(cr: &gtk4::cairo::Context, w: f64, h: f64) {
     let cut = 15.0;
 
     // Outer polygon
@@ -1663,7 +2226,7 @@ fn draw_brand_mark(cr: &gtk4::cairo::Context, w: f64, h: f64) {
     let _ = cr.fill();
 }
 
-fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
+fn build_settings_page(app: &adw::Application) -> gtk::ScrolledWindow {
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
     scroll.set_hexpand(true);
@@ -1839,7 +2402,11 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     // Eco Mode - caps volume/brightness at 40%, restores previous values on
     // off. Touches the privileged helper for the brightness half (see
     // `hardware::eco_mode` docs), so this runs off-thread like every other
-    // helper-backed switch, not inline in `connect_state_set`.
+    // helper-backed switch, not inline in `connect_state_set`. Only the
+    // privileged work runs there: config.json is loaded, changed and saved
+    // back here on the UI thread, where every save of it happens, so a
+    // setting saved by another page while the polkit prompt waits is not
+    // written over with the copy loaded before it.
     let eco_row = create_setting_row(t("eco_mode"), t("eco_mode_desc"));
     let eco_switch = gtk::Switch::new();
     eco_switch.set_active(cfg.eco_mode_enabled);
@@ -1849,28 +2416,34 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
         let switch = switch.clone();
         background::run(
             move || {
-                let mut c = config::load_app_config();
-                let result = if active {
-                    crate::hardware::eco_mode::enable().map(|(volume, brightness)| {
-                        c.eco_mode_saved_volume_pct = volume;
-                        c.eco_mode_saved_brightness_pct = brightness;
-                    })
+                if active {
+                    crate::hardware::eco_mode::enable().map(Some)
                 } else {
-                    let result = crate::hardware::eco_mode::disable(
+                    let c = config::load_app_config();
+                    crate::hardware::eco_mode::disable(
                         c.eco_mode_saved_volume_pct,
                         c.eco_mode_saved_brightness_pct,
-                    );
-                    c.eco_mode_saved_volume_pct = None;
-                    c.eco_mode_saved_brightness_pct = None;
-                    result
-                };
+                    )
+                    .map(|()| None)
+                }
+            },
+            move |result| {
+                let mut c = config::load_app_config();
+                match &result {
+                    Ok(Some((volume, brightness))) => {
+                        c.eco_mode_saved_volume_pct = *volume;
+                        c.eco_mode_saved_brightness_pct = *brightness;
+                    }
+                    Ok(None) | Err(_) if !active => {
+                        c.eco_mode_saved_volume_pct = None;
+                        c.eco_mode_saved_brightness_pct = None;
+                    }
+                    _ => {}
+                }
                 if result.is_ok() {
                     c.eco_mode_enabled = active;
                 }
                 let _ = config::save_app_config(&c);
-                result
-            },
-            move |result| {
                 switch.set_sensitive(true);
                 // A failure (most likely: the polkit prompt for the
                 // brightness half was dismissed) puts the switch back to
@@ -1907,114 +2480,76 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     let alert_switch = gtk::Switch::new();
     alert_switch.set_active(cfg.temp_alerts);
     alert_switch.set_valign(gtk::Align::Center);
-    alert_switch.connect_state_set(move |_, active| {
-        let mut c = config::load_app_config();
-        c.temp_alerts = active;
-        let _ = config::save_app_config(&c);
-        crate::hardware::alerts::set_enabled(active);
-        glib::Propagation::Proceed
-    });
-    alert_row.append(&alert_switch);
-    page.append(&alert_row);
 
-    // Auto performance profile by power source (AC vs battery)
-    let acp_row = create_setting_row(t("auto_profile_ac"), t("auto_profile_ac_desc"));
-    let acp_switch = gtk::Switch::new();
-    acp_switch.set_active(cfg.auto_profile_ac);
-    acp_switch.set_valign(gtk::Align::Center);
-    acp_row.append(&acp_switch);
-    page.append(&acp_row);
-
-    // Eco is battery-only in the official app (`MUI_Mode_Intro_ECO`, "Can be
-    // used when running on battery only") - it never gets an AC card, so the
-    // AC target list stays at the same four choices it always had. The
-    // battery list gets it as a fifth choice.
-    //
-    // Dropdown position is matched against these arrays directly rather than
-    // through `PowerProfile::index()`: Eco sits *below* Quiet in that
-    // ordering (see its doc comment), so position and index no longer agree
-    // once Eco exists, and the AC list does not even carry it at all.
-    let ac_profile_choices: [(&str, crate::hardware::profile::PowerProfile); 4] = [
-        ("quiet", crate::hardware::profile::PowerProfile::Quiet),
-        ("balanced", crate::hardware::profile::PowerProfile::Balanced),
-        (
-            "performance",
-            crate::hardware::profile::PowerProfile::Performance,
-        ),
-        ("turbo", crate::hardware::profile::PowerProfile::Turbo),
-    ];
-    let battery_profile_choices: [(&str, crate::hardware::profile::PowerProfile); 5] = [
-        ("quiet", crate::hardware::profile::PowerProfile::Quiet),
-        ("balanced", crate::hardware::profile::PowerProfile::Balanced),
-        (
-            "performance",
-            crate::hardware::profile::PowerProfile::Performance,
-        ),
-        ("turbo", crate::hardware::profile::PowerProfile::Turbo),
-        ("eco", crate::hardware::profile::PowerProfile::Eco),
-    ];
-    let ac_profile_labels: Vec<&str> = ac_profile_choices.iter().map(|(k, _)| t(k)).collect();
-    let battery_profile_labels: Vec<&str> =
-        battery_profile_choices.iter().map(|(k, _)| t(k)).collect();
-
-    let ac_profile_row = create_setting_row(t("profile_when_ac"), t("profile_when_ac_desc"));
-    ac_profile_row.set_sensitive(cfg.auto_profile_ac);
-    let ac_profile_dd = gtk::DropDown::from_strings(&ac_profile_labels);
-    let ac_selected = ac_profile_choices
-        .iter()
-        .position(|(_, p)| *p == cfg.profile_ac)
-        .unwrap_or(1) as u32; // Balanced, if the saved choice is somehow Eco.
-    ac_profile_dd.set_selected(ac_selected);
-    ac_profile_dd.set_valign(gtk::Align::Center);
-    ac_profile_dd.connect_selected_notify(move |dd| {
-        let sel = dd.selected() as usize;
-        let Some((_, profile)) = ac_profile_choices.get(sel) else {
-            return; // GTK_INVALID_LIST_POSITION or other transient state, not a real user pick
-        };
-        let mut c = config::load_app_config();
-        c.profile_ac = *profile;
-        let _ = config::save_app_config(&c);
-        crate::hardware::power_profile::set_target_profiles(c.profile_ac, c.profile_battery);
-    });
-    ac_profile_row.append(&ac_profile_dd);
-    page.append(&ac_profile_row);
-
-    let battery_profile_row =
-        create_setting_row(t("profile_when_battery"), t("profile_when_battery_desc"));
-    battery_profile_row.set_sensitive(cfg.auto_profile_ac);
-    let battery_profile_dd = gtk::DropDown::from_strings(&battery_profile_labels);
-    let battery_selected = battery_profile_choices
-        .iter()
-        .position(|(_, p)| *p == cfg.profile_battery)
-        .unwrap_or(1) as u32; // Balanced, if the saved choice can't be shown.
-    battery_profile_dd.set_selected(battery_selected);
-    battery_profile_dd.set_valign(gtk::Align::Center);
-    battery_profile_dd.connect_selected_notify(move |dd| {
-        let sel = dd.selected() as usize;
-        let Some((_, profile)) = battery_profile_choices.get(sel) else {
-            return; // GTK_INVALID_LIST_POSITION or other transient state, not a real user pick
-        };
-        let mut c = config::load_app_config();
-        c.profile_battery = *profile;
-        let _ = config::save_app_config(&c);
-        crate::hardware::power_profile::set_target_profiles(c.profile_ac, c.profile_battery);
-    });
-    battery_profile_row.append(&battery_profile_dd);
-    page.append(&battery_profile_row);
+    // The temperature that switch fires at. Built before the switch's handler
+    // so the handler can grey it out: a threshold with alerts off is a control
+    // that does nothing, and showing that is cheaper than a user wondering why
+    // theirs never fires.
+    let threshold_row =
+        create_setting_row(t("temp_alert_threshold"), t("temp_alert_threshold_desc"));
+    let threshold_label = gtk::Label::new(Some(&format!("{} \u{b0}C", cfg.temp_alert_c)));
+    threshold_label.add_css_class("settings-row-desc");
+    let threshold_scale = gtk::Scale::with_range(
+        gtk::Orientation::Horizontal,
+        f64::from(crate::hardware::alerts::MIN_THRESHOLD_C),
+        f64::from(crate::hardware::alerts::MAX_THRESHOLD_C),
+        1.0,
+    );
+    threshold_scale.set_value(f64::from(cfg.temp_alert_c));
+    threshold_scale.set_size_request(160, -1);
+    threshold_scale.set_valign(gtk::Align::Center);
+    threshold_scale.add_css_class("accent-scale");
+    threshold_row.set_sensitive(cfg.temp_alerts);
+    // A `GtkRange` handles the scroll wheel itself, so without this a wheel
+    // tick while scrolling the page past it silently changes the temperature
+    // the machine warns at.
+    crate::ui::scroll_guard::redirect_scroll_to_page(&threshold_scale);
+    {
+        let lbl = threshold_label.clone();
+        // The save waits for the drag to rest: each one parses, writes and
+        // fsyncs config.json, and a drag sends a value per step.
+        let (save, flush) = crate::ui::color_picker::debouncer(SLIDER_SAVE_DEBOUNCE_MS, {
+            let scale = threshold_scale.downgrade();
+            Rc::new(move || {
+                if let Some(scale) = scale.upgrade() {
+                    let mut c = config::load_app_config();
+                    c.temp_alert_c = scale.value().round() as u8;
+                    let _ = config::save_app_config(&c);
+                }
+            })
+        });
+        PENDING_SAVES.with(|pending| pending.borrow_mut().push(flush));
+        threshold_scale.connect_value_changed(move |sc| {
+            let celsius = sc.value().round() as u8;
+            lbl.set_text(&format!("{} \u{b0}C", celsius));
+            // In force immediately, before the save: the alert tick reads this
+            // in-memory value, so the next reading is already judged against
+            // the new threshold.
+            crate::hardware::alerts::set_threshold_c(celsius);
+            save();
+        });
+    }
 
     {
-        let ac_row = ac_profile_row.clone();
-        let bat_row = battery_profile_row.clone();
-        acp_switch.connect_state_set(move |_, active| {
+        let threshold_row = threshold_row.clone();
+        alert_switch.connect_state_set(move |_, active| {
             let mut c = config::load_app_config();
-            c.auto_profile_ac = active;
+            c.temp_alerts = active;
             let _ = config::save_app_config(&c);
-            crate::hardware::power_profile::set_auto(active);
-            ac_row.set_sensitive(active);
-            bat_row.set_sensitive(active);
+            crate::hardware::alerts::set_enabled(active);
+            threshold_row.set_sensitive(active);
             glib::Propagation::Proceed
         });
     }
+    alert_row.append(&alert_switch);
+    page.append(&alert_row);
+    threshold_row.append(&threshold_label);
+    threshold_row.append(&threshold_scale);
+    page.append(&threshold_row);
+
+    // The auto-profile switch and its two fall-back targets moved to the Mode
+    // page, next to the mode-key cycles the rule actually reads. They were a
+    // feature split across two pages with nothing saying so.
 
     // Persistent debug log (issue #7) - off by default, only meant for
     // remote debugging sessions like the one that motivated it.
@@ -2101,16 +2636,29 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
     font_scale.set_size_request(160, -1);
     font_scale.set_valign(gtk::Align::Center);
     font_scale.add_css_class("accent-scale");
+    // Same reason as the threshold slider above: a wheel tick over an
+    // unguarded `GtkRange` on a scrolling page rescales the whole app.
+    crate::ui::scroll_guard::redirect_scroll_to_page(&font_scale);
     {
         let lbl = font_scale_label.clone();
+        // Applied at once, saved once the drag rests (as the threshold above).
+        let (save, flush) = crate::ui::color_picker::debouncer(SLIDER_SAVE_DEBOUNCE_MS, {
+            let font_scale = font_scale.downgrade();
+            Rc::new(move || {
+                if let Some(font_scale) = font_scale.upgrade() {
+                    let mut c = config::load_app_config();
+                    c.font_scale = font_scale.value() / 100.0;
+                    let _ = config::save_app_config(&c);
+                }
+            })
+        });
+        PENDING_SAVES.with(|pending| pending.borrow_mut().push(flush));
         font_scale.connect_value_changed(move |sc| {
             let pct = sc.value();
             let scale = pct / 100.0;
             lbl.set_text(&format!("{}%", pct.round() as i32));
             crate::apply_font_scale(scale);
-            let mut c = config::load_app_config();
-            c.font_scale = scale;
-            let _ = config::save_app_config(&c);
+            save();
         });
     }
     font_row.append(&font_scale_label);
@@ -2245,7 +2793,7 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
         // (ui::lighting_page). Every other machine still needs it here: that
         // page is not built for them, and without this row the firmware
         // timeout would have no control anywhere in the app.
-        if !crate::hardware::keyboard_rgb::is_available() {
+        if !crate::hardware::capabilities::get().keyboard_rgb {
             let backlight_timeout_row =
                 create_setting_row(t("backlight_timeout"), t("backlight_timeout_desc"));
             let backlight_timeout_switch = gtk::Switch::new();
@@ -2413,6 +2961,126 @@ fn build_settings_page(_app: &adw::Application) -> gtk::ScrolledWindow {
         page.append(&sl);
     }
 
+    // === Settings backup ===
+    //
+    // Everything every page of this app writes lives in one config.json, and
+    // the only copy of it is in the user's home. A reinstall, a distro hop or
+    // a hand-edit that does not parse takes all of it at once: lighting
+    // schemes, per-mode fan plans, mode-key cycles, saved colours. These two
+    // rows are the smallest thing that makes that recoverable, which is also
+    // why the import validates the file *before* it replaces anything rather
+    // than after.
+    let backup_title = gtk::Label::new(Some(t("settings_backup")));
+    backup_title.add_css_class("settings-section-title");
+    backup_title.set_halign(gtk::Align::Start);
+    backup_title.set_margin_top(20);
+    page.append(&backup_title);
+
+    let backup_desc = gtk::Label::new(Some(t("settings_backup_desc")));
+    backup_desc.add_css_class("settings-row-desc");
+    backup_desc.set_halign(gtk::Align::Start);
+    backup_desc.set_wrap(true);
+    page.append(&backup_desc);
+
+    // An empty `.status-label` still reserves its own padding and GTK has no
+    // `:empty`, so this starts hidden and appears only once it has something
+    // to say.
+    let backup_status = gtk::Label::new(None);
+    backup_status.add_css_class("status-label");
+    backup_status.set_halign(gtk::Align::Start);
+    backup_status.set_wrap(true);
+    backup_status.set_visible(false);
+
+    let export_row = create_setting_row(t("settings_export"), t("settings_export_desc"));
+    let export_btn = gtk::Button::with_label(t("settings_export_button"));
+    export_btn.set_valign(gtk::Align::Center);
+    {
+        let app = app.clone();
+        let status = backup_status.clone();
+        export_btn.connect_clicked(move |_| {
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title(crate::i18n::t("settings_export"));
+            dialog.set_modal(true);
+            dialog.set_initial_name(Some(config::suggested_export_filename().as_str()));
+            dialog.set_filters(Some(&settings_file_filters()));
+            let status = status.clone();
+            dialog.save(
+                app.active_window().as_ref(),
+                gio::Cancellable::NONE,
+                move |result| {
+                    // `Err` here is the ordinary "closed the picker without
+                    // choosing anything" case, not a failure worth reporting.
+                    let Ok(file) = result else { return };
+                    let Some(path) = file.path() else { return };
+                    match config::export_app_config_to(&path) {
+                        Ok(()) => set_backup_status(
+                            &status,
+                            &crate::i18n::tf(
+                                "settings_export_done",
+                                &[&path.display().to_string()],
+                            ),
+                            true,
+                        ),
+                        Err(error) => set_backup_status(
+                            &status,
+                            &crate::i18n::tf("settings_export_failed", &[&error]),
+                            false,
+                        ),
+                    }
+                },
+            );
+        });
+    }
+    export_row.append(&export_btn);
+    page.append(&export_row);
+
+    let import_row = create_setting_row(t("settings_import"), t("settings_import_desc"));
+    let import_btn = gtk::Button::with_label(t("settings_import_button"));
+    import_btn.set_valign(gtk::Align::Center);
+    {
+        let app = app.clone();
+        let status = backup_status.clone();
+        import_btn.connect_clicked(move |_| {
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title(crate::i18n::t("settings_import"));
+            dialog.set_modal(true);
+            dialog.set_filters(Some(&settings_file_filters()));
+            let status = status.clone();
+            let app = app.clone();
+            dialog.open(
+                app.active_window().as_ref(),
+                gio::Cancellable::NONE,
+                move |result| {
+                    let Ok(file) = result else { return };
+                    let Some(path) = file.path() else { return };
+                    flush_pending_saves();
+                    // Checked while the user's own settings are still on disk.
+                    // A file that would send the app to defaults must never
+                    // get as far as replacing them.
+                    let imported = match config::import_app_config_from(&path) {
+                        Ok(imported) => imported,
+                        Err(error) => {
+                            set_backup_status(
+                                &status,
+                                &crate::i18n::tf("settings_import_failed", &[&error]),
+                                false,
+                            );
+                            return;
+                        }
+                    };
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    confirm_and_replace_settings(&app, imported, &name, &status);
+                },
+            );
+        });
+    }
+    import_row.append(&import_btn);
+    page.append(&import_row);
+    page.append(&backup_status);
+
     let about = gtk::Label::new(Some(t("about")));
     about.add_css_class("settings-section-title");
     about.set_halign(gtk::Align::Start);
@@ -2455,4 +3123,127 @@ pub(crate) fn create_setting_row(title: &str, desc: &str) -> gtk::Box {
     text.append(&d);
     row.append(&text);
     row
+}
+
+/// The `*.json` filter both settings pickers offer.
+fn settings_file_filters() -> gio::ListStore {
+    let filter = gtk::FileFilter::new();
+    filter.set_name(Some(crate::i18n::t("settings_backup")));
+    filter.add_suffix("json");
+    let filters = gio::ListStore::new::<gtk::FileFilter>();
+    filters.append(&filter);
+    filters
+}
+
+/// One line of feedback under the backup rows, in the success or error colour.
+fn set_backup_status(label: &gtk::Label, text: &str, ok: bool) {
+    label.set_text(text);
+    label.remove_css_class("status-success");
+    label.remove_css_class("status-error");
+    label.add_css_class(if ok { "status-success" } else { "status-error" });
+    label.set_visible(true);
+}
+
+/// Ask before replacing every setting at once, then do it and restart.
+///
+/// The confirmation is not ceremony: this is the only action in the app that
+/// overwrites all of a user's settings in one go, and the file it overwrites
+/// may be their only copy. The backup taken here is the safety net for the
+/// case where the imported file turns out not to be the one they meant.
+fn confirm_and_replace_settings(
+    app: &adw::Application,
+    imported: config::AppConfig,
+    file_name: &str,
+    status: &gtk::Label,
+) {
+    use libadwaita::prelude::*;
+
+    let Some(parent) = app.active_window() else {
+        return;
+    };
+    let dialog = adw::AlertDialog::new(
+        Some(crate::i18n::t("settings_import_confirm_title")),
+        Some(&crate::i18n::tf("settings_import_confirm_body", &[file_name])),
+    );
+    dialog.add_responses(&[
+        ("cancel", crate::i18n::t("settings_import_cancel")),
+        ("replace", crate::i18n::t("settings_import_replace")),
+    ]);
+    dialog.set_response_appearance("replace", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+
+    let status = status.clone();
+    dialog.choose(&parent, gio::Cancellable::NONE, move |response| {
+        if response != "replace" {
+            return;
+        }
+        if let Err(error) = config::backup_app_config() {
+            set_backup_status(
+                &status,
+                &crate::i18n::tf("settings_import_failed", &[&error]),
+                false,
+            );
+            return;
+        }
+        if let Err(error) = config::save_app_config(&imported) {
+            set_backup_status(
+                &status,
+                &crate::i18n::tf("settings_import_failed", &[&error]),
+                false,
+            );
+            return;
+        }
+        // The same relaunch the language dropdown does, for the same reason.
+        // Every page is built once from the config it was handed, and a good
+        // half of these settings are pushed to hardware at startup, so
+        // nothing short of a restart can honestly claim to have applied them.
+        // The typed internal argument delays GTK initialization long enough
+        // for this process to free the single-instance D-Bus name.
+        if let Ok(exe) = std::env::current_exe() {
+            let _ = std::process::Command::new(exe)
+                .arg(predator_sense_protocol::internal::DELAYED_APPLICATION_START_ARGUMENT)
+                .spawn();
+        }
+        std::process::exit(0);
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_pulse_step, pulse_phase, sidebar_takes_arrows, ArrowFocus, PULSE_STEPS};
+
+    /// The pulse in whole steps goes through the phases the old `+= 0.12, -1.0 past 1.0`
+    /// float did, to float noise, and comes back to the start after 25 ticks.
+    #[test]
+    fn the_neon_pulse_steps_through_the_old_phases() {
+        let pulse = |p: f64| (p * 2.0 * std::f64::consts::PI).sin();
+        let (mut old, mut step) = (0.0f64, 0);
+        let mut seen = std::collections::BTreeSet::new();
+        for tick in 1..=200 {
+            old += 0.12;
+            if old > 1.0 {
+                old -= 1.0;
+            }
+            step = next_pulse_step(step);
+            seen.insert(step);
+            assert!(step < PULSE_STEPS);
+            assert!(
+                (pulse(old) - pulse(pulse_phase(step))).abs() < 1e-9,
+                "tick {tick}: {old} against step {step}"
+            );
+        }
+        assert_eq!(seen.len(), PULSE_STEPS);
+        assert_eq!((0..PULSE_STEPS).fold(0, |s, _| next_pulse_step(s)), 0);
+    }
+
+    #[test]
+    fn up_and_down_move_the_sidebar_only_without_a_focused_page_widget() {
+        assert!(sidebar_takes_arrows(ArrowFocus::Nowhere));
+        assert!(sidebar_takes_arrows(ArrowFocus::Sidebar));
+        assert!(
+            !sidebar_takes_arrows(ArrowFocus::Elsewhere),
+            "a focused slider, list, curve chart, mode bar or key cursor keeps its arrows"
+        );
+    }
 }

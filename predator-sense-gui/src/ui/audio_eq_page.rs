@@ -82,9 +82,8 @@ pub fn build() -> gtk::ScrolledWindow {
     custom_section.set_visible(false);
 
     // Preset label i18n keys mirror `hardware::audio_eq::EqPreset::key`
-    // 1:1 ("music" -> "audio_eq_music", ...). Same "highlight the one
-    // active choice, clear the rest" pattern `rgb_page.rs`'s effect
-    // buttons already use.
+    // 1:1 ("music" -> "audio_eq_music", ...). The usual "highlight the one
+    // active choice, clear the rest" pattern.
     let preset_buttons: Rc<RefCell<Vec<gtk::Button>>> = Rc::new(RefCell::new(Vec::new()));
     for preset in audio_eq::PRESETS {
         let label_key = format!("audio_eq_{}", preset.key);

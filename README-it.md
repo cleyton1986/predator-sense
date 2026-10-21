@@ -61,8 +61,9 @@ Se questa app/progetto ti è stata utile e/o ti è piaciuta in qualche modo, con
 <p align="center"><b>Rete</b> — Grafici di download/upload in tempo reale con tracciamento dei picchi e rilevamento automatico dell'interfaccia (Wi-Fi o Ethernet).</p>
 <p align="center"><img src="assets/psense-4.png" width="800" alt="Rete"></p>
 
-<p align="center"><b>Illuminazione</b> — Colori statici per zona (4 sezioni) ed effetti RGB dinamici della tastiera (Breathing, Neon, Wave, Shifting, Zoom).</p>
+<p align="center"><b>Illuminazione</b>: ogni modalità di alimentazione ha la propria illuminazione, con preset con nome. Controllo illuminazione imposta gli effetti di ogni luce, e i colori per tasto sulla tastiera del PH16-71; Temi imposta insieme tastiera, barra luminosa e logo da uno di 32 temi integrati.</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Illuminazione"></p>
+<p align="center"><img src="assets/psense-17.png" width="800" alt="Temi di illuminazione"></p>
 
 <p align="center"><b>Modalità</b> — Profili di prestazioni: Silenzioso, Bilanciato, Prestazioni e Turbo, più un livello Eco esclusivo per la batteria (CPU governor + Intel EPP + limite di potenza della GPU).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modalità"></p>
@@ -112,6 +113,7 @@ Ispirato e basato sul progetto [acer-predator-turbo-and-rgb-keyboard-linux-modul
 | **Utilizzo** | Vista a 4 schede: CPU / GPU / Memoria / Storage con i processi principali, dettagli espandibili al click e animazione di fuoco in stile CSS sui gauge di temperatura |
 | **Rete** | Grafici di download/upload in tempo reale con tracciamento dei picchi e rilevamento automatico dell'interfaccia |
 | **Controllo RGB Tastiera** | Colori statici per zona (4 zone) ed effetti dinamici (Breathing, Neon, Wave, Shifting, Zoom) via WMI. Su hardware senza il modulo kernel, l'RGB funziona invece nativamente via USB/I2C-HID — chip ENEK5130 (statico a 4 zone, Breathing/Neon), chip Sunrex 2024+ (zona singola, elenco completo di effetti) o chip Chicony (palette a 7 colori, Helios 300) — auto-rilevato, vedi [Compatibilità](#compatibilità) |
+| **Illuminazione per modalità** | Ogni modalità di alimentazione mantiene la propria illuminazione, con preset con nome: gli effetti propri di ogni luce, o uno dei 32 temi integrati per tastiera, barra luminosa e logo. Le modifiche si applicano subito. Vedi [Illuminazione](#illuminazione) |
 | **Logo RGB della Cover** | Controlli indipendenti di accensione, colore fisso, luminosità, Breathing e Neon per l'emblema sul retro del display, con anteprima vettoriale in tempo reale. Mostrato solo dopo il rilevamento a runtime delle capacità HID |
 | **Profili di Prestazioni** | Modalità Silenzioso / Bilanciato / Prestazioni / Turbo, più un livello Eco esclusivo per la batteria (CPU governor + Intel EPP + limite di potenza della GPU) |
 | **Controllo Ventole** | RPM in tempo reale con ventole animate, interruttore CoolBoost, modalità Auto/Max, più controllo PWM per singola ventola e curva di temperatura automatica sperimentali (dove supportato) |
@@ -200,7 +202,7 @@ Alcuni modelli (confermati: PHN16S-71, PHN16-73, AN16S-61) instradano il control
 |---|---|
 | Colore statico per zona, luminosità, spegnimento retroilluminazione | ✅ confermato funzionante (PHN16S-71, AN16S-61) |
 | Effetti dinamici — Breathing, Neon | ✅ confermato funzionante (PHN16S-71, AN16S-61) — nativo, singola scrittura HID, l'hardware ripete il pattern in loop da solo. Sull'unità PHN16S-71, Breathing ignora il colore scelto e cicla l'arcobaleno; può variare su altro hardware |
-| Effetti dinamici — Wave, Shifting, Zoom | Solo anteprima a schermo (nessuna scrittura sull'hardware) — i codici di questi effetti si sono rivelati avere significati diversi tra le generazioni di hardware, quindi non sono ancora collegati |
+| Effetti dinamici: Wave, Shifting, Zoom | Offerti solo dove il controller li esegue da sé (la mappatura verificata del PHN16S-71, o l'effetto annunciato nel rapporto delle capacità del controller); i codici di questi effetti si sono rivelati avere significati diversi tra le generazioni di hardware |
 | Logo RGB della cover — spento, colore fisso, luminosità, Breathing, Neon | ✅ confermato funzionante (PHN16-73) |
 
 Il supporto al logo della cover non viene abilitato tramite una allow-list di nomi di modello. Il controller deve dichiarare il target `0x83` nel suo report A1 dei target e restituire capacità A3 corrispondenti e non vuote prima che l'interfaccia venga mostrata; l'app ripete questo controllo immediatamente prima di ogni scrittura. Il daemon dell'hotkey ripristina solo un'impostazione che l'app ha già applicato con successo dopo il login e il resume, e salta completamente il logo quando non c'è un'impostazione salvata o il target è assente.
@@ -336,24 +338,26 @@ sudo installer/target/release/predator-sense-installer --install
 
 ## Utilizzo
 
-### RGB della Tastiera
+### Illuminazione
 
-1. Vai su **Illuminazione** nella barra laterale
-2. Scegli **Statico** (colori per zona) o **Dinamico** (effetti)
-3. **Modalità Statica:** regola gli slider R/G/B per ciascuna delle 4 sezioni della tastiera
-4. **Modalità Dinamica:** seleziona un effetto (Breathing, Neon, Wave, Shifting, Zoom) e regola la velocità
-5. Clicca su **Applica**
+Ogni modalità di alimentazione ha la propria illuminazione. Quando la modalità cambia, dall'app, dal tasto modalità o dal desktop, le luci passano all'illuminazione di quella modalità.
 
-> Su hardware solo I2C-HID senza il modulo kernel (vedi [Compatibilità](#compatibilità)), Breathing e Neon animano davvero; Wave/Shifting/Zoom mostrano solo un'anteprima a schermo, chiaramente etichettata come tale — la tastiera fisica non cambia ancora per questi effetti.
+1. Vai su **Illuminazione** nella barra laterale. La pagina si apre sulla modalità attiva; scegli un'altra modalità in alto per modificarne l'illuminazione.
+2. **Controllo illuminazione** imposta gli effetti propri di ogni luce. Scegli una luce nell'anteprima (tastiera, barra luminosa o logo, secondo ciò che ha il tuo portatile), poi un effetto e, dove l'effetto li ha, colore, velocità e direzione. Sulla tastiera del PH16-71, **Colori per tasto** dipinge singoli tasti nell'anteprima.
+3. **Temi** imposta insieme tastiera, barra luminosa e logo da un tema integrato. Scegli una scheda, poi una delle sue combinazioni di colori o i tuoi colori (**Personalizzati**) e le impostazioni che quel tema ha.
+4. Sotto l'anteprima, regola la luminosità di ogni luce.
 
-### Logo RGB della Cover
+Le modifiche si applicano subito e vengono salvate; non c'è un pulsante Applica. Scegliere un tema al posto delle tue impostazioni, cancellare un disegno ed eliminare un preset offrono **Annulla**.
 
-1. Vai su **Illuminazione** e seleziona **Logo della cover** (il selettore appare solo quando viene rilevato un target HID compatibile)
-2. Usa **Illuminazione** per accendere o spegnere l'emblema
-3. Scegli **Statico**, **Breathing** o **Neon**, poi regola i controlli disponibili di colore, luminosità e velocità osservando l'anteprima in tempo reale
-4. Clicca su **Applica al logo**
+**Preset.** **Salva come nuovo preset…** conserva l'illuminazione di una modalità con un nome, e **Carica preset** la mette sulla modalità che stai modificando. Una modalità che usa un preset mostra **Modificato** appena la modifichi: **Salva** scrive le modifiche nel preset, **Annulla modifiche** torna al preset.
 
-L'ultimo stato applicato con successo viene ripristinato quando si avvia il servizio hotkey dell'utente e dopo la sospensione/ibernazione. I colori degli effetti animati sono controllati dal firmware, quindi l'anteprima rappresenta il loro comportamento invece di offrire un selettore di colore per queste modalità.
+**Mostra sul mio portatile.** Mentre modifichi una modalità che non è quella attiva, questo interruttore mette la sua illuminazione sulle luci. Termina quando lo spegni, lasci la pagina o la modalità di alimentazione cambia.
+
+**Temi disegnati dall'app.** Sulla tastiera con colori per tasto e sulla barra luminosa a tre zone del PH16-71, l'app disegna da sé gli aspetti animati di un tema. I temi che illuminano i tasti premuti leggono la tastiera integrata mentre sono in esecuzione, quando **Reagisci alla digitazione** è attivo nel pannello del tema. Per farlo il tuo account deve essere nel gruppo `input`. Su ogni altra luce, e finché l'app non può disegnare (per esempio prima che le regole dei dispositivi dell'installer diano alla tua sessione l'accesso alla tastiera e alla barra luminosa), un tema mostra l'effetto firmware più vicino. **Metti in pausa le animazioni a batteria** le ferma a batteria. Quando l'app si chiude o esci dalla sessione, le luci che animava passano all'aspetto firmware del tema; un'immagine ferma (un disegno per tasto, o un'immagine del tema che non si muove) resta com'è.
+
+**Altri modelli.** La stessa pagina gestisce le luci di tutti i modelli supportati: tastiere a quattro zone (WMI o il controller ENE), la tastiera dell'Helios 300 con i suoi 7 colori, la tastiera a un colore e il logo dei modelli 2024, il logo della cover ENE e la barra luminosa del PH16-72/PH18-72. È stata provata solo sul PH16-71.
+
+Il logo della cover ENE compare solo quando il rapporto delle capacità del controller ne contiene il target. Il suo ultimo stato applicato viene ripristinato all'avvio del servizio hotkey dell'utente e dopo sospensione/ibernazione. I colori degli effetti animati sono gestiti dal firmware, quindi solo l'effetto statico accetta un colore.
 
 > Il firmware controlla l'animazione di illuminazione mostrata prima che Linux avvii il servizio utente. Uno stato "spento" salvato viene ripristinato dopo il login, ma questa app non può sopprimere la precedente animazione del BIOS/boot.
 
@@ -641,6 +645,7 @@ predator-sense-gui/
 │   └── dkms.conf                # Configurazione DKMS per la ricompilazione automatica
 ├── installer/                   # Installer multicall e servizi Rust
 │   ├── Cargo.toml
+│   ├── assets/                  # Icona tray come pixmap (ARGB32, da resources/tray)
 │   └── src/
 │       ├── main.rs              # Dispatch tipizzato in base al nome dell'eseguibile installato
 │       ├── constants.rs         # Percorsi centrali, valori di protocollo e costanti hardware
@@ -651,7 +656,10 @@ predator-sense-gui/
 │       └── i18n.rs              # Messaggi tipizzati EN/PT
 ├── protocol/                    # Contratto tipizzato condiviso tra GUI e helper
 │   ├── Cargo.toml
-│   └── src/lib.rs               # Azioni, percorsi, limiti e nomi dei binari
+│   └── src/lib.rs               # Azioni, percorsi, limiti, nomi dei binari, report della tastiera
+├── hidraw/                      # Il nodo hidraw dell'illuminazione della tastiera del PH16-71 (un ioctl)
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Applicazione Rust GTK4
 │   ├── main.rs
 │   ├── app_state.rs             # Flag globale di visibilità della finestra (blocca i timer)
@@ -661,11 +669,21 @@ predator-sense-gui/
 │   ├── hardware/
 │   │   ├── helper.rs            # Client tipizzato dell'helper privilegiato
 │   │   ├── rgb.rs               # RGB via /dev/acer-gkbbl-*
+│   │   ├── keyboard_rgb.rs      # Tastiera del PH16-71 (Chicony a 24 bit) via hidraw
+│   │   ├── chicony_hid.rs       # Nodo hidraw della tastiera, tenuto aperto
+│   │   ├── light_bar.rs         # Barra luminosa dello chassis
+│   │   ├── light_bar_zones.rs   # Le tre zone della barra luminosa (nodo facer)
+│   │   ├── lighting.rs          # Mette sulle luci l'illuminazione di ogni modalità
+│   │   ├── lighting_model/      # Illuminazione per modalità, preset, cosa scrive un'impostazione
+│   │   ├── lighting_renderer/   # Disegna gli aspetti dei temi disegnati dall'app
+│   │   ├── effects/             # Motore degli effetti e catalogo dei temi
+│   │   ├── key_input/           # Tasti premuti per i temi che reagiscono alla digitazione
 │   │   ├── hwmon.rs             # Indice /sys/class/hwmon (cache in OnceLock)
 │   │   ├── sensors.rs           # Temperature, ventole, RAM, rete
-│   │   ├── gpu.rs               # Parser di nvidia-smi con cache TTL
+│   │   ├── gpu.rs               # Metriche GPU via NVML, limite di potenza via helper
+│   │   ├── nvml.rs              # NVML caricato a runtime (dlopen)
 │   │   ├── procs.rs             # Sampler /proc (CPU per core, memoria, elenco processi)
-│   │   ├── storage.rs           # Utilizzo disco via df
+│   │   ├── storage.rs           # Utilizzo disco via statvfs
 │   │   ├── sysinfo.rs           # Specifiche DMI + CPU + GPU + SO
 │   │   ├── fan.rs               # Modalità ventole + CoolBoost
 │   │   ├── extras.rs            # Limite batteria, LCD overdrive, ricarica USB, animazione di boot
@@ -673,14 +691,20 @@ predator-sense-gui/
 │   │   ├── ai_assistant.rs      # Tool-calling di Ollama: allow-list fissa mappata sui setter hardware:: già esistenti
 │   │   ├── ai_snapshot.rs       # Snapshot effimero dello stato hardware, fornito all'IA e cancellato a ogni lettura
 │   │   ├── ai_actionlog.rs      # Log persistente e consultabile di tutto ciò che l'IA ha suggerito/applicato
+│   │   ├── quiet_panics.rs      # Hook di panic: nessun messaggio dai thread che vedono i tasti
 │   │   └── setup.rs             # Gestione del modulo kernel
 │   └── ui/                      # Pagine GTK4 (widget Cairo personalizzati)
 │       ├── window.rs            # Finestra principale, sidebar, barre neon, riduci a tray
+│       ├── still_drawing.rs     # Disegni statici conservati come pixel
+│       ├── ticks.rs             # Timer di animazione solo mentre visibili
+│       ├── flow_box.rs          # Contenuto di FlowBox senza rimuovere figli
+│       ├── toasts.rs            # Toast a livello di finestra (Annulla)
 │       ├── dashboard_page.rs    # Hero + specifiche di sistema
 │       ├── temperatures_page.rs # Tutti i gauge di temperatura
 │       ├── usage_page.rs        # CPU/GPU/Mem/Storage con i processi principali
 │       ├── network_page.rs      # Download/upload con tracciamento dei picchi
-│       ├── rgb_page.rs          # RGB della tastiera con zone visive
+│       ├── lighting_page.rs     # Pagina Illuminazione: modalità, preset, anteprima
+│       ├── lighting/            # Le sue schede (Controllo illuminazione, Temi), anteprima, righe
 │       ├── fan_control_page.rs  # Ventole animate + CoolBoost
 │       ├── fan_page.rs          # Profili di prestazioni
 │       ├── battery_page.rs      # Statistiche batteria + limite di carica
@@ -689,9 +713,12 @@ predator-sense-gui/
 │       ├── ai_page.rs           # Assistente IA: chat, gestione modelli, monitor risorse, log delle azioni
 │       ├── setup_page.rs        # Wizard di configurazione del modulo kernel
 │       └── gauge_widget.rs      # Widget gauge circolare tratteggiato
+├── tests/data/                  # Fotogrammi di riferimento degli effetti, dati di temi e configurazione
+├── tools/                       # gen-golden.js e l'effects.js che esegue (gjs)
 └── resources/
+    ├── tray/                    # Sorgenti dell'icona tray (PNG)
     ├── style.css                # Tema scuro gaming
-    └── predator-icon.svg        # Icona del tray di sistema
+    └── predator-icon.svg        # Icona dell'app
 ```
 
 ---

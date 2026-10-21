@@ -61,8 +61,9 @@ Bu uygulama/proje işinize yaradıysa ve/veya bir şekilde beğendiyseniz, bir y
 <p align="center"><b>Ağ</b> — Zirve takibi ve otomatik arayüz algılamasıyla (Wi-Fi veya Ethernet) gerçek zamanlı indirme/yükleme grafikleri.</p>
 <p align="center"><img src="assets/psense-4.png" width="800" alt="Ağ"></p>
 
-<p align="center"><b>Aydınlatma</b> — Bölge bazlı statik (4 bölge) ve dinamik RGB klavye efektleri (Breathing, Neon, Wave, Shifting, Zoom).</p>
+<p align="center"><b>Aydınlatma</b>: her güç modunun kendi aydınlatması ve adlandırılmış ön ayarları vardır. Aydınlatma kontrolü her ışığın efektlerini, PH16-71 klavyesinde de tuş başına renkleri ayarlar; Temalar klavyeyi, ışık çubuğunu ve logoyu 32 yerleşik temadan biriyle birlikte ayarlar.</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Aydınlatma"></p>
+<p align="center"><img src="assets/psense-17.png" width="800" alt="Aydınlatma temaları"></p>
 
 <p align="center"><b>Modlar</b> — Performans profilleri: Sessiz, Dengeli, Performans ve Turbo, artı yalnızca pilde kullanılabilen bir Eco katmanı (CPU governor + Intel EPP + GPU güç limiti).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modlar"></p>
@@ -112,6 +113,7 @@ Acer oyuncu dizüstü bilgisayarları için RGB klavye aydınlatması ve Turbo m
 | **Kullanım** | 4 sekmeli görünüm: CPU / GPU / Bellek / Depolama, en çok kaynak tüketen süreçler, tıkla-genişlet detaylar ve sıcaklık göstergelerinde CSS tabanlı alev animasyonu |
 | **Ağ** | Zirve takibi ve otomatik arayüz algılamasıyla gerçek zamanlı indirme/yükleme grafikleri |
 | **RGB Klavye Kontrolü** | WMI üzerinden bölge bazlı statik (4 bölge) ve dinamik efektler (Breathing, Neon, Wave, Shifting, Zoom). Çekirdek modülü olmayan donanımlarda RGB, bunun yerine USB/I2C-HID üzerinden yerel olarak çalışır — ENEK5130 çip (4 bölgeli statik, Breathing/Neon), 2024+ Sunrex çip (tek bölge, tam efekt listesi) veya Chicony çip (7 renkli palet, Helios 300) — otomatik algılanır, bkz. [Uyumluluk](#uyumluluk) |
+| **Güç moduna göre aydınlatma** | Her güç modu kendi aydınlatmasını adlandırılmış ön ayarlarla saklar: her ışığın kendi efektleri ya da klavye, ışık çubuğu ve logo için 32 yerleşik temadan biri. Değişiklikler hemen uygulanır. Bkz. [Aydınlatma](#aydınlatma) |
 | **RGB Kapak Logosu** | Ekranın arkasındaki amblem için bağımsız açma/kapama, düz renk, parlaklık, Breathing ve Neon kontrolleri, canlı vektör önizlemesiyle. Yalnızca çalışma zamanı HID yetenek algılamasından sonra gösterilir |
 | **Performans Profilleri** | Sessiz / Dengeli / Performans / Turbo modları, artı yalnızca pilde kullanılabilen bir Eco katmanı (CPU governor + Intel EPP + GPU güç limiti) |
 | **Fan Kontrolü** | Animasyonlu dönen fanlarla canlı RPM, CoolBoost anahtarı, Auto/Max modları, artı deneysel fan başına PWM kontrolü ve otomatik sıcaklık eğrisi (destekleniyorsa) |
@@ -200,7 +202,7 @@ Bazı modeller (doğrulanmış: PHN16S-71, PHN16-73, AN16S-61) klavyenin RGB den
 |---|---|
 | Bölge bazlı statik renk, parlaklık, arka ışığı kapatma | ✅ çalıştığı doğrulandı (PHN16S-71, AN16S-61) |
 | Dinamik efektler — Breathing, Neon | ✅ çalıştığı doğrulandı (PHN16S-71, AN16S-61) — yerel, tek bir HID yazımı, donanım deseni kendi başına döngüye alır. PHN16S-71 biriminde Breathing seçilen rengi yok sayıp gökkuşağı döngüsüne giriyor; başka donanımlarda farklı olabilir |
-| Dinamik efektler — Wave, Shifting, Zoom | Yalnızca ekranda önizleme (donanıma yazım yok) — bu efektlerin kodlarının donanım nesilleri arasında farklı anlamlara geldiği tespit edildiği için henüz bağlanmadılar |
+| Dinamik efektler: Wave, Shifting, Zoom | Yalnızca denetleyicinin kendisinin çalıştırdığı yerde sunulur (PHN16S-71'in doğrulanmış eşlemesi veya denetleyicinin yetenek raporunda bildirilen efekt); bu efektlerin kodlarının donanım nesilleri arasında farklı anlamlara geldiği tespit edildi |
 | RGB kapak logosu — kapalı, düz renk, parlaklık, Breathing, Neon | ✅ çalıştığı doğrulandı (PHN16-73) |
 
 Kapak logosu desteği, model adına dayalı bir izin listesinden etkinleştirilmiyor. Arayüz gösterilmeden önce denetleyicinin A1 hedef raporunda `0x83` hedefini bildirmesi ve buna karşılık gelen, boş olmayan A3 yeteneklerini döndürmesi gerekir; uygulama bu kontrolü her yazımdan hemen önce tekrarlar. Hotkey daemon'u yalnızca uygulamanın giriş ve uykudan dönüş sonrasında daha önce başarıyla uyguladığı bir ayarı geri yükler ve kayıtlı bir ayar yoksa ya da hedef mevcut değilse logoyu tamamen atlar.
@@ -336,24 +338,26 @@ sudo installer/target/release/predator-sense-installer --install
 
 ## Kullanım
 
-### Klavye RGB
+### Aydınlatma
 
-1. Kenar çubuğundan **Aydınlatma**'ya gidin
-2. **Statik** (bölge başına renkler) veya **Dinamik** (efektler) seçin
-3. **Statik mod:** klavyenin 4 bölümünün her biri için R/G/B kaydırıcılarını ayarlayın
-4. **Dinamik mod:** bir efekt seçin (Breathing, Neon, Wave, Shifting, Zoom) ve hızı ayarlayın
-5. **Uygula**'ya tıklayın
+Her güç modunun kendi aydınlatması vardır. Güç modu uygulamadan, mod tuşundan veya masaüstünden değiştiğinde, ışıklar o modun aydınlatmasına geçer.
 
-> Çekirdek modülü olmayan, yalnızca I2C-HID kullanan donanımlarda (bkz. [Uyumluluk](#uyumluluk)), Breathing ve Neon gerçekten animasyon yapar; Wave/Shifting/Zoom yalnızca ekranda önizleme gösterir ve açıkça öyle etiketlenir — fiziksel klavye bunlar için henüz değişmez.
+1. Kenar çubuğunda **Aydınlatma**'ya gidin. Sayfa etkin güç modunda açılır; başka bir modun aydınlatmasını düzenlemek için üstten o modu seçin.
+2. **Aydınlatma kontrolü** her ışığın kendi efektlerini ayarlar. Önizlemede bir ışık seçin (dizüstünüzde hangisi varsa klavye, ışık çubuğu veya logo), ardından bir efekt ve efektte varsa rengini, hızını ve yönünü. PH16-71 klavyesinde **Tuş başına renkler** önizlemede tek tek tuşları boyar.
+3. **Temalar** klavyeyi, ışık çubuğunu ve logoyu yerleşik bir temadan birlikte ayarlar. Bir kart seçin, ardından renk seçeneklerinden birini veya kendi renklerinizi (**Özel**) ve temanın sahip olduğu ayarları.
+4. Önizlemenin altında her ışığın parlaklığını ayarlayın.
 
-### RGB Kapak Logosu
+Değişiklikler hemen uygulanır ve kaydedilir; Uygula düğmesi yoktur. Kendi ayarlarınızın üzerine bir tema seçmek, bir boyamayı temizlemek ve bir ön ayarı silmek **Geri al** sunar.
 
-1. **Aydınlatma**'ya gidin ve **Kapak logosu**'nu seçin (seçici yalnızca uyumlu bir HID hedefi algılandığında görünür)
-2. Amblemi açmak veya kapatmak için **Aydınlatma**'yı kullanın
-3. **Statik**, **Breathing** veya **Neon** seçin, ardından mevcut renk, parlaklık ve hız kontrollerini canlı önizlemeye bakarak ayarlayın
-4. **Logoya uygula**'ya tıklayın
+**Ön ayarlar.** **Yeni ön ayar olarak kaydet…** bir modun aydınlatmasını bir adla saklar, **Ön ayar yükle** onu düzenlediğiniz moda koyar. Bir ön ayarı kullanan mod, siz düzenleyince **Değiştirildi** gösterir: **Kaydet** değişiklikleri ön ayara yazar, **Değişiklikleri at** ön ayara geri döner.
 
-Son başarıyla uygulanan durum, kullanıcı hotkey servisi başladığında ve uyku/hazırda beklemeden sonra geri yüklenir. Animasyonlu efekt renkleri firmware tarafından kontrol edilir, bu yüzden önizleme bir renk seçici sunmak yerine bu modların davranışını temsil eder.
+**Dizüstümde göster.** Etkin olmayan bir modu düzenlerken bu anahtar o modun aydınlatmasını ışıklara koyar. Siz kapatınca, sayfadan ayrılınca veya güç modu değişince sona erer.
+
+**Uygulamanın çizdiği temalar.** PH16-71'in tuş başına renkli klavyesinde ve üç bölgeli ışık çubuğunda uygulama bir temanın hareketli görünümlerini kendisi çizer. Basılan tuşları yakan temalar, temanın panelinde **Yazmaya tepki ver** açıksa, çalışırken yerleşik klavyeyi okur. Bunun için hesabınızın `input` grubunda olması gerekir. Diğer tüm ışıklarda ve uygulama çizemediği sürece (örneğin yükleyicinin aygıt kuralları oturumunuza klavye ve ışık çubuğu erişimi vermeden önce) tema en yakın firmware efektini gösterir. **Pilde animasyonları duraklat** pildeyken onları durdurur. Uygulama kapandığında veya oturumu kapattığınızda, uygulamanın canlandırdığı ışıklar temanın firmware görünümüne geçer; hareketsiz bir resim (tuş başına bir boyama veya hareket etmeyen bir tema resmi) olduğu gibi kalır.
+
+**Diğer modeller.** Aynı sayfa desteklenen tüm modellerin ışıklarını yönetir: dört bölgeli klavyeler (WMI veya ENE denetleyicisi), 7 rengiyle Helios 300 klavyesi, 2024 modellerinin tek renkli klavyesi ve logosu, ENE kapak logosu ve PH16-72/PH18-72 ışık çubuğu. Yalnızca PH16-71'de test edilmiştir.
+
+ENE kapak logosu yalnızca denetleyicinin yetenek raporunda hedefi bulunduğunda görünür. Son uygulanan durumu, kullanıcının hotkey servisi başladığında ve uyku/hazırda bekletmeden sonra geri yüklenir. Hareketli efektlerin renklerini firmware belirler, bu yüzden yalnızca statik efekt bir renk alır.
 
 > Linux kullanıcı servisini başlatmadan önce gösterilen aydınlatma animasyonunun sahibi firmware'dir. Kaydedilmiş bir "kapalı" durum girişten sonra geri yüklenir, ancak bu uygulama önceki BIOS/açılış animasyonunu bastıramaz.
 
@@ -627,6 +631,7 @@ predator-sense-gui/
 │   └── dkms.conf                # DKMS otomatik yeniden derleme yapılandırması
 ├── installer/                   # Rust multicall yükleyici ve servisler
 │   ├── Cargo.toml
+│   ├── assets/                  # Tepsi simgesi pixmap olarak (ARGB32, resources/tray'den)
 │   └── src/
 │       ├── main.rs              # Kurulu çalıştırılabilir dosya adına göre tipli dağıtım
 │       ├── constants.rs         # Merkezi yollar, protokol değerleri ve donanım sabitleri
@@ -637,7 +642,10 @@ predator-sense-gui/
 │       └── i18n.rs              # Tipli EN/PT mesajları
 ├── protocol/                    # Paylaşılan tipli GUI/helper sözleşmesi
 │   ├── Cargo.toml
-│   └── src/lib.rs               # Eylemler, yollar, limitler ve binary adları
+│   └── src/lib.rs               # Eylemler, yollar, limitler, binary adları, klavye raporları
+├── hidraw/                      # PH16-71 klavyesinin aydınlatma hidraw düğümü (tek ioctl)
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Rust GTK4 uygulaması
 │   ├── main.rs
 │   ├── app_state.rs             # Global pencere-görünürlüğü bayrağı (zamanlayıcıları kapatır)
@@ -647,11 +655,21 @@ predator-sense-gui/
 │   ├── hardware/
 │   │   ├── helper.rs            # Tipli ayrıcalıklı-yardımcı istemcisi
 │   │   ├── rgb.rs               # /dev/acer-gkbbl-* üzerinden RGB
+│   │   ├── keyboard_rgb.rs      # hidraw üzerinden PH16-71 klavyesi (Chicony 24 bit)
+│   │   ├── chicony_hid.rs       # Klavyenin açık tutulan hidraw düğümü
+│   │   ├── light_bar.rs         # Kasa ışık çubuğu
+│   │   ├── light_bar_zones.rs   # Işık çubuğunun üç bölgesi (facer düğümü)
+│   │   ├── lighting.rs          # Her güç modunun aydınlatmasını ışıklara koyar
+│   │   ├── lighting_model/      # Mod başına aydınlatma, ön ayarlar, bir ayarın yazdıkları
+│   │   ├── lighting_renderer/   # Temaların uygulamanın çizdiği görünümlerini çizer
+│   │   ├── effects/             # Efekt motoru ve tema kataloğu
+│   │   ├── key_input/           # Yazmaya tepki veren temalar için tuş basışları
 │   │   ├── hwmon.rs             # /sys/class/hwmon indeksi (önbelleğe alınmış OnceLock)
 │   │   ├── sensors.rs           # Sıcaklıklar, fanlar, RAM, ağ
-│   │   ├── gpu.rs               # TTL önbellekli nvidia-smi ayrıştırıcı
+│   │   ├── gpu.rs               # NVML ile GPU ölçümleri, helper ile güç sınırı
+│   │   ├── nvml.rs              # Çalışırken yüklenen NVML (dlopen)
 │   │   ├── procs.rs             # /proc örnekleyici (çekirdek başına CPU, bellek, süreç listesi)
-│   │   ├── storage.rs           # df üzerinden disk kullanımı
+│   │   ├── storage.rs           # statvfs üzerinden disk kullanımı
 │   │   ├── sysinfo.rs           # DMI + CPU + GPU + işletim sistemi özellikleri
 │   │   ├── fan.rs               # Fan modu + CoolBoost
 │   │   ├── extras.rs            # Pil limiti, LCD overdrive, USB şarj, açılış animasyonu
@@ -659,14 +677,20 @@ predator-sense-gui/
 │   │   ├── ai_assistant.rs      # Ollama tool-calling: mevcut hardware:: setter'larına eşlenen sabit izin listesi
 │   │   ├── ai_snapshot.rs       # Yapay zekaya beslenen, her okumadan sonra temizlenen geçici donanım durumu anlık görüntüsü
 │   │   ├── ai_actionlog.rs      # Yapay zekanın önerdiği/uyguladığı her şeyin kalıcı, incelenebilir günlüğü
+│   │   ├── quiet_panics.rs      # Panik kancası: tuş basışlarını gören iş parçacıklarından mesaj yok
 │   │   └── setup.rs             # Çekirdek modülü yönetimi
 │   └── ui/                      # GTK4 sayfaları (Cairo özel widget'ları)
 │       ├── window.rs            # Ana pencere, kenar çubuğu, neon çubuklar, tepsiye gizleme
+│       ├── still_drawing.rs     # Piksel olarak saklanan sabit çizimler
+│       ├── ticks.rs             # Yalnızca görünürken çalışan animasyon zamanlayıcıları
+│       ├── flow_box.rs          # Alt öğeleri kaldırmadan FlowBox içeriği
+│       ├── toasts.rs            # Pencere düzeyinde bildirimler (Geri al)
 │       ├── dashboard_page.rs    # Ana görsel + sistem özellikleri
 │       ├── temperatures_page.rs # Tüm sıcaklık göstergeleri
 │       ├── usage_page.rs        # En çok kaynak tüketen süreçlerle CPU/GPU/Bellek/Depolama
 │       ├── network_page.rs      # Zirve takibiyle indirme/yükleme
-│       ├── rgb_page.rs          # Görsel bölgeli klavye RGB'si
+│       ├── lighting_page.rs     # Aydınlatma sayfası: modlar, ön ayarlar, önizleme
+│       ├── lighting/            # Sekmeleri (Aydınlatma kontrolü, Temalar), önizleme, satırlar
 │       ├── fan_control_page.rs  # Animasyonlu fanlar + CoolBoost
 │       ├── fan_page.rs          # Performans profilleri
 │       ├── battery_page.rs      # Pil istatistikleri + şarj limiti
@@ -675,9 +699,12 @@ predator-sense-gui/
 │       ├── ai_page.rs           # Yapay Zeka Asistanı: sohbet, model yöneticisi, kaynak izleyicisi, eylem günlüğü
 │       ├── setup_page.rs        # Çekirdek modülü kurulum sihirbazı
 │       └── gauge_widget.rs      # Kesikli dairesel gösterge widget'ı
+├── tests/data/                  # Efektlerin referans kareleri, tema ve yapılandırma verileri
+├── tools/                       # gen-golden.js ve çalıştırdığı effects.js (gjs)
 └── resources/
+    ├── tray/                    # Tepsi simgesi kaynakları (PNG)
     ├── style.css                # Oyuncu koyu teması
-    └── predator-icon.svg        # Sistem tepsisi simgesi
+    └── predator-icon.svg        # Uygulama simgesi
 ```
 
 ---

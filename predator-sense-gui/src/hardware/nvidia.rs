@@ -26,11 +26,23 @@ fn read_trim(path: impl AsRef<Path>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// The NVIDIA display devices, found once per run.
+///
+/// Finding them reads the class of every PCI device (35 on a PH16-71), and
+/// the GPU temperature asks for them on each reading. A dGPU does not come
+/// and go while the app runs; one taken off the bus (a mux tool can do that)
+/// is caught by [`live_query_is_safe`], which also checks it is still there.
 fn display_devices() -> Vec<crate::hardware::display::DisplayDevice> {
-    crate::hardware::display::devices()
-        .into_iter()
-        .filter(|device| device.vendor_id == NVIDIA_VENDOR)
-        .collect()
+    static DEVICES: std::sync::OnceLock<Vec<crate::hardware::display::DisplayDevice>> =
+        std::sync::OnceLock::new();
+    DEVICES
+        .get_or_init(|| {
+            crate::hardware::display::devices()
+                .into_iter()
+                .filter(|device| device.vendor_id == NVIDIA_VENDOR)
+                .collect()
+        })
+        .clone()
 }
 
 /// An NVIDIA display device, proprietary driver and `nvidia-smi` are usable.
@@ -42,7 +54,9 @@ pub fn is_available() -> bool {
     driver_is_loaded() && executable_in_path("nvidia-smi")
 }
 
-fn driver_is_loaded() -> bool {
+/// The proprietary driver is loaded for an NVIDIA display device. A file
+/// check under `/proc`, which does not wake the GPU.
+pub fn driver_is_loaded() -> bool {
     display_devices().iter().any(|device| {
         Path::new("/proc/driver/nvidia/gpus")
             .join(&device.bus_id)
@@ -79,7 +93,7 @@ pub fn live_query_is_safe() -> bool {
     !devices.is_empty()
         && devices.iter().all(|device| {
             let status = device.runtime_status();
-            runtime_status_is_safe(status.as_deref())
+            device.path.exists() && runtime_status_is_safe(status.as_deref())
         })
 }
 
@@ -96,6 +110,14 @@ fn parse_proc_information(contents: &str) -> NvidiaInfo {
         }
     }
     info
+}
+
+/// The PCI address of the first NVIDIA display device, as sysfs names it.
+pub fn primary_bus_id() -> Option<String> {
+    display_devices()
+        .into_iter()
+        .next()
+        .map(|device| device.bus_id)
 }
 
 /// Static NVIDIA identity available without runtime-resuming the dGPU.
