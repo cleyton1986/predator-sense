@@ -7,21 +7,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const PROFILE_STATE_FILE: &str = "/opt/predator-sense/current_profile";
 
-// Issue #41 (TongkyakHermit): forcing FanMode::Max on Performance/Turbo (see
-// fan_mode_for() below) matches the physical Predator/Turbo key, but some
+// Issue #41 (TongkyakHermit): binding Performance and Turbo to FanMode::Max
+// (see fan_mode_for() below) matches the physical Predator/Turbo key, but some
 // users would rather keep the automatic fan curve even at those power
 // targets and accept a louder/hotter machine only if the curve itself
 // decides that's needed. Opt-in, default off - keeps the existing
 // safety-first behavior for everyone who doesn't touch the new setting.
-static KEEP_FAN_AUTO_IN_PERFORMANCE: AtomicBool = AtomicBool::new(false);
-
-pub fn set_keep_fan_auto_in_performance(v: bool) {
-    KEEP_FAN_AUTO_IN_PERFORMANCE.store(v, Ordering::Relaxed);
-}
-
-pub fn keep_fan_auto_in_performance() -> bool {
-    KEEP_FAN_AUTO_IN_PERFORMANCE.load(Ordering::Relaxed)
-}
+//
+// The in-memory mirror of the setting this module used to keep is gone: since
+// fan behaviour is decided by `config::fan_plans` rather than by set_profile,
+// the only reader is `fan::migrate_plans`, which already has the whole
+// AppConfig in hand. A second copy could only drift from it.
 
 // Issue #57 (dathide): some users run a separate CPU tuning tool (e.g.
 // `tuned` with a custom profile) that writes the exact same sysfs files a
@@ -45,9 +41,17 @@ pub fn manage_cpu_power() -> bool {
     MANAGE_CPU_POWER.load(Ordering::Relaxed)
 }
 
-/// Pure so it's directly testable without touching hardware - see
-/// `fan_mode_for_tests` below.
-fn fan_mode_for(profile: PowerProfile, keep_auto: bool) -> crate::hardware::fan::FanMode {
+/// Which fan mode a power profile asks for. Pure so it's directly testable
+/// without touching hardware - see `fan_mode_for_tests` below.
+///
+/// No longer called from `set_profile`, which does not touch fan hardware at
+/// all now. It is instead what `fan::migrate_plans` binds each mode's initial
+/// fan plan from, so the mapping this function has always described survives
+/// the move to per-mode plans rather than being dropped on the way.
+pub(crate) fn fan_mode_for(
+    profile: PowerProfile,
+    keep_auto: bool,
+) -> crate::hardware::fan::FanMode {
     match profile {
         PowerProfile::Performance | PowerProfile::Turbo if keep_auto => {
             crate::hardware::fan::FanMode::Auto
@@ -1016,19 +1020,13 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
 
     apply_firmware_profile(profile);
 
-    // Fan mode used to only follow the physical Predator/Turbo key (see
-    // window.rs's turbo-key handler); picking a profile from the "Modo" page
-    // or via the AI assistant left whatever fan mode was previously set
-    // untouched, so e.g. selecting Quiet right after Max didn't quiet
-    // anything down. Every profile change now carries a matching fan mode,
-    // best-effort like the GPU wattage write above - some models have no EC
-    // fan control at all. Performance/Turbo push CPU+GPU power targets high
-    // enough that automatic fan curves alone won't keep up, so both force
-    // Max by default (matching what the physical Turbo key already does);
-    // only Quiet/Balanced leave the fan on Auto - unless the user opted into
-    // keeping Auto on Performance/Turbo too (see fan_mode_for() above).
-    let fan_mode = fan_mode_for(profile, keep_fan_auto_in_performance());
-    let _ = crate::hardware::fan::set_fan_mode(fan_mode);
+    // Fan mode used to be forced here to match the profile (Performance/Turbo
+    // to Max, everything else to Auto), the mapping fan_mode_for() above
+    // holds. That is now decided by the mode's own fan plan
+    // (`config::fan_plans`) instead: the reconciler tick in window.rs reads
+    // the plan bound to whichever profile is active and applies it, so this
+    // function no longer touches fan hardware at all. The mapping itself is
+    // not lost, it is what fan::migrate_plans seeds those plans from.
 
     // Save the selected profile to state file
     let _ = fs::write(PROFILE_STATE_FILE, profile.to_id());

@@ -3,7 +3,8 @@ use crate::hardware::profile::PowerProfile;
 use crate::hardware::rgb::{EffectParams, RgbConfig, RgbMode};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Last-applied 2024+ HID keyboard lighting state (`hardware::magic_rgb`,
 /// issues #25/#26) - same "the app forgets which effect was last applied and
@@ -146,6 +147,30 @@ pub struct ModeBinding {
     pub scheme: String,
 }
 
+/// What the fans should do while a given power mode is active.
+///
+/// `Automatic` leaves them to the firmware, which is the only thing that can
+/// stop them: a manual pwm of 0 is not off, the EC holds a floor, measured at
+/// ~1670 RPM on a PH16-71. See `fan::CurveAction::Firmware`, which carries the
+/// rest of that measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FanPlan {
+    Automatic,
+    Curve { steps: [u8; 6] },
+    Fixed { percent: u8 },
+    Max,
+}
+
+/// Binds a fan plan to a power mode, keyed by `PowerProfile::to_id()` for the
+/// same reason `ModeBinding` is: the map stays readable in config.json and
+/// survives an unknown mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanBinding {
+    pub mode: String,
+    pub plan: FanPlan,
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -167,9 +192,12 @@ pub struct AppConfig {
     #[serde(default)]
     pub debug_logging: bool,
     /// Issue #41 (TongkyakHermit): keep the fan on Auto even when
-    /// Performance/Turbo is selected, instead of forcing Max like the
-    /// physical Predator/Turbo key does. Off by default - preserves the
-    /// existing safety-first behavior for everyone who doesn't touch it.
+    /// Performance/Turbo is selected, instead of Max like the physical
+    /// Predator/Turbo key does. Off by default - preserves the existing
+    /// safety-first behavior for everyone who doesn't touch it. Expressed by
+    /// binding those two modes' `fan_plans` entries (see
+    /// `fan::plans_with_keep_fan_auto`), which is what the fans actually
+    /// follow; this field is what the switch shows and what migration reads.
     #[serde(default)]
     pub keep_fan_auto_in_performance: bool,
     /// Fan Control page (`ui::fan_control_page`): CoolBoost and the selected
@@ -197,6 +225,11 @@ pub struct AppConfig {
     /// this setting sees any behavior change.
     #[serde(default = "default_fan_curve_points")]
     pub fan_curve_points: [u8; 6],
+    /// One fan plan per power mode. Empty means "not migrated yet", which
+    /// `hardware::fan::migrate_plans` fills from the pre-existing global fan
+    /// settings on first run.
+    #[serde(default)]
+    pub fan_plans: Vec<FanBinding>,
     /// Last-applied static RGB zone colors (issue #11: nothing persisted this
     /// before, so a full power cycle always reset the keyboard to its default
     /// pulsing effect). Reapplied after login/resume by the Rust hotkey service.
@@ -499,6 +532,7 @@ impl Default for AppConfig {
             fan_mode: None,
             fan_auto_curve_enabled: false,
             fan_curve_points: default_fan_curve_points(),
+            fan_plans: Vec::new(),
             rgb_static_zones: None,
             rgb_brightness: 100,
             rgb_is_static: true,
@@ -641,12 +675,60 @@ pub fn list_profiles() -> Vec<String> {
         .collect()
 }
 
+/// What reading `config.json` actually found.
+///
+/// `load_app_config` collapses every failure into the default config, which is
+/// indistinguishable from a fresh install. Any background writer holding that
+/// default is one save away from replacing every lighting scheme, game
+/// profile, macro and setting the file still holds, so a caller that writes
+/// without the user asking has to be able to tell the two apart.
+pub enum AppConfigSource {
+    /// No config file yet: a fresh install, and the only state where writing
+    /// a default config back loses nothing.
+    Missing,
+    Loaded(AppConfig),
+    /// The file is there but could not be read or parsed. The user's settings
+    /// are still in it, so nothing may be written over them unasked.
+    Unreadable(String),
+}
+
+pub fn read_app_config_at(path: &Path) -> AppConfigSource {
+    let json = match fs::read_to_string(path) {
+        Ok(json) => json,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return AppConfigSource::Missing,
+        // Unreadable for any other reason (permissions, I/O) is still a file
+        // that exists and holds the user's settings.
+        Err(e) => return AppConfigSource::Unreadable(e.to_string()),
+    };
+    match serde_json::from_str(&json) {
+        Ok(config) => AppConfigSource::Loaded(config),
+        Err(e) => AppConfigSource::Unreadable(e.to_string()),
+    }
+}
+
+/// Logged at most once per session: the callers below run on timers a few
+/// seconds apart, and a damaged config stays damaged.
+static CONFIG_UNREADABLE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// `load_app_config`, but saying where the config came from.
+pub fn load_app_config_source() -> AppConfigSource {
+    let source = read_app_config_at(&config_dir().join("config.json"));
+    if let AppConfigSource::Unreadable(error) = &source {
+        if !CONFIG_UNREADABLE_LOGGED.swap(true, Ordering::Relaxed) {
+            crate::hardware::applog::error(&format!(
+                "config: config.json exists but could not be loaded, running on defaults \
+                 without overwriting it: {error}"
+            ));
+        }
+    }
+    source
+}
+
 /// Load app config
 pub fn load_app_config() -> AppConfig {
-    let path = config_dir().join("config.json");
-    match fs::read_to_string(&path) {
-        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
-        Err(_) => AppConfig::default(),
+    match load_app_config_source() {
+        AppConfigSource::Loaded(config) => config,
+        AppConfigSource::Missing | AppConfigSource::Unreadable(_) => AppConfig::default(),
     }
 }
 
@@ -716,6 +798,40 @@ fn sanitize_filename(name: &str) -> String {
 mod tests {
     use super::*;
 
+    /// An unparseable config used to be indistinguishable from a fresh
+    /// install: both handed the caller `AppConfig::default()`, with an empty
+    /// `fan_plans`, which is exactly what makes the reconciler migrate and
+    /// save. That saved the defaults over a file still holding every lighting
+    /// scheme, game profile, macro and setting the user had.
+    #[test]
+    fn an_unreadable_config_is_not_reported_as_a_fresh_install() {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-config-source-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.json");
+        let _ = fs::remove_file(&path);
+
+        assert!(
+            matches!(read_app_config_at(&path), AppConfigSource::Missing),
+            "no file at all is the one case where writing defaults back is safe"
+        );
+
+        let saved = serde_json::to_string(&AppConfig::default()).expect("serialize");
+        fs::write(&path, &saved).expect("write");
+        assert!(matches!(read_app_config_at(&path), AppConfigSource::Loaded(_)));
+
+        fs::write(&path, "{ not json at all").expect("write");
+        match read_app_config_at(&path) {
+            AppConfigSource::Unreadable(error) => assert!(!error.is_empty()),
+            _ => panic!("a present but unparseable file must not read as Missing or Loaded"),
+        }
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+    }
+
     /// A macro saved before `MacroStep::delay_only` existed has no such key
     /// in its JSON at all - `#[serde(default)]` must still load it, not
     /// error out or silently corrupt every macro a user already recorded.
@@ -739,5 +855,36 @@ mod tests {
         let back: MacroStep = serde_json::from_str(&json).expect("step should deserialize");
         assert_eq!(back.delay_ms, 500);
         assert!(back.delay_only);
+    }
+}
+
+#[cfg(test)]
+mod fan_plan_tests {
+    use super::*;
+
+    #[test]
+    fn a_curve_plan_survives_a_config_round_trip() {
+        let binding = FanBinding {
+            mode: "balanced".into(),
+            plan: FanPlan::Curve { steps: [0, 35, 50, 65, 80, 100] },
+        };
+        let json = serde_json::to_string(&binding).expect("serialize");
+        let back: FanBinding = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.mode, "balanced");
+        assert_eq!(back.plan, FanPlan::Curve { steps: [0, 35, 50, 65, 80, 100] });
+    }
+
+    #[test]
+    fn every_plan_variant_round_trips() {
+        for plan in [
+            FanPlan::Automatic,
+            FanPlan::Max,
+            FanPlan::Fixed { percent: 40 },
+            FanPlan::Curve { steps: crate::hardware::fan::DEFAULT_FAN_CURVE },
+        ] {
+            let json = serde_json::to_string(&plan).expect("serialize");
+            let back: FanPlan = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, plan);
+        }
     }
 }
