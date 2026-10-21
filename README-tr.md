@@ -667,6 +667,7 @@ predator-sense-gui/
 │   │   └── setup.rs             # Çekirdek modülü yönetimi
 │   └── ui/                      # GTK4 sayfaları (Cairo özel widget'ları)
 │       ├── window.rs            # Ana pencere, kenar çubuğu, neon çubuklar, tepsiye gizleme
+│       ├── flow_box.rs          # Alt öğeleri kaldırmadan FlowBox içeriği
 │       ├── dashboard_page.rs    # Ana görsel + sistem özellikleri
 │       ├── temperatures_page.rs # Tüm sıcaklık göstergeleri
 │       ├── usage_page.rs        # En çok kaynak tüketen süreçlerle CPU/GPU/Bellek/Depolama

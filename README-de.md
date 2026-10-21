@@ -687,6 +687,7 @@ predator-sense-gui/
 │   │   └── setup.rs             # Verwaltung des Kernelmoduls
 │   └── ui/                      # GTK4-Seiten (benutzerdefinierte Cairo-Widgets)
 │       ├── window.rs            # Hauptfenster, Seitenleiste, Neon-Balken, Ausblenden in den Tray
+│       ├── flow_box.rs          # FlowBox-Inhalt, ohne Kinder zu entfernen
 │       ├── dashboard_page.rs    # Hero-Bereich + Systemspezifikationen
 │       ├── temperatures_page.rs # Alle Temperaturanzeigen
 │       ├── usage_page.rs        # CPU/GPU/Speicher/Datenträger mit ressourcenintensivsten Prozessen

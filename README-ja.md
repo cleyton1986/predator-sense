@@ -608,6 +608,7 @@ predator-sense-gui/
 │   │   └── setup.rs             # カーネルモジュール管理
 │   └── ui/                      # GTK4ページ（Cairoカスタムウィジェット）
 │       ├── window.rs            # メインウィンドウ、サイドバー、ネオンバー、トレイへの非表示化
+│       ├── flow_box.rs          # 子を削除しないFlowBoxの内容更新
 │       ├── dashboard_page.rs    # ヒーロー表示 + システム仕様
 │       ├── temperatures_page.rs # すべての温度ゲージ
 │       ├── usage_page.rs        # 上位プロセス付きのCPU/GPU/メモリ/ストレージ

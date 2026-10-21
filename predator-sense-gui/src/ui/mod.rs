@@ -14,10 +14,13 @@ pub mod fan_control_page;
 pub mod fan_curve_geometry;
 pub mod fan_curve_widget;
 pub mod fan_page;
+pub mod flow_box;
 pub mod font_scale;
 pub mod game_sync_page;
 pub mod gauge_widget;
 pub mod gpu_page;
+#[cfg(test)]
+pub mod gtk_test;
 pub mod grub_splash_page;
 pub mod lighting_page;
 pub mod macros_page;

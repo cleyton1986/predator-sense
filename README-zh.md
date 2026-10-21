@@ -664,6 +664,7 @@ predator-sense-gui/
 │   │   └── setup.rs             # 内核模块管理
 │   └── ui/                      # GTK4 页面（Cairo 自定义控件）
 │       ├── window.rs            # 主窗口、侧边栏、霓虹条、隐藏到托盘
+│       ├── flow_box.rs          # 不移除子项的 FlowBox 内容更新
 │       ├── dashboard_page.rs    # 主视觉区 + 系统规格
 │       ├── temperatures_page.rs # 全部温度仪表盘
 │       ├── usage_page.rs        # 带占用最高进程的 CPU/GPU/内存/存储

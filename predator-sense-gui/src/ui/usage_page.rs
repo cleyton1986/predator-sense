@@ -826,22 +826,25 @@ fn redraw_in_subtree(w: &gtk::Widget) {
 }
 
 fn rebuild_storage_cards(flow: &gtk::FlowBox, state: &Rc<RefCell<AnimState>>) {
-    while let Some(c) = flow.first_child() {
-        flow.remove(&c);
-    }
     let st = state.borrow();
     let disks: Vec<DiskUsage> = st.disks.clone();
     let expanded = st.expanded_disk.clone();
     drop(st);
-    for (i, d) in disks.iter().enumerate() {
-        let card = build_storage_card(
-            d.clone(),
-            i,
-            expanded.as_deref() == Some(&d.mount),
-            state.clone(),
-        );
-        flow.insert(&card, -1);
-    }
+    let cards: Vec<gtk::Widget> = disks
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            build_storage_card(
+                d.clone(),
+                i,
+                expanded.as_deref() == Some(&d.mount),
+                state.clone(),
+            )
+        })
+        .collect();
+    // The cards' wrappers are reused, never removed: GTK leaves its keyboard cursor on a
+    // removed wrapper, and the next arrow key reads freed memory (`ui::flow_box`).
+    crate::ui::flow_box::set_contents(flow, &cards, crate::ui::flow_box::Wrappers::PLAIN);
 }
 
 fn build_storage_card(

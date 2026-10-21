@@ -681,6 +681,7 @@ predator-sense-gui/
 │   │   └── setup.rs             # Gestione del modulo kernel
 │   └── ui/                      # Pagine GTK4 (widget Cairo personalizzati)
 │       ├── window.rs            # Finestra principale, sidebar, barre neon, riduci a tray
+│       ├── flow_box.rs          # Contenuto di FlowBox senza rimuovere figli
 │       ├── dashboard_page.rs    # Hero + specifiche di sistema
 │       ├── temperatures_page.rs # Tutti i gauge di temperatura
 │       ├── usage_page.rs        # CPU/GPU/Mem/Storage con i processi principali
