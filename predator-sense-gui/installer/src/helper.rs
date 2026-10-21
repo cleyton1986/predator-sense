@@ -392,6 +392,22 @@ pub(crate) fn run(args: &[String]) -> AppResult {
     run_with_paths(args, &root, ec)
 }
 
+/// A `chicony-auto-off` command: `30 01 ST`, the keyboard's own 30 s idle
+/// timer on or off, as one 24-bit command ([`chicony_send_24bit`]).
+fn set_keyboard_timer(on: bool) -> AppResult {
+    chicony_send_24bit(&[keyboard::auto_off_packet(on)])
+}
+
+fn parse_keyboard_timer(value: &str) -> AppResult<bool> {
+    match value.trim() {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        other => Err(fail(format!(
+            "chicony-auto-off: invalid value '{other}' (must be 0 or 1)"
+        ))),
+    }
+}
+
 /// Daemon mode: reads one action line at a time (same wire format as normal
 /// argv, space-separated) until the caller's end of stdin closes, replying to
 /// each with an [`internal::HELPER_DAEMON_OK`]/[`internal::HELPER_DAEMON_ERR`]
@@ -682,6 +698,7 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
             let direction = parse_u16("direction", &args[7], 1, 6)? as u8;
             chicony_effect_apply(opcode, speed, brightness, red, green, blue, direction)
         }
+        HelperAction::ChiconyAutoOff => set_keyboard_timer(parse_keyboard_timer(&args[1])?),
         HelperAction::GrubSplashApply => grub_splash_apply(&args[1], &args[2], sysfs),
         HelperAction::GrubSplashReset => grub_splash_reset(sysfs),
     }
@@ -3352,6 +3369,12 @@ mod tests {
             keyboard::colour_packet(0xff, 0x80, 0x00),
             [0x14, 0, 0, 0xff, 0x80, 0x00, 0, 0x6c]
         );
+    }
+
+    #[test]
+    fn chicony_auto_off_packet_layout() {
+        assert_eq!(keyboard::auto_off_packet(false), [0x30, 0x01, 0, 0, 0, 0, 0, 0xce]);
+        assert_eq!(keyboard::auto_off_packet(true), [0x30, 0x01, 1, 0, 0, 0, 0, 0xcd]);
     }
 
     #[test]

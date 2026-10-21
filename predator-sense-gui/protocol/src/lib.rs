@@ -402,6 +402,9 @@ pub mod helper {
         /// controller's own ranges by the helper. Opcode is this keyboard's
         /// effect id - see `hardware::keyboard_rgb::Effect`.
         ChiconyEffect,
+        /// Switches the keyboard's own 30 s auto-off timer. Args: 0|1
+        /// (1 = on, the firmware default; the setting resets at boot).
+        ChiconyAutoOff,
         /// Mode-key cycles, as comma-separated WMI profile indices, written to
         /// facer's `mode_cycle_ac`/`mode_cycle_battery`. Args: AC BATTERY,
         /// either of which may be `skip` to leave that list alone. The key is
@@ -458,7 +461,7 @@ pub mod helper {
     }
 
     impl Action {
-        pub const ALL: [Self; 48] = [
+        pub const ALL: [Self; 49] = [
             Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
@@ -498,6 +501,7 @@ pub mod helper {
             Self::ChiconyRgb,
             Self::ChiconyColor,
             Self::ChiconyEffect,
+            Self::ChiconyAutoOff,
             Self::ModeCycle,
             Self::ThermalProfile,
             Self::BootReapplyThermal,
@@ -550,6 +554,7 @@ pub mod helper {
                 "chicony-rgb" => Some(Self::ChiconyRgb),
                 "chicony-color" => Some(Self::ChiconyColor),
                 "chicony-effect" => Some(Self::ChiconyEffect),
+                "chicony-auto-off" => Some(Self::ChiconyAutoOff),
                 "mode-cycle" => Some(Self::ModeCycle),
                 "thermal-profile" => Some(Self::ThermalProfile),
                 "boot-reapply-thermal" => Some(Self::BootReapplyThermal),
@@ -604,6 +609,7 @@ pub mod helper {
                 Self::ChiconyRgb => "chicony-rgb",
                 Self::ChiconyColor => "chicony-color",
                 Self::ChiconyEffect => "chicony-effect",
+                Self::ChiconyAutoOff => "chicony-auto-off",
                 Self::ModeCycle => "mode-cycle",
                 Self::ThermalProfile => "thermal-profile",
                 Self::BootReapplyThermal => "boot-reapply-thermal",
@@ -657,6 +663,7 @@ pub mod helper {
                 Self::ChiconyRgb => 4,
                 Self::ChiconyColor => 4,
                 Self::ChiconyEffect => 7,
+                Self::ChiconyAutoOff => 1,
                 Self::ModeCycle => 2,
                 Self::ThermalProfile => 1,
                 Self::BootReapplyThermal => 1,
@@ -712,6 +719,7 @@ pub mod helper {
                 Self::ChiconyRgb => "chicony-rgb EFFECT BRIGHTNESS COLOR SPEED",
                 Self::ChiconyColor => "chicony-color RED GREEN BLUE BRIGHTNESS",
                 Self::ChiconyEffect => "chicony-effect OPCODE SPEED BRIGHTNESS RED GREEN BLUE DIRECTION",
+                Self::ChiconyAutoOff => "chicony-auto-off 0|1",
                 Self::ModeCycle => "mode-cycle AC|skip BATTERY|skip",
                 Self::ThermalProfile => "thermal-profile INDEX",
                 Self::BootReapplyThermal => "boot-reapply-thermal USER_HOME",
@@ -1655,6 +1663,14 @@ mod tests {
             assert_eq!(Action::parse(action.as_str()), Some(action));
             assert!(action.usage().starts_with(action.as_str()));
         }
+    }
+
+    #[test]
+    fn keyboard_firmware_actions_are_wired_up() {
+        assert!(Action::ALL.contains(&Action::ChiconyAutoOff));
+        assert_eq!(Action::parse("chicony-auto-off"), Some(Action::ChiconyAutoOff));
+        assert_eq!(Action::ChiconyAutoOff.argument_count(), 1);
+        assert_eq!(Action::ChiconyAutoOff.usage(), "chicony-auto-off 0|1");
     }
 
     #[test]
@@ -2687,6 +2703,12 @@ pub mod keyboard {
         [PREAMBLE, colour_packet(red, green, blue), effect]
     }
 
+    /// `30 01 ST 00 00 00 00 CK`: the keyboard's own auto-off after 30 s
+    /// idle, on or off.
+    pub fn auto_off_packet(on: bool) -> [u8; FEATURE_LEN] {
+        sealed([0x30, 0x01, u8::from(on), 0, 0, 0, 0])
+    }
+
 }
 
 #[cfg(test)]
@@ -2804,5 +2826,11 @@ mod keyboard_tests {
         for packet in keyboard::effect_packets(0x29, 37, 74, 9, 8, 7, 4) {
             assert_eq!(packet[7], !byte_sum(&packet[..7]), "{packet:02x?}");
         }
+    }
+
+    #[test]
+    fn the_auto_off_report_carries_the_timer_state_in_byte_two() {
+        assert_eq!(keyboard::auto_off_packet(false), [0x30, 0x01, 0, 0, 0, 0, 0, 0xce]);
+        assert_eq!(keyboard::auto_off_packet(true), [0x30, 0x01, 1, 0, 0, 0, 0, 0xcd]);
     }
 }
