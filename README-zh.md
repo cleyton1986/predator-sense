@@ -647,6 +647,8 @@ predator-sense-gui/
 │   ├── hardware/
 │   │   ├── helper.rs            # 类型化的特权 helper 客户端
 │   │   ├── rgb.rs               # 通过 /dev/acer-gkbbl-* 实现的 RGB
+│   │   ├── keyboard_rgb.rs      # 通过 hidraw 访问的 PH16-71 键盘（Chicony 24 位）
+│   │   ├── chicony_hid.rs       # 保持打开的键盘 hidraw 节点
 │   │   ├── hwmon.rs             # /sys/class/hwmon 索引（使用 OnceLock 缓存）
 │   │   ├── sensors.rs           # 温度、风扇、RAM、网络
 │   │   ├── gpu.rs               # 带 TTL 缓存的 nvidia-smi 解析器

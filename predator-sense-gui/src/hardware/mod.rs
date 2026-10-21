@@ -7,6 +7,7 @@ pub mod blanking;
 pub mod audio_eq;
 pub mod audio_sync;
 pub mod capabilities;
+pub mod chicony_hid;
 pub mod chicony_rgb;
 pub mod discrete_gpu;
 pub mod display;

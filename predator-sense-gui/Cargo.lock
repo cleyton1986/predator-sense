@@ -729,10 +729,19 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "libc",
+ "predator-sense-hidraw",
  "predator-sense-protocol",
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "predator-sense-hidraw"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "predator-sense-protocol",
 ]
 
 [[package]]

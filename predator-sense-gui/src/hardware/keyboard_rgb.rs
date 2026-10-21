@@ -10,13 +10,25 @@
 //! Confirmed on real hardware (PH16-71, 04F2:0117): colours outside the
 //! 7-entry palette render correctly, brightness scales, and the animated
 //! effects run. Wire format cross-checked against CPT-Dawn/Arch-Sense and
-//! Order52/ph16-71-rgb, both of which target this exact keyboard; the actual
-//! USB transfer lives in the privileged helper (`chicony_effect_apply`).
+//! Order52/ph16-71-rgb, both of which target this exact keyboard; the bytes
+//! are built in `predator_sense_protocol::keyboard`.
+//!
+//! Every write goes to the keyboard's hidraw node from this process
+//! ([`chicony_hid`](super::chicony_hid)) when the user can open it (the
+//! installer's udev rule, for the active session's user), and to the privileged
+//! helper's actions otherwise ([`route`]). Both send the same reports.
 
+use std::sync::{Mutex, MutexGuard, TryLockError};
+
+use predator_sense_protocol::keyboard;
 use serde::{Deserialize, Serialize};
 
 use super::blanking::Blanking;
+use super::chicony_hid::{self, Keyboard, Node};
 use crate::config::AppConfig;
+
+/// The highest direction the effect packet takes (Wave's six).
+pub const DIRECTION_MAX: u8 = 6;
 
 /// One entry of the controller's effect table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -118,11 +130,12 @@ pub struct KeyboardState {
     pub red: u8,
     pub green: u8,
     pub blue: u8,
-    /// Percent, scaled to the controller's own ceiling by the helper.
+    /// Percent, scaled to the controller's own ceiling on the wire
+    /// (`protocol::keyboard`), on either route.
     pub brightness: u8,
     /// Percent; higher is faster.
     pub speed: u8,
-    /// 1 or 2, only meaningful for [`Effect::uses_direction`].
+    /// 1..=6, only meaningful for [`Effect::uses_direction`].
     pub direction: u8,
 }
 
@@ -154,40 +167,191 @@ pub fn is_available() -> bool {
         && super::sysinfo::product_matches(predator_sense_protocol::dmi::CHICONY_24BIT_MODELS)
 }
 
+/// The keyboard's hidraw node, opened on first use and kept open. Held for
+/// the whole of one transfer, so two writes never interleave on the wire,
+/// and never across a helper call, which can wait on an authentication
+/// dialog.
+static HIDRAW: Mutex<Keyboard<chicony_hid::Hidraw>> =
+    Mutex::new(Keyboard::new(chicony_hid::Hidraw::SYSTEM));
+
+/// Where one keyboard write or read goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// The hidraw node, from this process.
+    Hidraw,
+    /// The privileged helper's actions.
+    Helper,
+}
+
+/// The node when this user can write it, the helper otherwise. Decided again for every call, which
+/// costs nothing: once the node has opened in this process it stays the route, its failures
+/// reported by the call and never sent to a helper that could bring up an authentication dialog
+/// ([`Keyboard::is_writable`]). Until then a refused node is asked again within
+/// [`chicony_hid::RECHECK_AFTER`], so one that becomes writable while the app runs (the udev rule
+/// installed) is used from then on.
+fn route(writable: bool) -> Route {
+    if writable {
+        Route::Hidraw
+    } else {
+        Route::Helper
+    }
+}
+
+fn lock_node<N: Node>(slot: &Mutex<Keyboard<N>>) -> MutexGuard<'_, Keyboard<N>> {
+    slot.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// One keyboard call: `hidraw` on the node in `slot` when [`route`] picks
+/// it, else `helper`, with the node unlocked.
+fn routed<N: Node, T>(
+    slot: &Mutex<Keyboard<N>>,
+    hidraw: impl FnOnce(&mut Keyboard<N>) -> T,
+    helper: impl FnOnce() -> T,
+) -> T {
+    let mut node = lock_node(slot);
+    match route(node.is_writable()) {
+        Route::Hidraw => hidraw(&mut node),
+        Route::Helper => {
+            drop(node);
+            helper()
+        }
+    }
+}
+
+/// [`routed`] where this is the keyboard the capability names (`capable`),
+/// and straight to `helper` everywhere else. The Helios 300 has the same
+/// 04F2:0117, so without the gate its node would be looked for and opened.
+fn routed_if<N: Node, T>(
+    capable: bool,
+    slot: &Mutex<Keyboard<N>>,
+    hidraw: impl FnOnce(&mut Keyboard<N>) -> T,
+    helper: impl FnOnce() -> T,
+) -> T {
+    if capable {
+        routed(slot, hidraw, helper)
+    } else {
+        helper()
+    }
+}
+
+/// One call on this machine's keyboard: [`routed_if`] on the real node,
+/// gated on the `keyboard_rgb` capability.
+fn on_keyboard<T>(
+    hidraw: impl FnOnce(&mut Keyboard<chicony_hid::Hidraw>) -> T,
+    helper: impl FnOnce() -> T,
+) -> T {
+    routed_if(
+        crate::hardware::capabilities::get().keyboard_rgb,
+        &HIDRAW,
+        hidraw,
+        helper,
+    )
+}
+
+/// Whether the node in `slot` is writable, without waiting. A slot that is
+/// busy answers true: a transfer holds it, or a call deciding its route
+/// (perhaps over an open that fails). True is safe either way, because
+/// every caller of this goes on to a call that brings up no
+/// authentication dialog on either route.
+fn slot_is_writable<N: Node>(slot: &Mutex<Keyboard<N>>) -> bool {
+    match slot.try_lock() {
+        Ok(mut node) => node.is_writable(),
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().is_writable(),
+        Err(TryLockError::WouldBlock) => true,
+    }
+}
+
+/// [`slot_is_writable`] where `capable`, false without looking elsewhere.
+fn slot_is_writable_if<N: Node>(capable: bool, slot: &Mutex<Keyboard<N>>) -> bool {
+    capable && slot_is_writable(slot)
+}
+
+/// Whether this process writes the keyboard through its hidraw node. Never
+/// waits, and false without looking on a machine without the `keyboard_rgb`
+/// capability.
+pub fn is_hidraw_writable() -> bool {
+    slot_is_writable_if(crate::hardware::capabilities::get().keyboard_rgb, &HIDRAW)
+}
+
 /// Whether the keyboard can be written now without an authentication
-/// dialog: through a privileged session that is already open. Never waits,
-/// so the UI thread can ask at exit.
+/// dialog: through its hidraw node, or a privileged session that is already
+/// open. Never waits, so the UI thread can ask at exit.
 pub fn writable_without_prompt() -> bool {
-    crate::hardware::helper::open_session_exists()
+    is_hidraw_writable() || crate::hardware::helper::open_session_exists()
+}
+
+fn hidraw_error(error: std::io::Error) -> String {
+    format!("keyboard (hidraw): {error}")
+}
+
+/// The reports the node gets for `state`: what the helper sends for
+/// [`effect_arguments`].
+fn effect_reports(state: &KeyboardState) -> [[u8; keyboard::FEATURE_LEN]; 3] {
+    keyboard::effect_packets(
+        state.effect.opcode(),
+        wire_speed(state),
+        wire_brightness(state),
+        state.red,
+        state.green,
+        state.blue,
+        wire_direction(state),
+    )
+}
+
+fn send_effect<N: Node>(node: &mut Keyboard<N>, state: &KeyboardState) -> Result<(), String> {
+    node.send_features(&effect_reports(state)).map_err(hidraw_error)
+}
+
+fn send_auto_off<N: Node>(node: &mut Keyboard<N>, on: bool) -> Result<(), String> {
+    node.send_feature(&keyboard::auto_off_packet(on)).map_err(hidraw_error)
 }
 
 /// Applies `state`. `Off` is the static opcode at zero brightness, which is how
 /// this controller expresses "backlight off".
 pub fn apply(state: &KeyboardState) -> Result<(), String> {
-    let arguments = effect_arguments(state);
-    let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    crate::hardware::helper::execute(
-        predator_sense_protocol::helper::Action::ChiconyEffect,
-        &arguments,
-    )
+    on_keyboard(|node| send_effect(node, state), || {
+        let arguments = effect_arguments(state);
+        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        crate::hardware::helper::execute(
+            predator_sense_protocol::helper::Action::ChiconyEffect,
+            &arguments,
+        )
+    })
+}
+
+/// The brightness percent sent for `state`: `Off` at zero, and never above
+/// 100, which the helper would refuse (only a hand-edited config has more).
+fn wire_brightness(state: &KeyboardState) -> u8 {
+    if state.effect == Effect::Off {
+        0
+    } else {
+        state.brightness.min(100)
+    }
+}
+
+/// The speed percent sent for `state`, never above 100 for the same reason.
+fn wire_speed(state: &KeyboardState) -> u8 {
+    state.speed.min(100)
 }
 
 /// The `ChiconyEffect` helper arguments for `state`.
 fn effect_arguments(state: &KeyboardState) -> Vec<String> {
-    let brightness = if state.effect == Effect::Off {
-        0
-    } else {
-        state.brightness
-    };
     vec![
         state.effect.opcode().to_string(),
-        state.speed.to_string(),
-        brightness.to_string(),
+        wire_speed(state).to_string(),
+        wire_brightness(state).to_string(),
         state.red.to_string(),
         state.green.to_string(),
         state.blue.to_string(),
-        state.direction.clamp(1, 2).to_string(),
+        wire_direction(state).to_string(),
     ]
+}
+
+/// Direction byte, on either route. Confirmed on this keyboard (PH16-71) for
+/// Wave: 1 left to right, 2 right to left, 3 bottom to top, 4 top to bottom,
+/// 5 clockwise, 6 counter-clockwise.
+fn wire_direction(state: &KeyboardState) -> u8 {
+    state.direction.clamp(1, DIRECTION_MAX)
 }
 
 static BLANKING: Blanking = Blanking::new();
@@ -272,20 +436,24 @@ fn auto_off_argument(on: bool) -> &'static str {
 /// Switches the controller's own 30 s sleep timer on or off. It comes back on
 /// at every boot and survives suspend.
 pub fn set_firmware_auto_off(on: bool) -> Result<(), String> {
-    crate::hardware::helper::execute(
-        predator_sense_protocol::helper::Action::ChiconyAutoOff,
-        &[auto_off_argument(on)],
-    )
+    on_keyboard(|node| send_auto_off(node, on), || {
+        crate::hardware::helper::execute(
+            predator_sense_protocol::helper::Action::ChiconyAutoOff,
+            &[auto_off_argument(on)],
+        )
+    })
 }
 
 /// [`set_firmware_auto_off`] where no authentication dialog may appear:
-/// only through a privileged session that is already open (`None` when
-/// there is none).
+/// through the hidraw node, or else only through a privileged session that
+/// is already open (`None` when neither is there).
 fn set_firmware_auto_off_without_prompt(on: bool) -> Option<Result<(), String>> {
-    crate::hardware::helper::execute_in_open_session(
-        predator_sense_protocol::helper::Action::ChiconyAutoOff,
-        &[auto_off_argument(on)],
-    )
+    on_keyboard(|node| Some(send_auto_off(node, on)), || {
+        crate::hardware::helper::execute_in_open_session(
+            predator_sense_protocol::helper::Action::ChiconyAutoOff,
+            &[auto_off_argument(on)],
+        )
+    })
 }
 
 /// Whether [`apply_keyboard_idle`] sends the keyboard state again after the
@@ -484,9 +652,10 @@ pub fn retry_timer_off_if_due() {
 }
 
 /// One retry of the timer-off write, then the relight [`retry_relights`]
-/// asks for. Only through a privileged session that is already open, so a
-/// retry never brings up an authentication dialog: with none (the dialog
-/// was dismissed at startup), it waits for the next one. Under the same lock as
+/// asks for. Through the hidraw node, or else only through a privileged
+/// session that is already open, so a retry never brings up an
+/// authentication dialog: with neither (the dialog was dismissed at
+/// startup), it waits for the next one. Under the same lock as
 /// [`apply_keyboard_idle`], so the exit hand-back cannot be overtaken.
 fn retry_timer_off() {
     let _serial = KEYBOARD_IDLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -529,7 +698,7 @@ fn retry_timer_off() {
 /// A timer write that fails is tried again from the idle tick
 /// ([`retry_timer_off_if_due`]); one that lands ends any retry.
 ///
-/// Blocking, through the privileged helper, for up to
+/// Blocking, through the hidraw node or the privileged helper, for up to
 /// `RETRY_AFTER` longer when the relight has to wait out the blanking
 /// back-off. Call it off the UI thread.
 pub fn apply_keyboard_idle() -> KeyboardIdleApplied {
@@ -586,10 +755,10 @@ pub fn reapply_keyboard_idle_in_background() {
 /// or logging out leaves the keyboard with its stock behaviour instead of lit
 /// until the next boot.
 ///
-/// Best effort and bounded: only through a helper session that is already
-/// open (no authentication dialog at exit; with none, the timer was never
-/// switched off by this process either, unless the session broke), and it
-/// waits at most `timeout` before letting
+/// Best effort and bounded: through the hidraw node, or else only through a
+/// helper session that is already open (no authentication dialog at exit;
+/// with neither, the timer was never switched off by this process either,
+/// unless the session broke), and it waits at most `timeout` before letting
 /// the exit go on. With a `keyboard` state (`lighting::exit_looks`: the
 /// relight of a keyboard its idle timer has dark) it first sends that, inside
 /// the same budget.
@@ -607,13 +776,16 @@ pub fn hand_back_firmware_timer(timeout: std::time::Duration, keyboard: Option<K
         if let Some(state) = keyboard {
             // The idle timer blanked the keyboard with the Off effect, which
             // a key press does not wake, so it has to be lit before the app
-            // goes. Through the open session only, like the hand-back.
-            let arguments = effect_arguments(&state);
-            let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
-            let relit = crate::hardware::helper::execute_in_open_session(
-                predator_sense_protocol::helper::Action::ChiconyEffect,
-                &arguments,
-            );
+            // goes. Through the node or the open session only, like the
+            // hand-back.
+            let relit = on_keyboard(|node| Some(send_effect(node, &state)), || {
+                let arguments = effect_arguments(&state);
+                let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+                crate::hardware::helper::execute_in_open_session(
+                    predator_sense_protocol::helper::Action::ChiconyEffect,
+                    &arguments,
+                )
+            });
             match relit {
                 Some(Ok(())) => BLANKING.record(false),
                 Some(Err(e)) => crate::hardware::applog::error(&format!(
@@ -627,10 +799,10 @@ pub fn hand_back_firmware_timer(timeout: std::time::Duration, keyboard: Option<K
         let _ = tx.send(set_firmware_auto_off_without_prompt(true));
     });
     // The app hands the timer back itself on every exit, the signals
-    // included, through the helper session that is open. At logout the
-    // session stops the helper with the app, so that write can go
-    // unanswered there; the helper, which switched the timer off itself,
-    // hands it back when its signal arrives. And on a
+    // included: over the node, or else through the helper session that is
+    // open. At logout the session stops the helper with the app, so that
+    // fallback write can go unanswered there; a helper that switched the
+    // timer off itself hands it back when its signal arrives. And on a
     // PH16-71 by DMI (pkexec drops `PREDATOR_SENSE_FORCE_MODEL`), when the
     // app's end of an open privileged session closes, that helper hands the
     // timer back whoever switched it off, which also covers a write that
@@ -679,6 +851,29 @@ mod tests {
     fn only_wave_takes_a_direction() {
         assert!(Effect::Wave.uses_direction());
         assert!(!Effect::Breathing.uses_direction());
+    }
+
+    #[test]
+    fn colour_speed_and_direction_match_the_spec_table() {
+        for effect in Effect::ALL.into_iter().chain([Effect::Off]) {
+            let colour = !matches!(effect, Effect::Off | Effect::Wave | Effect::Rainbow);
+            let speed = !matches!(effect, Effect::Off | Effect::Static);
+            assert_eq!(effect.uses_color(), colour, "{effect:?} colour");
+            assert_eq!(effect.uses_speed(), speed, "{effect:?} speed");
+            assert_eq!(effect.uses_direction(), effect == Effect::Wave, "{effect:?} direction");
+        }
+    }
+
+    #[test]
+    fn all_six_wave_directions_reach_the_helper() {
+        for direction in 1..=DIRECTION_MAX {
+            let state = KeyboardState { effect: Effect::Wave, direction, ..Default::default() };
+            assert_eq!(wire_direction(&state), direction);
+        }
+        let state = KeyboardState { direction: 9, ..Default::default() };
+        assert_eq!(wire_direction(&state), DIRECTION_MAX);
+        let state = KeyboardState { direction: 0, ..Default::default() };
+        assert_eq!(wire_direction(&state), 1);
     }
 
     fn idle_settings(enabled: bool, keyboard: bool, secs: u32, mouse_wakes: bool) -> AppConfig {
@@ -990,5 +1185,200 @@ mod tests {
         assert!(!reapplying());
         assert!(as_reapply(reapplying));
         assert!(!reapplying(), "cleared once the work is done");
+    }
+
+    use crate::hardware::chicony_hid::fake::{FakeNode, Sent};
+
+    fn slot(node: &FakeNode) -> Mutex<Keyboard<FakeNode>> {
+        Mutex::new(Keyboard::new(node.clone()))
+    }
+
+    fn node_and_keyboard() -> (FakeNode, Keyboard<FakeNode>) {
+        let node = FakeNode::default();
+        let keyboard = Keyboard::new(node.clone());
+        (node, keyboard)
+    }
+
+    #[test]
+    fn a_writable_node_takes_every_call_and_anything_else_goes_to_the_helper() {
+        assert_eq!(route(true), Route::Hidraw);
+        assert_eq!(route(false), Route::Helper);
+    }
+
+    #[test]
+    fn a_call_goes_to_the_node_when_this_user_can_open_it() {
+        let node = FakeNode::default();
+        let slot = slot(&node);
+        assert_eq!(routed(&slot, |_| "node", || "helper"), "node");
+        assert_eq!(node.opens(), 1, "and the node stays open");
+        assert_eq!(routed(&slot, |_| "node", || "helper"), "node");
+        assert_eq!(node.opens(), 1);
+    }
+
+    #[test]
+    fn a_call_goes_to_the_helper_when_this_user_cannot_open_the_node() {
+        let node = FakeNode::locked();
+        let slot = slot(&node);
+        assert_eq!(routed(&slot, |_| "node", || "helper"), "helper");
+        assert!(node.sent().is_empty());
+    }
+
+    #[test]
+    fn the_helper_is_called_with_the_node_unlocked() {
+        // It can sit behind an authentication dialog for as long as the
+        // user takes; nothing else may wait on the node meanwhile.
+        let node = FakeNode::locked();
+        let slot = slot(&node);
+        let unlocked = routed(&slot, |_| false, || slot.try_lock().is_ok());
+        assert!(unlocked);
+    }
+
+    #[test]
+    fn the_helper_is_only_for_a_process_that_never_opened_the_node() {
+        let node = FakeNode::default();
+        let slot = slot(&node);
+        assert_eq!(routed(&slot, |_| "node", || "helper"), "node");
+        // The node stops opening (say the rule went away) and a transfer
+        // fails: the calls stay on the node and report it.
+        node.0.borrow_mut().locked = true;
+        node.fail_transfers(&[libc::EIO]);
+        let failed = routed(&slot, |keyboard| send_auto_off(keyboard, false), || Ok(()));
+        assert!(failed.is_err());
+        let next = routed(&slot, |keyboard| send_auto_off(keyboard, false), || Ok(()));
+        assert!(next.is_err(), "reported, not sent to the helper");
+        assert!(node.sent().is_empty());
+    }
+
+    #[test]
+    fn a_node_that_opened_once_keeps_the_calls_when_it_fails_to_reopen() {
+        // A re-enumeration, then the new node not yet given to this user: the
+        // failure is reported, and the next call still goes to the node,
+        // never to a helper that could bring up an authentication dialog.
+        let node = FakeNode::default();
+        let slot = slot(&node);
+        assert_eq!(routed(&slot, |_| "node", || "helper"), "node");
+        node.fail_transfers(&[libc::ENODEV]);
+        node.0.borrow_mut().open_errors.push_back(libc::EACCES);
+        let failed = routed(&slot, |keyboard| send_auto_off(keyboard, false), || Ok(()));
+        assert!(failed.is_err());
+        assert_eq!(routed(&slot, |_| "node", || "helper"), "node");
+    }
+
+    #[test]
+    fn without_the_capability_no_node_is_looked_for() {
+        // The Helios 300 has the same 04F2:0117: its node is never opened.
+        let node = FakeNode::default();
+        let slot = slot(&node);
+        assert_eq!(routed_if(false, &slot, |_| "node", || "helper"), "helper");
+        assert_eq!(node.opens(), 0);
+        assert!(!slot_is_writable_if(false, &slot));
+        assert_eq!(node.opens(), 0);
+        assert_eq!(routed_if(true, &slot, |_| "node", || "helper"), "node");
+        assert!(slot_is_writable_if(true, &slot));
+    }
+
+    #[test]
+    fn writability_is_answered_without_waiting_on_a_busy_node() {
+        let open = FakeNode::default();
+        assert!(slot_is_writable(&slot(&open)));
+        let locked = FakeNode::locked();
+        assert!(!slot_is_writable(&slot(&locked)));
+        // Busy: writable, as a transfer in flight holds an open node.
+        let busy = slot(&locked);
+        let transfer = busy.lock().unwrap();
+        assert!(slot_is_writable(&busy));
+        drop(transfer);
+    }
+
+    fn sample_state(effect: Effect) -> KeyboardState {
+        KeyboardState {
+            effect,
+            red: 10,
+            green: 20,
+            blue: 30,
+            brightness: 74,
+            speed: 30,
+            direction: 4,
+        }
+    }
+
+    /// What the helper sends for `state`: its arguments read back as the
+    /// helper parses them, into the same builder.
+    fn helper_reports(state: &KeyboardState) -> [[u8; 8]; 3] {
+        let a: Vec<u8> = effect_arguments(state)
+            .iter()
+            .map(|argument| argument.parse().unwrap())
+            .collect();
+        keyboard::effect_packets(a[0], a[1], a[2], a[3], a[4], a[5], a[6])
+    }
+
+    #[test]
+    fn the_helper_arguments_stay_in_the_ranges_the_helper_takes() {
+        // From a hand-edited config: the helper would refuse above 100, so
+        // both routes clamp and agree.
+        let state = KeyboardState {
+            speed: 250,
+            brightness: 180,
+            ..sample_state(Effect::Breathing)
+        };
+        let arguments = effect_arguments(&state);
+        assert_eq!((arguments[1].as_str(), arguments[2].as_str()), ("100", "100"));
+    }
+
+    #[test]
+    fn an_effect_reaches_the_node_as_the_reports_the_helper_sends() {
+        let out_of_range = KeyboardState {
+            speed: 250,
+            brightness: 180,
+            ..sample_state(Effect::Static)
+        };
+        let states = Effect::ALL.into_iter().map(sample_state).chain([out_of_range]);
+        for state in states {
+            let effect = state.effect;
+            let (node, mut keyboard) = node_and_keyboard();
+            send_effect(&mut keyboard, &state).unwrap();
+            let expected: Vec<Sent> = helper_reports(&state)
+                .into_iter()
+                .map(|report| Sent::Feature(1, report))
+                .collect();
+            assert_eq!(node.sent(), expected, "{effect:?}");
+        }
+    }
+
+    #[test]
+    fn an_effect_on_the_node_is_preamble_colour_and_effect() {
+        let (node, mut keyboard) = node_and_keyboard();
+        send_effect(&mut keyboard, &sample_state(Effect::Wave)).unwrap();
+        assert_eq!(
+            node.sent(),
+            [
+                Sent::Feature(1, keyboard::PREAMBLE),
+                Sent::Feature(1, [0x14, 0, 0, 10, 20, 30, 0, 0xaf]),
+                // Wave, speed 30 % as 7, 74 % as 37 of 50, entry 0, dir 4.
+                Sent::Feature(1, [0x08, 0x02, 0x03, 0x07, 0x25, 0x01, 0x04, 0xc1]),
+            ]
+        );
+    }
+
+    #[test]
+    fn off_reaches_the_node_as_static_at_zero_brightness() {
+        let (node, mut keyboard) = node_and_keyboard();
+        send_effect(&mut keyboard, &sample_state(Effect::Off)).unwrap();
+        let Sent::Feature(_, effect) = node.sent()[2];
+        assert_eq!((effect[2], effect[4]), (0x01, 0));
+    }
+
+    #[test]
+    fn the_timer_switch_reaches_the_node_as_the_auto_off_report() {
+        let (node, mut keyboard) = node_and_keyboard();
+        send_auto_off(&mut keyboard, false).unwrap();
+        send_auto_off(&mut keyboard, true).unwrap();
+        assert_eq!(
+            node.sent(),
+            [
+                Sent::Feature(1, [0x30, 0x01, 0, 0, 0, 0, 0, 0xce]),
+                Sent::Feature(1, [0x30, 0x01, 1, 0, 0, 0, 0, 0xcd]),
+            ]
+        );
     }
 }

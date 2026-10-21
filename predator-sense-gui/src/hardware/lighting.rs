@@ -7,10 +7,10 @@
 //! sequence - hence one function rather than two copies that drift.
 //!
 //! The daemon (`installer/src/hotkey.rs`) restores the *other* lighting path,
-//! the ENEK5130 HID controller, on those same two events. It cannot do these
-//! two: the Chicony write needs root, and the privileged helper session is
-//! owned by this process, so asking the daemon to do it would mean a pkexec
-//! prompt on every resume.
+//! the ENEK5130 HID controller, on those same two events. It does not do
+//! these two: the Chicony write goes through this process (its hidraw node,
+//! or the privileged helper session this process owns when the node is not
+//! writable), and the bar node is this process's too.
 
 use crate::config;
 use crate::hardware::keyboard_rgb::KeyboardState;
@@ -23,8 +23,8 @@ use crate::hardware::keyboard_rgb::KeyboardState;
 /// Coming back from suspend the controller is still powered, so that step is
 /// unnecessary there and only costs a visible flicker plus 300 ms.
 ///
-/// Blocking - both writes go to hardware, and the keyboard's goes through the
-/// privileged helper. Call it off the UI thread.
+/// Blocking - both writes go to hardware, the keyboard's through its hidraw
+/// node or the privileged helper. Call it off the UI thread.
 ///
 /// `context` names the caller in any log line, so a failure says whether it
 /// was the boot restore or the resume restore that could not write.

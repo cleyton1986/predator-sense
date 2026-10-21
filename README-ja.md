@@ -591,6 +591,8 @@ predator-sense-gui/
 │   ├── hardware/
 │   │   ├── helper.rs            # 型付き特権ヘルパークライアント
 │   │   ├── rgb.rs               # /dev/acer-gkbbl-*経由のRGB
+│   │   ├── keyboard_rgb.rs      # hidraw経由のPH16-71キーボード（Chicony 24ビット）
+│   │   ├── chicony_hid.rs       # 開いたままにするキーボードのhidrawノード
 │   │   ├── hwmon.rs             # /sys/class/hwmonインデックス（OnceLockでキャッシュ）
 │   │   ├── sensors.rs           # 温度、ファン、RAM、ネットワーク
 │   │   ├── gpu.rs               # TTLキャッシュ付きnvidia-smiパーサー

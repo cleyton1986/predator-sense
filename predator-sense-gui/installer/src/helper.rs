@@ -69,11 +69,14 @@ const DMI_SERIAL: &str = "class/dmi/id/product_serial";
 // (rusb) rather than a hidraw feature report, and that older 7-colour family
 // (`chicony-rgb`) still does.
 //
-// The 24-bit command family (PH16-71) goes over the keyboard's hidraw node,
-// which root opens whatever the udev rules say, and over rusb only when the
-// node cannot be found (`chicony_24bit`). The reports are built in
+// The 24-bit command family (PH16-71) is the GUI's own over the keyboard's
+// hidraw node when the user can open it (`chicony_hid.rs`); these actions are
+// its fallback. They go over the same node, which root opens whatever the
+// udev rule says, and over rusb only when the node cannot be found
+// (`chicony_24bit`). The reports are built in
 // `predator_sense_protocol::keyboard` and the node is found and written by
-// the `predator_sense_hidraw` crate.
+// the `predator_sense_hidraw` crate, so both processes send the same bytes
+// the same way.
 const CHICONY_VENDOR_ID: u16 = 0x04F2;
 const CHICONY_PRODUCT_ID: u16 = 0x0117;
 const CHICONY_INTERFACE: u8 = 3;

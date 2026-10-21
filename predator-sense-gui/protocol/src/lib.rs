@@ -2606,9 +2606,14 @@ mod dmi_tests {
 /// The Chicony 24-bit keyboard (04F2:0117, PH16-71): its wire format and the
 /// values that cross the process boundary.
 ///
-/// The privileged helper sends the reports built here. The format was read
-/// from PredatorSense's own USB controller library and tested on a PH16-71
-/// (2026-10-16): feature reports of 8 bytes, with no report IDs.
+/// Two processes talk to this controller: the GUI through the hidraw node of
+/// its lighting interface (the `predator-sense-hidraw` crate), and
+/// the privileged helper when the GUI cannot open that node, through the
+/// same node as root, or over USB control transfers when the node cannot be
+/// found. Both send the reports built here, so the two paths put the same
+/// bytes on the wire. The format was read from PredatorSense's own USB
+/// controller library and tested on a PH16-71 (2026-10-16): feature reports
+/// of 8 bytes, with no report IDs.
 pub mod keyboard {
     /// The controller's own brightness ceiling (`0x32`). Its Fn backlight
     /// keys step through 0, 12, 25, 37 and 50.

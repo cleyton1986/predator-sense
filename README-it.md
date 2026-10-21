@@ -664,6 +664,8 @@ predator-sense-gui/
 │   ├── hardware/
 │   │   ├── helper.rs            # Client tipizzato dell'helper privilegiato
 │   │   ├── rgb.rs               # RGB via /dev/acer-gkbbl-*
+│   │   ├── keyboard_rgb.rs      # Tastiera del PH16-71 (Chicony a 24 bit) via hidraw
+│   │   ├── chicony_hid.rs       # Nodo hidraw della tastiera, tenuto aperto
 │   │   ├── hwmon.rs             # Indice /sys/class/hwmon (cache in OnceLock)
 │   │   ├── sensors.rs           # Temperature, ventole, RAM, rete
 │   │   ├── gpu.rs               # Parser di nvidia-smi con cache TTL

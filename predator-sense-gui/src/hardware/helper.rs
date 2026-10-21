@@ -408,12 +408,17 @@ fn invoke_session(action: Action, arguments: &[&str]) -> Result<Reply, String> {
 /// after that replaces one that went away.
 static PRIVILEGED_SESSION_STARTED: AtomicBool = AtomicBool::new(false);
 
-/// A new privileged helper has just answered its first call. The helper
-/// that sent the keyboard's idle-timer off switches the timer back on when a
-/// signal stops it, so one that went away while the app runs (an upgrade's
-/// install sends it SIGTERM) left that timer on under an app that keeps it
-/// off. The new helper gets `keyboard_rgb::apply_keyboard_idle` again, which
-/// switches it off again through the new helper, which then holds it. (When the app's end of the session closes, the app gone,
+/// A new privileged helper has just answered its first call. A helper that
+/// sent the keyboard's idle-timer off itself (the fallback, when this
+/// process cannot open the keyboard's hidraw node) switches the timer back
+/// on when a signal stops it, so one that went away while the app runs (an
+/// upgrade's install sends it SIGTERM) left that timer on under an app that
+/// keeps it off. The new helper gets `keyboard_rgb::apply_keyboard_idle`
+/// again, which switches it off again: through the new helper on the
+/// fallback, which then holds it, or through the node. On the node the app
+/// holds the timer itself and hands it back at its own exit, and a helper
+/// stopped by a signal leaves that timer alone, so there the re-apply only
+/// repeats a write. (When the app's end of the session closes, the app gone,
 /// the privileged helper hands the timer back on a PH16-71
 /// (`dmi::CHICONY_24BIT_MODELS`) whoever sent the off. The unprivileged
 /// read session never does.)

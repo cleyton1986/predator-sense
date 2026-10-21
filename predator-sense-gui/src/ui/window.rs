@@ -362,8 +362,8 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // Chicony USB keyboard nor the WMI channel (the chassis light bar on
         // the PH16-71 generation) remembers anything across a reboot, and the
         // hotkey service only replays the ENEK5130 HID path. Restore both
-        // here; the Chicony write goes through the same privileged helper
-        // session the fan-mode reapply above already opened.
+        // here; the Chicony write goes through its hidraw node, or the same
+        // privileged helper session the fan-mode reapply above already opened.
         // `wake: true` - after a power cycle the light bar's firmware needs
         // one Breathing frame before any other mode becomes visible.
         background::run(

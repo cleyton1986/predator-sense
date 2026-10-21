@@ -2,7 +2,11 @@
 //! interface whose report descriptor starts `06 02 ff`, vendor page 0xFF02)
 //! as a hidraw node: where it is, and the one transfer it takes.
 //!
-//! The privileged helper opens it as root for one command at a time.
+//! Two processes use it. The GUI opens it as the user, which the installer's
+//! udev rule allows for the active local session's user, and keeps it open.
+//! The privileged helper opens it as root for one command at a time. Both
+//! find the same node and put the same bytes on it, so this is defined once,
+//! here.
 //!
 //! The reports carry no IDs, so each goes out behind a 0, as hidapi sends
 //! them: 9 bytes for a feature report (`HIDIOCSFEATURE`). What goes in
@@ -12,7 +16,8 @@
 //! from anyone holding it.
 //!
 //! A crate of its own because of the ioctl: `predator-sense-protocol`
-//! forbids `unsafe`.
+//! forbids `unsafe`, and the GUI and the helper share this rather than carry
+//! a copy each.
 
 // The feature-report ioctl in `HidrawDevice::feature_ioctl` is the one
 // `unsafe` block here, allowed on that function alone.

@@ -650,6 +650,8 @@ predator-sense-gui/
 │   ├── hardware/
 │   │   ├── helper.rs            # Tipli ayrıcalıklı-yardımcı istemcisi
 │   │   ├── rgb.rs               # /dev/acer-gkbbl-* üzerinden RGB
+│   │   ├── keyboard_rgb.rs      # hidraw üzerinden PH16-71 klavyesi (Chicony 24 bit)
+│   │   ├── chicony_hid.rs       # Klavyenin açık tutulan hidraw düğümü
 │   │   ├── hwmon.rs             # /sys/class/hwmon indeksi (önbelleğe alınmış OnceLock)
 │   │   ├── sensors.rs           # Sıcaklıklar, fanlar, RAM, ağ
 │   │   ├── gpu.rs               # TTL önbellekli nvidia-smi ayrıştırıcı
