@@ -5,6 +5,7 @@ use crate::process::{
     terminate_legacy_process, terminate_process,
 };
 use crate::AppResult;
+use predator_sense_protocol::dmi;
 use predator_sense_protocol::helper::Action as HelperAction;
 use predator_sense_protocol::installer as cli;
 use std::collections::BTreeSet;
@@ -1386,6 +1387,78 @@ fn copy_kernel_sources(source: &Path, destination: &Path) -> AppResult {
     Ok(())
 }
 
+/// The udev rules for the lighting and hotkey HID nodes, as written to
+/// `path::HID_UDEV_RULE`. Removed with that file on uninstall. The Chicony
+/// keyboard's lighting interface is not here: see [`seat_rules_for`].
+pub(crate) const HID_RULE: &str = concat!(
+    "SUBSYSTEM==\"hidraw\", ATTRS{name}==\"ENEK5130:*\", MODE=\"0660\", GROUP=\"input\"\n",
+    "SUBSYSTEM==\"hidraw\", KERNELS==\"0018:0CF2:5130.*\", MODE=\"0660\", GROUP=\"input\"\n",
+    // 2024+ generation (issue #26): keyboard/cover-logo RGB moved off
+    // this I2C-HID chip entirely onto plain USB HID feature reports
+    // sent to a Sunrex keyboard controller and a Darfon logo
+    // controller (magic_rgb.rs). Neither ever got a udev rule, so
+    // /dev/hidrawN stayed root-only and every write failed with
+    // "Permission denied" even though the protocol itself was right.
+    "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"05af\", MODE=\"0660\", GROUP=\"input\"\n",
+    "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"0d62\", MODE=\"0660\", GROUP=\"input\"\n",
+    // Acer embedded controller, exposed as an I2C-HID device. The
+    // physical mode-switch key reports here and nowhere else - it
+    // generates no input-subsystem event at all - so without read
+    // access the hotkey daemon cannot see the key and it stays dead,
+    // which is how it shipped.
+    //
+    // Matched on the Acer vendor id rather than one product id, so the
+    // key works on models whose EC reports a different product; the
+    // daemon still only opens the device it recognises (hotkey.rs).
+    // Read-only for the group on purpose - unlike the RGB controllers
+    // above nothing here ever writes to the EC, and this is the one
+    // device on the list that can change machine state.
+    "SUBSYSTEM==\"hidraw\", KERNELS==\"*:1025:*\", MODE=\"0640\", GROUP=\"input\"\n",
+    // The PredatorSense key on the Chicony keyboard (04F2:0117)
+    // reports HID usage 0xC9 on the keyboard interface and a vendor
+    // consumer usage on interface 2. The kernel maps neither, so the
+    // key generates no input event at all and does nothing - the
+    // daemon has to read its raw report instead.
+    //
+    // Interface 2 only: it carries consumer controls, not the
+    // keystroke stream, so this grants sight of the key without
+    // granting sight of what is typed. Matched on
+    // ID_USB_INTERFACE_NUM because the interface number and the
+    // vendor/product ids live on different parent devices, and every
+    // ATTRS match in one rule has to resolve on the same parent.
+    "SUBSYSTEM==\"hidraw\", ENV{ID_VENDOR_ID}==\"04f2\", ENV{ID_MODEL_ID}==\"0117\", ENV{ID_USB_INTERFACE_NUM}==\"02\", MODE=\"0640\", GROUP=\"input\"\n",
+);
+
+/// The Chicony keyboard's vendor lighting interface (3): the GUI writes the keyboard's
+/// effects and its idle timer to it unprivileged, so it needs read and write here, unlike
+/// the read-only interface 2 in [`HID_RULE`]. Through uaccess, for the user of the active
+/// local session only, not through the `input` group: nothing else unprivileged opens
+/// this interface (the hotkey daemon reads interface 2), and a group grant would hand
+/// every feature report of the controller to any process of any member, services
+/// included. The node stays 0660 root:root. Only on the models whose keyboard the app
+/// writes this way (`dmi::CHICONY_24BIT_MODELS`): the Helios 300 generation's keyboard
+/// has the same USB id, and nothing opens its interface 3.
+pub(crate) const CHICONY_LIGHTING_RULE: &str = "SUBSYSTEM==\"hidraw\", ENV{ID_VENDOR_ID}==\"04f2\", ENV{ID_MODEL_ID}==\"0117\", ENV{ID_USB_INTERFACE_NUM}==\"03\", TAG+=\"uaccess\"\n";
+
+/// facer's per-zone light bar node, `/dev/acer-lightbar-0`: facer creates it
+/// 0660 root:root, and this gives the user of the active local session access
+/// (an ACL logind moves with the session), so no other user and no system
+/// service can write it or make it call the firmware. Written everywhere:
+/// facer creates the node only on the chassis it is confirmed for.
+pub(crate) const LIGHT_BAR_SEAT_RULE: &str =
+    "SUBSYSTEM==\"acer-lightbar\", KERNEL==\"acer-lightbar-0\", TAG+=\"uaccess\"\n";
+
+/// The rules written to `path::SEAT_UDEV_RULE` on a machine whose DMI
+/// `product_name` is `product` ([`CHICONY_LIGHTING_RULE`] on the models that
+/// use it). Removed with that file on uninstall.
+fn seat_rules_for(product: &str) -> String {
+    let mut rules = LIGHT_BAR_SEAT_RULE.to_string();
+    if dmi::matches_model(product, dmi::CHICONY_24BIT_MODELS) {
+        rules.push_str(CHICONY_LIGHTING_RULE);
+    }
+    rules
+}
+
 impl Installer {
     fn install_permissions(&self) -> AppResult {
         let policy = format!(
@@ -1418,48 +1491,15 @@ impl Installer {
         )?;
         run(command::USERMOD, ["-aG", "input", self.user.name.as_str()])?;
 
-        const HID_RULE: &str = concat!(
-            "SUBSYSTEM==\"hidraw\", ATTRS{name}==\"ENEK5130:*\", MODE=\"0660\", GROUP=\"input\"\n",
-            "SUBSYSTEM==\"hidraw\", KERNELS==\"0018:0CF2:5130.*\", MODE=\"0660\", GROUP=\"input\"\n",
-            // 2024+ generation (issue #26): keyboard/cover-logo RGB moved off
-            // this I2C-HID chip entirely onto plain USB HID feature reports
-            // sent to a Sunrex keyboard controller and a Darfon logo
-            // controller (magic_rgb.rs). Neither ever got a udev rule, so
-            // /dev/hidrawN stayed root-only and every write failed with
-            // "Permission denied" even though the protocol itself was right.
-            "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"05af\", MODE=\"0660\", GROUP=\"input\"\n",
-            "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"0d62\", MODE=\"0660\", GROUP=\"input\"\n",
-            // Acer embedded controller, exposed as an I2C-HID device. The
-            // physical mode-switch key reports here and nowhere else - it
-            // generates no input-subsystem event at all - so without read
-            // access the hotkey daemon cannot see the key and it stays dead,
-            // which is how it shipped.
-            //
-            // Matched on the Acer vendor id rather than one product id, so the
-            // key works on models whose EC reports a different product; the
-            // daemon still only opens the device it recognises (hotkey.rs).
-            // Read-only for the group on purpose - unlike the RGB controllers
-            // above nothing here ever writes to the EC, and this is the one
-            // device on the list that can change machine state.
-            "SUBSYSTEM==\"hidraw\", KERNELS==\"*:1025:*\", MODE=\"0640\", GROUP=\"input\"\n",
-            // The PredatorSense key on the Chicony keyboard (04F2:0117)
-            // reports HID usage 0xC9 on the keyboard interface and a vendor
-            // consumer usage on interface 2. The kernel maps neither, so the
-            // key generates no input event at all and does nothing - the
-            // daemon has to read its raw report instead.
-            //
-            // Interface 2 only: it carries consumer controls, not the
-            // keystroke stream, so this grants sight of the key without
-            // granting sight of what is typed. Matched on
-            // ID_USB_INTERFACE_NUM because the interface number and the
-            // vendor/product ids live on different parent devices, and every
-            // ATTRS match in one rule has to resolve on the same parent.
-            "SUBSYSTEM==\"hidraw\", ENV{ID_VENDOR_ID}==\"04f2\", ENV{ID_MODEL_ID}==\"0117\", ENV{ID_USB_INTERFACE_NUM}==\"02\", MODE=\"0640\", GROUP=\"input\"\n",
-        );
         const EC_RULE: &str =
             "SUBSYSTEM==\"chardev\", KERNEL==\"ec\", MODE=\"0640\", GROUP=\"input\"\n";
         write_text(Path::new(path::HID_UDEV_RULE), HID_RULE, mode::REGULAR_FILE)?;
         write_text(Path::new(path::EC_UDEV_RULE), EC_RULE, mode::REGULAR_FILE)?;
+        write_text(
+            Path::new(path::SEAT_UDEV_RULE),
+            &seat_rules_for(dmi::product_name()),
+            mode::REGULAR_FILE,
+        )?;
         run(command::UDEVADM, ["control", "--reload-rules"])?;
         run(command::UDEVADM, ["trigger"])
     }
@@ -1989,6 +2029,7 @@ impl Installer {
             path::MODPROBE_CONFIG,
             path::HID_UDEV_RULE,
             path::EC_UDEV_RULE,
+            path::SEAT_UDEV_RULE,
             path::KEYBOARD_HWDB_FIX,
             path::DESKTOP_ENTRY,
             path::LEGACY_DESKTOP_ENTRY,
@@ -2512,5 +2553,54 @@ mod tests {
         assert!(rule.contains("pnPredator*PH*315-54:*"));
         assert!(rule.contains(" KEYBOARD_KEY_ef=kbdillumup"));
         assert!(rule.contains(" KEYBOARD_KEY_f0=kbdillumdown"));
+    }
+}
+
+#[cfg(test)]
+mod hid_rule_tests {
+    use super::{seat_rules_for, HID_RULE};
+
+    const LIGHTING_LINE: &str = "SUBSYSTEM==\"hidraw\", ENV{ID_VENDOR_ID}==\"04f2\", ENV{ID_MODEL_ID}==\"0117\", ENV{ID_USB_INTERFACE_NUM}==\"03\", TAG+=\"uaccess\"";
+
+    fn lighting_lines(rules: &str) -> usize {
+        rules.lines().filter(|l| *l == LIGHTING_LINE).count()
+    }
+
+    #[test]
+    fn chicony_lighting_interface_rule_appears_once_on_the_listed_models_only() {
+        assert_eq!(lighting_lines(&seat_rules_for("Predator PH16-71")), 1);
+        // The Helios 300 generation: the same USB id, its interface 3 never opened.
+        assert_eq!(lighting_lines(&seat_rules_for("Predator PH317-56")), 0);
+        assert_eq!(lighting_lines(&seat_rules_for("")), 0, "no DMI name");
+        // Nowhere in the HID rules, which every model gets, and never to a group.
+        assert!(!HID_RULE.contains("ID_USB_INTERFACE_NUM}==\"03\""));
+        assert!(!seat_rules_for("Predator PH16-71").contains("GROUP="));
+    }
+
+    #[test]
+    fn the_light_bar_node_goes_to_the_active_session_only() {
+        assert!(super::path::SEAT_UDEV_RULE.starts_with("/etc/udev/rules.d/70-"));
+        for product in ["Predator PH16-71", "Predator PH317-56", ""] {
+            let rules = seat_rules_for(product);
+            let lines: Vec<_> = rules
+                .lines()
+                .filter(|l| l.contains("acer-lightbar"))
+                .collect();
+            assert_eq!(
+                lines,
+                ["SUBSYSTEM==\"acer-lightbar\", KERNEL==\"acer-lightbar-0\", TAG+=\"uaccess\""]
+            );
+            assert!(!rules.contains("GROUP=") && !rules.contains("MODE="));
+        }
+    }
+
+    #[test]
+    fn chicony_interface_two_rule_stays_read_only() {
+        let lines: Vec<_> = HID_RULE
+            .lines()
+            .filter(|l| l.contains("ID_USB_INTERFACE_NUM}==\"02\""))
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("MODE=\"0640\""));
     }
 }

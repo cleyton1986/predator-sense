@@ -35,6 +35,10 @@ pub(crate) mod path {
     pub const POLKIT_RULE: &str = "/etc/polkit-1/rules.d/49-predator-sense.rules";
     pub const HID_UDEV_RULE: &str = "/etc/udev/rules.d/99-predator-hid-rgb.rules";
     pub const EC_UDEV_RULE: &str = "/etc/udev/rules.d/99-predator-ec.rules";
+    /// Rules that give the active local session's user access to a node
+    /// (`TAG+="uaccess"`). Numbered below systemd's `73-seat-late.rules`,
+    /// which applies that tag: a uaccess tag set after it does nothing.
+    pub const SEAT_UDEV_RULE: &str = "/etc/udev/rules.d/70-predator-sense-uaccess.rules";
     /// Fn+F9/F10 keyboard-illumination fix for the PH315-54 only (issue
     /// #64) - see `install::keyboard_hwdb_fix_for`.
     pub const KEYBOARD_HWDB_FIX: &str = "/etc/udev/hwdb.d/70-predator-sense-keyboard.hwdb";
