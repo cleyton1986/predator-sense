@@ -3346,6 +3346,21 @@ static DEVICE_ATTR_RW(backlight_timeout);
  * Best-effort like turbo_state: on hardware without this WMI method both
  * attributes just return an error.
  */
+/*
+ * Wake anything poll()ing the thermal_profile attribute.
+ *
+ * The index moves from three places: this driver's own sysfs store, the mode
+ * key handled entirely in acer_thermal_profile_change() below, and the
+ * platform_profile core. Userspace has no way to learn about the last two
+ * except by asking again, so Predator Sense polled every five seconds and a
+ * mode could be displayed for that long before its CPU settings were applied -
+ * or skipped altogether if the key was pressed twice inside one interval.
+ *
+ * sysfs_notify() lets it wait on the file instead, so a key press is acted on
+ * as it happens and the poll becomes a backstop rather than the mechanism.
+ */
+static void acer_thermal_profile_notify(void);
+
 static ssize_t thermal_profile_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	u8 value;
@@ -3387,6 +3402,8 @@ static ssize_t thermal_profile_store(struct device *dev, struct device_attribute
 	err = WMID_gaming_set_misc_setting(ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, value);
 	if (err)
 		return err;
+
+	acer_thermal_profile_notify();
 
 	return count;
 }
@@ -4057,6 +4074,8 @@ apply:
 		#else
 		platform_profile_notify();
 		#endif
+
+		acer_thermal_profile_notify();
 	}
 
 	return 0;
@@ -4833,6 +4852,12 @@ static struct platform_driver acer_platform_driver = {
 };
 
 static struct platform_device *acer_platform_device;
+
+static void acer_thermal_profile_notify(void)
+{
+	if (acer_platform_device)
+		sysfs_notify(&acer_platform_device->dev.kobj, NULL, "thermal_profile");
+}
 
 /*
  * Root-only probe for the gaming backlight methods (20 set / 21 get).

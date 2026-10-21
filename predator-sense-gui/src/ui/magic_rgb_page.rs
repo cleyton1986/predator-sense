@@ -71,7 +71,7 @@ pub fn build() -> gtk::ScrolledWindow {
     // target byte (see `hardware::light_bar`). rgb_page.rs never shows its
     // WMI panel once a USB keyboard backend exists, and that panel addresses
     // the keyboard target anyway, so the bar gets its own tab here.
-    if light_bar::is_available() && !sections.is_empty() {
+    if crate::hardware::capabilities::get().light_bar && !sections.is_empty() {
         sections.push((
             "light_bar",
             crate::i18n::t("light_bar_section").to_string(),

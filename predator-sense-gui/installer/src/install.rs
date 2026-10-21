@@ -1392,6 +1392,9 @@ impl Installer {
             app::DBUS_ID,
         );
         write_text(Path::new(path::DESKTOP_ENTRY), &desktop, mode::REGULAR_FILE)?;
+        // An upgrade from the binary-named entry would otherwise list the app
+        // twice in the launcher.
+        fs::remove_file(path::LEGACY_DESKTOP_ENTRY).ok();
         run_optional(command::GTK_UPDATE_ICON_CACHE, [path::ICON_THEME]);
         run_optional(command::UPDATE_DESKTOP_DATABASE, [path::APPLICATIONS_DIR]);
         Ok(())
@@ -1878,6 +1881,7 @@ impl Installer {
             path::EC_UDEV_RULE,
             path::KEYBOARD_HWDB_FIX,
             path::DESKTOP_ENTRY,
+            path::LEGACY_DESKTOP_ENTRY,
             path::ICON,
             path::POLKIT_POLICY,
             path::POLKIT_RULE,

@@ -33,7 +33,7 @@ pub fn restore_saved(wake: bool, context: &str) {
     // families, so exactly one of them may run. The 24-bit path is the better
     // one where it applies; `chicony_rgb` is the older palette command kept
     // for the generation this fork does not claim.
-    if super::keyboard_rgb::is_available() {
+    if super::capabilities::get().keyboard_rgb {
         if let Some(saved) = cfg.keyboard_rgb {
             if let Err(e) = super::keyboard_rgb::apply(&saved) {
                 super::applog::error(&format!("{context}: keyboard lighting not restored: {e}"));
