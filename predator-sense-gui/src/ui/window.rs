@@ -1696,8 +1696,8 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
 
     main_overlay.add_overlay(&layout);
 
-    // Refresh periódico da página de temperaturas (gauges precisam recalcular).
-    // Gated por visibilidade do window e da aba — evita rebuild quando no tray.
+    // Keeps the Temperatures page current while it is the page shown, in place
+    // (`temperatures_page::update`); nothing is read while the window is not on screen.
     let stack_c = stack.clone();
     let reading = Rc::new(Cell::new(false));
     glib::timeout_add_seconds_local(2, move || {
@@ -1709,10 +1709,14 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
             reading.set(true);
             let stack_c = stack_c.clone();
             let reading = reading.clone();
-            crate::ui::background::run(sensors::read_all_sensors, move |s| {
+            crate::ui::background::run_quick(sensors::read_all_sensors, move |s| {
                 reading.set(false);
                 // The page may have been left while the sensors were read.
                 if stack_c.visible_child_name().as_deref() != Some("temperatures") {
+                    return;
+                }
+                // In place, unless the sensors it shows changed.
+                if temperatures_page::update(&s) {
                     return;
                 }
                 let new_temps = temperatures_page::build(&s);
