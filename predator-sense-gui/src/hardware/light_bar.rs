@@ -299,6 +299,11 @@ pub fn is_blanked() -> bool {
 /// 300 ms sleep, which matters because the idle watcher calls it from the UI
 /// thread the moment a key is pressed.
 pub fn unblank() {
+    let _ = unblank_checked();
+}
+
+/// [`unblank`], with the failure returned. For app exit, which logs why.
+pub fn unblank_checked() -> Result<(), String> {
     // The same fallback `blank` uses, as keyboard_rgb does in both. Returning
     // early here instead left the flag set after `blank` had darkened the bar
     // from the default, so on a machine with no saved light bar setting the
@@ -308,7 +313,7 @@ pub fn unblank() {
         .unwrap_or_default();
     // Through `on_wire`, not raw: a saved `Off` written literally relights the
     // bar, since its mode id does not blank this firmware.
-    let _ = BLANKING.set(false, || write_frame(&on_wire(&saved)));
+    BLANKING.set(false, || write_frame(&on_wire(&saved)))
 }
 
 #[cfg(test)]

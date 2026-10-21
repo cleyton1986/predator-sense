@@ -154,26 +154,40 @@ pub fn is_available() -> bool {
         && super::sysinfo::product_matches(predator_sense_protocol::dmi::CHICONY_24BIT_MODELS)
 }
 
+/// Whether the keyboard can be written now without an authentication
+/// dialog: through a privileged session that is already open. Never waits,
+/// so the UI thread can ask at exit.
+pub fn writable_without_prompt() -> bool {
+    crate::hardware::helper::open_session_exists()
+}
+
 /// Applies `state`. `Off` is the static opcode at zero brightness, which is how
 /// this controller expresses "backlight off".
 pub fn apply(state: &KeyboardState) -> Result<(), String> {
+    let arguments = effect_arguments(state);
+    let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    crate::hardware::helper::execute(
+        predator_sense_protocol::helper::Action::ChiconyEffect,
+        &arguments,
+    )
+}
+
+/// The `ChiconyEffect` helper arguments for `state`.
+fn effect_arguments(state: &KeyboardState) -> Vec<String> {
     let brightness = if state.effect == Effect::Off {
         0
     } else {
         state.brightness
     };
-    crate::hardware::helper::execute(
-        predator_sense_protocol::helper::Action::ChiconyEffect,
-        &[
-            &state.effect.opcode().to_string(),
-            &state.speed.to_string(),
-            &brightness.to_string(),
-            &state.red.to_string(),
-            &state.green.to_string(),
-            &state.blue.to_string(),
-            &state.direction.clamp(1, 2).to_string(),
-        ],
-    )
+    vec![
+        state.effect.opcode().to_string(),
+        state.speed.to_string(),
+        brightness.to_string(),
+        state.red.to_string(),
+        state.green.to_string(),
+        state.blue.to_string(),
+        state.direction.clamp(1, 2).to_string(),
+    ]
 }
 
 static BLANKING: Blanking = Blanking::new();
@@ -576,8 +590,10 @@ pub fn reapply_keyboard_idle_in_background() {
 /// open (no authentication dialog at exit; with none, the timer was never
 /// switched off by this process either, unless the session broke), and it
 /// waits at most `timeout` before letting
-/// the exit go on.
-pub fn hand_back_firmware_timer(timeout: std::time::Duration) {
+/// the exit go on. With a `keyboard` state (`lighting::exit_looks`: the
+/// relight of a keyboard its idle timer has dark) it first sends that, inside
+/// the same budget.
+pub fn hand_back_firmware_timer(timeout: std::time::Duration, keyboard: Option<KeyboardState>) {
     if !crate::hardware::capabilities::get().keyboard_rgb {
         return;
     }
@@ -588,6 +604,26 @@ pub fn hand_back_firmware_timer(timeout: std::time::Duration) {
         let _serial = KEYBOARD_IDLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         EXITING.store(true, std::sync::atomic::Ordering::SeqCst);
         timer_off_retry().stop();
+        if let Some(state) = keyboard {
+            // The idle timer blanked the keyboard with the Off effect, which
+            // a key press does not wake, so it has to be lit before the app
+            // goes. Through the open session only, like the hand-back.
+            let arguments = effect_arguments(&state);
+            let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+            let relit = crate::hardware::helper::execute_in_open_session(
+                predator_sense_protocol::helper::Action::ChiconyEffect,
+                &arguments,
+            );
+            match relit {
+                Some(Ok(())) => BLANKING.record(false),
+                Some(Err(e)) => crate::hardware::applog::error(&format!(
+                    "exit: the app did not relight the keyboard ({e})"
+                )),
+                None => crate::hardware::applog::error(
+                    "exit: the app did not relight the keyboard (no helper session is open)",
+                ),
+            }
+        }
         let _ = tx.send(set_firmware_auto_off_without_prompt(true));
     });
     // The app hands the timer back itself on every exit, the signals

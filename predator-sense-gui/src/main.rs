@@ -191,11 +191,38 @@ fn main() {
     // producing data, i.e. forever.
     app.connect_shutdown(|_| {
         hardware::audio_sync::stop();
+        // A light the idle timer has dark would stay dark until the app runs
+        // again (the keyboard was blanked with the Off effect, which a key
+        // press does not wake): each is relit first.
+        let looks = hardware::lighting::exit_looks();
+        let bar_done = looks.light_bar.then(|| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(hardware::light_bar::unblank_checked());
+            });
+            rx
+        });
         // The app keeps the controller's own keyboard timer off while it
         // runs, and the controller keeps that until the next boot. Switched
         // back on here, or a quit or logout would leave the keyboard lit for
-        // good. Bounded: at most 2 s.
-        hardware::keyboard_rgb::hand_back_firmware_timer(std::time::Duration::from_secs(2));
+        // good. The keyboard's relight goes first, inside the same bounded
+        // shutdown (2 s for the keyboard and the hand-back, at most 0.5 s
+        // more for the bar).
+        hardware::keyboard_rgb::hand_back_firmware_timer(
+            std::time::Duration::from_secs(2),
+            looks.keyboard,
+        );
+        if let Some(rx) = bar_done {
+            match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => hardware::applog::error(&format!(
+                    "exit: the app did not relight the light bar ({e})"
+                )),
+                Err(_) => hardware::applog::error(
+                    "exit: the app did not relight the light bar within 500 ms",
+                ),
+            }
+        }
     });
 
     app.connect_activate(|app| {

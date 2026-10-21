@@ -13,6 +13,7 @@
 //! prompt on every resume.
 
 use crate::config;
+use crate::hardware::keyboard_rgb::KeyboardState;
 
 /// Reapplies the saved keyboard and light-bar state, and on the 24-bit
 /// keyboard path switches the keyboard's own idle timer off again.
@@ -70,5 +71,108 @@ pub fn restore_saved(wake: bool, context: &str) {
                 ));
             }
         }
+    }
+}
+
+/// What the exit puts back on the keyboard and the bar because the app's idle
+/// timer has them dark: the keyboard was blanked with the Off effect, which a
+/// key press does not wake, and the bar stays as the app left it, so either
+/// would stay dark until the app runs again.
+/// `keyboard_rgb::hand_back_firmware_timer` sends the keyboard's before it
+/// hands the keyboard's timer back, and `light_bar::unblank_checked` relights
+/// the bar.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExitLooks {
+    pub keyboard: Option<KeyboardState>,
+    pub light_bar: bool,
+}
+
+/// [`exit_looks`] from what it reads. The bar node is written by the app
+/// itself, so a blanked bar is always relit. The keyboard is relit only when
+/// that needs no authentication dialog (`keyboard_writable`: its hidraw node,
+/// or a privileged session that is already open), with the saved state
+/// (`record`).
+fn exit_looks_from(
+    keyboard_blanked: bool,
+    bar_blanked: bool,
+    keyboard_writable: bool,
+    record: Option<KeyboardState>,
+) -> ExitLooks {
+    ExitLooks {
+        keyboard: (keyboard_blanked && keyboard_writable).then(|| record.unwrap_or_default()),
+        light_bar: bar_blanked,
+    }
+}
+
+/// At exit: what goes back on the keyboard and the bar ([`exit_looks_from`]).
+/// On the UI thread: never waits.
+pub fn exit_looks() -> ExitLooks {
+    let keyboard_blanked = super::keyboard_rgb::is_blanked();
+    let bar_blanked = super::light_bar::is_blanked();
+    if !keyboard_blanked && !bar_blanked {
+        return ExitLooks::default();
+    }
+    exit_looks_from(
+        keyboard_blanked,
+        bar_blanked,
+        keyboard_blanked && super::keyboard_rgb::writable_without_prompt(),
+        config::load_app_config().keyboard_rgb,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn saved() -> KeyboardState {
+        KeyboardState {
+            brightness: 60,
+            ..KeyboardState::default()
+        }
+    }
+
+    #[test]
+    fn exit_relights_nothing_when_nothing_is_blanked() {
+        assert_eq!(
+            exit_looks_from(false, false, true, Some(saved())),
+            ExitLooks::default()
+        );
+    }
+
+    #[test]
+    fn exit_relights_a_blanked_bar_with_or_without_a_session() {
+        for writable in [false, true] {
+            assert!(exit_looks_from(false, true, writable, None).light_bar);
+        }
+    }
+
+    #[test]
+    fn exit_relights_a_blanked_keyboard_only_when_that_needs_no_prompt() {
+        assert_eq!(
+            exit_looks_from(true, false, true, Some(saved())).keyboard,
+            Some(saved())
+        );
+        assert_eq!(
+            exit_looks_from(true, false, false, Some(saved())).keyboard,
+            None,
+            "no authentication dialog is started at exit"
+        );
+        // A keyboard the app blanked with nothing saved comes back as the
+        // unblank brings it back, with the default state.
+        assert_eq!(
+            exit_looks_from(true, false, true, None).keyboard,
+            Some(KeyboardState::default())
+        );
+    }
+
+    #[test]
+    fn exit_relights_both_when_both_are_dark_and_a_session_is_open() {
+        assert_eq!(
+            exit_looks_from(true, true, true, Some(saved())),
+            ExitLooks {
+                keyboard: Some(saved()),
+                light_bar: true,
+            }
+        );
     }
 }

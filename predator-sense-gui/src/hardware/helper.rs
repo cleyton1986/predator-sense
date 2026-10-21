@@ -24,6 +24,26 @@ pub fn execute_in_open_session(action: Action, arguments: &[&str]) -> Option<Res
     Some(call_in_open_session(action, arguments)?.map(|_| ()))
 }
 
+/// Whether a privileged session is open right now, without starting one and
+/// without waiting: a call in flight holds the slot's lock for its whole
+/// duration, and this runs on the UI thread at exit. A slot that is busy has
+/// a session in it, so that counts as open.
+pub fn open_session_exists() -> bool {
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return true;
+    }
+    slot_has_live_session(&SESSION, |(child, _)| matches!(child.try_wait(), Ok(None)))
+}
+
+fn slot_has_live_session<T>(slot: &Mutex<Option<T>>, alive: impl FnOnce(&mut T) -> bool) -> bool {
+    match slot.try_lock() {
+        Ok(mut guard) => guard.as_mut().is_some_and(alive),
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner().as_mut().is_some_and(alive),
+        Err(std::sync::TryLockError::WouldBlock) => true,
+    }
+}
+
 /// One call through the open privileged session, or `None` when none is
 /// open. `Ok` carries what the action printed.
 fn call_in_open_session(action: Action, arguments: &[&str]) -> Option<Result<String, String>> {
@@ -689,5 +709,30 @@ mod tests {
         assert!(reply.success);
         assert!(started);
         close(slot);
+    }
+}
+
+#[cfg(test)]
+mod open_slot_tests {
+    use super::*;
+
+    #[test]
+    fn an_empty_slot_has_no_session() {
+        let slot: Mutex<Option<u8>> = Mutex::new(None);
+        assert!(!slot_has_live_session(&slot, |_| true));
+    }
+
+    #[test]
+    fn a_live_session_counts_and_a_dead_one_does_not() {
+        let slot = Mutex::new(Some(1u8));
+        assert!(slot_has_live_session(&slot, |_| true));
+        assert!(!slot_has_live_session(&slot, |_| false));
+    }
+
+    #[test]
+    fn a_busy_slot_counts_as_open_without_waiting() {
+        let slot = Mutex::new(Some(1u8));
+        let _held = slot.lock().unwrap();
+        assert!(slot_has_live_session(&slot, |_| false));
     }
 }
