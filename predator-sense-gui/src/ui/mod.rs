@@ -22,6 +22,7 @@ pub mod gpu_page;
 #[cfg(test)]
 pub mod gtk_test;
 pub mod grub_splash_page;
+pub mod lighting;
 pub mod lighting_page;
 pub mod macros_page;
 pub mod magic_rgb_page;
