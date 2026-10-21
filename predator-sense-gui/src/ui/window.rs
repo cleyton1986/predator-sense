@@ -2093,7 +2093,11 @@ fn build_settings_page(app: &adw::Application) -> gtk::ScrolledWindow {
     // Eco Mode - caps volume/brightness at 40%, restores previous values on
     // off. Touches the privileged helper for the brightness half (see
     // `hardware::eco_mode` docs), so this runs off-thread like every other
-    // helper-backed switch, not inline in `connect_state_set`.
+    // helper-backed switch, not inline in `connect_state_set`. Only the
+    // privileged work runs there: config.json is loaded, changed and saved
+    // back here on the UI thread, where every save of it happens, so a
+    // setting saved by another page while the polkit prompt waits is not
+    // written over with the copy loaded before it.
     let eco_row = create_setting_row(t("eco_mode"), t("eco_mode_desc"));
     let eco_switch = gtk::Switch::new();
     eco_switch.set_active(cfg.eco_mode_enabled);
@@ -2103,28 +2107,34 @@ fn build_settings_page(app: &adw::Application) -> gtk::ScrolledWindow {
         let switch = switch.clone();
         background::run(
             move || {
-                let mut c = config::load_app_config();
-                let result = if active {
-                    crate::hardware::eco_mode::enable().map(|(volume, brightness)| {
-                        c.eco_mode_saved_volume_pct = volume;
-                        c.eco_mode_saved_brightness_pct = brightness;
-                    })
+                if active {
+                    crate::hardware::eco_mode::enable().map(Some)
                 } else {
-                    let result = crate::hardware::eco_mode::disable(
+                    let c = config::load_app_config();
+                    crate::hardware::eco_mode::disable(
                         c.eco_mode_saved_volume_pct,
                         c.eco_mode_saved_brightness_pct,
-                    );
-                    c.eco_mode_saved_volume_pct = None;
-                    c.eco_mode_saved_brightness_pct = None;
-                    result
-                };
+                    )
+                    .map(|()| None)
+                }
+            },
+            move |result| {
+                let mut c = config::load_app_config();
+                match &result {
+                    Ok(Some((volume, brightness))) => {
+                        c.eco_mode_saved_volume_pct = *volume;
+                        c.eco_mode_saved_brightness_pct = *brightness;
+                    }
+                    Ok(None) | Err(_) if !active => {
+                        c.eco_mode_saved_volume_pct = None;
+                        c.eco_mode_saved_brightness_pct = None;
+                    }
+                    _ => {}
+                }
                 if result.is_ok() {
                     c.eco_mode_enabled = active;
                 }
                 let _ = config::save_app_config(&c);
-                result
-            },
-            move |result| {
                 switch.set_sensitive(true);
                 // A failure (most likely: the polkit prompt for the
                 // brightness half was dismissed) puts the switch back to
