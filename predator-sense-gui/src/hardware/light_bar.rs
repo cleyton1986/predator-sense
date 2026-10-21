@@ -36,6 +36,20 @@ pub const SPEED_MIN: u8 = 1;
 pub const SPEED_MAX: u8 = 5;
 /// Brightness is a percentage in the official app's capture (`0..100`).
 pub const BRIGHTNESS_MAX: u8 = 100;
+
+/// Wire speed range for the path this chassis uses. The zone node adds one
+/// step below 1.
+pub fn speed_range() -> (u8, u8) {
+    if crate::hardware::capabilities::get().light_bar_zones {
+        (
+            crate::hardware::light_bar_zones::SPEED_MIN,
+            crate::hardware::light_bar_zones::SPEED_MAX,
+        )
+    } else {
+        (SPEED_MIN, SPEED_MAX)
+    }
+}
+
 static BLANKING: crate::hardware::blanking::Blanking =
     crate::hardware::blanking::Blanking::new();
 
@@ -148,6 +162,12 @@ impl LightBarMode {
     pub fn uses_speed(self) -> bool {
         !matches!(self, Self::Off | Self::Static)
     }
+
+    /// Effects whose movement has a direction on the zone-node path. Measured:
+    /// Wave and Rainbow follow it, Ripple looked the same both ways.
+    pub fn uses_direction(self) -> bool {
+        matches!(self, Self::Wave | Self::Rainbow)
+    }
 }
 
 /// Everything one frame carries; also what the config persists.
@@ -159,6 +179,25 @@ pub struct LightBarState {
     pub red: u8,
     pub green: u8,
     pub blue: u8,
+    /// Colour the three zones separately. Only honoured where
+    /// `capabilities.light_bar_zones` is true; elsewhere the single colour
+    /// above is all the firmware can show.
+    #[serde(default)]
+    pub per_zone: bool,
+    /// Left, middle, right. Kept when `per_zone` is switched off, so turning
+    /// it back on restores the user's three colours. Numbers rather than hex
+    /// strings: a malformed hand edit would fail the whole config parse, and a
+    /// failed parse silently runs on defaults.
+    #[serde(default)]
+    pub zones: Option<[[u8; 3]; 3]>,
+    /// 1 left to right, 2 right to left. Wave and Rainbow use it, and only
+    /// the zone-node path sends it.
+    #[serde(default = "default_direction")]
+    pub direction: u8,
+}
+
+fn default_direction() -> u8 {
+    1
 }
 
 impl Default for LightBarState {
@@ -170,7 +209,35 @@ impl Default for LightBarState {
             red: 0,
             green: 174,
             blue: 199,
+            per_zone: false,
+            zones: None,
+            direction: default_direction(),
         }
+    }
+}
+
+impl LightBarState {
+    pub fn single(&self) -> [u8; 3] {
+        [self.red, self.green, self.blue]
+    }
+
+    /// What each zone shows: the stored zones when per-zone is on and has
+    /// been filled, otherwise the single colour three times.
+    pub fn zone_colours(&self) -> [[u8; 3]; 3] {
+        match (self.per_zone, self.zones) {
+            (true, Some(zones)) => zones,
+            _ => [self.single(); 3],
+        }
+    }
+
+    /// Turns per-zone on. The first time, the zones start as the single
+    /// colour so the bar does not change; after that the user's own three
+    /// colours come back.
+    pub fn enable_per_zone(&mut self) {
+        if self.zones.is_none() {
+            self.zones = Some([self.single(); 3]);
+        }
+        self.per_zone = true;
     }
 }
 
@@ -204,7 +271,9 @@ pub fn is_available() -> bool {
 fn frame(state: &LightBarState) -> [u8; 16] {
     let mut f = [0u8; 16];
     f[0] = state.mode.wire_id();
-    f[1] = state.speed;
+    // A config written on the zone-node path can hold speed 0, which the WMI
+    // path does not accept.
+    f[1] = state.speed.clamp(SPEED_MIN, SPEED_MAX);
     f[2] = state.brightness;
     f[4] = 0x01;
     f[5] = state.red;
@@ -215,7 +284,20 @@ fn frame(state: &LightBarState) -> [u8; 16] {
     f
 }
 
+/// The one place a light bar state reaches hardware. On a chassis with the
+/// zone node every write goes there. The node itself sends method 20 and
+/// then a per-zone method 6, so a bare method-20 frame from anywhere else
+/// flattens the three zones to one colour; elsewhere it is the WMI frame as
+/// before.
 fn write_frame(state: &LightBarState) -> Result<(), String> {
+    if crate::hardware::capabilities::get().light_bar_zones {
+        crate::hardware::light_bar_zones::write(state)
+    } else {
+        write_wmi(state)
+    }
+}
+
+fn write_wmi(state: &LightBarState) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .write(true)
         .open(DEVICE)
@@ -258,7 +340,12 @@ pub fn apply(state: &LightBarState, wake: bool) -> Result<(), String> {
     if state.mode == LightBarMode::Off {
         return write_frame(&on_wire(state));
     }
-    if wake && state.mode != LightBarMode::Breathing && state.mode != LightBarMode::Off {
+    // The Breathing wake frame is a workaround for the single-colour node.
+    // The zone node relights from brightness 0 directly: measured on the old
+    // EC-window path first, and on its per-zone WMI path on a PH16-71 on
+    // 2026-10-17 (Off to Static per zone, no wake frame).
+    let needs_wake = !crate::hardware::capabilities::get().light_bar_zones;
+    if wake && needs_wake && state.mode != LightBarMode::Breathing && state.mode != LightBarMode::Off {
         write_frame(&LightBarState {
             mode: LightBarMode::Breathing,
             ..*state
@@ -329,6 +416,7 @@ mod tests {
             red: 0x10,
             green: 0x20,
             blue: 0x30,
+            ..Default::default()
         };
         let wire = on_wire(&saved);
         assert_eq!(wire.mode, LightBarMode::Static, "Off's own id does not blank this firmware");
@@ -370,6 +458,7 @@ mod tests {
             red: 0x80,
             green: 0x00,
             blue: 0xff,
+            ..Default::default()
         });
         assert_eq!(
             f,
@@ -404,5 +493,62 @@ mod tests {
     fn static_is_the_sparse_0xff_id_not_zero() {
         assert_eq!(LightBarMode::Static.wire_id(), 0xFF);
         assert_eq!(LightBarMode::Off.wire_id(), 0x00);
+    }
+
+    #[test]
+    fn an_old_config_without_zone_fields_loads_as_single_colour() {
+        let json = r#"{"mode":"Scanner","speed":3,"brightness":100,"red":255,"green":0,"blue":0}"#;
+        let state: LightBarState = serde_json::from_str(json).expect("old shape must load");
+        assert!(!state.per_zone);
+        assert_eq!(state.zones, None);
+        assert_eq!(state.direction, 1);
+        assert_eq!(state.zone_colours(), [[255, 0, 0]; 3]);
+    }
+
+    #[test]
+    fn zone_fields_round_trip_through_json() {
+        let state = LightBarState {
+            per_zone: true,
+            zones: Some([[255, 0, 0], [0, 255, 0], [0, 0, 255]]),
+            direction: 2,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains(r#""zones":[[255,0,0],[0,255,0],[0,0,255]]"#), "{json}");
+        let back: LightBarState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, state);
+    }
+
+    #[test]
+    fn zone_colours_follow_the_switch_not_the_stored_zones() {
+        let mut state = LightBarState {
+            red: 1, green: 2, blue: 3,
+            zones: Some([[9, 9, 9], [8, 8, 8], [7, 7, 7]]),
+            ..Default::default()
+        };
+        assert_eq!(state.zone_colours(), [[1, 2, 3]; 3], "switch off: single colour");
+        state.per_zone = true;
+        assert_eq!(state.zone_colours(), [[9, 9, 9], [8, 8, 8], [7, 7, 7]]);
+        state.zones = None;
+        assert_eq!(state.zone_colours(), [[1, 2, 3]; 3], "per-zone with nothing stored yet");
+    }
+
+    #[test]
+    fn enabling_per_zone_fills_zones_only_the_first_time() {
+        let mut state = LightBarState { red: 10, green: 20, blue: 30, ..Default::default() };
+        state.enable_per_zone();
+        assert!(state.per_zone);
+        assert_eq!(state.zones, Some([[10, 20, 30]; 3]), "first time: no visible change");
+
+        state.zones = Some([[1, 1, 1], [2, 2, 2], [3, 3, 3]]);
+        state.per_zone = false;
+        state.enable_per_zone();
+        assert_eq!(state.zones, Some([[1, 1, 1], [2, 2, 2], [3, 3, 3]]), "user's zones kept");
+    }
+
+    #[test]
+    fn only_wave_and_rainbow_take_a_direction() {
+        let directional: Vec<_> = LightBarMode::ALL.into_iter().filter(|m| m.uses_direction()).collect();
+        assert_eq!(directional, vec![LightBarMode::Rainbow, LightBarMode::Wave]);
     }
 }

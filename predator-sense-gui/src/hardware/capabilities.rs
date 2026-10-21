@@ -29,6 +29,10 @@ pub struct Capabilities {
     /// that one is the badge on the outside of the lid, this is the bar across
     /// the chassis, and a machine can have either, both or neither.
     pub light_bar: bool,
+    /// The light bar's three zones can be coloured separately: facer's WMI
+    /// node exists and the chassis is one whose per-zone WMI methods were
+    /// confirmed (`hardware::light_bar_zones`). Implies `light_bar`.
+    pub light_bar_zones: bool,
     /// Chicony USB keyboard backlight with arbitrary colour
     /// (`hardware::keyboard_rgb`). Distinct from `rgb` above, which is the
     /// older WMI palette channel, and from `cover_logo`.
@@ -111,6 +115,7 @@ impl Capabilities {
             cover_logo: crate::hardware::hid_rgb::has_cover_logo()
                 || crate::hardware::magic_rgb::is_logo_available(),
             light_bar: crate::hardware::light_bar::is_available(),
+            light_bar_zones: crate::hardware::light_bar_zones::is_available(),
             keyboard_rgb: crate::hardware::keyboard_rgb::is_available(),
             predator_key: crate::hardware::sysinfo::product_matches(
                 predator_sense_protocol::dmi::PREDATOR_KEY_MODELS,
@@ -368,6 +373,7 @@ mod capability_fields {
         // on one path while the others keep it.
         let caps = super::get();
         let _: bool = caps.light_bar;
+        let _: bool = caps.light_bar_zones;
         let _: bool = caps.keyboard_rgb;
         let _: bool = caps.predator_key;
     }
@@ -377,5 +383,6 @@ mod capability_fields {
         let caps = super::get();
         assert_eq!(caps.keyboard_rgb, crate::hardware::keyboard_rgb::is_available());
         assert_eq!(caps.light_bar, crate::hardware::light_bar::is_available());
+        assert_eq!(caps.light_bar_zones, crate::hardware::light_bar_zones::is_available());
     }
 }

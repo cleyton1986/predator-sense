@@ -23,6 +23,7 @@ pub mod hwmon;
 pub mod idle;
 pub mod keyboard_rgb;
 pub mod light_bar;
+pub mod light_bar_zones;
 pub mod lighting;
 pub mod macro_player;
 pub mod magic_rgb;
