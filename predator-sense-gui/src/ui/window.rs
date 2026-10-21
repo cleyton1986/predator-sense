@@ -11,8 +11,8 @@ use crate::hardware::{rgb, sensors, setup};
 use crate::tray::TrayManager;
 use crate::ui::{
     ai_page, background, battery_page, dashboard_page, drivers_page, fan_control_page, fan_page,
-    gpu_page, monitor_page, network_page, rgb_page, setup_page, temperatures_page, tools_page,
-    usage_page,
+    gpu_page, lighting_page, monitor_page, network_page, setup_page, temperatures_page,
+    tools_page, usage_page,
 };
 
 /// How long a Settings slider rests before its value is saved to config.json.
@@ -1504,7 +1504,7 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
             Box::new(|| network_page::build().upcast()),
         );
         pages.insert("usage".into(), Box::new(|| usage_page::build().upcast()));
-        pages.insert("lighting".into(), Box::new(|| rgb_page::build().upcast()));
+        pages.insert("lighting".into(), Box::new(lighting_page::build));
         pages.insert("fan".into(), Box::new(|| fan_page::build().upcast()));
         pages.insert(
             "fan_ctrl".into(),
