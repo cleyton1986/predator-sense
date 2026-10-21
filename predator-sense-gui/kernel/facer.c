@@ -2737,6 +2737,15 @@ static void acer_led_exit(void)
  * uses method 21, method 7 for each zone and method 4. Any failed call or
  * non-zero status makes the write or read fail with -EIO.
  *
+ * Each of those calls is an SMM call, which stalls every core, so a 16-byte
+ * write or a read that reaches the firmware starts at least
+ * LIGHTBAR_WMI_GAP_MS after the last one ended: the writer or reader waits
+ * for that, nothing is refused or dropped. A read within LIGHTBAR_READ_KEEP_MS
+ * of the last one, with no write in between, is answered from that read, so
+ * reading the frame a byte at a time makes one set of calls, not sixteen.
+ * The node is 0660 root:root: only root, and a user a udev rule grants an
+ * ACL (uaccess, for the active session), can open it.
+ *
  * For animation the node also takes a direct colour frame, which makes none:
  *   a 9-byte write, left RGB, middle RGB, right RGB
  * It goes straight into the EC's shared-memory window ERM2 (a SystemMemory
@@ -2806,6 +2815,33 @@ static int lightbar_zones_sent = -1;
 static struct class *lightbar_class;
 static struct cdev lightbar_cdev;
 static dev_t lightbar_devt;
+/*
+ * Pacing of the SMM calls (see above), all under lightbar_lock: when the
+ * next firmware frame or read may start, and the last read's frame and
+ * when it was taken. lightbar_read_valid is cleared by every write and by
+ * acer_resume.
+ */
+#define LIGHTBAR_WMI_GAP_MS	20
+#define LIGHTBAR_READ_KEEP_MS	100
+static ktime_t lightbar_wmi_next;
+static u8 lightbar_read_frame[LIGHTBAR_FRAME_LEN];
+static ktime_t lightbar_read_at;
+static bool lightbar_read_valid;
+
+/* Waits until a firmware frame or read may start; lightbar_lock held. */
+static void lightbar_pace(void)
+{
+	s64 wait = ktime_ms_delta(lightbar_wmi_next, ktime_get());
+
+	if (wait > 0)
+		msleep(wait);
+}
+
+/* A firmware frame or read has just ended; lightbar_lock held. */
+static void lightbar_paced(void)
+{
+	lightbar_wmi_next = ktime_add_ms(ktime_get(), LIGHTBAR_WMI_GAP_MS);
+}
 
 /*
  * Logs why a light bar WMI call failed. At run time (probe NULL) that is a
@@ -2919,6 +2955,7 @@ static ssize_t lightbar_write_colours(const char __user *buf)
 		err = -EBUSY;
 		goto unlock;
 	}
+	lightbar_read_valid = false;
 	for (i = 0; i < LIGHTBAR_COLOURS_LEN; i++)
 		iowrite8(rgb[i], lightbar_erm2 + ERM2_ZONE_RGB + i);
 	iowrite8(ioread8(lightbar_erm2 + ERM2_APPLY) | ERM2_APPLY_LIGHTBAR,
@@ -2966,6 +3003,8 @@ static ssize_t lightbar_write(struct file *file, const char __user *buf,
 	led[LIGHTBAR_LED_ZONES_BYTE] = zones_on;
 
 	mutex_lock(&lightbar_lock);
+	lightbar_read_valid = false;
+	lightbar_pace();
 	err = lightbar_wmi(ACER_WMID_SET_GAMINGKBBL_METHODID, kbbl, sizeof(kbbl),
 			   NULL, 0);
 	for (i = 0; !err && i < LIGHTBAR_ZONES; i++)
@@ -2976,6 +3015,7 @@ static ssize_t lightbar_write(struct file *file, const char __user *buf,
 		if (!err)
 			lightbar_zones_sent = zones_on;
 	}
+	lightbar_paced();
 	mutex_unlock(&lightbar_lock);
 
 	return err ? err : LIGHTBAR_FRAME_LEN;
@@ -2983,7 +3023,7 @@ static ssize_t lightbar_write(struct file *file, const char __user *buf,
 
 /*
  * The frame as the firmware holds it now (methods 21, 7 x3 and 4), into
- * frame; lightbar_lock held. 0 or -EIO.
+ * frame; lightbar_lock held, pacing included. 0 or -EIO.
  */
 static int lightbar_read_firmware(u8 frame[LIGHTBAR_FRAME_LEN])
 {
@@ -2993,6 +3033,7 @@ static int lightbar_read_firmware(u8 frame[LIGHTBAR_FRAME_LEN])
 	int i, err;
 
 	memset(frame, 0, LIGHTBAR_FRAME_LEN);
+	lightbar_pace();
 	err = lightbar_wmi(ACER_WMID_GET_GAMINGKBBL_METHODID, kbbl_in,
 			   sizeof(kbbl_in), kbbl, sizeof(kbbl));
 	for (i = 0; !err && i < LIGHTBAR_ZONES; i++) {
@@ -3007,6 +3048,7 @@ static int lightbar_read_firmware(u8 frame[LIGHTBAR_FRAME_LEN])
 	if (!err)
 		err = lightbar_wmi(ACER_WMID_GET_GAMING_LED_METHODID, led_in,
 				   sizeof(led_in), led, sizeof(led));
+	lightbar_paced();
 	if (err)
 		return err;
 
@@ -3032,7 +3074,17 @@ static ssize_t lightbar_read(struct file *file, char __user *buf,
 		return 0;
 
 	mutex_lock(&lightbar_lock);
-	err = lightbar_read_firmware(frame);
+	if (!lightbar_read_valid ||
+	    ktime_ms_delta(ktime_get(), lightbar_read_at) >= LIGHTBAR_READ_KEEP_MS) {
+		lightbar_read_valid = false;
+		err = lightbar_read_firmware(lightbar_read_frame);
+		if (!err) {
+			lightbar_read_at = ktime_get();
+			lightbar_read_valid = true;
+		}
+	}
+	if (!err)
+		memcpy(frame, lightbar_read_frame, sizeof(frame));
 	mutex_unlock(&lightbar_lock);
 	if (err)
 		return err;
@@ -3059,6 +3111,20 @@ static struct attribute *lightbar_attrs[] = {
 	NULL,
 };
 ATTRIBUTE_GROUPS(lightbar);
+
+/*
+ * 0660 root:root: no access for other users. A udev rule that tags the node
+ * uaccess gives the user of the active local session an ACL.
+ */
+static int lightbar_dev_uevent(
+#if RTLNX_VER_MIN(6, 2, 0)
+const
+#endif
+struct device *dev, struct kobj_uevent_env *env)
+{
+	add_uevent_var(env, "DEVMODE=%#o", 0660);
+	return 0;
+}
 
 /* The window's colour bytes for all three zones, in frame order. */
 static void lightbar_read_window(void __iomem *erm2,
@@ -3196,6 +3262,7 @@ static int __init lightbar_cdev_init(void)
 		lightbar_class = NULL;
 		goto unregister;
 	}
+	lightbar_class->dev_uevent = lightbar_dev_uevent;
 
 	cdev_init(&lightbar_cdev, &lightbar_fops);
 	lightbar_cdev.owner = THIS_MODULE;
@@ -3273,6 +3340,8 @@ static ssize_t gkbbl_drv_write(struct file *file,
 	/* lightbar_write() sends method 20 too, as the first of a sequence of
 	 * calls; the lock keeps this frame out of the middle of it. */
 	mutex_lock(&lightbar_lock);
+	/* A method-20 frame can change the bar: no read is answered from before it. */
+	lightbar_read_valid = false;
 	set_u8_array(config_buf, GAMING_KBBL_CONFIG_LEN, ACER_CAP_GAMINGKB);
 	mutex_unlock(&lightbar_lock);
 	return count;
@@ -3521,6 +3590,7 @@ static ssize_t gkbbl_static_drv_write(struct file *file, const char __user *buf,
 		return -EFAULT;
 
 	mutex_lock(&lightbar_lock);
+	lightbar_read_valid = false;
 	ret = gkbbl_static_send(config_buf, count);
 	mutex_unlock(&lightbar_lock);
 	return ret;
@@ -5395,6 +5465,7 @@ static int acer_resume(struct device *dev)
 	 */
 	mutex_lock(&lightbar_lock);
 	lightbar_zones_sent = -1;
+	lightbar_read_valid = false;
 	mutex_unlock(&lightbar_lock);
 
 	if (!data)
