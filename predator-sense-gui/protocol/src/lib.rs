@@ -2497,7 +2497,8 @@ pub mod dmi {
     /// the older `08 00 .. BE` family. Keying off the USB ID alone would send
     /// this generation's packets to that one and take over its working RGB
     /// page. One list for the GUI, which drives this keyboard, and for the
-    /// privileged helper, which sends this family only there.
+    /// privileged helper, which sends this family only there and hands the
+    /// keyboard's idle timer back there when the GUI is gone.
     pub const CHICONY_24BIT_MODELS: &[&str] = &["PH16-71"];
 
     /// True when `product_name` names one of `models`.

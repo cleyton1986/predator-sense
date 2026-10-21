@@ -280,6 +280,15 @@ pub(crate) mod timing {
     pub const SERVICE_START_LIMIT_BURST: u32 = 5;
     pub const SERVICE_START_LIMIT_INTERVAL_SECS: u64 = 300;
     pub const PROCESS_SHUTDOWN_GRACE_SECS: u64 = 1;
+    /// How long an upgrade waits in all, the grace above included, for the
+    /// services it stopped to exit before it says it could not stop them.
+    /// The helper takes longer than the others: on SIGTERM it waits up to
+    /// `helper::IN_FLIGHT_WAIT` (3 s) for a command in flight, then hands back
+    /// the keyboard's idle timer if it switched that off itself, before it
+    /// exits.
+    pub const PROCESS_STOP_WAIT_SECS: u64 = 5;
+    /// How often that wait looks again.
+    pub const PROCESS_STOP_POLL_MS: u64 = 100;
 }
 
 pub(crate) mod installer {

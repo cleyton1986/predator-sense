@@ -750,6 +750,28 @@ fn find_kernel_source_root(gui_dir: Option<&Path>, installed_dir: &Path) -> Opti
         .map(Path::to_path_buf)
 }
 
+/// Asks `still_running` what has not exited yet, every `poll`, until the
+/// answer is empty or `limit` has been waited in all, and returns the last
+/// answer. Sleeps through `sleep`, so a test can run it on a clock of its
+/// own; nothing running at the first look means no wait at all.
+fn wait_until_stopped<T>(
+    limit: Duration,
+    poll: Duration,
+    mut still_running: impl FnMut() -> Vec<T>,
+    mut sleep: impl FnMut(Duration),
+) -> Vec<T> {
+    let mut waited = Duration::ZERO;
+    loop {
+        let running = still_running();
+        if running.is_empty() || waited >= limit {
+            return running;
+        }
+        let step = poll.min(limit - waited);
+        sleep(step);
+        waited += step;
+    }
+}
+
 fn gui_binary_path(gui: &Path) -> PathBuf {
     gui.join(GUI_RELEASE_DIR_RELATIVE).join(binary::APPLICATION)
 }
@@ -1059,14 +1081,24 @@ impl Installer {
         for process in [LEGACY_HOTKEY_PROCESS, LEGACY_TRAY_PROCESS] {
             terminate_legacy_process(process);
         }
+        let grace = Duration::from_secs(timing::PROCESS_SHUTDOWN_GRACE_SECS);
         if had_running_tool {
-            thread::sleep(Duration::from_secs(timing::PROCESS_SHUTDOWN_GRACE_SECS));
+            thread::sleep(grace);
         }
 
-        let running = RUST_TOOL_PROCESSES_TO_STOP
-            .into_iter()
-            .filter(|process| process_running(process))
-            .collect::<Vec<_>>();
+        // Then up to PROCESS_STOP_WAIT_SECS in all: on SIGTERM the helper
+        // first finishes the command in flight, which can take 3 s.
+        let running = wait_until_stopped(
+            Duration::from_secs(timing::PROCESS_STOP_WAIT_SECS).saturating_sub(grace),
+            Duration::from_millis(timing::PROCESS_STOP_POLL_MS),
+            || {
+                RUST_TOOL_PROCESSES_TO_STOP
+                    .into_iter()
+                    .filter(|process| process_running(process))
+                    .collect::<Vec<_>>()
+            },
+            thread::sleep,
+        );
         if running.is_empty() {
             Ok(())
         } else {
@@ -2041,8 +2073,65 @@ fn keyboard_hwdb_fix_for(product: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::os::unix::fs::MetadataExt;
     use tempfile::tempdir;
+
+    /// `wait_until_stopped` against processes that exit after `exits_after`
+    /// of waiting (`None`: never), on a clock made of the sleeps it asks for.
+    fn simulate_stop(
+        limit: Duration,
+        exits_after: Option<Duration>,
+    ) -> (Vec<&'static str>, Duration) {
+        let waited = Cell::new(Duration::ZERO);
+        let left = wait_until_stopped(
+            limit,
+            Duration::from_millis(timing::PROCESS_STOP_POLL_MS),
+            || match exits_after {
+                Some(after) if waited.get() >= after => Vec::new(),
+                _ => vec![path::HELPER],
+            },
+            |step| waited.set(waited.get() + step),
+        );
+        (left, waited.get())
+    }
+
+    #[test]
+    fn nothing_running_is_not_waited_for() {
+        let (left, waited) = simulate_stop(Duration::from_secs(4), Some(Duration::ZERO));
+        assert!(left.is_empty());
+        assert_eq!(waited, Duration::ZERO);
+    }
+
+    #[test]
+    fn the_wait_ends_as_soon_as_everything_has_exited() {
+        let exits_after = Some(Duration::from_millis(250));
+        let (left, waited) = simulate_stop(Duration::from_secs(4), exits_after);
+        assert!(left.is_empty());
+        assert!(waited < Duration::from_millis(400), "{waited:?}");
+    }
+
+    #[test]
+    fn what_never_exits_is_reported_after_exactly_the_limit() {
+        let limit = Duration::from_millis(4_050);
+        let (left, waited) = simulate_stop(limit, None);
+        assert_eq!(left, [path::HELPER]);
+        assert_eq!(waited, limit);
+    }
+
+    #[test]
+    fn an_upgrade_outwaits_a_helper_finishing_the_command_in_flight() {
+        // On SIGTERM the helper waits up to IN_FLIGHT_WAIT for a command in
+        // flight, then hands back a keyboard timer it switched off and exits.
+        // The upgrade used to give up after its 1 s grace.
+        let grace = Duration::from_secs(timing::PROCESS_SHUTDOWN_GRACE_SECS);
+        let total = Duration::from_secs(timing::PROCESS_STOP_WAIT_SECS);
+        let helper_exit = crate::helper::IN_FLIGHT_WAIT + Duration::from_millis(500);
+        let margin = Duration::from_secs(1);
+        assert!(total >= helper_exit + margin, "a margin to spare");
+        let (left, _) = simulate_stop(total - grace, Some(helper_exit - grace));
+        assert!(left.is_empty(), "the helper was still being waited for");
+    }
 
     #[test]
     fn parses_cli_without_silently_falling_back_to_menu() {

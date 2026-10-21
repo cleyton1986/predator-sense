@@ -22,10 +22,13 @@ use predator_sense_protocol::thermal_profile;
 use serde::Deserialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, IntoRawFd};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -465,18 +468,42 @@ struct CpuProfileLock {
 pub(crate) fn run(args: &[String]) -> AppResult {
     let root = test_root().unwrap_or_else(|| PathBuf::from(path::REAL_SYSFS));
     let ec = Path::new(path::EC_DEVICE);
-    if args.first().map(String::as_str) == Some(internal::HELPER_DAEMON_ARGUMENT) {
+    if is_daemon(args) {
+        hand_back_on_exit_signals();
         let stdin = io::stdin();
         let stdout = io::stdout();
         return run_daemon(&root, ec, stdin.lock(), stdout.lock());
     }
+    // One-shot mode leaves the keyboard timer wherever its action put it. A
+    // lone `chicony-auto-off 0` here is deliberate (trying the keyboard by
+    // hand), and there is no session for it to outlive.
     run_with_paths(args, &root, ec)
+}
+
+/// Whether `args` start a daemon session. Anything else is one action, run
+/// once (one-shot mode), which never hands the keyboard timer back.
+fn is_daemon(args: &[String]) -> bool {
+    args.first().map(String::as_str) == Some(internal::HELPER_DAEMON_ARGUMENT)
 }
 
 /// A `chicony-auto-off` command: `30 01 ST`, the keyboard's own 30 s idle
 /// timer on or off, as one 24-bit command ([`chicony_send_24bit`]).
 fn set_keyboard_timer(on: bool) -> AppResult {
     chicony_send_24bit(&[keyboard::auto_off_packet(on)])
+}
+
+/// The exit hand-back: `30 01 01`, the timer on, over the keyboard's hidraw
+/// node only. No USB session at exit: it would detach usbhid from the
+/// interface. When the node cannot be found this fails, and the timer stays
+/// where it is. One feature report, which the kernel bounds at 5 s
+/// (`USB_CTRL_SET_TIMEOUT`) against a keyboard that does not answer. The
+/// process is on its way out and has nobody left to retry for.
+fn hand_back_keyboard_timer() -> AppResult {
+    let path = keyboard_node()
+        .ok_or_else(|| fail("the keyboard's hidraw node (04f2:0117, 06 02 ff) was not found"))?;
+    on_keyboard_node(&path, |device| {
+        device.send_feature(&keyboard::auto_off_packet(true))
+    })
 }
 
 fn parse_keyboard_timer(value: &str) -> AppResult<bool> {
@@ -486,6 +513,307 @@ fn parse_keyboard_timer(value: &str) -> AppResult<bool> {
         other => Err(fail(format!(
             "chicony-auto-off: invalid value '{other}' (must be 0 or 1)"
         ))),
+    }
+}
+
+/// The timer state a well-formed `chicony-auto-off 0|1` asks for. Anything
+/// else, a malformed one included, is `None`.
+fn keyboard_timer_request(args: &[String]) -> Option<bool> {
+    match args {
+        [action, value] if HelperAction::parse(action) == Some(HelperAction::ChiconyAutoOff) => {
+            parse_keyboard_timer(value).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Whether this helper process holds the keyboard's own idle timer off.
+///
+/// The GUI switches that timer off while it runs and back on at exit, over
+/// the keyboard's hidraw node when the user can open it, and through this
+/// helper otherwise. On that second route, at logout, the session stops the
+/// GUI and this helper at the same moment, so the GUI's last write never
+/// lands and the keyboard stays lit at the login screen (measured
+/// 2026-10-17). So the process that switched it off switches it back on: a
+/// daemon whose last successful write was an off hands the timer back on its
+/// way out, however it ends ([`hands_back`]).
+struct KeyboardTimerHold(AtomicBool);
+
+impl KeyboardTimerHold {
+    const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    /// One `chicony-auto-off` write and whether it landed. One that failed
+    /// changes nothing: the keyboard is still where the last write that
+    /// landed left it.
+    fn record(&self, on: bool, landed: bool) {
+        if landed {
+            self.0.store(!on, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether an exit has to switch the timer back on. True at most once
+    /// per hold, so two exit paths meeting never send it twice.
+    fn take_hand_back(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
+    }
+}
+
+/// How a daemon session ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Exit {
+    /// Its caller is gone: the input ended, or a reply found nobody reading.
+    /// The GUI has exited, or crashed.
+    CallerGone,
+    /// SIGTERM, SIGHUP or SIGINT. The GUI may well be running on: an upgrade
+    /// stops this helper with SIGTERM and leaves the GUI alone.
+    Signal,
+}
+
+/// Whether a daemon session ending by `exit` switches the keyboard's idle
+/// timer back on. `held`: this session switched the timer off itself
+/// ([`KeyboardTimerHold`]). `keyboard_24bit`: this machine is a chassis with
+/// the 24-bit keyboard (`dmi::CHICONY_24BIT_MODELS`). `privileged`: this
+/// process runs as euid 0. The session the GUI starts through pkexec does;
+/// its read session runs as the user, and so never hands back unasked,
+/// unless the GUI itself runs as root, when that read session is euid 0 too
+/// and counts, which is right for a root GUI that has gone. So nothing that
+/// starts a read session, the GUI's tests included, may run as root on a
+/// machine with this helper installed.
+///
+/// - Caller gone: a privileged session on the 24-bit keyboard hands it back
+///   whoever switched it off. The GUI holds it off over the hidraw node
+///   without this helper, and hands it back itself at exit; when the GUI
+///   crashes or is killed, this is what does it. Anywhere else, only a timer
+///   this session switched off.
+/// - Signal: only a timer this session switched off. The GUI that holds it
+///   over the node hands it back itself, and may be running on with it off,
+///   which must not be undone.
+///
+/// One-shot mode is no session and never asks ([`is_daemon`]).
+fn hands_back(exit: Exit, privileged: bool, keyboard_24bit: bool, held: bool) -> bool {
+    match exit {
+        Exit::CallerGone => held || (privileged && keyboard_24bit),
+        Exit::Signal => held,
+    }
+}
+
+/// This machine's keyboard as a daemon session sees it, and the two writes
+/// it makes to its idle timer. Passed in, so tests drive a session without
+/// the keyboard.
+#[derive(Clone, Copy)]
+struct SessionKeyboard<'a> {
+    /// See [`hands_back`].
+    privileged: bool,
+    /// See [`hands_back`].
+    is_24bit: bool,
+    /// A `chicony-auto-off` command.
+    set_timer: &'a dyn Fn(bool) -> AppResult,
+    /// The exit hand-back, the timer on.
+    hand_back: &'a dyn Fn() -> AppResult,
+}
+
+impl SessionKeyboard<'static> {
+    /// This process and this machine, with the real writes. The model is
+    /// DMI's alone: pkexec clears the environment, so
+    /// `PREDATOR_SENSE_FORCE_MODEL` never reaches the root helper, and on a
+    /// chassis the GUI was forced onto, the GUI going away does not hand the
+    /// timer back.
+    fn system() -> Self {
+        Self {
+            // SAFETY: geteuid has no preconditions.
+            privileged: unsafe { libc::geteuid() } == 0,
+            is_24bit: dmi::product_matches(dmi::CHICONY_24BIT_MODELS),
+            set_timer: &set_keyboard_timer,
+            hand_back: &hand_back_keyboard_timer,
+        }
+    }
+}
+
+/// What a daemon session shares with the thread that waits for exit signals.
+struct DaemonShared {
+    /// Held for the whole of each command, its update of `timer` included.
+    /// A hand-back takes it first, so, unless a signal's wait for it runs
+    /// out ([`Self::hand_back_after_signal`]), a hand-back never lands
+    /// between the reports of a command in flight, never finds the node gone
+    /// under a command that detached usbhid for a USB session, and the
+    /// process never exits between a write landing and its being recorded,
+    /// or halfway through a session that detached the kernel driver.
+    dispatch: Mutex<()>,
+    timer: KeyboardTimerHold,
+}
+
+/// The real daemon's. Tests make their own.
+static DAEMON: DaemonShared = DaemonShared::new();
+
+impl DaemonShared {
+    const fn new() -> Self {
+        Self {
+            dispatch: Mutex::new(()),
+            timer: KeyboardTimerHold::new(),
+        }
+    }
+
+    /// Switches the keyboard timer back on if [`hands_back`] says so for
+    /// `exit`. One attempt (`keyboard.hand_back`).
+    ///
+    /// At most one exit path sends it. The end of input takes the hold and
+    /// sends under the dispatch lock, and a signal's hand-back keeps that
+    /// lock until the process exits ([`Self::hand_back_after_signal`]). So
+    /// a signal that comes after the end of input finds the hold taken,
+    /// whether it got the lock or its wait for it ran out, and one that comes
+    /// first leaves the end of input waiting for the lock until the process
+    /// has gone.
+    fn hand_back(&self, exit: Exit, keyboard: SessionKeyboard) {
+        let held = self.timer.take_hand_back();
+        if !hands_back(exit, keyboard.privileged, keyboard.is_24bit, held) {
+            return;
+        }
+        if let Err(error) = (keyboard.hand_back)() {
+            let _ = writeln!(
+                io::stderr(),
+                "daemon: keyboard idle timer not handed back: {error}"
+            );
+        }
+    }
+
+    /// [`Self::hand_back`] for an exit signal: behind the command in flight
+    /// if that finishes within `wait`, and without it otherwise rather than
+    /// outwait a stuck write. Returns the dispatch lock when it got it, for
+    /// the caller to keep until the process is gone, so no command starts
+    /// after the hand-back.
+    #[must_use = "hold the dispatch lock until the process exits"]
+    fn hand_back_after_signal(
+        &self,
+        keyboard: SessionKeyboard,
+        wait: Duration,
+    ) -> Option<MutexGuard<'_, ()>> {
+        let in_flight = lock_within(&self.dispatch, wait);
+        self.hand_back(Exit::Signal, keyboard);
+        in_flight
+    }
+}
+
+/// SIGTERM is what the session sends at logout, SIGHUP a closed terminal,
+/// SIGINT Ctrl+C on a daemon run by hand.
+const EXIT_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
+/// How long a signal's hand-back waits for the command in flight. A healthy
+/// keyboard finishes any command in milliseconds, so this leaves room to
+/// spare without outwaiting a stuck one: against a keyboard that does not
+/// answer, an effect can take up to 15 s over the hidraw node (three feature
+/// reports, each bounded by the kernel's 5 s) and about 8 s over USB (three
+/// 1000 ms transfers plus the kernel's 5 s for the clear-halt), and this
+/// gives up first. The installer waits longer than this for the helper to
+/// exit (`timing::PROCESS_STOP_WAIT_SECS`).
+pub(crate) const IN_FLIGHT_WAIT: Duration = Duration::from_secs(3);
+const IN_FLIGHT_POLL: Duration = Duration::from_millis(10);
+
+/// Locks `mutex` if it comes free within `limit`. Polls, because std's
+/// `Mutex` has no timed lock, and this runs once, at exit.
+fn lock_within<T>(mutex: &Mutex<T>, limit: Duration) -> Option<MutexGuard<'_, T>> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(IN_FLIGHT_POLL)
+            }
+            Err(TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+/// Write end of the pipe [`report_exit_signal`] writes to, -1 until set up.
+static EXIT_SIGNAL_PIPE: AtomicI32 = AtomicI32::new(-1);
+
+/// The exit signals' handler. It does only what a handler may: one write(2)
+/// of the signal number to a non-blocking pipe, with errno put back.
+extern "C" fn report_exit_signal(signal: libc::c_int) {
+    // SAFETY: write(2) and errno are async-signal-safe. The buffer is a live
+    // local, and the descriptor is either -1, where write fails harmlessly,
+    // or the pipe's write end, which is never closed.
+    unsafe {
+        let errno = libc::__errno_location();
+        let saved = *errno;
+        let byte = signal as u8;
+        libc::write(
+            EXIT_SIGNAL_PIPE.load(Ordering::Relaxed),
+            (&byte as *const u8).cast(),
+            1,
+        );
+        *errno = saved;
+    }
+}
+
+fn exit_signal_handler() -> libc::sighandler_t {
+    report_exit_signal as extern "C" fn(libc::c_int) as libc::sighandler_t
+}
+
+/// Sets `signal` to run `handler`, or to `libc::SIG_DFL`. False if refused.
+fn set_signal_action(signal: libc::c_int, handler: libc::sighandler_t) -> bool {
+    // SAFETY: the action is fully initialised (zeroed, then its mask
+    // emptied) before sigaction reads it, and a null old action is allowed.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = handler;
+        // A command the signal lands in carries on: the hand-back waits for
+        // it rather than cut it short.
+        action.sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(signal, &action, std::ptr::null_mut()) == 0
+    }
+}
+
+/// Waits for the handler to report a signal. `None` if the pipe broke.
+fn next_exit_signal(mut pipe: &UnixStream) -> Option<libc::c_int> {
+    let mut byte = [0u8; 1];
+    pipe.read_exact(&mut byte)
+        .ok()
+        .map(|()| libc::c_int::from(byte[0]))
+}
+
+/// On SIGTERM, SIGHUP or SIGINT: hands back a keyboard timer this session
+/// switched off ([`hands_back`] for [`Exit::Signal`]), then exits.
+///
+/// The handler only writes the signal number to a pipe; a thread waiting
+/// on the other end does the hand-back and the exit. The signal mask is
+/// left alone on purpose: std's `Command` does not clear it, so a blocked
+/// set would reach every program the helper runs, while a caught signal
+/// goes back to its default action at exec. If any step fails, the
+/// default actions stay in place, which is how the helper behaved before.
+fn hand_back_on_exit_signals() {
+    let Ok((reader, writer)) = UnixStream::pair() else {
+        return;
+    };
+    if writer.set_nonblocking(true).is_err() {
+        return;
+    }
+    let waiter = thread::Builder::new()
+        .name("exit-signals".into())
+        .spawn(move || {
+            let Some(signal) = next_exit_signal(&reader) else {
+                // Nothing can hear them any more, so they end the process
+                // as they always did.
+                for signal in EXIT_SIGNALS {
+                    set_signal_action(signal, libc::SIG_DFL);
+                }
+                return;
+            };
+            let _in_flight =
+                DAEMON.hand_back_after_signal(SessionKeyboard::system(), IN_FLIGHT_WAIT);
+            // 128 + n is the status a shell reports for death by signal n.
+            std::process::exit(128 + signal);
+        });
+    if waiter.is_err() {
+        return;
+    }
+    // Only now that something listens, so no failure above leaves the
+    // signals caught and nobody acting on them.
+    EXIT_SIGNAL_PIPE.store(writer.into_raw_fd(), Ordering::SeqCst);
+    for signal in EXIT_SIGNALS {
+        set_signal_action(signal, exit_signal_handler());
     }
 }
 
@@ -499,7 +827,61 @@ fn parse_keyboard_timer(value: &str) -> AppResult<bool> {
 /// *is* the reply stream; the marker line right after it is what tells a
 /// caller where that value ends. Generic over its I/O so tests can drive it
 /// without real pipes.
-fn run_daemon(sysfs: &Path, ec: &Path, input: impl BufRead, mut output: impl Write) -> AppResult {
+///
+/// However the session ends, a keyboard timer it switched off goes back on,
+/// and when its caller is gone, a privileged session on the 24-bit keyboard
+/// switches the timer back on whoever switched it off: see [`hands_back`].
+fn run_daemon(sysfs: &Path, ec: &Path, input: impl BufRead, output: impl Write) -> AppResult {
+    run_daemon_with(sysfs, ec, input, output, &DAEMON, SessionKeyboard::system())
+}
+
+/// [`run_daemon`] with the shared state and the keyboard passed in, so tests
+/// can drive it without one.
+fn run_daemon_with(
+    sysfs: &Path,
+    ec: &Path,
+    input: impl BufRead,
+    output: impl Write,
+    shared: &DaemonShared,
+    keyboard: SessionKeyboard,
+) -> AppResult {
+    let result = serve_daemon(sysfs, ec, input, output, shared, keyboard.set_timer);
+    // End of input (the caller closed the pipe or died) or a reply nobody
+    // reads any more. The lock queues this behind a signal's hand-back.
+    let _quiet = shared
+        .dispatch
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    shared.hand_back(Exit::CallerGone, keyboard);
+    result
+}
+
+/// One daemon command. A well-formed `chicony-auto-off` goes through
+/// `set_timer` and into `timer`; everything else, a malformed one included,
+/// runs exactly as in one-shot mode.
+fn run_daemon_command(
+    args: &[String],
+    sysfs: &Path,
+    ec: &Path,
+    timer: &KeyboardTimerHold,
+    set_timer: &dyn Fn(bool) -> AppResult,
+) -> AppResult {
+    let Some(on) = keyboard_timer_request(args) else {
+        return run_with_paths(args, sysfs, ec);
+    };
+    let result = set_timer(on);
+    timer.record(on, result.is_ok());
+    result
+}
+
+fn serve_daemon(
+    sysfs: &Path,
+    ec: &Path,
+    input: impl BufRead,
+    mut output: impl Write,
+    shared: &DaemonShared,
+    set_timer: &dyn Fn(bool) -> AppResult,
+) -> AppResult {
     for line in input.lines() {
         let line = match line {
             Ok(line) => line,
@@ -525,7 +907,14 @@ fn run_daemon(sysfs: &Path, ec: &Path, input: impl BufRead, mut output: impl Wri
             // session down.
             continue;
         }
-        let reply = match run_with_paths(&args, sysfs, ec) {
+        let result = {
+            let _running = shared
+                .dispatch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            run_daemon_command(&args, sysfs, ec, &shared.timer, set_timer)
+        };
+        let reply = match result {
             Ok(()) => internal::HELPER_DAEMON_OK.to_string(),
             Err(message) => {
                 let message = message.replace('\n', " ");
@@ -779,6 +1168,8 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
             let direction = parse_u16("direction", &args[7], 1, 6)? as u8;
             chicony_effect_apply(opcode, speed, brightness, red, green, blue, direction)
         }
+        // The daemon takes a well-formed one before it gets here (see
+        // `run_daemon_command`), so this is one-shot mode or a bad value.
         HelperAction::ChiconyAutoOff => set_keyboard_timer(parse_keyboard_timer(&args[1])?),
         HelperAction::GrubSplashApply => grub_splash_apply(&args[1], &args[2], sysfs),
         HelperAction::GrubSplashReset => grub_splash_reset(sysfs),
@@ -3139,6 +3530,418 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_timer_hold_starts_empty() {
+        assert!(!KeyboardTimerHold::new().take_hand_back());
+    }
+
+    #[test]
+    fn keyboard_timer_hold_hands_back_once_after_a_successful_off() {
+        let hold = KeyboardTimerHold::new();
+        hold.record(false, true);
+
+        assert!(hold.take_hand_back());
+        // Taken: a second exit path must not send the packet again.
+        assert!(!hold.take_hand_back());
+    }
+
+    #[test]
+    fn keyboard_timer_hold_ends_when_the_timer_goes_back_on() {
+        let hold = KeyboardTimerHold::new();
+        hold.record(false, true);
+        hold.record(true, true);
+
+        assert!(!hold.take_hand_back());
+    }
+
+    #[test]
+    fn keyboard_timer_hold_ignores_a_failed_off() {
+        let hold = KeyboardTimerHold::new();
+        hold.record(false, false);
+
+        assert!(!hold.take_hand_back());
+    }
+
+    #[test]
+    fn keyboard_timer_hold_survives_a_failed_on() {
+        // The keyboard is still where the last write that landed left it.
+        let hold = KeyboardTimerHold::new();
+        hold.record(false, true);
+        hold.record(true, false);
+
+        assert!(hold.take_hand_back());
+    }
+
+    #[test]
+    fn a_privileged_session_whose_caller_is_gone_always_hands_the_24bit_keyboard_back() {
+        // The GUI switched it off over the hidraw node and is gone: crashed,
+        // or killed before its own hand-back.
+        for held in [false, true] {
+            assert!(
+                hands_back(Exit::CallerGone, true, true, held),
+                "held {held}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_whose_caller_is_gone_hands_another_keyboard_back_only_if_it_switched_it_off() {
+        for privileged in [false, true] {
+            assert!(!hands_back(Exit::CallerGone, privileged, false, false));
+            assert!(hands_back(Exit::CallerGone, privileged, false, true));
+        }
+    }
+
+    #[test]
+    fn the_unprivileged_read_session_hands_back_only_what_it_switched_off() {
+        // `helper::read` starts one as the user, the GUI's tests included,
+        // and its end must not reach a keyboard the running app holds.
+        assert!(!hands_back(Exit::CallerGone, false, true, false));
+        assert!(hands_back(Exit::CallerGone, false, true, true));
+    }
+
+    #[test]
+    fn a_signal_hands_back_only_a_timer_this_session_switched_off() {
+        // An upgrade sends SIGTERM while the GUI runs on with the timer off.
+        for privileged in [false, true] {
+            for keyboard_24bit in [false, true] {
+                assert!(!hands_back(Exit::Signal, privileged, keyboard_24bit, false));
+                assert!(hands_back(Exit::Signal, privileged, keyboard_24bit, true));
+            }
+        }
+    }
+
+    #[test]
+    fn one_shot_mode_is_no_session_and_hands_nothing_back() {
+        // What `--internal-helper ...` and `predator-sense-helper ...` hand
+        // to `run`: only `--daemon` first starts a session, and only a
+        // session reaches a hand-back.
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        assert!(is_daemon(&args(&[internal::HELPER_DAEMON_ARGUMENT])));
+        assert!(!is_daemon(&args(&["chicony-auto-off", "0"])));
+        assert!(!is_daemon(&args(&["fan-auto"])));
+        assert!(!is_daemon(&args(&[
+            "thermal-profile",
+            internal::HELPER_DAEMON_ARGUMENT
+        ])));
+        assert!(!is_daemon(&[]));
+    }
+
+    /// What reached the stand-in keyboard, in order.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Wrote {
+        /// A `chicony-auto-off` command.
+        Timer(bool),
+        /// The exit hand-back.
+        HandBack,
+    }
+
+    /// A stand-in keyboard recording into `sent`, every write answering
+    /// `result`: the command write and the hand-back.
+    fn stand_in<'a>(
+        sent: &'a std::cell::RefCell<Vec<Wrote>>,
+        result: &'a AppResult,
+    ) -> (impl Fn(bool) -> AppResult + 'a, impl Fn() -> AppResult + 'a) {
+        let set_timer = move |on: bool| {
+            sent.borrow_mut().push(Wrote::Timer(on));
+            result.clone()
+        };
+        let hand_back = move || {
+            sent.borrow_mut().push(Wrote::HandBack);
+            result.clone()
+        };
+        (set_timer, hand_back)
+    }
+
+    /// Runs one daemon session against a stand-in for the keyboard and
+    /// returns what reached it, in order, plus the reply lines.
+    /// `answers_unasked`: a privileged session on the 24-bit keyboard.
+    fn daemon_session(
+        input: &[u8],
+        answers_unasked: bool,
+        keyboard: AppResult,
+    ) -> (AppResult, Vec<Wrote>, Vec<String>) {
+        let sent = std::cell::RefCell::new(Vec::new());
+        let (set_timer, hand_back) = stand_in(&sent, &keyboard);
+        let session = SessionKeyboard {
+            privileged: answers_unasked,
+            is_24bit: answers_unasked,
+            set_timer: &set_timer,
+            hand_back: &hand_back,
+        };
+        let mut output = Vec::new();
+        let ec = Path::new("/dev/null");
+        let result = run_daemon_with(ec, ec, input, &mut output, &DaemonShared::new(), session);
+        let replies = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+        (result, sent.take(), replies)
+    }
+
+    #[test]
+    fn daemon_hands_the_keyboard_timer_back_when_input_ends() {
+        for answers_unasked in [false, true] {
+            let (result, sent, replies) =
+                daemon_session(b"chicony-auto-off 0\n", answers_unasked, Ok(()));
+
+            result.unwrap();
+            assert_eq!(sent, vec![Wrote::Timer(false), Wrote::HandBack]);
+            assert_eq!(replies, vec![internal::HELPER_DAEMON_OK]);
+        }
+    }
+
+    #[test]
+    fn daemon_on_the_24bit_keyboard_hands_the_timer_back_when_input_ends_unasked() {
+        // The GUI held the timer over the node and never sent this session
+        // a keyboard command.
+        let (result, sent, _) = daemon_session(b"\n", true, Ok(()));
+
+        result.unwrap();
+        assert_eq!(sent, vec![Wrote::HandBack]);
+    }
+
+    #[test]
+    fn daemon_hands_back_once_however_many_offs_it_sent() {
+        let (result, sent, _) =
+            daemon_session(b"chicony-auto-off 0\nchicony-auto-off 0\n", true, Ok(()));
+
+        result.unwrap();
+        assert_eq!(
+            sent,
+            vec![Wrote::Timer(false), Wrote::Timer(false), Wrote::HandBack]
+        );
+    }
+
+    #[test]
+    fn daemon_elsewhere_leaves_the_keyboard_timer_alone_once_the_caller_handed_it_back() {
+        let (result, sent, _) =
+            daemon_session(b"chicony-auto-off 0\nchicony-auto-off 1\n", false, Ok(()));
+
+        result.unwrap();
+        assert_eq!(sent, vec![Wrote::Timer(false), Wrote::Timer(true)]);
+    }
+
+    #[test]
+    fn daemon_elsewhere_does_not_hand_back_a_timer_it_failed_to_switch_off() {
+        let (result, sent, replies) = daemon_session(
+            b"chicony-auto-off 0\n",
+            false,
+            Err("keyboard not found".into()),
+        );
+
+        result.unwrap();
+        assert_eq!(sent, vec![Wrote::Timer(false)]);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].starts_with(internal::HELPER_DAEMON_ERR));
+    }
+
+    #[test]
+    fn daemon_elsewhere_sends_nothing_to_the_keyboard_when_never_asked() {
+        let (result, sent, _) = daemon_session(b"\n", false, Ok(()));
+
+        result.unwrap();
+        assert!(sent.is_empty());
+    }
+
+    #[test]
+    fn daemon_rejects_a_bad_timer_value_without_touching_the_keyboard() {
+        let (result, sent, replies) = daemon_session(b"chicony-auto-off 2\n", false, Ok(()));
+
+        result.unwrap();
+        assert!(sent.is_empty());
+        assert!(replies[0].starts_with(internal::HELPER_DAEMON_ERR));
+        assert!(replies[0].contains("invalid value '2'"));
+    }
+
+    /// A reply pipe whose reader is gone.
+    struct ClosedPipe;
+    impl Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// One session whose first reply finds the caller gone.
+    fn session_with_the_caller_gone(
+        input: &[u8],
+        answers_unasked: bool,
+    ) -> (AppResult, Vec<Wrote>) {
+        let sent = std::cell::RefCell::new(Vec::new());
+        let ok = Ok(());
+        let (set_timer, hand_back) = stand_in(&sent, &ok);
+        let session = SessionKeyboard {
+            privileged: answers_unasked,
+            is_24bit: answers_unasked,
+            set_timer: &set_timer,
+            hand_back: &hand_back,
+        };
+        let ec = Path::new("/dev/null");
+        let result = run_daemon_with(ec, ec, input, ClosedPipe, &DaemonShared::new(), session);
+        (result, sent.take())
+    }
+
+    #[test]
+    fn daemon_hands_the_keyboard_timer_back_when_the_caller_is_gone() {
+        // The caller died: its end of the reply pipe is closed, so the first
+        // reply fails and the session ends there, not at end of input.
+        let (result, sent) =
+            session_with_the_caller_gone(b"chicony-auto-off 0\nthermal-profile 3\n", false);
+
+        assert!(result.is_err());
+        assert_eq!(sent, vec![Wrote::Timer(false), Wrote::HandBack]);
+    }
+
+    #[test]
+    fn daemon_on_the_24bit_keyboard_hands_the_timer_back_when_the_caller_is_gone_unasked() {
+        let (result, sent) = session_with_the_caller_gone(b"not-a-real-action\n", true);
+
+        assert!(result.is_err());
+        assert_eq!(sent, vec![Wrote::HandBack]);
+    }
+
+    #[test]
+    fn signal_hand_back_sends_the_timer_on_only_while_held() {
+        // Even a privileged session on the 24-bit keyboard: the GUI may be
+        // running on with the timer off.
+        let sent = std::cell::RefCell::new(Vec::new());
+        let ok = Ok(());
+        let (set_timer, hand_back) = stand_in(&sent, &ok);
+        let session = SessionKeyboard {
+            privileged: true,
+            is_24bit: true,
+            set_timer: &set_timer,
+            hand_back: &hand_back,
+        };
+        let shared = DaemonShared::new();
+
+        drop(shared.hand_back_after_signal(session, Duration::ZERO));
+        assert!(sent.borrow().is_empty());
+
+        shared.timer.record(false, true);
+        drop(shared.hand_back_after_signal(session, Duration::ZERO));
+        drop(shared.hand_back_after_signal(session, Duration::ZERO));
+        assert_eq!(sent.take(), vec![Wrote::HandBack]);
+    }
+
+    /// A session keyboard whose hand-back pushes to `sent`, usable across
+    /// threads. Nothing else is written.
+    fn hand_back_into(sent: &Mutex<Vec<Wrote>>) -> impl Fn() -> AppResult + Sync + '_ {
+        move || {
+            sent.lock().unwrap().push(Wrote::HandBack);
+            Ok(())
+        }
+    }
+
+    fn never_set_timer(_: bool) -> AppResult {
+        panic!("no command runs in this test")
+    }
+
+    #[test]
+    fn signal_hand_back_waits_for_the_command_in_flight() {
+        let shared = DaemonShared::new();
+        let sent = Mutex::new(Vec::new());
+        let hand_back = hand_back_into(&sent);
+        thread::scope(|scope| {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let shared = &shared;
+            scope.spawn(move || {
+                // A `chicony-auto-off 0` still running when the signal lands:
+                // the hand-back has to see the hold it is about to record.
+                let _running = shared.dispatch.lock().unwrap();
+                started_tx.send(()).unwrap();
+                thread::sleep(Duration::from_millis(50));
+                shared.timer.record(false, true);
+            });
+            started_rx.recv().unwrap();
+            let session = SessionKeyboard {
+                privileged: true,
+                is_24bit: false,
+                set_timer: &never_set_timer,
+                hand_back: &hand_back,
+            };
+            let in_flight = shared.hand_back_after_signal(session, Duration::from_secs(5));
+            assert!(in_flight.is_some());
+        });
+        assert_eq!(sent.lock().unwrap().clone(), vec![Wrote::HandBack]);
+    }
+
+    #[test]
+    fn signal_hand_back_gives_up_waiting_on_a_stuck_command() {
+        let shared = DaemonShared::new();
+        shared.timer.record(false, true);
+        let _stuck = shared.dispatch.lock().unwrap();
+        let sent = Mutex::new(Vec::new());
+        let hand_back = hand_back_into(&sent);
+        let session = SessionKeyboard {
+            privileged: true,
+            is_24bit: false,
+            set_timer: &never_set_timer,
+            hand_back: &hand_back,
+        };
+
+        let started = Instant::now();
+        let in_flight = shared.hand_back_after_signal(session, Duration::from_millis(50));
+
+        assert!(in_flight.is_none());
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        assert_eq!(sent.lock().unwrap().clone(), vec![Wrote::HandBack]);
+    }
+
+    #[test]
+    fn tests_never_reach_the_real_keyboard() {
+        // The machine running the tests may have this keyboard: the real
+        // node is never found and USB is never opened, so neither the real
+        // commands nor the real hand-back can reach it.
+        assert_eq!(keyboard_node(), None);
+        let error = hand_back_keyboard_timer().unwrap_err();
+        assert!(error.contains("not found"), "{error}");
+        // Past the model gate (on a PH16-71) or stopped by it (elsewhere).
+        let error = set_keyboard_timer(true).unwrap_err();
+        assert!(
+            error.contains("tests never reach the keyboard") || error.contains("only for"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_24bit_commands_are_only_for_the_listed_models() {
+        assert_eq!(require_24bit_keyboard("Predator PH16-71"), Ok(()));
+        // The Helios 300 generation: the same USB id, the older family.
+        assert!(require_24bit_keyboard("Predator PH317-56").is_err());
+        assert!(require_24bit_keyboard("Predator PH16-71X").is_err());
+        assert!(require_24bit_keyboard("").is_err());
+    }
+
+    #[test]
+    fn an_exit_signal_reaches_the_waiting_thread_through_the_pipe() {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        EXIT_SIGNAL_PIPE.store(writer.as_raw_fd(), Ordering::SeqCst);
+        // SIGHUP alone: nothing else in the test process uses it, and it goes
+        // straight back to its default action below.
+        assert!(set_signal_action(libc::SIGHUP, exit_signal_handler()));
+        // SAFETY: raise has no preconditions, and SIGHUP is caught just above.
+        let raised = unsafe { libc::raise(libc::SIGHUP) };
+        assert!(set_signal_action(libc::SIGHUP, libc::SIG_DFL));
+        EXIT_SIGNAL_PIPE.store(-1, Ordering::SeqCst);
+
+        assert_eq!(raised, 0);
+        assert_eq!(next_exit_signal(&reader), Some(libc::SIGHUP));
+    }
+
+    #[test]
+    fn the_exit_signal_wait_ends_when_the_pipe_breaks() {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        drop(writer);
+
+        assert_eq!(next_exit_signal(&reader), None);
+    }
+
+    #[test]
     fn strip_managed_background_line_leaves_a_foreign_background_line_alone() {
         let content = "GRUB_TIMEOUT=5\nGRUB_BACKGROUND=\"/home/user/my-own-wallpaper.png\"\nGRUB_CMDLINE_LINUX=\"\"\n";
 
@@ -3387,15 +4190,6 @@ mod tests {
             fs::read_to_string(fixture.path().join("etc/default/grub")).unwrap(),
             "GRUB_TIMEOUT=5\n"
         );
-    }
-
-    #[test]
-    fn the_24bit_commands_are_only_for_the_listed_models() {
-        assert_eq!(require_24bit_keyboard("Predator PH16-71"), Ok(()));
-        // The Helios 300 generation: the same USB id, the older family.
-        assert!(require_24bit_keyboard("Predator PH317-56").is_err());
-        assert!(require_24bit_keyboard("Predator PH16-71X").is_err());
-        assert!(require_24bit_keyboard("").is_err());
     }
 
     #[test]
