@@ -195,7 +195,7 @@ pub fn curve_input_temp(cpu: Option<f64>, gpu: Option<f64>) -> Option<f64> {
 /// The 6 fixed temperature breakpoints (<45/<55/<65/<75/<85/85+ °C) the
 /// software auto-curve steps through. Not user-editable, only the percent
 /// each step applies is (see `config::fan_curve_points`, issue #59).
-const FAN_CURVE_BREAKPOINTS_C: [f64; 5] = [45.0, 55.0, 65.0, 75.0, 85.0];
+pub const FAN_CURVE_BREAKPOINTS_C: [f64; 5] = [45.0, 55.0, 65.0, 75.0, 85.0];
 
 /// Original hardcoded curve, kept as the default for anyone who never opens
 /// the new per-step editor in Fan Control.
@@ -233,11 +233,35 @@ pub fn fan_curve_pct(temp_c: f64, steps: &[u8; 6]) -> u8 {
 /// them until the temperature falls back under 45 C. At idle the firmware
 /// simply holds the temperature inside that band and nothing cycles; under a
 /// real load the temperature crosses the top in seconds.
-fn curve_resume_c(steps: &[u8; 6]) -> Option<f64> {
+pub fn curve_resume_c(steps: &[u8; 6]) -> Option<f64> {
     let first_active = steps.iter().position(|&pct| pct != 0)?;
     // A curve whose only non-zero step is the top one resumes at that step's
     // own boundary: there is no band above it to defer to.
     Some(FAN_CURVE_BREAKPOINTS_C[first_active.min(FAN_CURVE_BREAKPOINTS_C.len() - 1)])
+}
+
+/// The temperature below which this curve leaves the fans to the firmware
+/// whatever state they are already in.
+///
+/// Not the same as [`curve_resume_c`], and anything that draws a curve
+/// needs the difference. Below the value returned here `fan_curve_pct` is
+/// zero, so `curve_action` hands the fans over however they are running.
+/// Between here and `curve_resume_c` the firmware keeps them only if it
+/// already has them; otherwise the curve drives its first non-zero step.
+///
+/// `None` both when the first step is not zero and when every step is
+/// zero. A caller that cares must tell those apart: an all-zero curve is
+/// the firmware's at every temperature.
+pub fn curve_zero_region_top_c(steps: &[u8; 6]) -> Option<f64> {
+    if steps[0] != 0 {
+        return None;
+    }
+    // `steps[0] == 0` puts the first non-zero step at index 1 or later, so
+    // the subtraction cannot underflow.
+    steps
+        .iter()
+        .position(|&pct| pct != 0)
+        .map(|first| FAN_CURVE_BREAKPOINTS_C[first - 1])
 }
 
 /// What the software curve should do on this tick.
@@ -340,7 +364,7 @@ pub fn curve_action(temp_c: f64, steps: &[u8; 6], handed_off: bool) -> CurveActi
     // setting being ignored.
     if handed_off
         && steps[0] == 0
-        && curve_resume_c(steps).is_none_or(|resume| temp_c < resume)
+        && curve_resume_c(steps).map_or(true, |resume| temp_c < resume)
     {
         return CurveAction::Hold;
     }
@@ -452,25 +476,6 @@ pub fn plan_for_id(
         .map(|binding| binding.plan)
 }
 
-/// The plan to store after the user edits the curve steps, or `None` when the
-/// active mode is not following a curve.
-///
-/// The reconciler reads the steps held inside the active mode's
-/// `FanPlan::Curve`, not `config::fan_curve_points`, so an edit that stops at
-/// the points never reaches the fans: it would sit there until the curve
-/// switch was toggled off and on, which is how the per-step editor came to be
-/// inert. When the mode is on something else the edit is still worth saving to
-/// the points, it just has no plan to update yet.
-pub fn plan_with_steps(
-    current: crate::config::FanPlan,
-    steps: [u8; 6],
-) -> Option<crate::config::FanPlan> {
-    match current {
-        crate::config::FanPlan::Curve { .. } => Some(crate::config::FanPlan::Curve { steps }),
-        _ => None,
-    }
-}
-
 /// `plans` with `mode` bound to `plan`, adding the binding if it is new.
 pub fn with_plan(
     plans: &[crate::config::FanBinding],
@@ -527,9 +532,11 @@ pub fn plan_for(
 /// comment in the body for why that is the honest reading.
 ///
 /// The only writer of `fan_plans` that reads the legacy global fields, so the
-/// reconciler itself never has to consult two sources. `fan_auto_curve_enabled`
-/// and `fan_curve_points` still have one other reader, the Fan Control page,
-/// which shows the switch and the per-step editor from them.
+/// reconciler itself never has to consult two sources. `fan_curve_points` has
+/// one other reader, the Fan Control page, which uses it as the seed for a
+/// mode that has never had a curve; `fan_auto_curve_enabled` has no reader
+/// outside this function and nothing writes it but the tests below, so it is
+/// only ever whatever an older config.json already held.
 pub fn migrate_plans(cfg: &crate::config::AppConfig) -> Vec<crate::config::FanBinding> {
     use crate::config::{FanBinding, FanPlan};
     use crate::hardware::profile::PowerProfile;
@@ -1190,23 +1197,27 @@ mod tests {
     }
 
     #[test]
-    fn editing_the_steps_updates_a_curve_plan() {
-        use crate::config::FanPlan;
-        let edited = [10, 20, 30, 40, 50, 60];
-        assert_eq!(
-            plan_with_steps(FanPlan::Curve { steps: DEFAULT_FAN_CURVE }, edited),
-            Some(FanPlan::Curve { steps: edited })
-        );
+    fn the_unconditional_firmware_region_ends_where_the_zero_steps_do() {
+        assert_eq!(curve_zero_region_top_c(&[0, 35, 50, 65, 80, 100]), Some(45.0));
+        assert_eq!(curve_zero_region_top_c(&[0, 0, 30, 45, 65, 100]), Some(55.0));
     }
 
     #[test]
-    fn editing_the_steps_leaves_a_non_curve_plan_alone() {
-        use crate::config::FanPlan;
-        // The edit is still remembered in fan_curve_points for the next time
-        // the curve is switched on; it just has nothing to apply to now.
-        let edited = [10, 20, 30, 40, 50, 60];
-        assert_eq!(plan_with_steps(FanPlan::Automatic, edited), None);
-        assert_eq!(plan_with_steps(FanPlan::Max, edited), None);
-        assert_eq!(plan_with_steps(FanPlan::Fixed { percent: 40 }, edited), None);
+    fn a_curve_that_starts_above_zero_leaves_the_firmware_nothing() {
+        assert_eq!(curve_zero_region_top_c(&DEFAULT_FAN_CURVE), None);
+    }
+
+    #[test]
+    fn an_all_zero_curve_reports_no_boundary() {
+        assert_eq!(curve_zero_region_top_c(&[0; 6]), None);
+    }
+
+    #[test]
+    fn the_band_below_the_resume_point_is_the_firmwares_only_once_it_has_the_fans() {
+        // The band a chart must not draw as plain firmware ownership: same
+        // temperature, opposite answers depending on who holds the fans.
+        let steps = [0, 35, 50, 65, 80, 100];
+        assert_eq!(curve_action(50.0, &steps, true), CurveAction::Hold);
+        assert_eq!(curve_action(50.0, &steps, false), CurveAction::Manual(35));
     }
 }

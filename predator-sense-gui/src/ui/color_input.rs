@@ -23,6 +23,7 @@ pub fn rgb_channel_control(value: f64) -> (gtk::Box, gtk::Scale) {
     scale.set_draw_value(false);
     scale.set_hexpand(true);
     scale.add_css_class("color-scale");
+    crate::ui::scroll_guard::redirect_scroll_to_page(&scale);
 
     let spin = gtk::SpinButton::new(Some(&adjustment), 1.0, 0);
     spin.set_numeric(true);
