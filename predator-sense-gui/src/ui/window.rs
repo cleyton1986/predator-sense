@@ -815,6 +815,10 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // temperature near the boundary is left alone or taken back. It
         // only advances on a write that actually succeeded.
         let fan_state = Rc::new(Cell::new(crate::hardware::fan::FanState::Unknown));
+        // The curve step behind `fan_state`, so a temperature wobbling at a
+        // band border does not flip the fans between two speeds. See
+        // `fan::CURVE_HYSTERESIS_C`.
+        let curve_memory = Rc::new(Cell::new(None::<crate::hardware::fan::CurveMemory>));
         // Consecutive failed writes, and how many ticks have passed since the
         // last attempt. See `fan::may_attempt_write`: without this a write
         // that can never succeed costs a privileged call, and on an
@@ -912,10 +916,20 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             let (cpu, gpu) = sensors::read_critical_temps();
             let temp = crate::hardware::fan::curve_input_temp(cpu, gpu);
             let applied = fan_state.get();
-            let target = crate::hardware::fan::plan_target(
+            let applied_band = match plan {
+                config::FanPlan::Curve { steps } => crate::hardware::fan::remembered_band(
+                    curve_memory.get(),
+                    active,
+                    &steps,
+                    applied,
+                ),
+                _ => None,
+            };
+            let target = crate::hardware::fan::plan_target_held(
                 plan,
                 temp,
                 applied == FanState::Firmware,
+                applied_band,
             );
             if !crate::hardware::fan::needs_write(target, applied) {
                 return glib::ControlFlow::Continue;
@@ -953,6 +967,17 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             let state = fan_state.clone();
             let failed = failures.clone();
             let intended = target;
+            let remember = match (plan, temp, target) {
+                (config::FanPlan::Curve { steps }, Some(t), CurveAction::Manual(_)) => {
+                    Some(crate::hardware::fan::CurveMemory {
+                        mode: active,
+                        steps,
+                        band: crate::hardware::fan::curve_band_held(t, &steps, applied_band),
+                    })
+                }
+                _ => None,
+            };
+            let memory = curve_memory.clone();
             background::run(
                 move || match write {
                     crate::hardware::fan::FanWrite::PwmAuto => {
@@ -984,6 +1009,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         // firmware has them" as far as needs_write cares.
                         Ok(()) => {
                             failed.set(0);
+                            memory.set(remember);
                             state.set(match intended {
                                 CurveAction::Firmware => FanState::Firmware,
                                 CurveAction::Manual(percent) => FanState::Manual(percent),
@@ -993,6 +1019,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         Err(error) => {
                             failed.set(failed.get().saturating_add(1));
                             state.set(FanState::Unknown);
+                            memory.set(None);
                             crate::hardware::applog::error(&format!(
                                 "fan: {write:?} not applied: {error}"
                             ));

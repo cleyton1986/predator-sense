@@ -412,6 +412,88 @@ pub fn plan_target(
     }
 }
 
+/// How far below the border of the band a curve has applied the temperature
+/// must fall before the curve steps down to the band under it.
+///
+/// Measured on a PH16-71 on 2026-10-21: Balanced on a `[25, 40, ...]` curve
+/// with the CPU hovering near 45 C switched the fans between 25 % and 40 %
+/// (pwm 64 and 102) ten times in about 3.5 minutes, roughly every 20 s.
+/// Stepping up stays immediate, since that is the direction that protects
+/// the machine.
+///
+/// Only between two non-zero steps. The border of a zero band keeps
+/// `curve_resume_c`, whose own comment records why a 3 C buffer there made
+/// the fans cycle.
+pub const CURVE_HYSTERESIS_C: f64 = 3.0;
+
+/// Which of the six steps a temperature falls in, without hysteresis.
+pub fn curve_band(temp_c: f64) -> usize {
+    FAN_CURVE_BREAKPOINTS_C.iter().take_while(|&&border| temp_c >= border).count()
+}
+
+/// The step the curve should apply, given the step it applied last
+/// (`applied_band`, `None` when it has not applied one of this curve's).
+///
+/// A rise is followed at once. A fall moves down only through borders the
+/// temperature has dropped `CURVE_HYSTERESIS_C` below, so a jump of several
+/// bands lands on the right one in a single step.
+pub fn curve_band_held(temp_c: f64, steps: &[u8; 6], applied_band: Option<usize>) -> usize {
+    let band = curve_band(temp_c);
+    let Some(applied) = applied_band else {
+        return band;
+    };
+    if band >= applied || steps[band] == 0 {
+        return band;
+    }
+    let held = curve_band(temp_c + CURVE_HYSTERESIS_C).min(applied);
+    if steps[held] == 0 {
+        band
+    } else {
+        held
+    }
+}
+
+/// `plan_target` with band hysteresis for a curve. See `curve_band_held`.
+pub fn plan_target_held(
+    plan: crate::config::FanPlan,
+    temp_c: Option<f64>,
+    handed_off: bool,
+    applied_band: Option<usize>,
+) -> CurveAction {
+    if let (crate::config::FanPlan::Curve { steps }, Some(temp_c)) = (plan, temp_c) {
+        let band = curve_band_held(temp_c, &steps, applied_band);
+        if band != curve_band(temp_c) {
+            return CurveAction::Manual(steps[band]);
+        }
+    }
+    plan_target(plan, temp_c, handed_off)
+}
+
+/// The curve step the reconciler last applied, and for which mode and curve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CurveMemory {
+    pub mode: Option<crate::hardware::profile::PowerProfile>,
+    pub steps: [u8; 6],
+    pub band: usize,
+}
+
+/// The band to hold against, or `None` when the memory no longer describes
+/// what is in force: a different mode or an edited curve (which then takes
+/// effect at once), or fans that are no longer at that step's percent
+/// because another plan, a failed write or the firmware has them.
+pub fn remembered_band(
+    memory: Option<CurveMemory>,
+    mode: Option<crate::hardware::profile::PowerProfile>,
+    steps: &[u8; 6],
+    applied: FanState,
+) -> Option<usize> {
+    let memory = memory?;
+    (memory.mode == mode
+        && memory.steps == *steps
+        && applied == FanState::Manual(steps[memory.band]))
+        .then_some(memory.band)
+}
+
 /// Read current CPU/GPU fan PWM as percentage (0-100), if available.
 pub fn get_pwm_percent() -> Option<(u8, u8)> {
     let cpu: u16 = crate::hardware::helper::read(HelperAction::PwmCpuRead)?
@@ -809,6 +891,93 @@ mod tests {
         let steps = [0; 6];
         assert_eq!(curve_action(95.0, &steps, false), CurveAction::Firmware);
         assert_eq!(curve_action(95.0, &steps, true), CurveAction::Hold);
+    }
+
+    // An illustrative curve, not a measured one.
+    const WOBBLE: [u8; 6] = [25, 40, 55, 70, 85, 100];
+
+    fn held(temp_c: f64, steps: [u8; 6], applied_band: Option<usize>) -> CurveAction {
+        plan_target_held(
+            crate::config::FanPlan::Curve { steps },
+            Some(temp_c),
+            false,
+            applied_band,
+        )
+    }
+
+    #[test]
+    fn a_curve_steps_up_as_soon_as_the_border_is_reached() {
+        assert_eq!(held(45.0, WOBBLE, Some(0)), CurveAction::Manual(40));
+        assert_eq!(curve_band_held(45.0, &WOBBLE, Some(0)), 1);
+    }
+
+    #[test]
+    fn a_curve_steps_down_only_3_c_below_the_border() {
+        // Applied 40% (band 1, border 45 C): the wobble that flipped the fans.
+        assert_eq!(held(44.9, WOBBLE, Some(1)), CurveAction::Manual(40));
+        assert_eq!(held(42.1, WOBBLE, Some(1)), CurveAction::Manual(40));
+        assert_eq!(curve_band_held(42.1, &WOBBLE, Some(1)), 1);
+        assert_eq!(held(41.9, WOBBLE, Some(1)), CurveAction::Manual(25));
+        assert_eq!(curve_band_held(41.9, &WOBBLE, Some(1)), 0);
+        // Nothing remembered: plain bands, as before.
+        assert_eq!(held(44.9, WOBBLE, None), CurveAction::Manual(25));
+    }
+
+    #[test]
+    fn a_fall_across_several_bands_lands_on_the_right_one() {
+        // Applied 85% (band 4). 50 C is in band 1, and 53 C (50 + 3) is
+        // still in band 1, so it goes straight there.
+        assert_eq!(held(50.0, WOBBLE, Some(4)), CurveAction::Manual(40));
+        // 53 C: 56 C is band 2, so it holds one band above the plain one.
+        assert_eq!(held(53.0, WOBBLE, Some(4)), CurveAction::Manual(55));
+        // A rise across several bands is immediate.
+        assert_eq!(held(80.0, WOBBLE, Some(0)), CurveAction::Manual(85));
+    }
+
+    #[test]
+    fn a_step_down_to_a_zero_band_is_not_held() {
+        let steps = [0, 35, 50, 65, 80, 100];
+        // Applied 35% (band 1), 44 C is the zero band: hand off as today,
+        // the zero border has its own rules (curve_resume_c).
+        assert_eq!(held(44.0, steps, Some(1)), CurveAction::Firmware);
+        assert_eq!(held(44.0, steps, None), CurveAction::Firmware);
+    }
+
+    #[test]
+    fn the_remembered_band_is_dropped_on_any_change() {
+        use crate::hardware::profile::PowerProfile;
+        let mode = Some(PowerProfile::Balanced);
+        let memory = Some(CurveMemory { mode, steps: WOBBLE, band: 1 });
+        let applied = FanState::Manual(40);
+        assert_eq!(remembered_band(memory, mode, &WOBBLE, applied), Some(1));
+        // Curve edited: the new curve takes effect at once.
+        let mut edited = WOBBLE;
+        edited[1] = 45;
+        assert_eq!(remembered_band(memory, mode, &edited, applied), None);
+        // Mode changed.
+        assert_eq!(
+            remembered_band(memory, Some(PowerProfile::Performance), &WOBBLE, applied),
+            None
+        );
+        // Something else now holds the fans (another plan, a failed write,
+        // the firmware).
+        assert_eq!(remembered_band(memory, mode, &WOBBLE, FanState::Manual(30)), None);
+        assert_eq!(remembered_band(memory, mode, &WOBBLE, FanState::Unknown), None);
+        assert_eq!(remembered_band(memory, mode, &WOBBLE, FanState::Firmware), None);
+        assert_eq!(remembered_band(None, mode, &WOBBLE, applied), None);
+    }
+
+    #[test]
+    fn hysteresis_leaves_other_plans_alone() {
+        use crate::config::FanPlan;
+        assert_eq!(
+            plan_target_held(FanPlan::Fixed { percent: 40 }, Some(44.0), false, Some(3)),
+            CurveAction::Manual(40)
+        );
+        assert_eq!(
+            plan_target_held(FanPlan::Curve { steps: WOBBLE }, None, false, Some(1)),
+            CurveAction::Hold
+        );
     }
 
     #[test]
