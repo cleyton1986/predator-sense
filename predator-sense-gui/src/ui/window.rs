@@ -577,8 +577,12 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         let cycle_ticks = std::cell::Cell::new(u32::MAX / 2);
         let cycle_pending = std::rc::Rc::new(std::cell::Cell::new(false));
         glib::timeout_add_seconds_local(5, move || {
-            let (cpu, gpu) = sensors::read_critical_temps();
-            crate::hardware::alerts::check(&notify_app_for_alerts, cpu, gpu);
+            // Off, the alerts read nothing: the GPU temperature is a driver
+            // call, not worth making for a check that will not look at it.
+            if crate::hardware::alerts::is_enabled() {
+                let (cpu, gpu) = sensors::read_critical_temps();
+                crate::hardware::alerts::check(&notify_app_for_alerts, cpu, gpu);
+            }
 
             react_to_mode();
             crate::hardware::power_profile::check();
@@ -866,9 +870,15 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             // Whichever die is hotter. The GPU reading used to be dropped
             // here, so a GPU-bound load with an idle CPU got no fan
             // response at all. See fan::curve_input_temp for why this
-            // stays one speed for both fans.
-            let (cpu, gpu) = sensors::read_critical_temps();
-            let temp = crate::hardware::fan::curve_input_temp(cpu, gpu);
+            // stays one speed for both fans. Only a curve asks the GPU: the
+            // other plans ignore the temperature, which then serves the log
+            // line below alone, and the CPU's is a free hwmon read.
+            let gpu = if crate::hardware::fan::plan_reads_temperature(plan) {
+                crate::hardware::gpu::temperature()
+            } else {
+                None
+            };
+            let temp = crate::hardware::fan::curve_input_temp(sensors::read_cpu_temp(), gpu);
             let applied = fan_state.get();
             if crate::hardware::fan::take_curve_history_stale() {
                 curve_readings.borrow_mut().clear();

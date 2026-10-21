@@ -595,7 +595,8 @@ predator-sense-gui/
 │   │   ├── chicony_hid.rs       # 開いたままにするキーボードのhidrawノード
 │   │   ├── hwmon.rs             # /sys/class/hwmonインデックス（OnceLockでキャッシュ）
 │   │   ├── sensors.rs           # 温度、ファン、RAM、ネットワーク
-│   │   ├── gpu.rs               # TTLキャッシュ付きnvidia-smiパーサー
+│   │   ├── gpu.rs               # NVML経由のGPU値、ヘルパー経由の電力制限
+│   │   ├── nvml.rs              # 実行時に読み込むNVML（dlopen）
 │   │   ├── procs.rs             # /procサンプラー（コアごとのCPU、メモリ、プロセス一覧）
 │   │   ├── storage.rs           # df経由のディスク使用量
 │   │   ├── sysinfo.rs           # DMI + CPU + GPU + OSの仕様

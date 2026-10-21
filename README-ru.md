@@ -681,7 +681,8 @@ predator-sense-gui/
 │   │   ├── chicony_hid.rs       # Узел hidraw клавиатуры, остаётся открытым
 │   │   ├── hwmon.rs             # Индекс /sys/class/hwmon (кэшируется в OnceLock)
 │   │   ├── sensors.rs           # Температуры, вентиляторы, RAM, сеть
-│   │   ├── gpu.rs               # Парсер nvidia-smi с TTL-кэшем
+│   │   ├── gpu.rs               # Показатели GPU через NVML, лимит мощности через helper
+│   │   ├── nvml.rs              # NVML, загружаемая во время работы (dlopen)
 │   │   ├── procs.rs             # Сэмплер /proc (CPU по ядрам, память, список процессов)
 │   │   ├── storage.rs           # Использование диска через df
 │   │   ├── sysinfo.rs           # Характеристики DMI + CPU + GPU + ОС

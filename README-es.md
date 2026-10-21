@@ -671,7 +671,8 @@ predator-sense-gui/
 │   │   ├── chicony_hid.rs       # Nodo hidraw del teclado, mantenido abierto
 │   │   ├── hwmon.rs             # Índice de /sys/class/hwmon (caché en OnceLock)
 │   │   ├── sensors.rs           # Temperaturas, ventiladores, RAM, red
-│   │   ├── gpu.rs               # Parser de nvidia-smi con caché TTL
+│   │   ├── gpu.rs               # Métricas de GPU vía NVML, límite de potencia vía el helper
+│   │   ├── nvml.rs              # NVML cargado en tiempo de ejecución (dlopen)
 │   │   ├── procs.rs             # Muestreador de /proc (CPU por núcleo, memoria, lista de procesos)
 │   │   ├── storage.rs           # Uso de disco vía df
 │   │   ├── sysinfo.rs           # Especificaciones de DMI + CPU + GPU + SO

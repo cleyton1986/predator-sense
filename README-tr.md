@@ -654,7 +654,8 @@ predator-sense-gui/
 │   │   ├── chicony_hid.rs       # Klavyenin açık tutulan hidraw düğümü
 │   │   ├── hwmon.rs             # /sys/class/hwmon indeksi (önbelleğe alınmış OnceLock)
 │   │   ├── sensors.rs           # Sıcaklıklar, fanlar, RAM, ağ
-│   │   ├── gpu.rs               # TTL önbellekli nvidia-smi ayrıştırıcı
+│   │   ├── gpu.rs               # NVML ile GPU ölçümleri, helper ile güç sınırı
+│   │   ├── nvml.rs              # Çalışırken yüklenen NVML (dlopen)
 │   │   ├── procs.rs             # /proc örnekleyici (çekirdek başına CPU, bellek, süreç listesi)
 │   │   ├── storage.rs           # df üzerinden disk kullanımı
 │   │   ├── sysinfo.rs           # DMI + CPU + GPU + işletim sistemi özellikleri

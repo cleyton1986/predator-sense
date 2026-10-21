@@ -371,6 +371,12 @@ pub fn curve_action(temp_c: f64, steps: &[u8; 6], handed_off: bool) -> CurveActi
     CurveAction::Manual(fan_curve_pct(temp_c, steps))
 }
 
+/// Whether a plan's target depends on the temperature. Only a curve's does,
+/// so only a curve makes the reconciler ask the GPU for one.
+pub fn plan_reads_temperature(plan: crate::config::FanPlan) -> bool {
+    matches!(plan, crate::config::FanPlan::Curve { .. })
+}
+
 /// Resolves a mode's plan into what the reconciler should do this tick.
 ///
 /// `temp_c` is the hotter die from `curve_input_temp`. `handed_off` is whether
@@ -851,6 +857,18 @@ pub fn write_for(target: CurveAction, pwm_available: bool) -> Option<FanWrite> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_curve_reads_the_temperature() {
+        use crate::config::FanPlan;
+        assert!(plan_reads_temperature(FanPlan::Curve {
+            steps: DEFAULT_FAN_CURVE
+        }));
+        assert!(!plan_reads_temperature(FanPlan::Automatic));
+        assert!(!plan_reads_temperature(FanPlan::Max));
+        assert!(!plan_reads_temperature(FanPlan::Fixed { percent: 40 }));
+        assert!(!plan_reads_temperature(FanPlan::Fixed { percent: 0 }));
+    }
 
     #[test]
     fn default_curve_matches_the_original_hardcoded_steps() {

@@ -33,7 +33,7 @@ pub struct GpuInfo {
 pub fn read_all_sensors() -> SensorData {
     let gpu_info = read_nvidia_gpu_info();
     SensorData {
-        cpu_temp: read_cpu_temperature(),
+        cpu_temp: read_cpu_temp(),
         gpu_temp: gpu_info.temp,
         system_temp: read_system_temperature(),
         cpu_fan_rpm: read_fan("fan1_input"),
@@ -65,12 +65,14 @@ fn read_cpu_frequency() -> Option<u32> {
 }
 
 fn read_nvidia_gpu_info() -> GpuInfo {
-    // Reuse the comprehensive GPU cache instead of maintaining a second
-    // nvidia-smi command, TTL and suspended-device policy in parallel.
+    // The temperature from the cheap source every page and timer shares. The
+    // rest from the full metrics cache, which is refreshed only while a page
+    // that shows those fields is on screen (see gpu::read_gpu_metrics); only
+    // the Monitor page reads them from here, and it is one of those pages.
     let metrics = crate::hardware::gpu::read_gpu_metrics();
     GpuInfo {
         name: metrics.name,
-        temp: metrics.live.then_some(metrics.temp),
+        temp: crate::hardware::gpu::temperature(),
         fan_speed_pct: if metrics.live {
             metrics.fan_speed_pct
         } else {
@@ -83,18 +85,18 @@ fn read_nvidia_gpu_info() -> GpuInfo {
     }
 }
 
-fn read_cpu_temperature() -> Option<f64> {
+/// The CPU package temperature, from hwmon.
+pub fn read_cpu_temp() -> Option<f64> {
     find_hwmon_label("coretemp", "Package id 0")
         .or_else(|| find_hwmon_temp_by_name("coretemp", "temp1_input"))
         .or_else(|| find_hwmon_temp_by_name("k10temp", "temp1_input"))
 }
 
 /// Lightweight CPU/GPU temperature read for background alerts.
-/// CPU is from hwmon (cheap); GPU reuses the cached nvidia-smi result.
+/// CPU is from hwmon, GPU from `gpu::temperature` (NVML, cached); neither
+/// starts a process.
 pub fn read_critical_temps() -> (Option<f64>, Option<f64>) {
-    let cpu = read_cpu_temperature();
-    let gpu = read_nvidia_gpu_info().temp;
-    (cpu, gpu)
+    (read_cpu_temp(), crate::hardware::gpu::temperature())
 }
 
 fn read_system_temperature() -> Option<f64> {

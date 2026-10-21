@@ -27,6 +27,7 @@ pub mod lighting;
 pub mod macro_player;
 pub mod magic_rgb;
 pub mod nvidia;
+pub mod nvml;
 pub mod notify;
 pub mod power_profile;
 pub mod ppd;

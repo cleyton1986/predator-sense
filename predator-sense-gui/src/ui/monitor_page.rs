@@ -23,6 +23,7 @@ pub fn build() -> gtk::Box {
     page.set_margin_start(24);
     page.set_margin_end(24);
     page.add_css_class("page-content");
+    crate::ui::gpu_page::shows_full_metrics(&page);
 
     let state = Rc::new(RefCell::new(MonitorState {
         cpu_temp_history: VecDeque::with_capacity(HISTORY_SIZE),

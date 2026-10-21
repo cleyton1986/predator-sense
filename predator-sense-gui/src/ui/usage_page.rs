@@ -400,6 +400,8 @@ fn rebuild_cpu_process_list(list: &gtk::Box, state: &Rc<RefCell<AnimState>>) {
 
 fn build_gpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    // The sampler reads the GPU on every tab; only this one makes it fresh.
+    crate::ui::gpu_page::shows_full_metrics(&page);
     page.set_margin_top(10);
 
     // Header com nome e driver

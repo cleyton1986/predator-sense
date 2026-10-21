@@ -651,7 +651,8 @@ predator-sense-gui/
 │   │   ├── chicony_hid.rs       # 保持打开的键盘 hidraw 节点
 │   │   ├── hwmon.rs             # /sys/class/hwmon 索引（使用 OnceLock 缓存）
 │   │   ├── sensors.rs           # 温度、风扇、RAM、网络
-│   │   ├── gpu.rs               # 带 TTL 缓存的 nvidia-smi 解析器
+│   │   ├── gpu.rs               # 通过 NVML 获取 GPU 指标，经 helper 设置功率上限
+│   │   ├── nvml.rs              # 运行时加载的 NVML（dlopen）
 │   │   ├── procs.rs             # /proc 采样器（每核 CPU、内存、进程列表）
 │   │   ├── storage.rs           # 通过 df 获取磁盘使用情况
 │   │   ├── sysinfo.rs           # DMI + CPU + GPU + 操作系统规格
