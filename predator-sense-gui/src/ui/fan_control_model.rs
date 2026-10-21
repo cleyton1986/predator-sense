@@ -58,6 +58,18 @@ impl PlanKind {
     }
 }
 
+/// The plan button and caption a saved plan gets on this machine: without
+/// PWM the reconciler runs Curve and Fixed as Automatic, so the page says so.
+pub fn caption_kind(plan: FanPlan, fan_pwm: bool) -> PlanKind {
+    PlanKind::of(fan::plan_for_hardware(plan, fan_pwm))
+}
+
+/// A slider position on the `STEP_PCT` grid, within 0 to 100.
+pub fn snap_pct(value: f64) -> u8 {
+    let step = f64::from(STEP_PCT);
+    ((value / step).round() * step).clamp(0.0, 100.0) as u8
+}
+
 /// Each mode's plan as it was the first time the page showed it during this
 /// visit: what Discard puts back. A visit ends when the page is unmapped
 /// (`clear`), so the next visit's Discard starts from what is saved then.
@@ -211,6 +223,29 @@ mod tests {
     fn nudge_past_the_end_changes_nothing() {
         let s = [10, 20, 30, 40, 50, 60];
         assert_eq!(nudge(s, 6, true), s);
+    }
+
+    #[test]
+    fn captions_follow_what_the_hardware_can_run() {
+        let curve = FanPlan::Curve { steps: [0, 20, 40, 60, 80, 100] };
+        let fixed = FanPlan::Fixed { percent: 40 };
+        assert_eq!(caption_kind(curve, false), PlanKind::Automatic);
+        assert_eq!(caption_kind(fixed, false), PlanKind::Automatic);
+        assert_eq!(caption_kind(fixed, true), PlanKind::Fixed);
+        assert_eq!(caption_kind(curve, true), PlanKind::Curve);
+        assert_eq!(caption_kind(FanPlan::Max, false), PlanKind::Max);
+        assert_eq!(caption_kind(FanPlan::Max, true), PlanKind::Max);
+    }
+
+    #[test]
+    fn snap_pct_lands_on_the_grid_within_range() {
+        assert_eq!(snap_pct(0.0), 0);
+        assert_eq!(snap_pct(2.4), 0);
+        assert_eq!(snap_pct(2.6), 5);
+        assert_eq!(snap_pct(47.0), 45);
+        assert_eq!(snap_pct(48.0), 50);
+        assert_eq!(snap_pct(-3.0), 0);
+        assert_eq!(snap_pct(130.0), 100);
     }
 
     #[test]

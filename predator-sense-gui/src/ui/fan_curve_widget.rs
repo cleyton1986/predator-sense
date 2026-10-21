@@ -33,6 +33,7 @@ struct State {
 pub struct FanCurveView {
     pub widget: gtk::DrawingArea,
     state: Rc<RefCell<State>>,
+    change: Rc<dyn Fn([u8; geo::STEP_COUNT])>,
 }
 
 /// Height the chart asks for. Wide enough for six columns to be draggable
@@ -254,6 +255,7 @@ pub fn build(steps: [u8; geo::STEP_COUNT]) -> FanCurveView {
     let key = gtk::EventControllerKey::new();
     {
         let state = state.clone();
+        let change = change.clone();
         key.connect_key_pressed(move |_, keyval, _, _| {
             use gtk::gdk::Key;
             let (current, steps) = {
@@ -275,7 +277,7 @@ pub fn build(steps: [u8; geo::STEP_COUNT]) -> FanCurveView {
     }
     widget.add_controller(key);
 
-    FanCurveView { widget, state }
+    FanCurveView { widget, state, change }
 }
 
 impl FanCurveView {
@@ -291,6 +293,16 @@ impl FanCurveView {
 
     pub fn selected(&self) -> usize {
         self.state.borrow().selected
+    }
+
+    /// Moves the selected bar one notch through the same path as a drag and
+    /// Up/Down, so `on_change` fires only when the value really moved.
+    pub fn nudge_selected(&self, up: bool) {
+        let (selected, steps) = {
+            let s = self.state.borrow();
+            (s.selected, s.steps)
+        };
+        (self.change)(model::nudge(steps, selected, up));
     }
 
     pub fn set_steps(&self, steps: [u8; geo::STEP_COUNT]) {

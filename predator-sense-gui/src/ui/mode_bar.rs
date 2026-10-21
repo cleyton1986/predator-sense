@@ -108,19 +108,23 @@ impl ModeBar {
         active: Option<PowerProfile>,
         caption: &dyn Fn(PowerProfile) -> String,
     ) {
+        let word = crate::i18n::t("fan_mode_active");
         for it in self.items.iter() {
             let text = caption(it.mode);
-            if active == Some(it.mode) {
-                let word = crate::i18n::t("fan_mode_active");
+            // The colour alone never reaches a screen reader, so the spoken
+            // label carries the word too.
+            let spoken = if active == Some(it.mode) {
                 it.caption.set_markup(&format!(
                     "<span foreground=\"{}\" weight=\"bold\">{}</span> · {}",
                     hex(accent_for_profile(it.mode).bright),
                     glib::markup_escape_text(word),
                     glib::markup_escape_text(&text),
                 ));
+                format!("{}, {}, {}", it.mode.label(), word, text)
             } else {
                 it.caption.set_text(&text);
-            }
+                format!("{}, {}", it.mode.label(), text)
+            };
             let on = it.mode == selected;
             if on {
                 it.button.add_css_class("mode-bar-selected");
@@ -130,11 +134,8 @@ impl ModeBar {
             it.button.update_state(&[gtk::accessible::State::Checked(
                 if on { gtk::AccessibleTristate::True } else { gtk::AccessibleTristate::False },
             )]);
-            it.button.update_property(&[gtk::accessible::Property::Label(&format!(
-                "{}, {}",
-                it.mode.label(),
-                text
-            ))]);
+            it.button
+                .update_property(&[gtk::accessible::Property::Label(&spoken)]);
         }
     }
 }
