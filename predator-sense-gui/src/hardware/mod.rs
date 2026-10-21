@@ -7,6 +7,7 @@ pub mod audio_eq;
 pub mod audio_sync;
 pub mod capabilities;
 pub mod chicony_rgb;
+pub mod claude_code;
 pub mod discrete_gpu;
 pub mod display;
 pub mod eco_mode;

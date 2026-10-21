@@ -119,6 +119,7 @@ Inspired by and based on the [acer-predator-turbo-and-rgb-keyboard-linux-module]
 | **GPU Dashboard** | NVIDIA metrics: temperature, utilization, VRAM, clocks, power draw, PCIe info with live graphs, plus a **power limit (TGP) slider** |
 | **Graphs** | Detailed CPU and GPU history charts with min/max tracking |
 | **AI Assistant** 🧪 | Local, opt-in AI assistant powered by [Ollama](https://ollama.com) — reads live hardware state and suggests or applies changes through a fixed, already-validated set of actions (thermal profile, fan mode, CoolBoost, RGB, GPU power limit, battery). Chat, model manager (download/select), live resource/VRAM monitor and a persistent action log. Auto-apply or always-confirm, your choice. Requires Ollama installed separately — see [AI Assistant](#ai-assistant-beta) below |
+| **Claude Code lighting** | The keyboard (and optionally the cover logo) shows what a [Claude Code](https://docs.claude.com/en/docs/claude-code) session is doing — working, waiting for your answer, done, or hit a usage limit — with an effect, color, speed and optional sound per state. ENEK5130 hardware; see [Claude Code lighting](#claude-code-lighting) |
 | **Auto capability detection** | Detects what each model supports and adapts the UI — unsupported features are shown as "not available on this model" instead of erroring. Supported features are listed in Settings |
 | **Temperature alerts** | Desktop notification when CPU/GPU exceed 90°C (works in the tray) |
 | **Auto power profile** | Switches profile automatically on AC/battery change — target profile for each state is configurable in Settings (default: Performance on AC, Balanced on battery) |
@@ -510,6 +511,24 @@ An opt-in local AI assistant, powered by [Ollama](https://ollama.com) running en
 
 The assistant reads live hardware state (temperature, fan, thermal profile, battery) and can suggest or apply changes through a fixed, already-validated set of actions — it never touches raw hardware/EC access directly, and every action maps 1:1 to a function this app already used before the AI feature existed. The model loads only to run an analysis, then unloads — it doesn't sit idle in memory. All AI activity is recorded in a persistent, reviewable action log on the same page.
 
+### Claude Code lighting
+
+Turns the keyboard into a status light for [Claude Code](https://docs.claude.com/en/docs/claude-code) sessions. Needs the ENEK5130 I2C-HID controller (the hidraw udev rule the installer already ships is all it uses — no root, no helper).
+
+1. Go to **Tools → Claude Code** and turn on **Enable Claude Code hooks**
+2. Pick the devices that should follow the session (keyboard, and the cover logo where detected)
+3. Open each state to set its effect, color, speed and sound, and use **Test** to see it on the hardware for a few seconds
+
+| Claude Code event | State | Default |
+|---|---|---|
+| `UserPromptSubmit`, `PostToolUse` | Running | blue |
+| `PreToolUse` (`AskUserQuestion`), `Notification` (`permission_prompt`) | Waiting | orange |
+| `Stop` | Done | green |
+| `StopFailure` (`rate_limit\|billing_error`) | Limit | red |
+| `SessionEnd` | off — restores the lighting saved on the Lighting page | |
+
+The hooks are added to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`) next to any you already have; turning the switch off removes only this app's. The file keeps its permissions, a symlinked one stays a symlink (its target is what gets edited), and the first edit leaves a `settings.json.bak` next to it (never overwritten afterwards). Each hook runs `predator-sense --claude-code-hook <state>`, which writes the controller in a few milliseconds and exits before any GTK or D-Bus setup, so the app window does not need to be open. Repeated events for the state already showing write nothing, so animated effects are not restarted after every tool call. Hooks always exit 0: a lighting problem never blocks a Claude Code action. Uninstalling Predator Sense removes the hooks too. If the app runs from a location that can be changed without root (a build directory, say), the page warns about it, since the hooks run that exact file on every event.
+
 ---
 
 ## Installer Options
@@ -657,6 +676,7 @@ predator-sense-gui/
 │   │   ├── ai_assistant.rs      # Ollama tool-calling: fixed allow-list mapped to existing hardware:: setters
 │   │   ├── ai_snapshot.rs       # Ephemeral hardware-state snapshot fed to the AI, cleared after each read
 │   │   ├── ai_actionlog.rs      # Persistent, reviewable log of everything the AI suggested/applied
+│   │   ├── claude_code.rs       # Claude Code hooks: session state -> keyboard/logo lighting
 │   │   └── setup.rs             # Kernel module management
 │   └── ui/                      # GTK4 pages (Cairo custom widgets)
 │       ├── window.rs            # Main window, sidebar, neon bars, hide-to-tray
@@ -671,6 +691,7 @@ predator-sense-gui/
 │       ├── gpu_page.rs          # NVIDIA GPU dashboard
 │       ├── monitor_page.rs      # Detailed CPU/GPU history graphs
 │       ├── ai_page.rs           # AI Assistant: chat, model manager, resource monitor, action log
+│       ├── claude_code_page.rs  # Tools -> Claude Code: hooks, devices, per-state effect/color/sound
 │       ├── setup_page.rs        # Kernel module setup wizard
 │       └── gauge_widget.rs      # Dashed circular gauge widget
 └── resources/
