@@ -916,22 +916,49 @@ pub fn config_generation() -> u64 {
 /// invalidated by [`save_app_config`], which is the only way the file changes
 /// while the app is running - editing it by hand underneath a running app is
 /// already documented as unsupported, because the app will overwrite it.
-pub fn load_app_config_cached() -> AppConfig {
+///
+/// Shared, not copied: the config holds every lighting scheme, game profile
+/// and fan plan, and the timers asking for it used to deep-copy all of it
+/// several times a second.
+pub fn load_app_config_cached() -> std::rc::Rc<AppConfig> {
+    with_cached(|cached| cached.config.clone())
+}
+
+/// [`load_app_config_cached`], and whether the app may write it back unasked:
+/// `false` when config.json exists but could not be read, where the shared
+/// config is the defaults and saving them would replace the user's settings.
+/// For the fan reconciler's one-time migration, every three seconds.
+pub fn load_app_config_cached_checked() -> (std::rc::Rc<AppConfig>, bool) {
+    with_cached(|cached| (cached.config.clone(), cached.may_persist))
+}
+
+struct CachedConfig {
+    generation: u64,
+    may_persist: bool,
+    config: std::rc::Rc<AppConfig>,
+}
+
+fn with_cached<T>(read: impl FnOnce(&CachedConfig) -> T) -> T {
     thread_local! {
-        static CACHE: std::cell::RefCell<Option<(u64, AppConfig)>> =
+        static CACHE: std::cell::RefCell<Option<CachedConfig>> =
             const { std::cell::RefCell::new(None) };
     }
     let generation = config_generation();
     CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        match cache.as_ref() {
-            Some((cached_generation, config)) if *cached_generation == generation => config.clone(),
-            _ => {
-                let config = load_app_config();
-                *cache = Some((generation, config.clone()));
-                config
-            }
+        if cache.as_ref().map(|c| c.generation) != Some(generation) {
+            let (config, may_persist) = match load_app_config_source() {
+                AppConfigSource::Loaded(config) => (config, true),
+                AppConfigSource::Missing => (AppConfig::default(), true),
+                AppConfigSource::Unreadable(_) => (AppConfig::default(), false),
+            };
+            *cache = Some(CachedConfig {
+                generation,
+                may_persist,
+                config: std::rc::Rc::new(config),
+            });
         }
+        read(cache.as_ref().expect("filled above"))
     })
 }
 

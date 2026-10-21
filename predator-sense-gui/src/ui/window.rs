@@ -891,16 +891,16 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             // lighting scheme, game profile, macro and setting still in the
             // file, unasked, within three seconds of launch. So the tick runs
             // on the defaults but is not allowed to write them back.
-            let (mut cfg, may_persist) = match config::load_app_config_source() {
-                config::AppConfigSource::Loaded(cfg) => (cfg, true),
-                config::AppConfigSource::Missing => (config::AppConfig::default(), true),
-                config::AppConfigSource::Unreadable(_) => (config::AppConfig::default(), false),
-            };
+            // Cached and shared: parsed again only after a save, and copied
+            // only for the one-time migration below.
+            let (shared, may_persist) = config::load_app_config_cached_checked();
+            let mut migrated: Option<config::AppConfig> = None;
             // Migrate on first sight, then use plans only. An empty list
             // means either a fresh install or a config from before this
             // feature, and both want the pre-existing global settings
             // carried forward unchanged rather than reset to Automatic.
-            if cfg.fan_plans.is_empty() {
+            if shared.fan_plans.is_empty() {
+                let mut cfg = (*shared).clone();
                 cfg.fan_plans = crate::hardware::fan::migrate_plans(&cfg);
                 if may_persist {
                     match config::save_app_config(&cfg) {
@@ -925,7 +925,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 }
                 // Fall through with the migrated plans in hand: this tick
                 // applies them either way.
+                migrated = Some(cfg);
             }
+            let cfg: &config::AppConfig = migrated.as_ref().unwrap_or(&shared);
 
             if applying.get() {
                 return glib::ControlFlow::Continue;
@@ -1130,7 +1132,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         let window_c = window.clone();
         let minutes_since_check: Rc<std::cell::Cell<u32>> = Rc::new(std::cell::Cell::new(0));
         glib::timeout_add_seconds_local(60, move || {
-            let cfg = config::load_app_config();
+            let cfg = config::load_app_config_cached();
             if !cfg.ai_assistant_enabled {
                 minutes_since_check.set(0);
                 return glib::ControlFlow::Continue;

@@ -222,7 +222,7 @@ fn queue_commit(page: &Rc<Page>) {
 /// Pushes config into every control. The only place that decides what the
 /// page shows, so the mode bar, the buttons and the editors cannot disagree.
 fn refresh(page: &Rc<Page>) {
-    let cfg = config::load_app_config();
+    let cfg = config::load_app_config_cached();
     let editing = page.editing.borrow().clone();
     let plan = plan_of(&cfg, &editing);
     // What the reconciler will run here, so the buttons, the editor shown and
@@ -397,8 +397,7 @@ pub fn build() -> gtk::Widget {
 
     // ---- title row: CoolBoost, the "Changed" tag and Discard on the right ----
     let title = gtk::Label::new(Some(crate::i18n::t("fan_control")));
-    // No page on this branch has a large heading class of its own, so the
-    // page title uses libadwaita's stock title-1.
+    // The page title uses libadwaita's stock title-1.
     title.add_css_class("title-1");
     title.set_halign(gtk::Align::Start);
     title.set_hexpand(true);
@@ -971,7 +970,7 @@ pub fn build() -> gtk::Widget {
         if let Some(page) = weak_sensors.upgrade() {
             page.curve_view.set_temp(live);
         }
-        let cfg = config::load_app_config();
+        let cfg = config::load_app_config_cached();
         let running = fan::plan_for(
             crate::hardware::profile::get_current_profile(),
             &cfg.fan_plans,
