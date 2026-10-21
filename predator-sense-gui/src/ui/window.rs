@@ -375,8 +375,8 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // it has to start with the app even when the user never opens the
         // Lighting page - pages here are built lazily, and doing this only in
         // the page meant a machine with the firmware timeout already on never
-        // blanked its bar. The firmware timeout is read for the inheritance
-        // below.
+        // blanked its bar. The firmware timeout is read for the idle settings'
+        // one-time migration (`AppConfig::migrate_idle_once`).
         background::run(
             || crate::hardware::extras::get_backlight_timeout(),
             |firmware_enabled| {
@@ -390,13 +390,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 if !can_blank_keyboard && !can_blank_bar {
                     return;
                 }
-                let mut cfg = config::load_app_config();
-                // Inherit the old single light-bar flag, or the firmware
-                // timeout, the first time this runs.
-                if !cfg.idle_enabled && (cfg.light_bar_idle_enabled || firmware_enabled) {
-                    cfg.idle_enabled = true;
-                    let _ = config::save_app_config(&cfg);
-                }
+                // Inheriting the old single light-bar flag, or the firmware timeout,
+                // the first time this runs, and only then.
+                let cfg = crate::config::migrate_idle_at_startup(firmware_enabled);
                 if cfg.idle_enabled {
                     // The WMI backlight timeout. Written only where the app
                     // blanks the keyboard itself (the 24-bit Chicony path),

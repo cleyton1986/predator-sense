@@ -326,6 +326,12 @@ pub struct AppConfig {
     /// a click is as deliberate as a keystroke - this is only about motion.
     #[serde(default = "default_true")]
     pub idle_mouse_wakes: bool,
+    /// Whether the start-up idle migration has run (see
+    /// [`AppConfig::migrate_idle_once`]). A config written before this field
+    /// reads `false` and is migrated once; after that, nothing at start-up
+    /// switches idle on by itself.
+    #[serde(default)]
+    pub idle_migrated: bool,
     // `idle_keyboard_keepalive` was here. The keepalive went when the
     // controller's own sleep timer became switchable; a file that
     // still carries the key loads, since this struct ignores unknown keys.
@@ -567,6 +573,64 @@ impl AppConfig {
             PowerSourceAction::Keep
         })
     }
+
+    /// The one-time start-up migration of the idle settings. Returns whether
+    /// it changed the config, which the caller then saves.
+    ///
+    /// Idle used to be the light bar's own flag, and on some models the
+    /// firmware's WMI backlight timeout; the first start of this build turns
+    /// idle on if either was on, so nobody loses what they had. Only the
+    /// first: since "Turn off when idle" off means nothing turns off, a
+    /// timeout that reads on at a later start (a BIOS reset, the Windows app,
+    /// a firmware that sets it at boot) must not switch idle back on over the
+    /// user's choice. A migration never switches idle off.
+    pub fn migrate_idle_once(&mut self, firmware_timeout_on: bool) -> bool {
+        if self.idle_migrated {
+            return false;
+        }
+        if self.light_bar_idle_enabled || firmware_timeout_on {
+            self.idle_enabled = true;
+        }
+        self.idle_migrated = true;
+        true
+    }
+}
+
+/// Start-up's one-time migration of the idle settings on `source`
+/// ([`AppConfig::migrate_idle_once`]), with the firmware timeout as read.
+/// Returns the config and whether to save it.
+///
+/// An unreadable config.json is neither migrated nor saved over: the app runs
+/// on defaults and the file keeps the user's settings. A missing file is a
+/// fresh install, with nothing to lose, so the marked defaults are saved.
+fn with_idle_migrated(source: AppConfigSource, firmware_timeout: bool) -> (AppConfig, bool) {
+    match source {
+        AppConfigSource::Loaded(mut cfg) => {
+            let save = cfg.migrate_idle_once(firmware_timeout);
+            (cfg, save)
+        }
+        AppConfigSource::Missing => {
+            let mut cfg = AppConfig::default();
+            cfg.migrate_idle_once(firmware_timeout);
+            (cfg, true)
+        }
+        AppConfigSource::Unreadable(_) => (AppConfig::default(), false),
+    }
+}
+
+/// On the UI thread, once the firmware's backlight timeout is read, on a machine whose
+/// lighting the app can blank: the idle settings' one-time migration
+/// ([`with_idle_migrated`]), saved. Returns the config the idle watcher starts on.
+pub fn migrate_idle_at_startup(firmware_timeout: bool) -> AppConfig {
+    let (cfg, save) = with_idle_migrated(load_app_config_source(), firmware_timeout);
+    if save {
+        if let Err(e) = save_app_config(&cfg) {
+            crate::hardware::applog::error(&format!(
+                "startup: migrated idle settings not saved: {e}"
+            ));
+        }
+    }
+    cfg
 }
 
 fn default_auto_eco_threshold() -> u32 {
@@ -649,6 +713,7 @@ impl Default for AppConfig {
             idle_bar_enabled: true,
             idle_bar_secs: default_idle_secs(),
             idle_mouse_wakes: true,
+            idle_migrated: false,
             mode_cycle_ac: Vec::new(),
             mode_cycle_battery: Vec::new(),
             mode_default: None,
@@ -1150,6 +1215,101 @@ mod tests {
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(&dir);
+    }
+
+    /// A config.json written before `idle_migrated` existed, read from disk.
+    fn config_without_the_idle_marker(name: &str, edit: impl FnOnce(&mut AppConfig)) -> AppConfig {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-idle-migration-{name}-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.json");
+        let mut old = AppConfig::default();
+        edit(&mut old);
+        let mut value = serde_json::to_value(&old).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("a config is a JSON object")
+            .remove("idle_migrated");
+        fs::write(&path, serde_json::to_string_pretty(&value).expect("json")).expect("write");
+        let loaded = match read_app_config_at(&path) {
+            AppConfigSource::Loaded(config) => config,
+            AppConfigSource::Missing => panic!("the file was written"),
+            AppConfigSource::Unreadable(error) => {
+                panic!("an old config must not fall back to defaults: {error}")
+            }
+        };
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_dir(&dir);
+        loaded
+    }
+
+    #[test]
+    fn an_old_config_inherits_the_firmware_idle_timeout_once() {
+        let mut cfg = config_without_the_idle_marker("firmware", |_| {});
+        assert!(!cfg.idle_migrated, "an old file has not been migrated");
+        assert!(cfg.migrate_idle_once(true), "the first start has to save");
+        assert!(cfg.idle_enabled && cfg.idle_migrated);
+    }
+
+    #[test]
+    fn an_old_config_inherits_the_old_light_bar_flag_once() {
+        let mut cfg = config_without_the_idle_marker("bar", |old| {
+            old.light_bar_idle_enabled = true;
+        });
+        assert!(cfg.migrate_idle_once(false));
+        assert!(cfg.idle_enabled && cfg.idle_migrated);
+    }
+
+    #[test]
+    fn a_first_start_with_nothing_to_inherit_still_marks_the_config() {
+        // Otherwise the firmware timeout reading on at some later start
+        // (a BIOS reset, the Windows app) would still switch idle on.
+        let mut cfg = config_without_the_idle_marker("nothing", |_| {});
+        assert!(cfg.migrate_idle_once(false), "saved, for the marker");
+        assert!(!cfg.idle_enabled);
+        assert!(cfg.idle_migrated);
+    }
+
+    #[test]
+    fn idle_switched_off_stays_off_at_every_later_start() {
+        let mut cfg = config_without_the_idle_marker("later", |_| {});
+        assert!(cfg.migrate_idle_once(true));
+        // The user turns idle off. The firmware timeout still reads on.
+        cfg.idle_enabled = false;
+        cfg.light_bar_idle_enabled = false;
+        for start in 0..3 {
+            assert!(!cfg.migrate_idle_once(true), "start {start} saves nothing");
+            assert!(!cfg.idle_enabled, "start {start} left idle off");
+        }
+        // The same after a save and a reload.
+        let reloaded: AppConfig =
+            serde_json::from_str(&serde_json::to_string(&cfg).expect("json")).expect("parse");
+        assert!(reloaded.idle_migrated);
+        let mut reloaded = reloaded;
+        assert!(!reloaded.migrate_idle_once(true));
+        assert!(!reloaded.idle_enabled);
+    }
+
+    #[test]
+    fn a_migrated_config_keeps_idle_on_as_it_was() {
+        let mut cfg = config_without_the_idle_marker("on", |old| old.idle_enabled = true);
+        assert!(cfg.migrate_idle_once(false));
+        assert!(cfg.idle_enabled, "a migration never switches idle off");
+    }
+
+    #[test]
+    fn an_unreadable_config_is_neither_migrated_nor_saved_over() {
+        let (cfg, save) = with_idle_migrated(AppConfigSource::Unreadable("bad".into()), true);
+        assert!(!save, "the user's file is left alone");
+        assert!(!cfg.idle_migrated && !cfg.idle_enabled);
+        // A fresh install has nothing to lose: the marked defaults are saved.
+        let (cfg, save) = with_idle_migrated(AppConfigSource::Missing, true);
+        assert!(save && cfg.idle_migrated && cfg.idle_enabled);
+        // A migrated file saves nothing at a later start.
+        let (_, save) = with_idle_migrated(AppConfigSource::Loaded(cfg), true);
+        assert!(!save);
     }
 
     /// `idle_keyboard_keepalive` was removed with the keepalive itself. A
