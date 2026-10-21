@@ -21,7 +21,14 @@ pub(crate) mod binary {
 pub(crate) mod path {
     pub use predator_sense_protocol::path::*;
 
-    pub const DESKTOP_ENTRY: &str = "/usr/share/applications/predator-sense.desktop";
+    /// Named after the application id, not the binary. GNotification resolves
+    /// a notification's name and icon by looking for `<app id>.desktop`, so a
+    /// mismatch here means a notification with no icon, or on some backends no
+    /// notification at all.
+    pub const DESKTOP_ENTRY: &str = "/usr/share/applications/com.predator.sense.desktop";
+    /// What the entry was called before that. Removed on install and uninstall
+    /// so an upgrade does not leave the app listed twice.
+    pub const LEGACY_DESKTOP_ENTRY: &str = "/usr/share/applications/predator-sense.desktop";
     pub const ICON: &str = "/usr/share/icons/hicolor/128x128/apps/predator-sense.png";
     pub const ICON_THEME: &str = "/usr/share/icons/hicolor";
     pub const POLKIT_POLICY: &str = "/usr/share/polkit-1/actions/com.predator.sense.policy";

@@ -57,7 +57,10 @@ const SETTLE_MS: u64 = 1500;
 /// because retrying forever against someone holding the mode key would hang.
 const SETTLE_ATTEMPTS: u8 = 3;
 
-fn index_path() -> PathBuf {
+/// The attribute the driver notifies on when the profile changes, so a caller
+/// can wait on it instead of asking again on a timer. See `facer.c`'s
+/// `acer_thermal_profile_notify`.
+pub fn index_path() -> PathBuf {
     Path::new(SYSFS_ROOT).join(shared::SYSFS_INDEX)
 }
 

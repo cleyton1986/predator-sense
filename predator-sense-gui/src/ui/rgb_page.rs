@@ -41,7 +41,7 @@ pub fn build() -> gtk::ScrolledWindow {
     // the chassis light bar together, with shared swatches and schemes. It owns
     // the hardware this machine actually has; magic_rgb_page still serves the
     // 2024+ Sunrex/Darfon boards it was written for.
-    if crate::hardware::keyboard_rgb::is_available() || crate::hardware::light_bar::is_available() {
+    if crate::hardware::capabilities::get().keyboard_rgb || crate::hardware::capabilities::get().light_bar {
         return crate::ui::lighting_page::build();
     }
     // `chicony_rgb::is_available()` is a USB-ID check with no model gate, and it

@@ -36,7 +36,8 @@ pub const SPEED_MIN: u8 = 1;
 pub const SPEED_MAX: u8 = 5;
 /// Brightness is a percentage in the official app's capture (`0..100`).
 pub const BRIGHTNESS_MAX: u8 = 100;
-static BLANKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static BLANKING: crate::hardware::blanking::Blanking =
+    crate::hardware::blanking::Blanking::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LightBarMode {
@@ -278,21 +279,19 @@ pub fn blank() -> Result<(), String> {
     let saved = crate::config::load_app_config()
         .light_bar
         .unwrap_or_default();
-    // Only after the write lands. The flag is what the idle tick compares
-    // against to decide there is nothing to do, so setting it first meant a
-    // failed privileged write left it claiming a lit bar was blanked, and
-    // nothing ever retried.
-    write_frame(&LightBarState {
-        brightness: 0,
-        ..saved
-    })?;
-    BLANKED.store(true, std::sync::atomic::Ordering::Relaxed);
-    Ok(())
+    // `Blanking::set` records the flag only after the write lands, which is
+    // the rule this used to get wrong in both this module and keyboard_rgb.
+    BLANKING.set(true, || {
+        write_frame(&LightBarState {
+            brightness: 0,
+            ..saved
+        })
+    })
 }
 
 /// True when the bar is currently blanked by the idle watcher.
 pub fn is_blanked() -> bool {
-    BLANKED.load(std::sync::atomic::Ordering::Relaxed)
+    BLANKING.is_blanked()
 }
 
 /// Undoes [`blank`]. Blanking only zeroes brightness and leaves the mode
@@ -300,18 +299,16 @@ pub fn is_blanked() -> bool {
 /// 300 ms sleep, which matters because the idle watcher calls it from the UI
 /// thread the moment a key is pressed.
 pub fn unblank() {
-    let Some(saved) = crate::config::load_app_config().light_bar else {
-        BLANKED.store(false, std::sync::atomic::Ordering::Relaxed);
-        return;
-    };
+    // The same fallback `blank` uses, as keyboard_rgb does in both. Returning
+    // early here instead left the flag set after `blank` had darkened the bar
+    // from the default, so on a machine with no saved light bar setting the
+    // idle tick called this four times a second and the bar never relit.
+    let saved = crate::config::load_app_config()
+        .light_bar
+        .unwrap_or_default();
     // Through `on_wire`, not raw: a saved `Off` written literally relights the
     // bar, since its mode id does not blank this firmware.
-    if write_frame(&on_wire(&saved)).is_ok() {
-        // Same reason as `blank`: clearing this first would tell the idle tick
-        // the bar is showing again when the write that was meant to restore it
-        // had failed, and it would never try a second time.
-        BLANKED.store(false, std::sync::atomic::Ordering::Relaxed);
-    }
+    let _ = BLANKING.set(false, || write_frame(&on_wire(&saved)));
 }
 
 #[cfg(test)]
