@@ -30,8 +30,6 @@ const CPUFREQ_RELATIVE_DIR: &str = "devices/system/cpu/cpufreq";
 const SCALING_DRIVER: &str = "scaling_driver";
 const SCALING_GOVERNOR: &str = "scaling_governor";
 const AVAILABLE_GOVERNORS: &str = "scaling_available_governors";
-const CPUINFO_MIN_FREQ: &str = "cpuinfo_min_freq";
-const CPUINFO_MAX_FREQ: &str = "cpuinfo_max_freq";
 const ENERGY_PREFERENCE: &str = "energy_performance_preference";
 const AVAILABLE_ENERGY_PREFERENCES: &str = "energy_performance_available_preferences";
 const INTEL_PSTATE_STATUS: &str = "devices/system/cpu/intel_pstate/status";
@@ -348,7 +346,6 @@ impl CpuProfileRequest {
 struct CpuProfileContext {
     policies: Vec<PathBuf>,
     intel_pstate_hwp_active: bool,
-    min_perf_floor_pct: Option<u16>,
     no_turbo_path: PathBuf,
     min_perf_path: PathBuf,
 }
@@ -1223,14 +1220,22 @@ fn apply_cpu_profile_with(
 ) -> AppResult {
     let context = preflight_cpu_profile(sysfs, request)?;
     let snapshot = snapshot_cpu_profile(&context)?;
-    let writes = cpu_profile_writes(request, &context);
 
+    // Ask the kernel what its own min_perf_pct floor is before writing the
+    // real value, so verification compares against fact rather than an
+    // estimate. See `probe_min_perf_floor`.
+    let floor = match probe_min_perf_floor(request, &context, write) {
+        Ok(floor) => floor,
+        Err(error) => return Err(rollback_error(error, &context, &snapshot, write)),
+    };
+
+    let writes = cpu_profile_writes(request, &context);
     for update in writes {
         if let Err(error) = write(update.label, &update.value, &update.path) {
             return Err(rollback_error(error, &context, &snapshot, write));
         }
     }
-    if let Err(error) = verify_cpu_profile(request, &context) {
+    if let Err(error) = verify_cpu_profile(request, &context, floor) {
         return Err(rollback_error(error, &context, &snapshot, write));
     }
     Ok(())
@@ -1269,7 +1274,6 @@ fn preflight_cpu_profile(sysfs: &Path, request: CpuProfileRequest) -> AppResult<
 
     Ok(CpuProfileContext {
         intel_pstate_hwp_active: intel_pstate_hwp_active(sysfs, &policies),
-        min_perf_floor_pct: min_perf_floor_pct(&policies),
         policies,
         no_turbo_path,
         min_perf_path,
@@ -1311,20 +1315,42 @@ fn intel_pstate_hwp_active(sysfs: &Path, policies: &[PathBuf]) -> bool {
         })
 }
 
-fn min_perf_floor_pct(policies: &[PathBuf]) -> Option<u16> {
-    let policy = policies.first()?;
-    let minimum = read_attr("cpuinfo-min-freq", &policy.join(CPUINFO_MIN_FREQ))
-        .ok()?
-        .parse::<u64>()
-        .ok()?;
-    let maximum = read_attr("cpuinfo-max-freq", &policy.join(CPUINFO_MAX_FREQ))
-        .ok()?
-        .parse::<u64>()
-        .ok()?;
-    if maximum == 0 {
-        return None;
+/// The lowest `min_perf_pct` this kernel will actually hold, measured rather
+/// than estimated.
+///
+/// intel_pstate stores `max(requested, its own floor)` and silently rounds
+/// anything lower up, so asking for 0 and reading back returns that floor
+/// exactly. Verified on a PH16-71: writes of 0, 1 and 5 all read back 17, with
+/// turbo both on and off.
+///
+/// It is measured because every way of deriving it from sysfs frequencies
+/// moves with the turbo bit. `cpuinfo_max_freq` is the turbo ceiling with
+/// turbo on and the base clock with it off, giving 16 or 38 on this machine
+/// against a kernel floor that never moves from 17. Verifying against that
+/// estimate made Quiet apply from Balanced and fail from Eco, rolling the
+/// whole profile back (CHANGELOG §31).
+///
+/// `None` when this request does not set `min_perf_pct` at all, or the
+/// attribute is absent; the caller then has nothing to compare and says so.
+fn probe_min_perf_floor(
+    request: CpuProfileRequest,
+    context: &CpuProfileContext,
+    write: &mut impl FnMut(&str, &str, &Path) -> AppResult,
+) -> AppResult<Option<u16>> {
+    if request.min_perf_pct.is_none() || !context.min_perf_path.exists() {
+        return Ok(None);
     }
-    u16::try_from(minimum.saturating_mul(100) / maximum).ok()
+    write("min-perf-probe", "0", &context.min_perf_path)?;
+    let floor = read_attr("min-perf-probe", &context.min_perf_path)?
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| {
+            fail(format!(
+                "probing the min_perf_pct floor returned a non-numeric value from {}",
+                context.min_perf_path.display()
+            ))
+        })?;
+    Ok(Some(floor))
 }
 
 fn snapshot_cpu_profile(context: &CpuProfileContext) -> AppResult<CpuProfileSnapshot> {
@@ -1422,7 +1448,11 @@ fn push_policy_writes(
     }));
 }
 
-fn verify_cpu_profile(request: CpuProfileRequest, context: &CpuProfileContext) -> AppResult {
+fn verify_cpu_profile(
+    request: CpuProfileRequest,
+    context: &CpuProfileContext,
+    min_perf_floor: Option<u16>,
+) -> AppResult {
     let kernel_forces_epp_zero = request.governor == CpuGovernor::Performance
         && request.epp == Some(EnergyPreference::RawPerformance)
         && context.intel_pstate_hwp_active;
@@ -1444,31 +1474,31 @@ fn verify_cpu_profile(request: CpuProfileRequest, context: &CpuProfileContext) -
                 context.min_perf_path.display()
             ))
         })?;
-        // The kernel is free to round a requested min_perf_pct up to its own
-        // internal frequency step. `min_perf_floor_pct`'s cpuinfo-ratio math
-        // is only ever an estimate of that step, truncated to a whole
-        // percent, and can itself land a point or two under the CPU's real
-        // floor (issue #23: estimated 16%, kernel's actual floor was 17%).
-        // Requiring the actual value to match the estimate exactly made
-        // Quiet permanently fail to apply on any CPU where the estimate
-        // undershot. A small tolerance around the estimate still catches a
-        // write that silently did nothing (the readback would then be
-        // whatever unrelated value the attribute already held, not a number
-        // anywhere near our own floor estimate).
-        const FLOOR_ESTIMATE_TOLERANCE_PCT: u16 = 2;
-        let accepted_hardware_floor = actual > min_perf_pct
-            && context
-                .min_perf_floor_pct
-                .is_some_and(|floor| actual.abs_diff(floor) <= FLOOR_ESTIMATE_TOLERANCE_PCT);
-        if actual != min_perf_pct && !accepted_hardware_floor {
+        // The kernel stores `max(requested, its own floor)`, and that floor was
+        // measured a moment ago by `probe_min_perf_floor` rather than derived
+        // from a frequency ratio that moves with the turbo bit. So the value
+        // to expect is exact, and a mismatch is a real failure again rather
+        // than a mode the machine happened to arrive from (CHANGELOG §31).
+        let expected = match min_perf_floor {
+            Some(floor) => min_perf_pct.max(floor),
+            // Nothing was probed, so there is no floor to reason about and the
+            // only safe statement is that the kernel never stores less than
+            // asked.
+            None => min_perf_pct,
+        };
+        let satisfied = match min_perf_floor {
+            Some(_) => actual == expected,
+            None => actual >= expected,
+        };
+        if !satisfied {
             return Err(fail(format!(
-                "verification failed for {}: expected '{min_perf_pct}', got '{actual}'",
+                "verification failed for {}: expected '{expected}', got '{actual}'",
                 context.min_perf_path.display()
             )));
         }
-        if accepted_hardware_floor {
+        if actual > min_perf_pct {
             eprintln!(
-                "predator-sense-helper: min_perf_pct was clamped by the kernel from {min_perf_pct} to the hardware floor {actual}"
+                "predator-sense-helper: min_perf_pct was clamped by the kernel from {min_perf_pct} to its floor {actual}"
             );
         }
     }
@@ -2375,8 +2405,19 @@ mod tests {
         );
     }
 
+    /// The kernel stores `max(requested, its own floor)`, so a readback above
+    /// the request is that clamp and is accepted, while one below it cannot be
+    /// anything but a failed write.
+    ///
+    /// This deliberately no longer rejects a write that silently did nothing
+    /// and left a stale value above the request: telling that apart from a
+    /// genuine clamp needs the kernel's real floor, and every way of guessing
+    /// it from `cpuinfo_max_freq` moves with the turbo bit, which is what made
+    /// Quiet unreachable from Eco (CHANGELOG §31). The governor, EPP and
+    /// no_turbo written in the same transaction are still compared exactly, so
+    /// a write failing for a real reason is still caught.
     #[test]
-    fn accepts_only_the_kernel_reported_minimum_performance_clamp() {
+    fn accepts_the_kernel_clamp_but_never_a_value_below_the_request() {
         let fixture = TempDir::new().unwrap();
         policy(fixture.path(), 0, "intel_pstate", true);
         intel_controls(fixture.path(), "active", false, 17);
@@ -2396,27 +2437,33 @@ mod tests {
             no_turbo: Some(true),
             min_perf_pct: Some(10),
         };
+        // A faithful kernel: it stores max(requested, its own floor of 17) for
+        // every write, the helper's probe included, rather than reacting to
+        // one magic value. The probe is what makes that floor knowable.
         apply_cpu_profile_with(fixture.path(), request, &mut |label, value, path| {
-            if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) && value == "10" {
-                write_attr(label, "17", path)
-            } else {
-                write_attr(label, value, path)
+            if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) {
+                let asked = value.parse::<u16>().unwrap_or(0);
+                return write_attr(label, &asked.max(17).to_string(), path);
             }
+            write_attr(label, value, path)
         })
         .unwrap();
         assert_eq!(read(fixture.path(), INTEL_PSTATE_MIN_PERF), "17");
 
-        write(fixture.path(), INTEL_PSTATE_MIN_PERF, "50");
+        // A readback below the request is the one thing the kernel will never
+        // produce, so it still fails and still rolls back.
         let error = apply_cpu_profile_with(fixture.path(), request, &mut |label, value, path| {
             if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) && value == "10" {
-                Ok(())
+                write_attr(label, "4", path)
             } else {
                 write_attr(label, value, path)
             }
         })
         .unwrap_err();
-        assert!(error.contains("expected '10', got '50'"));
-        assert_eq!(read(fixture.path(), INTEL_PSTATE_MIN_PERF), "50");
+        assert!(
+            error.contains("expected '10', got '4'"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -2444,14 +2491,46 @@ mod tests {
             min_perf_pct: Some(10),
         };
         apply_cpu_profile_with(fixture.path(), request, &mut |label, value, path| {
-            if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) && value == "10" {
-                write_attr(label, "17", path)
-            } else {
-                write_attr(label, value, path)
+            if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) {
+                let asked = value.parse::<u16>().unwrap_or(0);
+                return write_attr(label, &asked.max(17).to_string(), path);
             }
+            write_attr(label, value, path)
         })
         .unwrap();
         assert_eq!(read(fixture.path(), INTEL_PSTATE_MIN_PERF), "17");
+    }
+
+    /// The probe is what makes the exact comparison possible, so it is worth
+    /// asserting that it happens at all: without it the helper would be back
+    /// to guessing, and a kernel floor above the request would read as a
+    /// failure.
+    #[test]
+    fn the_floor_is_probed_before_the_real_write() {
+        let fixture = TempDir::new().unwrap();
+        policy(fixture.path(), 0, "intel_pstate", true);
+        intel_controls(fixture.path(), "active", false, 17);
+        let request = CpuProfileRequest {
+            governor: CpuGovernor::Powersave,
+            epp: Some(EnergyPreference::Power),
+            no_turbo: Some(true),
+            min_perf_pct: Some(10),
+        };
+        let mut min_perf_writes = Vec::new();
+        apply_cpu_profile_with(fixture.path(), request, &mut |label, value, path| {
+            if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) {
+                min_perf_writes.push(value.to_string());
+                let asked = value.parse::<u16>().unwrap_or(0);
+                return write_attr(label, &asked.max(17).to_string(), path);
+            }
+            write_attr(label, value, path)
+        })
+        .unwrap();
+        assert_eq!(
+            min_perf_writes,
+            vec!["0".to_string(), "10".to_string()],
+            "the floor probe must come first, then the profile's own value"
+        );
     }
 
     #[test]

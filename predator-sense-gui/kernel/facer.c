@@ -113,6 +113,7 @@ MODULE_LICENSE("GPL");
 #define ACER_WMID_GET_GAMING_LED_METHODID 4
 #define ACER_WMID_GET_GAMING_SYS_INFO_METHODID 5
 #define ACER_WMID_SET_GAMING_STATIC_LED_METHODID 6
+#define ACER_WMID_GET_GAMING_RGB_KB_METHODID 7
 #define ACER_WMID_SET_GAMING_FAN_BEHAVIOR 14
 /* PWM fan control method ids (ported from mainline acer-wmi) */
 #define ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID 14
@@ -536,6 +537,9 @@ struct quirk_entry {
 	u8 predator_v4;
 	u8 pwm;
 	u8 four_zone_kb;
+	u8 lightbar_zones;
+	/* Physical base of the EC window ERM2, for direct light bar colours. */
+	u32 lightbar_erm2;
 };
 
 static struct quirk_entry *quirks;
@@ -623,6 +627,9 @@ static struct quirk_entry quirk_acer_predator_ph16_71 = {
 	.gpu_fans = 1,
 	.predator_v4 = 1,
 	.pwm = 1,
+	.lightbar_zones = 1,
+	/* ERM2, the DSDT's SystemMemory OperationRegion (BIOS V1.18). */
+	.lightbar_erm2 = 0xFE708F00,
 };
 
 
@@ -2698,27 +2705,645 @@ static void acer_led_exit(void)
 }
 
 /*
+ * Per-zone light bar (PH16-71).
+ *
+ * Method 20 sets the bar's mode, speed, brightness and direction, but the
+ * firmware copies its one colour into all three zones. Other BIOS WMI
+ * methods on the same GUID reach the zones one at a time (BIOS V1.18,
+ * hardware-tested), so this needs no raw EC access:
+ *   20 SetGamingKBBacklight
+ *        [mode, speed, brightness, 0, direction, R, G, B, 0x03, 0x02, 0...]
+ *        byte 9 0x02 is the bar; static is mode 0xFF
+ *   21 GetGamingKBBacklight, input 2 (the bar)
+ *        -> [status, mode, speed, brightness, x, direction, R, G, B, ...]
+ *        static reads back as mode 0; the colour is the left zone's
+ *   6  SetGamingRgbKb [0, R, G, B, 0x08, zone, 0, 0]: one zone's colour
+ *   7  GetGamingRgbKb [0, 0x08, zone, 0] -> [status, R, G, B, ...]
+ *   2  SetGamingLED sub-function 4: mask 0x0010 in bytes 0-1, byte 9 two
+ *        bits per zone (01 on, 00 off), left bits 0-1, middle 2-3, right
+ *        4-5, rest zero. A zone turned off stays off through method 20.
+ *   4  GetGamingLED, input 0x10 -> byte 9 = 0xc0 | those two-bit fields
+ * where zone is 1 left, 2 middle, 4 right, and 0x08 selects the bar (with
+ * 0 in byte 0, method 6 leaves the keyboard zones alone). Every reply
+ * starts with a status byte, 0 on success.
+ *
+ * One 16-byte frame, the same for write and read:
+ *   0 mode (0..7, 0 static)  1 speed (0..5)  2 brightness (0..100)
+ *   3 direction (1..2)  4..6 left RGB  7..9 middle RGB  10..12 right RGB
+ *   13 zones_off (bit 0 left, bit 1 middle, bit 2 right; 0 = all on)
+ *   14..15 zero
+ * A write sends method 20, then method 6 for each zone, then method 2 when
+ * the zone on/off state differs from the last one this driver sent. A read
+ * uses method 21, method 7 for each zone and method 4. Any failed call or
+ * non-zero status makes the write or read fail with -EIO.
+ *
+ * Each of those calls is an SMM call, which stalls every core, so a 16-byte
+ * write or a read that reaches the firmware starts at least
+ * LIGHTBAR_WMI_GAP_MS after the last one ended: the writer or reader waits
+ * for that, nothing is refused or dropped. A read within LIGHTBAR_READ_KEEP_MS
+ * of the last one, with no write in between, is answered from that read, so
+ * reading the frame a byte at a time makes one set of calls, not sixteen.
+ * The node is 0660 root:root: only root, and a user a udev rule grants an
+ * ACL (uaccess, for the active session), can open it.
+ *
+ * For animation the node also takes a direct colour frame, which makes none:
+ *   a 9-byte write, left RGB, middle RGB, right RGB
+ * It goes straight into the EC's shared-memory window ERM2 (a SystemMemory
+ * OperationRegion in the DSDT; method 6 writes the same bytes from SMM):
+ * the zone colours at 0x73-0x7b, then bit 6 (0x40) of 0x4b, read-modify-
+ * write, which tells the EC to apply them. The EC clears that bit when it
+ * has (65-106 ms on BIOS V1.18; it polls about every 100 ms). A direct frame
+ * never waits: while the bit from the previous frame is still set it fails
+ * at once with -EBUSY, writing nothing, and the caller sends its next frame
+ * later. Mode, speed, brightness and the zone on/off state are left as the
+ * last 16-byte frame set them, so a 16-byte frame sets those up before
+ * direct frames follow.
+ *
+ * The direct route is on only for a quirk that names the window, and only
+ * when a probe at load proves the mapping is that window: the three zone
+ * colours read in it equal what method 7 returns for each zone, then
+ * method 6 sets each zone to a distinctive probe colour and the window must
+ * hold exactly those nine bytes, then method 6 puts the colours read first
+ * back (the bar shows the probe colours for that moment). A passive compare
+ * alone can match by chance (a black or white bar against memory that
+ * reads all zeros or all ones). Any failed call or mismatch, the restore
+ * included, leaves the route off for the module's life, and a direct frame
+ * then fails with -EOPNOTSUPP; it never falls back to WMI. The device
+ * attribute direct_route (/sys/class/acer-lightbar/acer-lightbar-0/
+ * direct_route) reads 1 when it is on, 0 when it is off.
+ *
+ * Gated to the PH16-71 quirk and to WMID_GUID4, and created only when a
+ * method-7 query of the left zone succeeds at load.
+ */
+#define LIGHTBAR_FRAME_LEN	16
+#define LIGHTBAR_ZONES		3
+#define LIGHTBAR_ZONES_OFF_MASK	0x07
+#define LIGHTBAR_KBBL_STATIC	0xFF	/* method 20 mode byte for static */
+#define LIGHTBAR_KBBL_TARGET	0x02	/* method 20 byte 9: the light bar */
+#define LIGHTBAR_RGB_KB_BAR	0x08	/* method 6/7: address the bar */
+#define LIGHTBAR_LED_LEN	12	/* method 2 input */
+#define LIGHTBAR_LED_ZONES	0x10	/* methods 2/4: sub-function 4 */
+#define LIGHTBAR_LED_ZONES_BYTE	9
+#define LIGHTBAR_GET_CHANNEL	2	/* method 21 input: the light bar */
+#define LIGHTBAR_CHR		"acer-lightbar"
+#define LIGHTBAR_COLOURS_LEN	9	/* direct frame: three zones' RGB */
+#define LIGHTBAR_ERM2_LEN	0x100
+#define ERM2_APPLY		0x4b
+#define ERM2_APPLY_LIGHTBAR	0x40
+#define ERM2_ZONE_RGB		0x73
+
+/*
+ * Held around a whole light bar frame here (methods 20, 6 and 2, or a
+ * direct colour frame) and around each method-20 frame gkbbl_drv_write
+ * sends, so a frame written to /dev/acer-gkbbl-0 cannot land in the middle
+ * of a per-zone write, and no two writers read-modify-write ERM2 0x4b at
+ * once.
+ */
+static DEFINE_MUTEX(lightbar_lock);
+/*
+ * ERM2, mapped while the direct route is on, else NULL. Set at load before
+ * the node exists; cleared under lightbar_lock, and unmapped, after the node
+ * is gone (lightbar_direct_exit).
+ */
+static void __iomem *lightbar_erm2;
+/*
+ * Method-2 zone byte this driver last sent successfully, under
+ * lightbar_lock. -1 is never a valid byte, so the first write after load,
+ * and after every resume or hibernate restore (acer_resume), sends it.
+ */
+static int lightbar_zones_sent = -1;
+static struct class *lightbar_class;
+static struct cdev lightbar_cdev;
+static dev_t lightbar_devt;
+/*
+ * Pacing of the SMM calls (see above), all under lightbar_lock: when the
+ * next firmware frame or read may start, and the last read's frame and
+ * when it was taken. lightbar_read_valid is cleared by every write and by
+ * acer_resume.
+ */
+#define LIGHTBAR_WMI_GAP_MS	20
+#define LIGHTBAR_READ_KEEP_MS	100
+static ktime_t lightbar_wmi_next;
+static u8 lightbar_read_frame[LIGHTBAR_FRAME_LEN];
+static ktime_t lightbar_read_at;
+static bool lightbar_read_valid;
+
+/* Waits until a firmware frame or read may start; lightbar_lock held. */
+static void lightbar_pace(void)
+{
+	s64 wait = ktime_ms_delta(lightbar_wmi_next, ktime_get());
+
+	if (wait > 0)
+		msleep(wait);
+}
+
+/* A firmware frame or read has just ended; lightbar_lock held. */
+static void lightbar_paced(void)
+{
+	lightbar_wmi_next = ktime_add_ms(ktime_get(), LIGHTBAR_WMI_GAP_MS);
+}
+
+/*
+ * Logs why a light bar WMI call failed. At run time (probe NULL) that is a
+ * ratelimited warning; during the init probe it is one info line ending in
+ * the probe's outcome.
+ */
+#define lightbar_wmi_fail(probe, fmt, ...)				\
+	do {								\
+		if (probe)						\
+			pr_info("light bar: " fmt "; %s\n",		\
+				##__VA_ARGS__, probe);			\
+		else							\
+			pr_warn_ratelimited("light bar: " fmt "\n",	\
+					    ##__VA_ARGS__);		\
+	} while (0)
+
+/*
+ * Evaluates one gaming WMI method for the light bar. The reply must be a
+ * buffer of at least max(out_len, 1) bytes whose status byte (byte 0) is 0;
+ * when out is given it receives the first out_len bytes. Returns 0 or -EIO.
+ */
+static int lightbar_wmi_call(u32 method_id, const u8 *in, size_t in_len,
+			     u8 *out, size_t out_len, const char *probe)
+{
+	struct acpi_buffer input = { (acpi_size)in_len, (void *)in };
+	struct acpi_buffer result = { ACPI_ALLOCATE_BUFFER, NULL };
+	size_t need = max_t(size_t, out_len, 1);
+	union acpi_object *obj;
+	acpi_status status;
+	int err = -EIO;
+
+	status = wmi_evaluate_method(WMID_GUID4, 0, method_id, &input, &result);
+	if (ACPI_FAILURE(status)) {
+		lightbar_wmi_fail(probe, "WMI method %u failed: %s",
+				  method_id, acpi_format_exception(status));
+		return -EIO;
+	}
+
+	obj = result.pointer;
+	if (!obj || obj->type != ACPI_TYPE_BUFFER || !obj->buffer.pointer ||
+	    obj->buffer.length < need) {
+		lightbar_wmi_fail(probe,
+				  "WMI method %u returned no usable buffer (object type %u, length %u, need %zu)",
+				  method_id, obj ? obj->type : ACPI_TYPE_ANY,
+				  obj && obj->type == ACPI_TYPE_BUFFER ?
+					obj->buffer.length : 0,
+				  need);
+	} else if (obj->buffer.pointer[0]) {
+		lightbar_wmi_fail(probe, "WMI method %u returned status %u",
+				  method_id, obj->buffer.pointer[0]);
+	} else {
+		if (out)
+			memcpy(out, obj->buffer.pointer, out_len);
+		err = 0;
+	}
+	kfree(result.pointer);
+	return err;
+}
+
+static int lightbar_wmi(u32 method_id, const u8 *in, size_t in_len,
+			u8 *out, size_t out_len)
+{
+	return lightbar_wmi_call(method_id, in, in_len, out, out_len, NULL);
+}
+
+/*
+ * Method 6 for one bar zone: zone (0 left, 1 middle, 2 right) to rgb. probe
+ * as for lightbar_wmi_call.
+ */
+static int lightbar_set_zone(int zone, const u8 *rgb, const char *probe)
+{
+	u8 in[8] = { 0, rgb[0], rgb[1], rgb[2],
+		     LIGHTBAR_RGB_KB_BAR, BIT(zone), 0, 0 };
+
+	return lightbar_wmi_call(ACER_WMID_SET_GAMING_STATIC_LED_METHODID,
+				 in, sizeof(in), NULL, 0, probe);
+}
+
+/*
+ * A direct colour frame (see above): the nine zone colour bytes into ERM2,
+ * then the apply bit, or -EBUSY if the EC has not taken the previous frame
+ * yet. Nothing else in the window is written. The apply bit is set by a
+ * read-modify-write of 0x4b, under lightbar_lock, which every light bar and
+ * gaming keyboard writer of this driver also takes (this node,
+ * /dev/acer-gkbbl-0, /dev/acer-gkbbl-static-0, resume). Not under it: the
+ * turbo LED's method 2 (the turbo key), the "all zones on" method 2 sent once
+ * at load (gaming_kbbl_poll_and_enable_zones), and the root-only debugfs
+ * gkbbl_set probe; whether their SMM handlers touch 0x4b is not known.
+ * Bit 0x20 of 0x4b is the keyboard's apply flag (method 20's SMM handler
+ * sets it for a keyboard frame); the other bits are undocumented. The EC
+ * itself may clear a bit between the read and the write, which the write
+ * would then set again: re-reading 0x4b just before the write narrows that
+ * window but cannot close it.
+ */
+static ssize_t lightbar_write_colours(const char __user *buf)
+{
+	u8 rgb[LIGHTBAR_COLOURS_LEN];
+	u8 apply;
+	int i, err = 0;
+
+	if (copy_from_user(rgb, buf, sizeof(rgb)))
+		return -EFAULT;
+
+	mutex_lock(&lightbar_lock);
+	if (!lightbar_erm2) {
+		err = -EOPNOTSUPP;
+		goto unlock;
+	}
+	apply = ioread8(lightbar_erm2 + ERM2_APPLY);
+	if (apply & ERM2_APPLY_LIGHTBAR) {
+		err = -EBUSY;
+		goto unlock;
+	}
+	lightbar_read_valid = false;
+	for (i = 0; i < LIGHTBAR_COLOURS_LEN; i++)
+		iowrite8(rgb[i], lightbar_erm2 + ERM2_ZONE_RGB + i);
+	iowrite8(ioread8(lightbar_erm2 + ERM2_APPLY) | ERM2_APPLY_LIGHTBAR,
+		 lightbar_erm2 + ERM2_APPLY);
+unlock:
+	mutex_unlock(&lightbar_lock);
+
+	return err ? err : LIGHTBAR_COLOURS_LEN;
+}
+
+static ssize_t lightbar_write(struct file *file, const char __user *buf,
+			      size_t count, loff_t *offset)
+{
+	u8 frame[LIGHTBAR_FRAME_LEN];
+	u8 kbbl[GAMING_KBBL_CONFIG_LEN] = { 0 };
+	u8 led[LIGHTBAR_LED_LEN] = { 0 };
+	u8 zones_on = 0;
+	int i, err;
+
+	if (count == LIGHTBAR_COLOURS_LEN)
+		return lightbar_write_colours(buf);
+	if (count != LIGHTBAR_FRAME_LEN)
+		return -EINVAL;
+	if (copy_from_user(frame, buf, LIGHTBAR_FRAME_LEN))
+		return -EFAULT;
+	if (frame[0] > 7 || frame[1] > 5 || frame[2] > 100 ||
+	    frame[3] < 1 || frame[3] > 2 ||
+	    (frame[13] & ~LIGHTBAR_ZONES_OFF_MASK) || frame[14] || frame[15])
+		return -EINVAL;
+
+	/* Method 20: [mode, speed, brightness, 0, direction, left RGB, 0x03, 0x02, 0...] */
+	kbbl[0] = frame[0] ? frame[0] : LIGHTBAR_KBBL_STATIC;
+	kbbl[1] = frame[1];
+	kbbl[2] = frame[2];
+	kbbl[4] = frame[3];
+	memcpy(&kbbl[5], &frame[4], 3);
+	kbbl[8] = 0x03;
+	kbbl[9] = LIGHTBAR_KBBL_TARGET;
+
+	/* Method 2 sub-function 4: 01 in a zone's two-bit field turns it on. */
+	for (i = 0; i < LIGHTBAR_ZONES; i++)
+		if (!(frame[13] & BIT(i)))
+			zones_on |= 0x01 << (2 * i);
+	led[0] = LIGHTBAR_LED_ZONES;
+	led[LIGHTBAR_LED_ZONES_BYTE] = zones_on;
+
+	mutex_lock(&lightbar_lock);
+	lightbar_read_valid = false;
+	lightbar_pace();
+	err = lightbar_wmi(ACER_WMID_SET_GAMINGKBBL_METHODID, kbbl, sizeof(kbbl),
+			   NULL, 0);
+	for (i = 0; !err && i < LIGHTBAR_ZONES; i++)
+		err = lightbar_set_zone(i, &frame[4 + 3 * i], NULL);
+	if (!err && zones_on != lightbar_zones_sent) {
+		err = lightbar_wmi(ACER_WMID_SET_GAMING_LED_METHODID, led,
+				   sizeof(led), NULL, 0);
+		if (!err)
+			lightbar_zones_sent = zones_on;
+	}
+	lightbar_paced();
+	mutex_unlock(&lightbar_lock);
+
+	return err ? err : LIGHTBAR_FRAME_LEN;
+}
+
+/*
+ * The frame as the firmware holds it now (methods 21, 7 x3 and 4), into
+ * frame; lightbar_lock held, pacing included. 0 or -EIO.
+ */
+static int lightbar_read_firmware(u8 frame[LIGHTBAR_FRAME_LEN])
+{
+	static const u8 kbbl_in[8] = { LIGHTBAR_GET_CHANNEL };
+	static const u8 led_in[8] = { LIGHTBAR_LED_ZONES };
+	u8 kbbl[6], led[LIGHTBAR_LED_ZONES_BYTE + 1], zones;
+	int i, err;
+
+	memset(frame, 0, LIGHTBAR_FRAME_LEN);
+	lightbar_pace();
+	err = lightbar_wmi(ACER_WMID_GET_GAMINGKBBL_METHODID, kbbl_in,
+			   sizeof(kbbl_in), kbbl, sizeof(kbbl));
+	for (i = 0; !err && i < LIGHTBAR_ZONES; i++) {
+		u8 zone_in[4] = { 0, LIGHTBAR_RGB_KB_BAR, BIT(i), 0 };
+		u8 rgb[4];
+
+		err = lightbar_wmi(ACER_WMID_GET_GAMING_RGB_KB_METHODID, zone_in,
+				   sizeof(zone_in), rgb, sizeof(rgb));
+		if (!err)
+			memcpy(&frame[4 + 3 * i], &rgb[1], 3);
+	}
+	if (!err)
+		err = lightbar_wmi(ACER_WMID_GET_GAMING_LED_METHODID, led_in,
+				   sizeof(led_in), led, sizeof(led));
+	lightbar_paced();
+	if (err)
+		return err;
+
+	frame[0] = kbbl[1];
+	frame[1] = kbbl[2];
+	frame[2] = kbbl[3];
+	frame[3] = kbbl[5];
+	zones = led[LIGHTBAR_LED_ZONES_BYTE];
+	for (i = 0; i < LIGHTBAR_ZONES; i++)
+		if (!((zones >> (2 * i)) & 0x03))
+			frame[13] |= BIT(i);
+	return 0;
+}
+
+static ssize_t lightbar_read(struct file *file, char __user *buf,
+			     size_t count, loff_t *offset)
+{
+	u8 frame[LIGHTBAR_FRAME_LEN];
+	int err = 0;
+
+	/* Past the frame (a reader looking for EOF): no firmware calls. */
+	if (*offset >= LIGHTBAR_FRAME_LEN)
+		return 0;
+
+	mutex_lock(&lightbar_lock);
+	if (!lightbar_read_valid ||
+	    ktime_ms_delta(ktime_get(), lightbar_read_at) >= LIGHTBAR_READ_KEEP_MS) {
+		lightbar_read_valid = false;
+		err = lightbar_read_firmware(lightbar_read_frame);
+		if (!err) {
+			lightbar_read_at = ktime_get();
+			lightbar_read_valid = true;
+		}
+	}
+	if (!err)
+		memcpy(frame, lightbar_read_frame, sizeof(frame));
+	mutex_unlock(&lightbar_lock);
+	if (err)
+		return err;
+
+	return simple_read_from_buffer(buf, count, offset, frame, LIGHTBAR_FRAME_LEN);
+}
+
+static const struct file_operations lightbar_fops = {
+	.owner = THIS_MODULE,
+	.read  = lightbar_read,
+	.write = lightbar_write,
+};
+
+/* The direct_route attribute: see the comment above LIGHTBAR_FRAME_LEN. */
+static ssize_t direct_route_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", lightbar_erm2 ? 1 : 0);
+}
+static DEVICE_ATTR_RO(direct_route);
+
+static struct attribute *lightbar_attrs[] = {
+	&dev_attr_direct_route.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(lightbar);
+
+/*
+ * 0660 root:root: no access for other users. A udev rule that tags the node
+ * uaccess gives the user of the active local session an ACL.
+ */
+static int lightbar_dev_uevent(
+#if RTLNX_VER_MIN(6, 2, 0)
+const
+#endif
+struct device *dev, struct kobj_uevent_env *env)
+{
+	add_uevent_var(env, "DEVMODE=%#o", 0660);
+	return 0;
+}
+
+/* The window's colour bytes for all three zones, in frame order. */
+static void lightbar_read_window(void __iomem *erm2,
+				 u8 rgb[LIGHTBAR_COLOURS_LEN])
+{
+	int i;
+
+	for (i = 0; i < LIGHTBAR_COLOURS_LEN; i++)
+		rgb[i] = ioread8(erm2 + ERM2_ZONE_RGB + i);
+}
+
+/*
+ * Turns the direct route on (see the comment above LIGHTBAR_FRAME_LEN): maps
+ * the window the quirk names and keeps it only when the probe described
+ * there passes: the window holds what method 7 reports for each zone, then
+ * exactly the probe colours method 6 sets, and the colours read first are
+ * put back. Reads only the nine colour bytes of the window and writes
+ * nothing to it. Otherwise logs why, once, and leaves the route off. Called
+ * once at load, before the node exists, with lightbar_lock held.
+ */
+static void __init lightbar_direct_init(void)
+{
+	/* Distinctive per zone, and neither all zeros nor all ones. */
+	static const u8 probe_rgb[LIGHTBAR_COLOURS_LEN] = {
+		0x5a, 0xa5, 0x3c,  0x3c, 0x5a, 0xa5,  0xa5, 0x3c, 0x5a,
+	};
+	static const char *const off = "direct colour frames off";
+	u8 saved[LIGHTBAR_COLOURS_LEN], ec[LIGHTBAR_COLOURS_LEN];
+	void __iomem *erm2;
+	bool ok = true;
+	int i;
+
+	if (!quirks->lightbar_erm2)
+		return;
+	erm2 = ioremap(quirks->lightbar_erm2, LIGHTBAR_ERM2_LEN);
+	if (!erm2) {
+		pr_info("light bar: could not map the EC window at %#x; direct colour frames off\n",
+			quirks->lightbar_erm2);
+		return;
+	}
+
+	/* What the zones show now, through WMI and in the window. */
+	for (i = 0; i < LIGHTBAR_ZONES; i++) {
+		u8 zone_in[4] = { 0, LIGHTBAR_RGB_KB_BAR, BIT(i), 0 };
+		u8 wmi[4];
+
+		if (lightbar_wmi_call(ACER_WMID_GET_GAMING_RGB_KB_METHODID,
+				      zone_in, sizeof(zone_in), wmi, sizeof(wmi),
+				      off))
+			goto unmap;
+		memcpy(&saved[3 * i], &wmi[1], 3);
+	}
+	lightbar_read_window(erm2, ec);
+	if (memcmp(ec, saved, sizeof(ec))) {
+		pr_info("light bar: zones are %*phN through WMI but %*phN in the EC window; direct colour frames off\n",
+			LIGHTBAR_COLOURS_LEN, saved, LIGHTBAR_COLOURS_LEN, ec);
+		goto unmap;
+	}
+
+	/* The probe colours through WMI must show up in the window. */
+	for (i = 0; ok && i < LIGHTBAR_ZONES; i++)
+		ok = !lightbar_set_zone(i, &probe_rgb[3 * i], off);
+	if (ok) {
+		lightbar_read_window(erm2, ec);
+		if (memcmp(ec, probe_rgb, sizeof(ec))) {
+			pr_info("light bar: probe colours %*phN set through WMI but %*phN in the EC window; direct colour frames off\n",
+				LIGHTBAR_COLOURS_LEN, probe_rgb,
+				LIGHTBAR_COLOURS_LEN, ec);
+			ok = false;
+		}
+	}
+
+	/* Every zone back to what it showed, whatever happened above. */
+	for (i = 0; i < LIGHTBAR_ZONES; i++)
+		if (lightbar_set_zone(i, &saved[3 * i], off))
+			ok = false;
+	if (!ok)
+		goto unmap;
+
+	lightbar_erm2 = erm2;
+	return;
+
+unmap:
+	iounmap(erm2);
+}
+
+/* Turns the direct route off for good; for after the node is gone. */
+static void lightbar_direct_exit(void)
+{
+	void __iomem *erm2;
+
+	mutex_lock(&lightbar_lock);
+	erm2 = lightbar_erm2;
+	lightbar_erm2 = NULL;
+	mutex_unlock(&lightbar_lock);
+	if (erm2)
+		iounmap(erm2);
+}
+
+static int __init lightbar_cdev_init(void)
+{
+	static const u8 probe_in[4] = { 0, LIGHTBAR_RGB_KB_BAR, BIT(0), 0 };
+	struct device *dev;
+	u8 probe_out[4];
+	int err;
+
+	/*
+	 * One zone colour query (method 7, left zone) shows whether this
+	 * firmware has the per-zone methods. If it fails or is refused, the
+	 * node is not created and the rest of the driver loads as usual; the
+	 * app then drives the bar as one colour through /dev/acer-gkbbl-0,
+	 * because its per-zone capability needs this node.
+	 */
+	mutex_lock(&lightbar_lock);
+	err = lightbar_wmi_call(ACER_WMID_GET_GAMING_RGB_KB_METHODID, probe_in,
+				sizeof(probe_in), probe_out, sizeof(probe_out),
+				"per-zone node not created");
+	if (!err)
+		lightbar_direct_init();
+	mutex_unlock(&lightbar_lock);
+	if (err)
+		return 0;
+
+	err = alloc_chrdev_region(&lightbar_devt, 0, 1, LIGHTBAR_CHR);
+	if (err < 0)
+		goto direct_off;
+
+	#if RTLNX_VER_MIN(6, 4, 0)
+		lightbar_class = class_create(LIGHTBAR_CHR);
+	#else
+		lightbar_class = class_create(THIS_MODULE, LIGHTBAR_CHR);
+	#endif
+	if (IS_ERR(lightbar_class)) {
+		err = PTR_ERR(lightbar_class);
+		lightbar_class = NULL;
+		goto unregister;
+	}
+	lightbar_class->dev_uevent = lightbar_dev_uevent;
+
+	cdev_init(&lightbar_cdev, &lightbar_fops);
+	lightbar_cdev.owner = THIS_MODULE;
+	err = cdev_add(&lightbar_cdev, lightbar_devt, 1);
+	if (err < 0)
+		goto destroy_class;
+
+	dev = device_create_with_groups(lightbar_class, NULL, lightbar_devt,
+					NULL, lightbar_groups, "%s-%d",
+					LIGHTBAR_CHR, 0);
+	if (IS_ERR(dev)) {
+		err = PTR_ERR(dev);
+		goto del_cdev;
+	}
+
+	pr_info("light bar: per-zone control on /dev/%s-0%s\n", LIGHTBAR_CHR,
+		lightbar_erm2 ? ", direct colour frames on" : "");
+	return 0;
+
+del_cdev:
+	cdev_del(&lightbar_cdev);
+destroy_class:
+	class_destroy(lightbar_class);
+	lightbar_class = NULL;
+unregister:
+	unregister_chrdev_region(lightbar_devt, 1);
+direct_off:
+	lightbar_direct_exit();
+	return err;
+}
+
+static void lightbar_cdev_exit(void)
+{
+	if (!lightbar_class)
+		return;
+	device_destroy(lightbar_class, lightbar_devt);
+	cdev_del(&lightbar_cdev);
+	class_destroy(lightbar_class);
+	lightbar_class = NULL;
+	unregister_chrdev_region(lightbar_devt, 1);
+	lightbar_direct_exit();
+}
+
+/*
  * Keyboard RGB backlight character device handler.
  * On systems supporting Acer gaming functions, a char device
  * will be exposed to communicate with user space
  * for keyboard RGB backlight configurations.
  */
 
+/*
+ * One method-20 frame: exactly 16 bytes, else -EINVAL; a fault while
+ * copying it is -EFAULT and sends nothing. Of the bytes whose legal range is
+ * known, speed (byte 1) must be 0..9 and brightness (byte 2) 0..100. The
+ * mode byte is not checked: the keyboard takes 0..7 and the light bar
+ * 1..7, 0xFF and ids the firmware shows as static, so no one range holds.
+ * Byte 0 and bytes 3..15 reach method 20 unchecked too, because their
+ * legal values vary by model and caller: the app's keyboard frame sends
+ * 0x08 in byte 3 for Wave and 1 in byte 9, the light bar 0x03 and 0x02 in
+ * bytes 8 and 9. lightbar_write checks the bar's direction (1..2); this
+ * node does not. The node's 0666 mode is upstream's.
+ */
 static ssize_t gkbbl_drv_write(struct file *file,
 		const char __user *buf, size_t count, loff_t *offset)
 {
 	u8 config_buf[GAMING_KBBL_CONFIG_LEN];
-	unsigned long err;
 
-	if (count != GAMING_KBBL_CONFIG_LEN) {
-		pr_err("Invalid data given to gaming keyboard backlight");
-		return 0;
-	}
-	err = copy_from_user(config_buf, buf, GAMING_KBBL_CONFIG_LEN);
-	if (err < 0)
-		pr_err("Copying data from userspace failed with code: %lu\n", err);
+	if (count != GAMING_KBBL_CONFIG_LEN)
+		return -EINVAL;
+	if (copy_from_user(config_buf, buf, GAMING_KBBL_CONFIG_LEN))
+		return -EFAULT;
+	if (config_buf[1] > 9 || config_buf[2] > 100)
+		return -EINVAL;
 
+	/* lightbar_write() sends method 20 too, as the first of a sequence of
+	 * calls; the lock keeps this frame out of the middle of it. */
+	mutex_lock(&lightbar_lock);
+	/* A method-20 frame can change the bar: no read is answered from before it. */
+	lightbar_read_valid = false;
 	set_u8_array(config_buf, GAMING_KBBL_CONFIG_LEN, ACER_CAP_GAMINGKB);
+	mutex_unlock(&lightbar_lock);
 	return count;
 }
 
@@ -2800,11 +3425,14 @@ static int __init gaming_kbbl_cdev_init(void)
 	return 0;
 }
 
-static void __exit gaming_kbbl_cdev_exit(void)
+/*
+ * Not __exit: a module load that fails after the node exists calls it too
+ * (gaming_cdevs_exit), so no node outlives the module. init() already tears
+ * down and NULLs the class on its own failure paths, and this NULLs it
+ * after the teardown, so it runs the teardown at most once.
+ */
+static void gaming_kbbl_cdev_exit(void)
 {
-	/* init() already tears down and NULLs this on any failure path, so
-	 * this only runs the real teardown when init actually succeeded -
-	 * otherwise we'd double-free/double-unregister everything below. */
 	if (!gkbbl_dev_class)
 		return;
 
@@ -2812,6 +3440,7 @@ static void __exit gaming_kbbl_cdev_exit(void)
 
 	class_unregister(gkbbl_dev_class);
 	class_destroy(gkbbl_dev_class);
+	gkbbl_dev_class = NULL;
 	cdev_del(&gkbbl_dev_data.cdev);
 
 	unregister_chrdev_region(gkbbl_dynamic_dev, 1);
@@ -2850,22 +3479,12 @@ struct led_zone_set_param_u64 {
 		u8 reserved[4];
 } __packed;
 
-static ssize_t gkbbl_static_drv_write(struct file *file, const char __user *buf, size_t count, loff_t *offset)
+/* gkbbl_static_drv_write's WMI calls for config_buf; lightbar_lock held. */
+static ssize_t gkbbl_static_send(const u8 *config_buf, size_t count)
 {
-	u8 config_buf[4]={0,0,0,0};
-	unsigned long err;
 	struct led_zone_set_param set_params;
 	struct led_zone_set_param_u64 set_params_u64;
 	struct acpi_buffer set_input;
-	err = copy_from_user(config_buf, buf, GAMING_KBBL_STATIC_CONFIG_LEN);
-
-	if (count != GAMING_KBBL_STATIC_CONFIG_LEN) {
-		pr_err("Invalid data given to gaming keyboard static backlight");
-		return 0;
-	}
-
-	if (err < 0)
-		pr_err("Copying data from userspace failed with code: %lu\n", err);
 
 	if (quirks->four_zone_kb) {
 		/*
@@ -2953,6 +3572,30 @@ static ssize_t gkbbl_static_drv_write(struct file *file, const char __user *buf,
 }
 
 
+/*
+ * One static zone frame: exactly 4 bytes, else -EINVAL; a fault while
+ * copying it is -EFAULT and sends nothing. The zone byte (byte 0) is not
+ * checked, since which zones exist varies by model; the node's 0666 mode
+ * is upstream's. Its WMI calls run under lightbar_lock, like every other
+ * gaming lighting call, so none lands in the middle of a light bar frame.
+ */
+static ssize_t gkbbl_static_drv_write(struct file *file, const char __user *buf, size_t count, loff_t *offset)
+{
+	u8 config_buf[GAMING_KBBL_STATIC_CONFIG_LEN];
+	ssize_t ret;
+
+	if (count != GAMING_KBBL_STATIC_CONFIG_LEN)
+		return -EINVAL;
+	if (copy_from_user(config_buf, buf, GAMING_KBBL_STATIC_CONFIG_LEN))
+		return -EFAULT;
+
+	mutex_lock(&lightbar_lock);
+	lightbar_read_valid = false;
+	ret = gkbbl_static_send(config_buf, count);
+	mutex_unlock(&lightbar_lock);
+	return ret;
+}
+
 static const struct file_operations gkbbl_static_dev_fops = {
 		.owner      = THIS_MODULE,
 		.write       = gkbbl_static_drv_write
@@ -3039,10 +3682,9 @@ static int __init gaming_kbbl_poll_and_enable_zones(void)
 	return 0;
 }
 
-static void __exit gaming_kbbl_static_cdev_exit(void)
+/* As gaming_kbbl_cdev_exit, for the static node. */
+static void gaming_kbbl_static_cdev_exit(void)
 {
-	/* Mirrors gaming_kbbl_cdev_exit(): init() already tears down and
-	 * NULLs this on any failure path, so skip if it never succeeded. */
 	if (!gkbbl_static_dev_class)
 		return;
 
@@ -3050,9 +3692,22 @@ static void __exit gaming_kbbl_static_cdev_exit(void)
 
 	class_unregister(gkbbl_static_dev_class);
 	class_destroy(gkbbl_static_dev_class);
+	gkbbl_static_dev_class = NULL;
 	cdev_del(&gkbbl_static_dev_data.cdev);
 
 	unregister_chrdev_region(gkbbl_static_dev, 1);
+}
+
+/*
+ * Removes the three gaming lighting nodes, whichever exist. For unload and
+ * for every failure path of module init after they were created: a node
+ * left behind would point into the freed module.
+ */
+static void gaming_cdevs_exit(void)
+{
+	gaming_kbbl_cdev_exit();
+	gaming_kbbl_static_cdev_exit();
+	lightbar_cdev_exit();
 }
 
 /*
@@ -3346,6 +4001,21 @@ static DEVICE_ATTR_RW(backlight_timeout);
  * Best-effort like turbo_state: on hardware without this WMI method both
  * attributes just return an error.
  */
+/*
+ * Wake anything poll()ing the thermal_profile attribute.
+ *
+ * The index moves from three places: this driver's own sysfs store, the mode
+ * key handled entirely in acer_thermal_profile_change() below, and the
+ * platform_profile core. Userspace has no way to learn about the last two
+ * except by asking again, so Predator Sense polled every five seconds and a
+ * mode could be displayed for that long before its CPU settings were applied -
+ * or skipped altogether if the key was pressed twice inside one interval.
+ *
+ * sysfs_notify() lets it wait on the file instead, so a key press is acted on
+ * as it happens and the poll becomes a backstop rather than the mechanism.
+ */
+static void acer_thermal_profile_notify(void);
+
 static ssize_t thermal_profile_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	u8 value;
@@ -3387,6 +4057,8 @@ static ssize_t thermal_profile_store(struct device *dev, struct device_attribute
 	err = WMID_gaming_set_misc_setting(ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, value);
 	if (err)
 		return err;
+
+	acer_thermal_profile_notify();
 
 	return count;
 }
@@ -4057,6 +4729,8 @@ apply:
 		#else
 		platform_profile_notify();
 		#endif
+
+		acer_thermal_profile_notify();
 	}
 
 	return 0;
@@ -4784,6 +5458,16 @@ static int acer_resume(struct device *dev)
 {
 	struct acer_data *data = &interface->data;
 
+	/*
+	 * Resume, thaw and restore all land here. After a hibernate restore
+	 * the EC's bar zone enables need not match the byte this driver last
+	 * sent, so the next light bar write sends method 2 again.
+	 */
+	mutex_lock(&lightbar_lock);
+	lightbar_zones_sent = -1;
+	lightbar_read_valid = false;
+	mutex_unlock(&lightbar_lock);
+
 	if (!data)
 		return -ENOMEM;
 
@@ -4833,6 +5517,12 @@ static struct platform_driver acer_platform_driver = {
 };
 
 static struct platform_device *acer_platform_device;
+
+static void acer_thermal_profile_notify(void)
+{
+	if (acer_platform_device)
+		sysfs_notify(&acer_platform_device->dev.kobj, NULL, "thermal_profile");
+}
 
 /*
  * Root-only probe for the gaming backlight methods (20 set / 21 get).
@@ -5279,6 +5969,8 @@ static int __init acer_wmi_init(void)
 			gaming_interface->capability |= ACER_CAP_GAMINGKB | ACER_CAP_GAMINGKB_STATIC;
 			gaming_kbbl_cdev_init();
 			gaming_kbbl_static_cdev_init();
+			if (quirks->lightbar_zones)
+				lightbar_cdev_init();
 		}
 	}
 
@@ -5293,10 +5985,12 @@ static int __init acer_wmi_init(void)
 		if (ec_raw_mode) {
 			if (ACPI_FAILURE(acer_wmi_enable_ec_raw())) {
 				pr_err("Cannot enable EC raw mode\n");
+				gaming_cdevs_exit();
 				return -ENODEV;
 			}
 		} else if (ACPI_FAILURE(acer_wmi_enable_lm())) {
 			pr_err("Cannot enable Launch Manager mode\n");
+			gaming_cdevs_exit();
 			return -ENODEV;
 		}
 	} else if (ec_raw_mode) {
@@ -5305,8 +5999,10 @@ static int __init acer_wmi_init(void)
 
 	if (wmi_has_guid(ACERWMID_EVENT_GUID)) {
 		err = acer_wmi_input_setup();
-		if (err)
+		if (err) {
+			gaming_cdevs_exit();
 			return err;
+		}
 		err = acer_wmi_accel_setup();
 		if (err && err != -ENODEV)
 			pr_warn("Cannot enable accelerometer\n");
@@ -5362,14 +6058,26 @@ static int __init acer_wmi_init(void)
 	return 0;
 
 error_device_add:
+	/*
+	 * The WMI notify handler reads acer_platform_device
+	 * (acer_thermal_profile_notify): remove it before the device goes,
+	 * as acer_wmi_exit does.
+	 */
+	if (wmi_has_guid(ACERWMID_EVENT_GUID))
+		acer_wmi_input_destroy();
 	platform_device_put(acer_platform_device);
+	acer_platform_device = NULL;
+	platform_driver_unregister(&acer_platform_driver);
+	goto error_input_gone;
 error_device_alloc:
 	platform_driver_unregister(&acer_platform_driver);
 error_platform_register:
 	if (wmi_has_guid(ACERWMID_EVENT_GUID))
 		acer_wmi_input_destroy();
+error_input_gone:
 	if (acer_wmi_accel_dev)
 		input_unregister_device(acer_wmi_accel_dev);
+	gaming_cdevs_exit();
 
 	return err;
 }
@@ -5382,10 +6090,8 @@ static void __exit acer_wmi_exit(void)
 	if (acer_wmi_accel_dev)
 		input_unregister_device(acer_wmi_accel_dev);
 
-	if (wmi_has_guid(WMID_GUID4)) {
-		gaming_kbbl_cdev_exit();
-		gaming_kbbl_static_cdev_exit();
-	}
+	if (wmi_has_guid(WMID_GUID4))
+		gaming_cdevs_exit();
 
 	remove_debugfs();
 	platform_device_unregister(acer_platform_device);
