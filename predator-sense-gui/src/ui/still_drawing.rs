@@ -3,13 +3,14 @@
 //!
 //! As a `DrawingArea` it is a Cairo node, and GTK's GPU renderer draws a Cairo node on the
 //! CPU every frame that draws any part of it again: it has no cache for one (GTK 4.24,
-//! `gsk_gpu_node_processor_add_cairo_node`). Under an animating drawing (the neon edge, a
-//! page's gauges) that is every frame, for the part behind it. Kept as pixels, it is drawn
-//! once for its size, place on the pixel grid and colour, and the GPU draws the texture.
+//! `gsk_gpu_node_processor_add_cairo_node`). Under an animating drawing that is every
+//! frame, for the part behind it, so the window's background under the Lighting page's
+//! preview cost more than everything the preview draws. Kept as pixels, it is drawn once
+//! for its size, place on the pixel grid and colour, and the GPU draws the texture.
 //!
-//! The pixels are what the renderer made of the Cairo node ([`raster`] draws the same node
-//! at the same scale and place on the pixel grid). A test compares the two at scale 1 and
-//! 4/3, in the GL and the Cairo renderer.
+//! The pixels are what the renderer made of the Cairo node (`lighting::nodes::raster`
+//! draws the same node at the same scale and place on the pixel grid). A test compares the
+//! two at scale 1 and 4/3, in the GL and the Cairo renderer.
 //!
 //! A drawing that cycles through a few frames (the window's neon edge, 25 phases of its
 //! pulse) keeps one set of pixels per frame ([`StillDrawing::frames`]), so each tick shows
@@ -18,7 +19,10 @@
 use gtk4 as gtk;
 use gtk4::prelude::*;
 use gtk4::subclass::prelude::*;
-use gtk4::{cairo, gdk, glib, graphene, gsk};
+use gtk4::{cairo, glib, graphene};
+
+use crate::ui::lighting::nodes::{self, Device, Raster};
+use crate::ui::lighting::preview_scene::Rect;
 
 /// The drawing: a Cairo context, the width, the height and the frame.
 pub type Draw = Box<dyn Fn(&cairo::Context, f64, f64, usize)>;
@@ -42,227 +46,6 @@ impl Drawn {
     }
 }
 
-/// Where a drawing falls on the screen's pixels: the scale GTK draws it at (the surface's
-/// own, 4/3 on a panel at 133 %, GTK 4.12's `scale` property, or the widget's whole scale
-/// factor before it) and its origin's place on the pixel grid, the fraction of a pixel it sits
-/// right of and below a pixel's corner (at a fractional scale a widget at a whole
-/// coordinate can sit between pixels).
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Device {
-    scale: f64,
-    origin: (f64, f64),
-}
-
-thread_local! {
-    /// The tests draw a widget themselves, at a scale of their own, with the point `origin`
-    /// of `root` on a pixel's corner: [`Device::of`] then answers for that.
-    static RENDER_FRAME: std::cell::RefCell<Option<(f64, gtk::Widget, graphene::Point)>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// The tests' own scale and frame for [`Device::of`] (`None`: the screen's again).
-#[cfg(test)]
-fn set_render_frame(frame: Option<(f64, gtk::Widget, graphene::Point)>) {
-    RENDER_FRAME.with(|f| *f.borrow_mut() = frame);
-}
-
-impl Device {
-    /// Where `widget` is drawn now.
-    fn of(widget: &impl IsA<gtk::Widget>) -> Device {
-        let widget = widget.as_ref();
-        let zero = graphene::Point::zero();
-        // The fraction rounded to 1/256 of a pixel, so that float noise (0.99999 against 0)
-        // does not make the same place look like another.
-        let phase = |v: f64| {
-            let f = (v.rem_euclid(1.0) * 256.0).round() / 256.0;
-            if f >= 1.0 {
-                0.0
-            } else {
-                f
-            }
-        };
-        let place = |scale: f64, x: f64, y: f64| Device {
-            scale,
-            origin: (phase(x * scale), phase(y * scale)),
-        };
-        let framed = RENDER_FRAME.with(|f| {
-            f.borrow().as_ref().map(|(scale, root, origin)| {
-                let p = widget.compute_point(root, &zero).unwrap_or(zero);
-                place(
-                    *scale,
-                    f64::from(p.x() - origin.x()),
-                    f64::from(p.y() - origin.y()),
-                )
-            })
-        });
-        if let Some(device) = framed {
-            return device;
-        }
-        let whole = f64::from(widget.scale_factor().max(1));
-        let Some(native) = widget.native() else {
-            return place(whole, 0.0, 0.0);
-        };
-        let scale = native
-            .surface()
-            .and_then(|s| surface_scale(&s))
-            .unwrap_or(whole);
-        let p = widget.compute_point(&native, &zero).unwrap_or(zero);
-        let (tx, ty) = native.surface_transform();
-        place(scale, f64::from(p.x()) + tx, f64::from(p.y()) + ty)
-    }
-}
-
-/// The surface's own scale (GTK 4.12's `scale` property, fractional), where it has one.
-fn surface_scale(surface: &gdk::Surface) -> Option<f64> {
-    surface
-        .find_property("scale")
-        .is_some_and(|p| p.value_type() == f64::static_type())
-        .then(|| surface.property::<f64>("scale"))
-        .filter(|s| *s > 0.0)
-}
-
-/// A Cairo drawing made into pixels once and kept as a texture: drawn as GTK draws a Cairo
-/// node into pixels (recorded into one, which is then drawn onto an image of its area
-/// widened to whole pixels, at the device's scale), so it comes out the same pixel for
-/// pixel, and placed back on those same pixels.
-struct Raster {
-    texture: gdk::Texture,
-    /// Its top left corner from the drawing's origin, in pixels.
-    at: (f64, f64),
-    scale: f64,
-}
-
-/// Draws `draw` over `width` by `height` from the drawing's origin into pixels for `device`.
-fn raster(
-    width: f64,
-    height: f64,
-    device: Device,
-    draw: impl FnOnce(&cairo::Context),
-) -> Option<Raster> {
-    let s = device.scale;
-    if s <= 0.0 || width <= 0.0 || height <= 0.0 {
-        return None;
-    }
-    let (ox, oy) = device.origin;
-    let x0 = ox.floor();
-    let y0 = oy.floor();
-    let w = (width * s + ox).ceil() - x0;
-    let h = (height * s + oy).ceil() - y0;
-    let node = gsk::CairoNode::new(&graphene::Rect::new(0.0, 0.0, width as f32, height as f32));
-    draw(&node.draw_context());
-    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w as i32, h as i32).ok()?;
-    surface.set_device_scale(s, s);
-    {
-        let cr = cairo::Context::new(&surface).ok()?;
-        cr.translate(-(x0 - ox) / s, -(y0 - oy) / s);
-        node.draw(&cr);
-    }
-    surface.flush();
-    let stride = surface.stride() as usize;
-    let mut bytes = Vec::new();
-    surface.with_data(|d| bytes.extend_from_slice(d)).ok()?;
-    // Cairo's ARGB32: one native-endian `u32` a pixel, premultiplied.
-    #[cfg(target_endian = "little")]
-    let format = gdk::MemoryFormat::B8g8r8a8Premultiplied;
-    #[cfg(target_endian = "big")]
-    let format = gdk::MemoryFormat::A8r8g8b8Premultiplied;
-    let texture = gdk::MemoryTexture::new(
-        w as i32,
-        h as i32,
-        format,
-        &glib::Bytes::from_owned(bytes),
-        stride,
-    )
-    .upcast();
-    Some(Raster {
-        texture,
-        at: (x0 - ox, y0 - oy),
-        scale: s,
-    })
-}
-
-impl Raster {
-    /// Draws it, one texture pixel on each device pixel.
-    fn append(&self, snapshot: &gtk::Snapshot) {
-        let s = self.scale as f32;
-        let bounds = graphene::Rect::new(
-            self.at.0 as f32,
-            self.at.1 as f32,
-            self.texture.width() as f32,
-            self.texture.height() as f32,
-        );
-        snapshot.save();
-        snapshot.scale(1.0 / s, 1.0 / s);
-        snapshot.append_texture(&self.texture, &bounds);
-        snapshot.restore();
-    }
-}
-
-/// How many Cairo nodes are under `node`: each one is drawn into pixels on the CPU every
-/// frame it is part of (a test that a still drawing makes none).
-#[cfg(test)]
-fn cairo_nodes(node: &gsk::RenderNode) -> usize {
-    if node.node_type() == gsk::RenderNodeType::CairoNode {
-        return 1;
-    }
-    children(node).iter().map(cairo_nodes).sum()
-}
-
-/// The nodes right under `node`. Every node type GTK 4.10 has is either walked into or
-/// known to have no children; a node of a type it does not know (the fill, stroke and
-/// subsurface nodes of 4.14, or a newer one) fails the test rather than being taken as
-/// having nothing under it.
-#[cfg(test)]
-fn children(node: &gsk::RenderNode) -> Vec<gsk::RenderNode> {
-    use gsk::RenderNodeType as T;
-    match node.node_type() {
-        T::CairoNode
-        | T::ColorNode
-        | T::LinearGradientNode
-        | T::RepeatingLinearGradientNode
-        | T::RadialGradientNode
-        | T::RepeatingRadialGradientNode
-        | T::ConicGradientNode
-        | T::BorderNode
-        | T::TextureNode
-        | T::TextureScaleNode
-        | T::InsetShadowNode
-        | T::OutsetShadowNode
-        | T::TextNode => Vec::new(),
-        T::ContainerNode => {
-            let c = node.downcast_ref::<gsk::ContainerNode>().unwrap();
-            (0..c.n_children()).map(|i| c.child(i)).collect()
-        }
-        T::GlShaderNode => {
-            let c = node.downcast_ref::<gsk::GLShaderNode>().unwrap();
-            (0..c.n_children()).map(|i| c.child(i)).collect()
-        }
-        T::TransformNode => vec![node.downcast_ref::<gsk::TransformNode>().unwrap().child()],
-        T::ClipNode => vec![node.downcast_ref::<gsk::ClipNode>().unwrap().child()],
-        T::RoundedClipNode => vec![node.downcast_ref::<gsk::RoundedClipNode>().unwrap().child()],
-        T::OpacityNode => vec![node.downcast_ref::<gsk::OpacityNode>().unwrap().child()],
-        T::DebugNode => vec![node.downcast_ref::<gsk::DebugNode>().unwrap().child()],
-        T::ShadowNode => vec![node.downcast_ref::<gsk::ShadowNode>().unwrap().child()],
-        T::BlurNode => vec![node.downcast_ref::<gsk::BlurNode>().unwrap().child()],
-        T::ColorMatrixNode => vec![node.downcast_ref::<gsk::ColorMatrixNode>().unwrap().child()],
-        T::RepeatNode => vec![node.downcast_ref::<gsk::RepeatNode>().unwrap().child()],
-        T::MaskNode => {
-            let m = node.downcast_ref::<gsk::MaskNode>().unwrap();
-            vec![m.source(), m.mask()]
-        }
-        T::BlendNode => {
-            let m = node.downcast_ref::<gsk::BlendNode>().unwrap();
-            vec![m.bottom_child(), m.top_child()]
-        }
-        T::CrossFadeNode => {
-            let m = node.downcast_ref::<gsk::CrossFadeNode>().unwrap();
-            vec![m.start_child(), m.end_child()]
-        }
-        other => panic!("a render node the walker does not know: {other:?}"),
-    }
-}
-
-
 mod imp {
     use super::*;
     use std::cell::{Cell, RefCell};
@@ -277,7 +60,7 @@ mod imp {
         pub(super) frame: Cell<usize>,
         /// The pixels of each frame drawn for the current size, scale and colour, so a
         /// resized window keeps no old ones.
-        pub(super) kept: RefCell<Vec<(Drawn, super::Raster)>>,
+        pub(super) kept: RefCell<Vec<(Drawn, Raster)>>,
         /// While mapped: the surface's `scale`, with its handler.
         pub(super) watch: RefCell<Option<(glib::Object, glib::SignalHandlerId)>>,
     }
@@ -307,7 +90,7 @@ mod imp {
             if let Some(surface) = obj
                 .native()
                 .and_then(|n| n.surface())
-                .filter(|s| super::surface_scale(s).is_some())
+                .filter(|s| nodes::surface_scale(s).is_some())
             {
                 let weak = obj.downgrade();
                 let id = surface.connect_notify_local(Some("scale"), move |_, _| {
@@ -336,7 +119,7 @@ mod imp {
             }
             let drawn = Drawn {
                 size: (width, height),
-                device: super::Device::of(&*widget),
+                device: Device::of(&*widget),
                 colour: self.colour.borrow().map(|colour| colour()),
                 frame: self.frame.get(),
             };
@@ -345,8 +128,16 @@ mod imp {
             if !kept.iter().any(|(made, _)| *made == drawn) {
                 if let Some(draw) = self.draw.borrow().as_ref() {
                     let (w, h) = (f64::from(width), f64::from(height));
+                    let area = Rect {
+                        x: 0.0,
+                        y: 0.0,
+                        w,
+                        h,
+                    };
                     let frame = drawn.frame;
-                    if let Some(raster) = super::raster(w, h, drawn.device, |cr| draw(cr, w, h, frame)) {
+                    if let Some(raster) =
+                        nodes::raster(area, drawn.device, |cr| draw(cr, w, h, frame))
+                    {
                         kept.push((drawn, raster));
                     }
                 }
@@ -426,6 +217,7 @@ impl StillDrawing {
 #[cfg(test)]
 mod tests {
     use super::StillDrawing;
+    use crate::ui::lighting::nodes;
     use gtk4 as gtk;
     use gtk4::gsk::prelude::*;
     use gtk4::prelude::*;
@@ -435,7 +227,7 @@ mod tests {
     /// is another drawing, whose frames replace them.
     #[test]
     fn frames_of_one_drawing_are_kept_together() {
-        let device = super::Device {
+        let device = nodes::Device {
             scale: 4.0 / 3.0,
             origin: (0.0, 0.0),
         };
@@ -454,7 +246,7 @@ mod tests {
             colour: None,
             ..at(6)
         }));
-        let moved = super::Device {
+        let moved = nodes::Device {
             origin: (1.0 / 3.0, 0.0),
             ..device
         };
@@ -558,7 +350,7 @@ mod tests {
                     for (renderer_name, renderer) in &renderers {
                         // The frame as built for this renderer.
                         super::CAIRO_RENDERER.with(|c| c.set(Some(*renderer_name == "Cairo")));
-                        super::set_render_frame(Some((
+                        nodes::set_render_frame(Some((
                             scale,
                             fixed.clone().upcast(),
                             graphene::Point::zero(),
@@ -568,10 +360,10 @@ mod tests {
                         snapshot.scale(scale as f32, scale as f32);
                         fixed.snapshot_child(&widget, &snapshot);
                         let node = snapshot.to_node().expect("the drawing draws");
-                        super::set_render_frame(None);
+                        nodes::set_render_frame(None);
                         super::CAIRO_RENDERER.with(|c| c.set(None));
                         if kind == "still drawing" {
-                            assert_eq!(super::cairo_nodes(&node), 0, "{name}: no Cairo node");
+                            assert_eq!(nodes::cairo_nodes(&node), 0, "{name}: no Cairo node");
                         }
                         renderer
                             .realize(None::<&gdk::Surface>)

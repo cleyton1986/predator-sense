@@ -47,3 +47,22 @@ pub fn run(name: &str, job: impl FnOnce() + Send + 'static) {
         panic::resume_unwind(cause);
     }
 }
+
+/// Gives the GTK test thread's display the app's style sheet, once (font scale 1). Called
+/// on the GTK test thread, by tests that measure styled widgets.
+pub fn app_style() {
+    thread_local! {
+        static LOADED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if LOADED.with(|loaded| loaded.replace(true)) {
+        return;
+    }
+    let display = gtk::gdk::Display::default().expect("a display");
+    let style = gtk::CssProvider::new();
+    style.load_from_data(crate::CSS_THEME);
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &style,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+}

@@ -6,9 +6,9 @@
 //! clicked, activated, or takes the keyboard focus (also a wrapper that is not focusable
 //! itself, when the button inside it takes the focus). Once a rebuild removed that child, the
 //! next arrow key (`move-cursor`), Enter or Space (`activate-cursor-child`), Ctrl+Space or
-//! Page Up/Down reads freed memory. A page crashed that way on 2026-10-19: SIGSEGV in
-//! `g_sequence_iter_next` under `gtk_flow_box_move_cursor`, after its flow box was rebuilt.
-//! It does not crash every time, since a new child often reuses the freed memory.
+//! Page Up/Down reads freed memory. The Lighting page crashed that way on 2026-10-19: SIGSEGV
+//! in `g_sequence_iter_next` under `gtk_flow_box_move_cursor`, after its colour swatches were
+//! rebuilt. It does not crash every time, since a new child often reuses the freed memory.
 //!
 //! [`set_contents`] therefore keeps every wrapper a box has held: the new widgets go into the
 //! existing wrappers in order, wrappers are added only when more are needed, and the spare
@@ -20,7 +20,8 @@ use gtk4::glib;
 use gtk4::prelude::*;
 
 /// How a box's wrappers are made: their accessible role (fixed when a wrapper is made, so
-/// one box always uses the same) and whether they take the focus themselves.
+/// one box always uses the same) and whether they take the focus themselves (a box of
+/// buttons leaves it to the buttons).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wrappers {
     pub role: gtk::AccessibleRole,
@@ -32,6 +33,12 @@ impl Wrappers {
     pub const PLAIN: Wrappers = Wrappers {
         role: gtk::AccessibleRole::GridCell,
         focusable: true,
+    };
+
+    /// Cells that only hold a focusable control (a button, a swatch).
+    pub const HOLDERS: Wrappers = Wrappers {
+        role: gtk::AccessibleRole::GridCell,
+        focusable: false,
     };
 }
 
@@ -88,6 +95,41 @@ fn reset(wrapper: &gtk::FlowBoxChild, wrappers: Wrappers) {
     wrapper.set_visible(true);
 }
 
+/// The number of visible children on each of `flow`'s lines, top to bottom, as it is
+/// allocated now.
+#[cfg(test)]
+pub(crate) fn lines(flow: &gtk::FlowBox) -> Vec<usize> {
+    let mut lines: Vec<(f32, usize)> = Vec::new();
+    let mut index = 0;
+    while let Some(child) = flow.child_at_index(index) {
+        index += 1;
+        if !child.is_visible() {
+            continue;
+        }
+        let top = child.compute_bounds(flow).expect("a placed child").y();
+        match lines.last_mut() {
+            Some((at, count)) if *at == top => *count += 1,
+            _ => lines.push((top, 1)),
+        }
+    }
+    lines.into_iter().map(|(_, count)| count).collect()
+}
+
+/// The number of children on `flow`'s first line as it is allocated now.
+#[cfg(test)]
+pub(crate) fn first_line(flow: &gtk::FlowBox) -> usize {
+    lines(flow).first().copied().unwrap_or(0)
+}
+
+/// The number of children on `flow`'s first line when it is allocated `width` px wide (off
+/// screen).
+#[cfg(test)]
+pub(crate) fn first_line_at(flow: &gtk::FlowBox, width: i32) -> usize {
+    let (_, height, _, _) = flow.measure(gtk::Orientation::Vertical, width);
+    flow.allocate(width, height, -1, None);
+    first_line(flow)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,7 +172,7 @@ mod tests {
             } else {
                 widgets.insert(0, moved.clone());
             }
-            let used = set_contents(&flow, &widgets, Wrappers::PLAIN);
+            let used = set_contents(&flow, &widgets, Wrappers::HOLDERS);
             for wrapper in &used {
                 if !ever.contains(wrapper) {
                     ever.push(wrapper.clone());
@@ -156,7 +198,7 @@ mod tests {
                     "round {round}: a spare holds nothing"
                 );
             }
-            assert!(used.iter().all(|w| w.is_focusable()));
+            assert!(used.iter().all(|w| !w.is_focusable()));
         }
         assert_eq!(
             wrappers_of(&flow).len(),
@@ -170,9 +212,9 @@ mod tests {
             .iter()
             .map(|n| gtk::Label::new(Some(n)).upcast())
             .collect();
-        let used = set_contents(&flow, &widgets, Wrappers::PLAIN);
+        let used = set_contents(&flow, &widgets, Wrappers::HOLDERS);
         used[2].emit_by_name::<()>("activate", &[]);
-        set_contents(&flow, &widgets[..1], Wrappers::PLAIN);
+        set_contents(&flow, &widgets[..1], Wrappers::HOLDERS);
         assert!(wrappers_of(&flow).contains(&used[2]));
         for count in [1i32, -1, 1] {
             flow.emit_by_name::<bool>(
@@ -183,10 +225,10 @@ mod tests {
         flow.emit_by_name::<()>("activate-cursor-child", &[]);
 
         // A reused wrapper loses what a caller set on it for its last widget.
-        let used = set_contents(&flow, &widgets, Wrappers::PLAIN);
+        let used = set_contents(&flow, &widgets, Wrappers::HOLDERS);
         used[0].add_css_class("checked");
         used[0].set_tooltip_text(Some("tip"));
-        let used = set_contents(&flow, &widgets, Wrappers::PLAIN);
+        let used = set_contents(&flow, &widgets, Wrappers::HOLDERS);
         assert!(!used[0].has_css_class("checked"));
         assert_eq!(used[0].tooltip_text(), None);
     }
