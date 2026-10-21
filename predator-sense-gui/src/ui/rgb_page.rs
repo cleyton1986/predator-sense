@@ -31,7 +31,7 @@ struct CoverLogoState {
     anim_phase: f64,
 }
 
-pub fn build() -> gtk::ScrolledWindow {
+pub fn build() -> gtk::Widget {
     // 2024+ hardware (issue #26) moved RGB entirely off WMI/EC onto plain USB
     // HID - a different chip/protocol from everything below this point, with
     // no independent zones and a much larger effect list. Routed to its own
@@ -56,7 +56,7 @@ pub fn build() -> gtk::ScrolledWindow {
         || crate::hardware::magic_rgb::is_logo_available()
         || crate::hardware::chicony_rgb::is_available()
     {
-        return crate::ui::magic_rgb_page::build();
+        return crate::ui::magic_rgb_page::build().upcast();
     }
 
     let scroll = gtk::ScrolledWindow::new();
@@ -152,7 +152,7 @@ pub fn build() -> gtk::ScrolledWindow {
     }
 
     scroll.set_child(Some(&shell));
-    scroll
+    scroll.upcast()
 }
 
 fn build_keyboard_panel() -> gtk::Box {

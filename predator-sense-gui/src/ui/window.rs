@@ -232,6 +232,97 @@ pub fn build(app: &adw::Application) {
     crate::startup_mark("window present called");
 }
 
+/// The power source and "Pause animations on battery", for the lighting
+/// renderer: on battery with the setting on, app-drawn looks hold their frame.
+/// Reading the supply is a couple of small sysfs reads, as the power policy's
+/// own tick makes. The Lighting page's switch calls it too, so the setting
+/// applies at once.
+pub(crate) fn sync_renderer_battery(cfg: &config::AppConfig) {
+    let on_battery = crate::hardware::power_profile::ac_online() == Some(false);
+    crate::hardware::lighting_renderer::renderer()
+        .set_battery(on_battery, cfg.pause_animations_on_battery);
+}
+
+/// `GtkSettings:gtk-interface-reduced-motion`, GTK 4.20 and up: a
+/// `GtkReducedMotion`, whose `REDUCE` (nick "reduce", value 1) asks for less
+/// motion.
+const REDUCED_MOTION_PROPERTY: &str = "gtk-interface-reduced-motion";
+
+/// `GtkSettings:gtk-interface-contrast`, GTK 4.20 and up: a
+/// `GtkInterfaceContrast`, whose `MORE` (nick "more", value 2) asks for high
+/// contrast; 0 is "unsupported" and 1 "no preference".
+const CONTRAST_PROPERTY: &str = "gtk-interface-contrast";
+
+/// The nick of `settings`' enum property `name`, looked up by name, as
+/// `suspended` is above, so an older GTK (the build targets 4.10) reads no
+/// preference: `None` without the property.
+fn setting_nick(settings: &gtk::Settings, name: &str) -> Option<String> {
+    settings.find_property(name)?;
+    let value = settings.property_value(name);
+    glib::EnumValue::from_value(&value).map(|(_, v)| v.nick().to_string())
+}
+
+/// Whether the desktop asks for less motion. A missing property is off.
+fn reduced_motion(settings: &gtk::Settings) -> bool {
+    setting_nick(settings, REDUCED_MOTION_PROPERTY).is_some_and(|nick| nick == "reduce")
+}
+
+/// Whether the desktop asks for high contrast. A missing property is off.
+fn high_contrast(settings: &gtk::Settings) -> bool {
+    setting_nick(settings, CONTRAST_PROPERTY).is_some_and(|nick| nick == "more")
+}
+
+thread_local! {
+    /// The desktop's reduced-motion preference as last read, for the Lighting page's
+    /// preview, which asks it on every frame.
+    static REDUCED_MOTION: Cell<bool> = const { Cell::new(false) };
+    /// The desktop's high-contrast preference as last read, for the Lighting page's own
+    /// drawing.
+    static HIGH_CONTRAST: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether the desktop asks for less motion, as last read (`follow_motion_and_contrast`):
+/// the Lighting page's preview and theme cards then hold still, and the lights run at half
+/// speed with their busiest looks swapped.
+pub fn reduced_motion_now() -> bool {
+    REDUCED_MOTION.with(Cell::get)
+}
+
+/// Whether the desktop asks for high contrast, as last read: the Lighting page's drawing
+/// (key outlines and legends, colour dots) keeps its contrast.
+pub fn high_contrast_now() -> bool {
+    HIGH_CONTRAST.with(Cell::get)
+}
+
+/// Hands the desktop's reduced-motion and contrast preferences to the lighting and the
+/// Lighting page, now and whenever they change.
+fn follow_motion_and_contrast() {
+    let Some(settings) = gtk::Settings::default() else {
+        return;
+    };
+    let motion = |settings: &gtk::Settings, changed: bool| {
+        let reduced = reduced_motion(settings);
+        REDUCED_MOTION.with(|cell| cell.set(reduced));
+        crate::hardware::lighting::set_reduced_motion(reduced);
+        if changed {
+            crate::ui::lighting_page::motion_preference_changed();
+        }
+    };
+    motion(&settings, false);
+    if settings.find_property(REDUCED_MOTION_PROPERTY).is_some() {
+        settings.connect_notify_local(Some(REDUCED_MOTION_PROPERTY), move |settings, _| {
+            motion(settings, true)
+        });
+    }
+    HIGH_CONTRAST.with(|cell| cell.set(high_contrast(&settings)));
+    if settings.find_property(CONTRAST_PROPERTY).is_some() {
+        settings.connect_notify_local(Some(CONTRAST_PROPERTY), |settings, _| {
+            HIGH_CONTRAST.with(|cell| cell.set(high_contrast(settings)));
+            crate::ui::lighting_page::contrast_preference_changed();
+        });
+    }
+}
+
 /// Reads the compositor's current answer into the shared flag.
 ///
 /// Called again after presenting the window, because presenting is a request
@@ -320,7 +411,7 @@ fn build_with_setup(
     });
     let setup = setup_page::build(on_complete);
     main_stack.add_named(&setup, Some("setup"));
-    window.set_child(Some(&main_stack));
+    window.set_child(Some(&crate::ui::toasts::host(&main_stack)));
 }
 
 fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
@@ -343,6 +434,10 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // The same lists the mode key uses are what a power-source change
         // moves between, so the policy needs them too, not just the driver.
         crate::hardware::power_profile::set_cycles(&cfg.mode_cycle_ac, &cfg.mode_cycle_battery);
+        // The lighting renderer's inputs that come from the desktop and the
+        // power supply: before anything is shown, and kept up to date below.
+        sync_renderer_battery(&cfg);
+        follow_motion_and_contrast();
 
         // The cycles live in the kernel module, which forgets them on every
         // reload and every boot, so they are pushed back on each start.
@@ -422,17 +517,23 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             );
         }
 
-        // Lighting has the same "forgot on power cycle" gap: neither the
-        // Chicony USB keyboard nor the WMI channel (the chassis light bar on
-        // the PH16-71 generation) remembers anything across a reboot, and the
-        // hotkey service only replays the ENEK5130 HID path. Restore both
-        // here; the Chicony write goes through its hidraw node, or the same
-        // privileged helper session the fan-mode reapply above already opened.
-        // `wake: true` - after a power cycle the light bar's firmware needs
-        // one Breathing frame before any other mode becomes visible.
+        // The lighting's one-time migration, then its restore, at once: neither waits for
+        // the firmware's backlight timeout read below.
+        //
+        // Lighting has the same "forgot on power cycle" gap: neither the Chicony USB
+        // keyboard nor the WMI channel (the chassis light bar on the PH16-71 generation)
+        // remembers anything across a reboot, and the hotkey service only replays the
+        // ENEK5130 HID path. Restored after the migration, since what it applies is the
+        // active mode's lighting. The Chicony write goes through its hidraw node, or the
+        // same privileged helper session the fan-mode reapply above already opened.
+        // `wake: true` - after a power cycle the light bar's firmware needs one Breathing
+        // frame before any other mode becomes visible. What it wrote is recorded back
+        // here, on this thread, where every save of config.json happens. An unreadable
+        // config.json runs on defaults and is neither migrated nor saved over.
+        crate::hardware::lighting::migrate_at_startup();
         background::run(
             || crate::hardware::lighting::restore_saved(true, "startup"),
-            |()| {},
+            |()| crate::hardware::lighting::record_written(),
         );
 
         // Idle-off covers the keyboard and the light bar as one feature, and
@@ -455,7 +556,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     return;
                 }
                 // Inheriting the old single light-bar flag, or the firmware timeout,
-                // the first time this runs, and only then.
+                // the first time this runs, and only then. On this thread, after the
+                // lighting's migration above was saved, so neither loses the other's
+                // marker.
                 let cfg = crate::config::migrate_idle_at_startup(firmware_enabled);
                 if cfg.idle_enabled {
                     // The WMI backlight timeout. Written only where the app
@@ -546,7 +649,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     now.label(),
                     config::load_app_config().notify_mode_changes,
                 );
-                crate::ui::lighting_page::apply_scheme_for_mode(now);
+                crate::ui::lighting_page::apply_lighting_for_mode(now);
             }
         });
 
@@ -658,6 +761,8 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
 
             react_to_mode();
             crate::hardware::power_profile::check();
+            sync_renderer_battery(&crate::config::load_app_config_cached());
+            crate::ui::lighting_page::check_bar_lost();
 
             cycle_ticks.set(cycle_ticks.get().saturating_add(1));
             if !cycle_pending.get() {
@@ -754,13 +859,25 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     // the blanking logic below undo a blank that was in place
                     // when the lid closed.
                     crate::hardware::idle::mark_active();
+                    // "Show on my laptop" ends with a suspend: the restore below puts the
+                    // active mode's lighting back.
+                    crate::ui::lighting_page::machine_resumed();
+                    // The lighting renderer writes nothing while the restore
+                    // runs, and sends every light whole after it: the
+                    // controllers may have lost what it last drew. The bracket
+                    // closes on the worker when the restore ends, also if it
+                    // panics, and a second resume meanwhile keeps it open.
+                    let bracket = crate::hardware::lighting_renderer::renderer().resume_bracket();
                     // `wake: false` - the light bar's controller stayed
                     // powered, so it does not need the Breathing priming frame
                     // a cold boot does, and skipping it avoids a visible
                     // flicker and 300 ms of sleeping.
                     background::run(
-                        || crate::hardware::lighting::restore_saved(false, "resume"),
-                        |()| {},
+                        move || {
+                            let _bracket = bracket;
+                            crate::hardware::lighting::restore_saved(false, "resume")
+                        },
+                        |()| crate::hardware::lighting::record_written(),
                     );
                 }
                 // Also before the early return: with idle off this is what
@@ -787,9 +904,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 };
 
                 // With the mode Never the keyboard is left alone entirely: not
-                // blanked, and not unblanked either. The Lighting page relights
-                // a keyboard the app had blanked when idle, or the keyboard's
-                // own switch, is turned off.
+                // blanked, and not unblanked either. `apply_keyboard_idle`,
+                // run on every idle setting change, relights a keyboard the
+                // app had blanked when idle is switched off.
                 let app_blanks_keyboard = crate::hardware::keyboard_rgb::keyboard_idle_mode(&cfg)
                     == crate::hardware::keyboard_rgb::KeyboardIdleMode::App
                     && crate::hardware::capabilities::get().keyboard_rgb;
@@ -1266,14 +1383,18 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             return glib::ControlFlow::Continue;
         }
         step.set(next_pulse_step(step.get()));
+        // While the Lighting page's preview animates, the pulse is drawn in its next frame
+        // rather than in five frames a second of its own.
         for bar in &neon_bars {
             bar.set_frame(step.get());
-            bar.queue_draw();
+            crate::ui::ticks::queue_draw_carried(bar);
         }
         glib::ControlFlow::Continue
     });
 
-    window.set_child(Some(&root_overlay));
+    // The toasts sit over everything, at window level (Undo through
+    // toasts).
+    window.set_child(Some(&crate::ui::toasts::host(&root_overlay)));
 }
 
 type PageBuilder = Box<dyn FnOnce() -> gtk::Widget>;
@@ -1305,8 +1426,8 @@ enum ArrowFocus {
 }
 
 /// Whether Up and Down move the sidebar: with the focus in the sidebar or nowhere. A focused
-/// widget on a page keeps its arrows (the Fan Control curve chart, its mode bar and the
-/// sliders all use them).
+/// widget on a page keeps its arrows (the Fan Control curve chart and its mode bar, the
+/// Lighting page's key cursor, effect tiles, sliders, lists and its mode selector all use them).
 fn sidebar_takes_arrows(focus: ArrowFocus) -> bool {
     focus != ArrowFocus::Elsewhere
 }
@@ -1531,6 +1652,9 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
             lbl.add_css_class("nav-label");
         }
         item_overlay.add_overlay(&lbl);
+        if *page_name == "lighting" {
+            item_overlay.add_overlay(&lighting_paused_mark());
+        }
 
         // Click
         let gesture = gtk::GestureClick::new();
@@ -1551,8 +1675,9 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     // size/placement in a way mouse clicks can't route around. Capture phase
     // so it fires before any focused child widget would otherwise eat the
     // key - but only while the keyboard focus is in the sidebar or nowhere:
-    // a focused widget on a page (a slider, the Fan Control curve chart,
-    // its mode bar) keeps its own Up and Down
+    // a focused widget on a page (a slider, a list, a radio group, the Fan
+    // Control curve chart, its mode bar, the Lighting preview's key cursor)
+    // keeps its own Up and Down
     // (`sidebar_takes_arrows`).
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1868,6 +1993,40 @@ fn rounded_rect(cr: &gtk4::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f6
     cr.close_path();
 }
 
+thread_local! {
+    /// The Lighting item's paused mark ([`show_lighting_paused`]).
+    static LIGHTING_PAUSED_MARK: RefCell<Option<gtk::Image>> = const { RefCell::new(None) };
+}
+
+/// The small pause symbol at the end of the sidebar's Lighting item, shown while the
+/// Lighting page's Pause holds the lights' animations, so someone who paused them and went
+/// to another page knows why the lights are still. It sits in the item's
+/// spare room on the right, which the widest label leaves too.
+fn lighting_paused_mark() -> gtk::Image {
+    let words = crate::i18n::t("lighting_paused");
+    let mark = gtk::Image::from_icon_name("media-playback-pause-symbolic");
+    mark.set_pixel_size(12);
+    mark.add_css_class("nav-paused-mark");
+    mark.set_halign(gtk::Align::End);
+    mark.set_valign(gtk::Align::Center);
+    mark.set_margin_end(8);
+    mark.set_tooltip_text(Some(words));
+    mark.update_property(&[gtk::accessible::Property::Label(words)]);
+    mark.set_visible(false);
+    LIGHTING_PAUSED_MARK.with(|slot| *slot.borrow_mut() = Some(mark.clone()));
+    mark
+}
+
+/// The Lighting page's Pause holds the lights' animations, or no longer: the sidebar's
+/// Lighting item shows it.
+pub(crate) fn show_lighting_paused(paused: bool) {
+    LIGHTING_PAUSED_MARK.with(|slot| {
+        if let Some(mark) = slot.borrow().as_ref() {
+            mark.set_visible(paused);
+        }
+    });
+}
+
 /// Left margin the nav label overlay already uses (`lbl.set_margin_start`),
 /// plus breathing room on the right so the widest label's text never
 /// touches the item's own right edge.
@@ -1911,8 +2070,9 @@ fn nav_sidebar_width<'a>(
 /// reuses a child's unless something specifically told that child it
 /// changed, so recoloring the live theme needs this walk to actually reach
 /// every hand-drawn `DrawingArea` (sidebar highlight, gauges, the Mode
-/// cards) rather than just the window's own top-level surface.
-fn queue_draw_recursive(widget: &gtk::Widget) {
+/// cards) rather than just the window's own top-level surface. The Lighting page
+/// redraws itself with it when the desktop's contrast preference changes.
+pub(crate) fn queue_draw_recursive(widget: &gtk::Widget) {
     widget.queue_draw();
     let mut child = widget.first_child();
     while let Some(w) = child {
@@ -3083,7 +3243,7 @@ mod tests {
         assert!(sidebar_takes_arrows(ArrowFocus::Sidebar));
         assert!(
             !sidebar_takes_arrows(ArrowFocus::Elsewhere),
-            "a focused slider, curve chart or mode bar keeps its arrows"
+            "a focused slider, list, curve chart, mode bar or key cursor keeps its arrows"
         );
     }
 }

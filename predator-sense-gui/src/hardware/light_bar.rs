@@ -439,7 +439,7 @@ pub fn show_at_exit(state: &LightBarState, blanked: bool) -> Result<(), String> 
 }
 
 /// [`unblank`], with the failure returned.
-pub fn unblank_checked() -> Result<(), String> {
+fn unblank_checked() -> Result<(), String> {
     // The same fallback `blank` uses, as keyboard_rgb does in both. Returning
     // early here instead left the flag set after `blank` had darkened the bar
     // from the default, so on a machine with no saved light bar setting the

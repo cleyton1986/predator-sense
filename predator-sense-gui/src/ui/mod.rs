@@ -35,6 +35,7 @@ pub mod setup_page;
 pub mod still_drawing;
 pub mod tech_gauge;
 pub mod ticks;
+pub mod toasts;
 pub mod temperatures_page;
 pub mod tools_page;
 pub mod usage_page;

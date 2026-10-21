@@ -115,6 +115,9 @@ fn reload_css(scale: f64) {
 
 fn main() {
     STARTUP_STARTED.get_or_init(Instant::now);
+    // The GTK main loop runs on this thread: only its saves of config.json may switch
+    // "React to typing" on.
+    config::mark_ui_thread();
     // Before any thread starts: a panic on a thread that sees key presses prints
     // fixed text, never its message.
     hardware::quiet_panics::install();
@@ -204,38 +207,49 @@ fn main() {
     app.connect_shutdown(|_| {
         // A Settings slider value still waiting out its save debounce.
         ui::window::flush_pending_saves();
+        // Then, before any hardware: "Show on my laptop" puts the active mode's lighting
+        // back, bounded, before anything below stops the renderer or hands the keyboard's
+        // timer back, and the Lighting page starts no apply from here on.
+        ui::lighting_page::at_exit();
         hardware::audio_sync::stop();
         // The keyboard node closes before the renderer stops.
         hardware::key_input::shutdown(std::time::Duration::from_millis(200));
-        // A light the idle timer has dark would stay dark until the app runs
-        // again (the keyboard was blanked with the Off effect, which a key
-        // press does not wake): each is relit first.
-        let looks = hardware::lighting::exit_looks();
-        let bar_done = looks.light_bar.then(|| {
+        // The lighting renderer stops first, with its `parec` child, so no
+        // frame of it lands on a light the exit writes below.
+        let drew = hardware::lighting_renderer::shutdown(std::time::Duration::from_millis(500));
+        // An animation the app drew would stay on the keyboard and the bar as
+        // a frozen frame, and a light the idle timer has dark would stay dark
+        // until the app runs again (the keyboard was blanked with the Off
+        // effect, which a key press does not wake). Each gets the active
+        // mode's look with nothing drawn: a theme's firmware fallback. A still
+        // picture (a per-key painting) stays, and is sent again if dark.
+        let looks = hardware::lighting::exit_looks(drew);
+        let bar_done = looks.light_bar.map(|state| {
+            let blanked = hardware::light_bar::is_blanked();
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let _ = tx.send(hardware::light_bar::unblank_checked());
+                let _ = tx.send(hardware::light_bar::show_at_exit(&state, blanked));
             });
             rx
         });
         // The app keeps the controller's own keyboard timer off while it
         // runs, and the controller keeps that until the next boot. Switched
         // back on here, or a quit or logout would leave the keyboard lit for
-        // good. The keyboard's relight goes first, inside the same bounded
+        // good. The keyboard's look goes first, inside the same bounded
         // shutdown (2 s for the keyboard and the hand-back, at most 0.5 s
         // more for the bar).
         hardware::keyboard_rgb::hand_back_firmware_timer(
             std::time::Duration::from_secs(2),
-            looks.keyboard.map(hardware::keyboard_rgb::ExitLook::Effect),
+            looks.keyboard,
         );
         if let Some(rx) = bar_done {
             match rx.recv_timeout(std::time::Duration::from_millis(500)) {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => hardware::applog::error(&format!(
-                    "exit: the app did not relight the light bar ({e})"
+                    "exit: the app did not write the light bar's look ({e})"
                 )),
                 Err(_) => hardware::applog::error(
-                    "exit: the app did not relight the light bar within 500 ms",
+                    "exit: the app did not write the light bar's look within 500 ms",
                 ),
             }
         }

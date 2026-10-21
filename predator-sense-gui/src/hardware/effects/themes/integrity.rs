@@ -634,3 +634,37 @@ fn no_theme_is_offered_without_a_look_for_each_light() {
     }
     p.assert_none();
 }
+
+/// The Themes tab keeps one waiting edit per setting and per Custom colour of a theme, by
+/// index (`ui::lighting::themes` and its `settings`): a theme with more of either than it has
+/// keys for would have two controls share one, and the later drag would drop the other's
+/// edit.
+#[test]
+fn every_themes_settings_and_custom_colours_fit_the_pages_edit_keys() {
+    use crate::ui::lighting::themes::settings::SETTING_KEYS;
+    use crate::ui::lighting::themes::SLOT_KEYS;
+    for keys in [&SETTING_KEYS[..], &SLOT_KEYS[..]] {
+        let unique: BTreeSet<&str> = keys.iter().copied().collect();
+        assert_eq!(unique.len(), keys.len(), "the keys are distinct");
+    }
+    let mut p = Problems::default();
+    for t in catalogue() {
+        p.check(t.settings.len() <= SETTING_KEYS.len(), || {
+            format!(
+                "{}: {} settings, {} edit keys",
+                t.id,
+                t.settings.len(),
+                SETTING_KEYS.len()
+            )
+        });
+        p.check(t.custom.len() <= SLOT_KEYS.len(), || {
+            format!(
+                "{}: {} Custom colours, {} edit keys",
+                t.id,
+                t.custom.len(),
+                SLOT_KEYS.len()
+            )
+        });
+    }
+    p.assert_none();
+}

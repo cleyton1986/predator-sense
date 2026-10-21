@@ -400,11 +400,44 @@ fn invoke_session(action: Action, arguments: &[&str]) -> Result<Reply, String> {
             .map_err(|error| format!("Failed to launch hardware helper: {error}"))?;
         return Ok(Reply::from_output(&output));
     }
-    let (reply, started) = call_session(&SESSION, spawn_session, true, action, arguments)?;
+    let result = call_session(&SESSION, spawn_session, true, action, arguments);
+    AUTHENTICATION_DISMISSED.store(dismissed_after(&result), Ordering::SeqCst);
+    let (reply, started) = result?;
     if started {
         privileged_session_started();
     }
     Ok(reply)
+}
+
+/// What a privileged call says when the user dismissed the authentication dialog both times
+/// [`call_session`] asked (pkexec exits [`PKEXEC_NOT_AUTHORIZED`], 126, for a dismissed
+/// dialog: pkexec(1)).
+pub const DISMISSED: &str = "Hardware helper: the authentication dialog was dismissed";
+
+/// Set while the last privileged call failed because the authentication dialog was
+/// dismissed ([`DISMISSED`]), and cleared by the next one that is answered or fails
+/// otherwise: the Lighting page's "Password request cancelled" state.
+static AUTHENTICATION_DISMISSED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the last privileged call failed because the authentication dialog was
+/// dismissed. Never waits.
+pub fn authentication_dismissed() -> bool {
+    AUTHENTICATION_DISMISSED.load(Ordering::SeqCst)
+}
+
+/// Whether `result`, a privileged call's, says the dialog was dismissed.
+fn dismissed_after(result: &Result<(Reply, bool), String>) -> bool {
+    matches!(result, Err(error) if error == DISMISSED)
+}
+
+/// What a privileged call says when the session it started closed at once: [`DISMISSED`]
+/// when pkexec's exit status says the user dismissed the dialog, else that it closed.
+fn closed_at_once(exit_code: Option<i32>) -> String {
+    if exit_code == Some(PKEXEC_NOT_AUTHORIZED) {
+        DISMISSED.to_string()
+    } else {
+        "Hardware helper daemon closed the connection immediately after starting".to_string()
+    }
 }
 
 /// Set once a privileged session has answered a call. Every session started
@@ -508,11 +541,8 @@ fn call_session(
                     // again). Reap it here - nothing else holds this child,
                     // and dropping it unreaped would leak an unwaited zombie
                     // process for the rest of this GUI's lifetime.
-                    let _ = child.wait();
-                    Err(
-                        "Hardware helper daemon closed the connection immediately after starting"
-                            .to_string(),
-                    )
+                    let code = child.wait().ok().and_then(|status| status.code());
+                    Err(closed_at_once(code))
                 }
             }
         }
@@ -554,6 +584,24 @@ fn output_error(action: Action, output: &Output) -> String {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// A dismissed authentication dialog (pkexec's 126) reads as such, and only that does;
+    /// the next call answered, or failing otherwise, clears it.
+    #[test]
+    fn a_dismissed_authentication_dialog_is_told_apart() {
+        assert_eq!(closed_at_once(Some(126)), DISMISSED);
+        for other in [None, Some(127), Some(1), Some(0)] {
+            assert_ne!(closed_at_once(other), DISMISSED, "{other:?}");
+        }
+        assert!(dismissed_after(&Err(DISMISSED.to_string())));
+        assert!(!dismissed_after(&Err(closed_at_once(Some(127)))));
+        let answered = Reply {
+            success: true,
+            stdout: String::new(),
+            detail: String::new(),
+        };
+        assert!(!dismissed_after(&Ok((answered, true))));
+    }
 
     #[test]
     fn a_rejected_call_names_the_action_and_the_helpers_reason() {

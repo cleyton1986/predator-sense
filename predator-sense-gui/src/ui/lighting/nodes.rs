@@ -643,6 +643,111 @@ fn children(node: &gsk::RenderNode) -> Vec<gsk::RenderNode> {
 mod tests {
     use super::{glow_sum, raster, Device, GlowImage, GlowLayer};
     use crate::ui::lighting::preview_scene::Rect;
+    use gtk4 as gtk;
+    use gtk4::prelude::*;
+    use gtk4::{gdk, graphene, gsk};
+
+    /// A drawing kept as pixels (`Raster`) comes out as the same drawing in a Cairo node, at
+    /// scale 1, 4/3 and 5/4 and with its origin between pixels: the logo, text and a stroke.
+    /// As on screen, the drawing's nodes are made at its own scale and the renderer draws
+    /// them at the device's (a snapshot scaled before its Cairo node is made would record
+    /// the Cairo drawing at that scale instead). Drawn by the GL renderer, as the app is
+    /// (skipped without one), and by the Cairo renderer. Within one level (rounding).
+    #[test]
+    fn a_raster_draws_what_its_cairo_node_draws() {
+        crate::ui::gtk_test::run("nodes", raster_matches_its_cairo_node);
+    }
+
+    fn raster_matches_its_cairo_node() {
+        let area = Rect {
+            x: 3.3,
+            y: 2.7,
+            w: 61.0,
+            h: 37.0,
+        };
+        let draw = |cr: &gtk::cairo::Context| {
+            cr.save().unwrap();
+            cr.translate(area.x, area.y);
+            crate::ui::lighting::preview::draw_logo(cr, 30.0, 30.0, [255.0, 80.0, 20.0]);
+            cr.restore().unwrap();
+            cr.select_font_face(
+                "Sans",
+                gtk::cairo::FontSlant::Normal,
+                gtk::cairo::FontWeight::Normal,
+            );
+            cr.set_font_size(9.3);
+            cr.set_source_rgba(0.2, 0.9, 0.6, 1.0);
+            cr.move_to(area.x + 31.4, area.y + 20.6);
+            let _ = cr.show_text("Esc");
+            cr.new_path();
+            cr.set_line_width(1.7);
+            cr.arc(area.x + 45.0, area.y + 28.0, 6.2, 0.0, 5.0);
+            let _ = cr.stroke();
+        };
+        let gl = gsk::GLRenderer::new();
+        let renderers: Vec<(&str, gsk::Renderer)> = if gl.realize(None::<&gdk::Surface>).is_ok() {
+            vec![("GL", gl.upcast())]
+        } else {
+            eprintln!("nodes: no GL renderer, so only the Cairo one compared the raster");
+            Vec::new()
+        };
+        let cairo_renderer = gsk::CairoRenderer::new();
+        cairo_renderer
+            .realize(None::<&gdk::Surface>)
+            .expect("the Cairo renderer starts");
+        let mut renderers = renderers;
+        renderers.push(("Cairo", cairo_renderer.upcast()));
+        let mut results = Vec::new();
+        for (name, renderer) in &renderers {
+            for (scale, origin) in [
+                (1.0, (0.0, 0.0)),
+                (4.0 / 3.0, (0.0, 0.0)),
+                (4.0 / 3.0, (1.0 / 3.0, 2.0 / 3.0)),
+                (1.25, (0.5, 0.25)),
+            ] {
+                let device = Device { scale, origin };
+                let pixels = |make: &dyn Fn(&gtk::Snapshot)| {
+                    let drawing = gtk::Snapshot::new();
+                    make(&drawing);
+                    let snapshot = gtk::Snapshot::new();
+                    snapshot.translate(&graphene::Point::new(origin.0 as f32, origin.1 as f32));
+                    snapshot.scale(scale as f32, scale as f32);
+                    snapshot.append_node(drawing.to_node().expect("a drawing"));
+                    let node = snapshot.to_node().expect("a drawing");
+                    let (w, h) = (90, 60);
+                    let bounds = graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+                    let texture = renderer.render_texture(&node, Some(&bounds));
+                    let mut data = vec![0u8; w * h * 4];
+                    texture.download(&mut data, w * 4);
+                    data
+                };
+                let cairo = pixels(&|snapshot| draw(&snapshot.append_cairo(&super::rect(area))));
+                let kept = pixels(&|snapshot| {
+                    raster(area, device, draw)
+                        .expect("a raster")
+                        .append(snapshot)
+                });
+                let worst = cairo
+                    .iter()
+                    .zip(&kept)
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap_or(0);
+                results.push((*name, scale, origin, cairo.iter().any(|v| *v > 0), worst));
+            }
+        }
+        // Unrealized before any assertion: a realized renderer must not be dropped.
+        for (_, renderer) in &renderers {
+            renderer.unrealize();
+        }
+        for (name, scale, origin, shows, worst) in results {
+            assert!(shows, "the drawing shows something");
+            assert!(
+                worst <= 1,
+                "{name}, scale {scale}, origin {origin:?}: {worst} levels apart"
+            );
+        }
+    }
 
     /// A raster is made once per key and reused: up to four (one per place on the pixel
     /// grid a scroll can put a drawing at, and one spare), the oldest dropped for a fifth.
