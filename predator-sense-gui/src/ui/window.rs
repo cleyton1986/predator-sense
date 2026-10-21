@@ -676,6 +676,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     crate::hardware::applog::info(
                         "resume from suspend: restoring keyboard and light bar",
                     );
+                    // The fan curve's readings and held step are from
+                    // before the machine cooled in suspend.
+                    crate::hardware::fan::forget_curve_history();
                     // Waking the machine is activity. Without this the idle
                     // watcher still holds whatever it measured before the
                     // suspend and would blank again immediately; it also lets
@@ -919,6 +922,10 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             let (cpu, gpu) = sensors::read_critical_temps();
             let temp = crate::hardware::fan::curve_input_temp(cpu, gpu);
             let applied = fan_state.get();
+            if crate::hardware::fan::take_curve_history_stale() {
+                curve_readings.borrow_mut().clear();
+                curve_memory.set(None);
+            }
             let now_s = glib::monotonic_time() as f64 / 1e6;
             let hold = match (plan, temp) {
                 (config::FanPlan::Curve { steps }, Some(t)) => {
@@ -996,6 +1003,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 _ => None,
             };
             let memory = curve_memory.clone();
+            let readings = curve_readings.clone();
             background::run(
                 move || match write {
                     crate::hardware::fan::FanWrite::PwmAuto => {
@@ -1032,6 +1040,11 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                                 applied_at_s: glib::monotonic_time() as f64 / 1e6,
                                 ..m
                             }));
+                            // Taking the curve back after a hand-off starts
+                            // from fresh readings.
+                            if intended == CurveAction::Firmware {
+                                readings.borrow_mut().clear();
+                            }
                             state.set(match intended {
                                 CurveAction::Firmware => FanState::Firmware,
                                 CurveAction::Manual(percent) => FanState::Manual(percent),

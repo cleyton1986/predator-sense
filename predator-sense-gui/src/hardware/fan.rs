@@ -499,6 +499,20 @@ pub fn curve_band_target(temp_c: f64, steps: &[u8; 6], hold: Option<CurveHold>) 
     curve_band_held(hold.mean_c, steps, Some(hold.band)).max(band).min(hold.band)
 }
 
+static CURVE_HISTORY_STALE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Makes the reconciler drop its curve readings and remembered step on its
+/// next tick: after a suspend they describe a machine that has since cooled.
+pub fn forget_curve_history() {
+    CURVE_HISTORY_STALE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether `forget_curve_history` was called since the last call here.
+pub fn take_curve_history_stale() -> bool {
+    CURVE_HISTORY_STALE.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The last `CURVE_SMOOTHING_READINGS` curve inputs, for one mode and curve.
 #[derive(Debug, Default)]
 pub struct CurveReadings {
@@ -1129,6 +1143,13 @@ mod tests {
         // not lift the step: only the current reading may.
         let hold = CurveHold { band: 1, applied_at_s: 0.0, now_s: 90.0, mean_c: 70.0 };
         assert_eq!(curve_band_target(42.0, &BALANCED, Some(hold)), 1);
+    }
+
+    #[test]
+    fn forgetting_the_curve_history_is_taken_once() {
+        forget_curve_history();
+        assert!(take_curve_history_stale());
+        assert!(!take_curve_history_stale());
     }
 
     #[test]
