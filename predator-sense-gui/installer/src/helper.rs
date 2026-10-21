@@ -987,7 +987,7 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
                 hardware::GPU_POWER_MIN_WATTS,
                 hardware::GPU_POWER_MAX_WATTS,
             )?;
-            set_gpu_power_limit(watts, command)
+            set_gpu_power_limit(watts, &PERSISTENCE_ASKED, command)
         }
         HelperAction::SetNoTurbo => {
             let value = parse_bool(&args[1])?;
@@ -2393,19 +2393,35 @@ fn command(name: &str, args: &[&str]) -> AppResult {
     Ok(())
 }
 
+/// Whether this helper process has already asked for persistence mode: once
+/// per process, so a privileged session runs `nvidia-smi -pm 1` at its first
+/// GPU power change and not again at every mode switch (each run is 28 to
+/// 50 ms of a full NVML start, measured on a PH16-71, where persistence was
+/// already on).
+static PERSISTENCE_ASKED: AtomicBool = AtomicBool::new(false);
+
 fn set_gpu_power_limit(
     watts: u16,
+    persistence_asked: &AtomicBool,
     mut execute: impl FnMut(&str, &[&str]) -> AppResult,
 ) -> AppResult {
     // Persistence mode is best effort, but a tool that did not answer at all
-    // would only hang the next call the same way.
-    if let Err(error) = execute(external::NVIDIA_SMI, &["-pm", "1"]) {
-        if error.to_string().contains(TIMED_OUT_MARKER) {
-            return Err(error);
+    // would only hang the next call the same way. A timeout leaves it to be
+    // asked again next time.
+    if !persistence_asked.load(Ordering::SeqCst) {
+        match execute(external::NVIDIA_SMI, &["-pm", "1"]) {
+            Err(error) if error.to_string().contains(TIMED_OUT_MARKER) => return Err(error),
+            _ => persistence_asked.store(true, Ordering::SeqCst),
         }
     }
     let watts = watts.to_string();
-    execute(external::NVIDIA_SMI, &["-pl", watts.as_str()])
+    let result = execute(external::NVIDIA_SMI, &["-pl", watts.as_str()]);
+    if result.is_err() {
+        // Persistence mode resets with the driver: after a module reload in a
+        // long session, the next change asks for it again.
+        persistence_asked.store(false, Ordering::SeqCst);
+    }
+    result
 }
 
 /// `sysfs`'s real parent, in production and in every test fixture alike:
@@ -3400,7 +3416,7 @@ mod tests {
     #[test]
     fn applies_gpu_power_limit_when_persistence_mode_is_unsupported() {
         let mut invocations = Vec::new();
-        let result = set_gpu_power_limit(80, |name, args| {
+        let result = set_gpu_power_limit(80, &AtomicBool::new(false), |name, args| {
             invocations.push((name.to_string(), args.join(" ")));
             if args == ["-pm", "1"] {
                 Err("persistence mode unsupported".into())
@@ -3421,7 +3437,7 @@ mod tests {
 
     #[test]
     fn reports_gpu_power_limit_failure() {
-        let result = set_gpu_power_limit(80, |_name, args| {
+        let result = set_gpu_power_limit(80, &AtomicBool::new(false), |_name, args| {
             if args == ["-pl", "80"] {
                 Err("power limit rejected".into())
             } else {
@@ -3430,6 +3446,57 @@ mod tests {
         });
 
         assert_eq!(result.unwrap_err(), "power limit rejected");
+    }
+
+    #[test]
+    fn asks_for_persistence_mode_once_per_helper_process() {
+        let asked = AtomicBool::new(false);
+        let mut invocations = Vec::new();
+        for watts in [80, 60, 100] {
+            set_gpu_power_limit(watts, &asked, |_name, args| {
+                invocations.push(args.join(" "));
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(invocations, ["-pm 1", "-pl 80", "-pl 60", "-pl 100"]);
+    }
+
+    #[test]
+    fn a_refused_power_limit_asks_for_persistence_mode_again() {
+        let asked = AtomicBool::new(false);
+        let mut invocations = Vec::new();
+        for _ in 0..2 {
+            let _ = set_gpu_power_limit(80, &asked, |_name, args| {
+                invocations.push(args.join(" "));
+                if args == ["-pl", "80"] {
+                    Err("power limit rejected".into())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        assert_eq!(invocations, ["-pm 1", "-pl 80", "-pm 1", "-pl 80"]);
+    }
+
+    #[test]
+    fn a_persistence_mode_timeout_is_asked_again() {
+        let asked = AtomicBool::new(false);
+        let timed_out = set_gpu_power_limit(80, &asked, |_name, args| {
+            if args == ["-pm", "1"] {
+                Err(format!("nvidia-smi {TIMED_OUT_MARKER} 10s").into())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(timed_out.is_err());
+        let mut invocations = Vec::new();
+        set_gpu_power_limit(80, &asked, |_name, args| {
+            invocations.push(args.join(" "));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(invocations, ["-pm 1", "-pl 80"]);
     }
 
     #[test]
