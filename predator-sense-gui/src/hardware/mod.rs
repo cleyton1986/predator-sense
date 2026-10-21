@@ -38,6 +38,7 @@ pub mod power_profile;
 pub mod ppd;
 pub mod procs;
 pub mod profile;
+pub mod quiet_panics;
 pub mod resume;
 pub mod rgb;
 pub mod sensors;

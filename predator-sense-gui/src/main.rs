@@ -115,6 +115,9 @@ fn reload_css(scale: f64) {
 
 fn main() {
     STARTUP_STARTED.get_or_init(Instant::now);
+    // Before any thread starts: a panic on a thread that sees key presses prints
+    // fixed text, never its message.
+    hardware::quiet_panics::install();
     startup_mark("main entered");
     if std::env::args().any(|argument| {
         argument == predator_sense_protocol::internal::DELAYED_APPLICATION_START_ARGUMENT
