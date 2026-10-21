@@ -674,7 +674,7 @@ predator-sense-gui/
 │   │   ├── gpu.rs               # Métricas de GPU vía NVML, límite de potencia vía el helper
 │   │   ├── nvml.rs              # NVML cargado en tiempo de ejecución (dlopen)
 │   │   ├── procs.rs             # Muestreador de /proc (CPU por núcleo, memoria, lista de procesos)
-│   │   ├── storage.rs           # Uso de disco vía df
+│   │   ├── storage.rs           # Uso de disco vía statvfs
 │   │   ├── sysinfo.rs           # Especificaciones de DMI + CPU + GPU + SO
 │   │   ├── fan.rs               # Modo de ventilador + CoolBoost
 │   │   ├── extras.rs            # Límite de batería, LCD overdrive, carga USB, animación de arranque

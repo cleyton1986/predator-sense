@@ -1,6 +1,6 @@
 //! Small bridge for blocking work that must not run on GTK's main thread.
 
-use gtk4::glib;
+use gtk4::{gio, glib};
 
 /// Runs `work` on a thread of its own and delivers its result on the GTK
 /// thread.
@@ -15,7 +15,7 @@ use gtk4::glib;
 /// callers can wait for minutes (a helper call behind an authentication
 /// dialog, a switch behind queued ones, a network request), and a few of
 /// those would hold up everything else on a small pool, GTK's own loaders
-/// included.
+/// included. Short, frequent reads use [`run_quick`].
 pub fn run<T, F, D>(work: F, on_done: D)
 where
     T: Send + 'static,
@@ -37,6 +37,24 @@ where
     });
 }
 
+/// [`run`] for a short read that repeats every few seconds (the Usage
+/// sample, the Temperatures page's sensors): on GLib's shared thread pool
+/// (`gio::spawn_blocking`) instead of a new thread each time. Never for work
+/// that can wait on the helper, a switch or the network.
+pub fn run_quick<T, F, D>(work: F, on_done: D)
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+    D: FnOnce(T) + 'static,
+{
+    let result = gio::spawn_blocking(work);
+    glib::MainContext::default().spawn_local(async move {
+        if let Ok(result) = result.await {
+            on_done(result);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -45,7 +63,11 @@ mod tests {
 
     #[test]
     fn the_result_arrives_on_the_gtk_thread() {
-        crate::ui::gtk_test::run("background result", result_arrives_on_the_gtk_thread);
+        crate::ui::gtk_test::run("background result", || {
+            for quick in [false, true] {
+                result_arrives_on_the_gtk_thread(quick);
+            }
+        });
     }
 
     #[test]
@@ -66,13 +88,14 @@ mod tests {
         });
     }
 
-    fn result_arrives_on_the_gtk_thread() {
+    fn result_arrives_on_the_gtk_thread(quick: bool) {
         {
             let gtk_thread = std::thread::current().id();
             let got = Rc::new(Cell::new(None));
             {
                 let got = got.clone();
-                super::run(
+                let run = if quick { super::run_quick } else { super::run };
+                run(
                     move || std::thread::current().id() != gtk_thread,
                     move |off_thread| got.set(Some((off_thread, std::thread::current().id()))),
                 );
@@ -83,7 +106,7 @@ mod tests {
                 context.iteration(false);
                 std::thread::sleep(Duration::from_millis(1));
             }
-            assert_eq!(got.get(), Some((true, gtk_thread)));
+            assert_eq!(got.get(), Some((true, gtk_thread)), "quick: {quick}");
         }
     }
 }

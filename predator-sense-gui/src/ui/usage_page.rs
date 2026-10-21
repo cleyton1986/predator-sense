@@ -64,7 +64,7 @@ pub fn build() -> gtk::Box {
         pulse_phase: 0.0,
     }));
 
-    let sampler = Rc::new(RefCell::new(sampler));
+    let sampler = Rc::new(RefCell::new(Some(sampler)));
 
     // Tabs
     let tab_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -142,17 +142,41 @@ pub fn build() -> gtk::Box {
             if !crate::app_state::is_window_visible() || !page_c.is_mapped() {
                 return glib::ControlFlow::Continue;
             }
-            let mut s = sampler_c.borrow_mut();
-            let sample = s.sample();
-            let disks = storage::list_disks();
-            let mut st = state_c.borrow_mut();
-            // Sincronizar tamanho dos vetores
-            let dlen = disks.len();
-            if st.disk_shown.len() != dlen {
-                st.disk_shown.resize(dlen, 0.0);
-            }
-            st.sample = sample;
-            st.disks = disks;
+            // The /proc scan and the disk sizes take 20 to 30 ms: on a worker. The sampler
+            // goes with it and comes back with the result; while it is away a sample is
+            // under way, and this tick has nothing to do.
+            let Some(mut s) = sampler_c.borrow_mut().take() else {
+                return glib::ControlFlow::Continue;
+            };
+            let state_c = state_c.clone();
+            let sampler_c = sampler_c.clone();
+            crate::ui::background::run_quick(
+                move || {
+                    // A sample that panics must not take the sampler with it, or the page
+                    // would never sample again: a fresh one comes back instead.
+                    let taken = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        (s.sample(), storage::list_disks())
+                    }));
+                    match taken {
+                        Ok(reading) => (s, Some(reading)),
+                        Err(_) => (UsageSampler::new(), None),
+                    }
+                },
+                move |(s, reading)| {
+                    *sampler_c.borrow_mut() = Some(s);
+                    let Some((sample, disks)) = reading else {
+                        return;
+                    };
+                    let mut st = state_c.borrow_mut();
+                    // Sincronizar tamanho dos vetores
+                    let dlen = disks.len();
+                    if st.disk_shown.len() != dlen {
+                        st.disk_shown.resize(dlen, 0.0);
+                    }
+                    st.sample = sample;
+                    st.disks = disks;
+                },
+            );
             glib::ControlFlow::Continue
         });
     }

@@ -654,7 +654,7 @@ predator-sense-gui/
 │   │   ├── gpu.rs               # 通过 NVML 获取 GPU 指标，经 helper 设置功率上限
 │   │   ├── nvml.rs              # 运行时加载的 NVML（dlopen）
 │   │   ├── procs.rs             # /proc 采样器（每核 CPU、内存、进程列表）
-│   │   ├── storage.rs           # 通过 df 获取磁盘使用情况
+│   │   ├── storage.rs           # 通过 statvfs 获取磁盘使用情况
 │   │   ├── sysinfo.rs           # DMI + CPU + GPU + 操作系统规格
 │   │   ├── fan.rs               # 风扇模式 + CoolBoost
 │   │   ├── extras.rs            # 电池限制、LCD 超频、USB 充电、开机动画

@@ -598,7 +598,7 @@ predator-sense-gui/
 │   │   ├── gpu.rs               # NVML経由のGPU値、ヘルパー経由の電力制限
 │   │   ├── nvml.rs              # 実行時に読み込むNVML（dlopen）
 │   │   ├── procs.rs             # /procサンプラー（コアごとのCPU、メモリ、プロセス一覧）
-│   │   ├── storage.rs           # df経由のディスク使用量
+│   │   ├── storage.rs           # statvfs経由のディスク使用量
 │   │   ├── sysinfo.rs           # DMI + CPU + GPU + OSの仕様
 │   │   ├── fan.rs               # ファンモード + CoolBoost
 │   │   ├── extras.rs            # バッテリー制限、LCDオーバードライブ、USB充電、起動アニメーション

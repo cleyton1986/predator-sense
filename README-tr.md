@@ -657,7 +657,7 @@ predator-sense-gui/
 │   │   ├── gpu.rs               # NVML ile GPU ölçümleri, helper ile güç sınırı
 │   │   ├── nvml.rs              # Çalışırken yüklenen NVML (dlopen)
 │   │   ├── procs.rs             # /proc örnekleyici (çekirdek başına CPU, bellek, süreç listesi)
-│   │   ├── storage.rs           # df üzerinden disk kullanımı
+│   │   ├── storage.rs           # statvfs üzerinden disk kullanımı
 │   │   ├── sysinfo.rs           # DMI + CPU + GPU + işletim sistemi özellikleri
 │   │   ├── fan.rs               # Fan modu + CoolBoost
 │   │   ├── extras.rs            # Pil limiti, LCD overdrive, USB şarj, açılış animasyonu
