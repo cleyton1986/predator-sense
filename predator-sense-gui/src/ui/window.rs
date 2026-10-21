@@ -525,17 +525,23 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // The first is this app's own writes and the mode key, which the
         // driver handles in-kernel. The second is anything going through the
         // standard interface, which is how the desktop's power menu changes the
-        // mode. Watching only one of them leaves the other on the five second
+        // mode. Watching only one of them leaves the other on the one minute
         // backstop, so both are watched and the closure is idempotent anyway.
         //
         // `platform_profile` is also the portable half: it exists on any
         // machine with a platform profile driver, including one running a
         // module without the `sysfs_notify` this fork adds.
+        //
+        // Both also keep the remembered firmware index current (see
+        // thermal_profile::current), which is what lets the timers below ask
+        // for the mode without a WMI read each time.
         let mut watched = Vec::new();
+        let index_path = crate::hardware::thermal_profile::index_path();
         for path in [
-            crate::hardware::thermal_profile::index_path(),
+            index_path.clone(),
             std::path::PathBuf::from("/sys/firmware/acpi/platform_profile"),
         ] {
+            let is_index = path == index_path;
             match std::fs::File::open(&path) {
                 Ok(file) => {
                     use std::io::{Read, Seek};
@@ -552,6 +558,15 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         let mut value = String::new();
                         let _ = file.rewind();
                         let _ = file.read_to_string(&mut value);
+                        // The index attribute's own value is the new index, so
+                        // it is recorded as read. platform_profile names a
+                        // profile, not an index, so the index is read once by
+                        // whoever asks next.
+                        if is_index {
+                            crate::hardware::thermal_profile::observed(&value);
+                        } else {
+                            crate::hardware::thermal_profile::forget();
+                        }
                         react();
                         glib::ControlFlow::Continue
                     });
@@ -559,7 +574,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 }
                 Err(error) => {
                     crate::hardware::applog::info(&format!(
-                        "not watching {} ({error}); changes made through it wait for the tick",
+                        "not watching {} ({error}); changes made through it wait for the one minute backstop",
                         path.display()
                     ));
                 }
@@ -567,11 +582,11 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         }
         if watched.is_empty() {
             crate::hardware::applog::info(
-                "no mode attribute to wait on; mode changes are polled every five seconds",
+                "no mode attribute to wait on; mode changes are seen within a minute",
             );
         } else {
             crate::hardware::applog::info(&format!(
-                "mode changes are event-driven on {}; the five second tick is a backstop",
+                "mode changes are event-driven on {}; the firmware index is re-read every minute as a backstop",
                 watched.join(" and ")
             ));
         }
@@ -682,6 +697,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     crate::hardware::applog::info(
                         "resume from suspend: restoring keyboard and light bar",
                     );
+                    // The firmware does not always keep its mode across a
+                    // suspend, and the remembered index cannot know.
+                    crate::hardware::thermal_profile::forget();
                     // The fan curve's readings and held step are from
                     // before the machine cooled in suspend.
                     crate::hardware::fan::forget_curve_history();

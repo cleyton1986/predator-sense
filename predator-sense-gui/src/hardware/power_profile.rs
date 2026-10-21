@@ -482,6 +482,13 @@ pub fn check() {
     // acted on a machine it could not read. The half that stays readable
     // through all of it is the firmware index, and reconciling the CPU half
     // back to the mode is the mode watcher's job, not this one's.
+    //
+    // A plug or unplug reads the firmware index afresh rather than taking the
+    // remembered one (see thermal_profile::current): it is one read per event,
+    // and this rule acts on the answer at once.
+    if transitioned {
+        crate::hardware::thermal_profile::forget();
+    }
     let current = crate::hardware::profile::get_current_profile();
 
     // The charge left outranks the supply: arriving on battery already below

@@ -786,7 +786,9 @@ fn write_firmware_index(profile: PowerProfile, index: u8, write: ModeWrite, daem
     if firmware_write_needed(
         write,
         daemon_told,
-        crate::hardware::thermal_profile::current,
+        // Live, not remembered: at startup the boot service may have just
+        // written the index, before the app's change watchers were armed.
+        crate::hardware::thermal_profile::read,
         index,
     ) {
         if let Err(e) = crate::hardware::thermal_profile::set(index) {
