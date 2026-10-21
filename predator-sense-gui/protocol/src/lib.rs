@@ -402,6 +402,9 @@ pub mod helper {
         /// controller's own ranges by the helper. Opcode is this keyboard's
         /// effect id - see `hardware::keyboard_rgb::Effect`.
         ChiconyEffect,
+        /// Switches the keyboard's own 30 s auto-off timer. Args: 0|1
+        /// (1 = on, the firmware default; the setting resets at boot).
+        ChiconyAutoOff,
         /// Mode-key cycles, as comma-separated WMI profile indices, written to
         /// facer's `mode_cycle_ac`/`mode_cycle_battery`. Args: AC BATTERY,
         /// either of which may be `skip` to leave that list alone. The key is
@@ -458,7 +461,7 @@ pub mod helper {
     }
 
     impl Action {
-        pub const ALL: [Self; 48] = [
+        pub const ALL: [Self; 49] = [
             Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
@@ -498,6 +501,7 @@ pub mod helper {
             Self::ChiconyRgb,
             Self::ChiconyColor,
             Self::ChiconyEffect,
+            Self::ChiconyAutoOff,
             Self::ModeCycle,
             Self::ThermalProfile,
             Self::BootReapplyThermal,
@@ -550,6 +554,7 @@ pub mod helper {
                 "chicony-rgb" => Some(Self::ChiconyRgb),
                 "chicony-color" => Some(Self::ChiconyColor),
                 "chicony-effect" => Some(Self::ChiconyEffect),
+                "chicony-auto-off" => Some(Self::ChiconyAutoOff),
                 "mode-cycle" => Some(Self::ModeCycle),
                 "thermal-profile" => Some(Self::ThermalProfile),
                 "boot-reapply-thermal" => Some(Self::BootReapplyThermal),
@@ -604,6 +609,7 @@ pub mod helper {
                 Self::ChiconyRgb => "chicony-rgb",
                 Self::ChiconyColor => "chicony-color",
                 Self::ChiconyEffect => "chicony-effect",
+                Self::ChiconyAutoOff => "chicony-auto-off",
                 Self::ModeCycle => "mode-cycle",
                 Self::ThermalProfile => "thermal-profile",
                 Self::BootReapplyThermal => "boot-reapply-thermal",
@@ -657,6 +663,7 @@ pub mod helper {
                 Self::ChiconyRgb => 4,
                 Self::ChiconyColor => 4,
                 Self::ChiconyEffect => 7,
+                Self::ChiconyAutoOff => 1,
                 Self::ModeCycle => 2,
                 Self::ThermalProfile => 1,
                 Self::BootReapplyThermal => 1,
@@ -712,6 +719,7 @@ pub mod helper {
                 Self::ChiconyRgb => "chicony-rgb EFFECT BRIGHTNESS COLOR SPEED",
                 Self::ChiconyColor => "chicony-color RED GREEN BLUE BRIGHTNESS",
                 Self::ChiconyEffect => "chicony-effect OPCODE SPEED BRIGHTNESS RED GREEN BLUE DIRECTION",
+                Self::ChiconyAutoOff => "chicony-auto-off 0|1",
                 Self::ModeCycle => "mode-cycle AC|skip BATTERY|skip",
                 Self::ThermalProfile => "thermal-profile INDEX",
                 Self::BootReapplyThermal => "boot-reapply-thermal USER_HOME",
@@ -1658,6 +1666,14 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_firmware_actions_are_wired_up() {
+        assert!(Action::ALL.contains(&Action::ChiconyAutoOff));
+        assert_eq!(Action::parse("chicony-auto-off"), Some(Action::ChiconyAutoOff));
+        assert_eq!(Action::ChiconyAutoOff.argument_count(), 1);
+        assert_eq!(Action::ChiconyAutoOff.usage(), "chicony-auto-off 0|1");
+    }
+
+    #[test]
     fn installed_binary_names_do_not_share_exact_names() {
         let names = [
             super::binary::INSTALLER,
@@ -2455,5 +2471,372 @@ mod temp_limit_tests {
         assert!(!path.with_extension("tmp").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Reading and matching this machine's DMI identity.
+///
+/// Lives here because both the GUI and the installer need it and the installer
+/// cannot depend on the GUI crate. It used to exist twice, and the two copies
+/// had already drifted: only the GUI honoured the `PREDATOR_SENSE_FORCE_MODEL`
+/// override, so the hotkey daemon ignored the documented escape hatch.
+pub mod dmi {
+    /// Chassis with the dedicated PredatorSense key beside NumLock.
+    ///
+    /// One list, used by the daemon that watches the key and by the GUI page
+    /// that offers to rebind it. Add a model only once someone has confirmed
+    /// it on real hardware.
+    pub const PREDATOR_KEY_MODELS: &[&str] = &["PH16-71"];
+
+    /// Chassis whose Chicony keyboard is confirmed to accept the 24-bit
+    /// command family ([`keyboard`](crate::keyboard): `B1..` preamble, `0x14`
+    /// RGB packet, `08 02 ..` effect packet).
+    ///
+    /// Deliberately a model list rather than a USB-ID check: `04F2:0117` is
+    /// also the Helios 300 (PH317-56) generation, which the GUI drives with
+    /// the older `08 00 .. BE` family. Keying off the USB ID alone would send
+    /// this generation's packets to that one and take over its working RGB
+    /// page. One list for the GUI, which drives this keyboard, and for the
+    /// privileged helper, which sends this family only there and hands the
+    /// keyboard's idle timer back there when the GUI is gone.
+    pub const CHICONY_24BIT_MODELS: &[&str] = &["PH16-71"];
+
+    /// True when `product_name` names one of `models`.
+    ///
+    /// Model codes are compared as whole whitespace-separated words, so
+    /// `PH16-71` matches `"Predator PH16-71"` but not `"Predator PH16-71X"` -
+    /// a different chassis whose firmware is not known to behave the same way.
+    /// Pure, so it is testable without touching DMI or the environment.
+    pub fn matches_model(product_name: &str, models: &[&str]) -> bool {
+        product_name
+            .split_whitespace()
+            .any(|part| models.iter().any(|m| part.eq_ignore_ascii_case(m)))
+    }
+
+    /// [`matches_model`] against this machine's DMI `product_name`.
+    ///
+    /// `PREDATOR_SENSE_FORCE_MODEL` overrides the DMI read so someone on an
+    /// unlisted chassis can try a gated path and report back without
+    /// rebuilding.
+    /// This machine's DMI `product_name`, read once.
+    ///
+    /// `PREDATOR_SENSE_FORCE_MODEL` is consulted first and is captured once
+    /// too: it is a developer override read at startup, and re-reading the
+    /// environment four times a second to notice a change nobody makes was the
+    /// cost this removes. Neither value can change without restarting the
+    /// process, or the machine.
+    pub fn product_name() -> &'static str {
+        static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        NAME.get_or_init(|| {
+            std::env::var("PREDATOR_SENSE_FORCE_MODEL")
+                .ok()
+                .or_else(|| {
+                    std::fs::read_to_string("/sys/class/dmi/id/product_name")
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                })
+                .unwrap_or_default()
+        })
+        .as_str()
+    }
+
+    pub fn product_matches(models: &[&str]) -> bool {
+        matches_model(product_name(), models)
+    }
+}
+
+#[cfg(test)]
+mod dmi_tests {
+    use super::dmi;
+
+    #[test]
+    fn a_model_code_matches_as_a_whole_word() {
+        assert!(dmi::matches_model("Predator PH16-71", &["PH16-71"]));
+        assert!(dmi::matches_model("predator ph16-71", &["PH16-71"]));
+    }
+
+    #[test]
+    fn a_longer_code_sharing_a_prefix_does_not_match() {
+        // PH16-71X is a different chassis whose firmware is not known to
+        // behave the same way. This is the whole reason the comparison is
+        // whole-word rather than a substring test.
+        assert!(!dmi::matches_model("Predator PH16-71X", &["PH16-71"]));
+    }
+
+    #[test]
+    fn an_empty_name_or_list_matches_nothing() {
+        assert!(!dmi::matches_model("", &["PH16-71"]));
+        assert!(!dmi::matches_model("Predator PH16-71", &[]));
+    }
+
+    #[test]
+    fn any_listed_model_matches() {
+        assert!(dmi::matches_model("Nitro AN515-58", &["PH16-71", "AN515-58"]));
+    }
+
+    #[test]
+    fn the_dmi_name_is_read_once_and_remembered() {
+        // The 250 ms idle timer asks this four times a second for a value that
+        // cannot change without a reboot. Reading the file every time was pure
+        // cost.
+        let first = dmi::product_name();
+        let second = dmi::product_name();
+        assert_eq!(first, second);
+        assert!(
+            std::ptr::eq(first, second),
+            "the same cached string, not a re-read"
+        );
+    }
+
+    #[test]
+    fn the_predator_key_list_is_the_one_both_crates_use() {
+        assert_eq!(dmi::PREDATOR_KEY_MODELS, &["PH16-71"]);
+    }
+
+    #[test]
+    fn the_24bit_keyboard_list_is_the_one_both_crates_use() {
+        assert_eq!(dmi::CHICONY_24BIT_MODELS, &["PH16-71"]);
+        assert!(!dmi::matches_model(
+            "Predator PH317-56",
+            dmi::CHICONY_24BIT_MODELS
+        ));
+    }
+}
+
+/// The Chicony 24-bit keyboard (04F2:0117, PH16-71): its wire format and the
+/// values that cross the process boundary.
+///
+/// Two processes talk to this controller: the GUI through the hidraw node of
+/// its lighting interface (the `predator-sense-hidraw` crate), and
+/// the privileged helper when the GUI cannot open that node, through the
+/// same node as root, or over USB control transfers when the node cannot be
+/// found. Both send the reports built here, so the two paths put the same
+/// bytes on the wire. The format was read from PredatorSense's own USB
+/// controller library and tested on a PH16-71 (2026-10-16): feature reports
+/// of 8 bytes, with no report IDs.
+pub mod keyboard {
+    /// The controller's own brightness ceiling (`0x32`). Its Fn backlight
+    /// keys step through 0, 12, 25, 37 and 50.
+    pub const BRIGHTNESS_MAX: u8 = 50;
+
+    /// A percent on the controller's scale, rounded down. Above 100 counts as
+    /// 100.
+    pub fn percent_to_raw(percent: u8) -> u8 {
+        ((percent.min(100) as u16 * BRIGHTNESS_MAX as u16) / 100) as u8
+    }
+
+    /// Bytes in every feature report.
+    pub const FEATURE_LEN: usize = 8;
+
+    /// Byte 7 of every feature report: the complement of the sum of bytes
+    /// 0..6. The firmware does not check it, but Acer's software always
+    /// sends it.
+    pub fn checksum(report: &mut [u8; FEATURE_LEN]) {
+        let sum = report[..7].iter().fold(0u8, |acc, byte| acc.wrapping_add(*byte));
+        report[7] = !sum;
+    }
+
+    /// `head` with its checksum appended.
+    fn sealed(head: [u8; 7]) -> [u8; FEATURE_LEN] {
+        let mut report = [0u8; FEATURE_LEN];
+        report[..7].copy_from_slice(&head);
+        checksum(&mut report);
+        report
+    }
+
+    /// The reset the controller expects before a colour and effect.
+    pub const PREAMBLE: [u8; FEATURE_LEN] = [0xB1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4E];
+
+    /// Speed runs 1 (fastest) to 9 (slowest) on the wire.
+    const SPEED_FAST: u8 = 1;
+    const SPEED_SLOW: u8 = 9;
+
+    /// Which palette entry an effect shows: 1 is entry 0, the one
+    /// [`colour_packet`] writes (8 would be a random colour).
+    const COLOUR_FROM_PACKET: u8 = 0x01;
+
+    /// A percent, higher faster, as the wire's speed byte.
+    fn scale_speed(percent: u8) -> u8 {
+        if percent >= 100 {
+            return SPEED_FAST;
+        }
+        let range = (SPEED_SLOW - SPEED_FAST) as u16;
+        (SPEED_SLOW - ((percent as u16 * range) / 100) as u8).max(SPEED_FAST)
+    }
+
+    /// `14 00 00 RR GG BB 00 CK`: palette entry 0 as a real 24-bit colour.
+    /// On its own it changes nothing; the effect report after it shows it.
+    pub fn colour_packet(red: u8, green: u8, blue: u8) -> [u8; FEATURE_LEN] {
+        sealed([0x14, 0x00, 0x00, red, green, blue, 0x00])
+    }
+
+    /// Every effect opcode the controller is known to take, in the effect
+    /// report's byte 2: static 01, breathing 02, wave 03, snake 05, ripple
+    /// 06, rainbow 08, rain 0A, lightning 12, spot 25, stars 26, fireball
+    /// 27, snow 28, heartbeat 29. The GUI's `keyboard_rgb::Effect` sends
+    /// these and no other, and the privileged helper refuses any other.
+    pub const EFFECT_OPCODES: [u8; 13] = [
+        0x01, 0x02, 0x03, 0x05, 0x06, 0x08, 0x0A, 0x12, 0x25, 0x26, 0x27, 0x28, 0x29,
+    ];
+
+    /// Whether `opcode` is one of [`EFFECT_OPCODES`].
+    pub fn is_effect_opcode(opcode: u8) -> bool {
+        EFFECT_OPCODES.contains(&opcode)
+    }
+
+    /// One firmware effect in one colour: the preamble, the colour, then
+    /// `08 02 MODE SPEED BRIGHT 01 DIR CK`. `speed` and `brightness` are
+    /// percents (above 100 counts as 100), `direction` 1..=6 (kept to that
+    /// range). The three go out together, in this order.
+    pub fn effect_packets(
+        opcode: u8,
+        speed: u8,
+        brightness: u8,
+        red: u8,
+        green: u8,
+        blue: u8,
+        direction: u8,
+    ) -> [[u8; FEATURE_LEN]; 3] {
+        let effect = sealed([
+            0x08,
+            0x02,
+            opcode,
+            scale_speed(speed),
+            percent_to_raw(brightness),
+            COLOUR_FROM_PACKET,
+            direction.clamp(1, 6),
+        ]);
+        [PREAMBLE, colour_packet(red, green, blue), effect]
+    }
+
+    /// `30 01 ST 00 00 00 00 CK`: the keyboard's own auto-off after 30 s
+    /// idle, on or off.
+    pub fn auto_off_packet(on: bool) -> [u8; FEATURE_LEN] {
+        sealed([0x30, 0x01, u8::from(on), 0, 0, 0, 0])
+    }
+
+}
+
+#[cfg(test)]
+mod keyboard_tests {
+    use super::keyboard;
+
+    #[test]
+    fn only_the_known_effect_opcodes_are_effects() {
+        for opcode in keyboard::EFFECT_OPCODES {
+            assert!(keyboard::is_effect_opcode(opcode));
+        }
+        for opcode in [0x00, 0x04, 0x07, 0x09, 0x0B, 0x11, 0x13, 0x24, 0x2A, 0xFF] {
+            assert!(!keyboard::is_effect_opcode(opcode), "{opcode:#04x}");
+        }
+        let accepted = (0..=255u8)
+            .filter(|&o| keyboard::is_effect_opcode(o))
+            .count();
+        assert_eq!(accepted, keyboard::EFFECT_OPCODES.len());
+    }
+
+    #[test]
+    fn the_scale_ends_at_the_controllers_own_ceiling() {
+        assert_eq!(keyboard::BRIGHTNESS_MAX, 0x32);
+        assert_eq!(keyboard::percent_to_raw(100), keyboard::BRIGHTNESS_MAX);
+        assert_eq!(keyboard::percent_to_raw(0), 0);
+        // Floored, as the helper always scaled it.
+        assert_eq!(keyboard::percent_to_raw(99), 49);
+        assert_eq!(keyboard::percent_to_raw(255), keyboard::BRIGHTNESS_MAX);
+    }
+
+    fn byte_sum(bytes: &[u8]) -> u8 {
+        bytes.iter().fold(0u8, |acc, byte| acc.wrapping_add(*byte))
+    }
+
+    #[test]
+    fn the_checksum_is_the_complement_of_the_byte_sum() {
+        let cases: [([u8; 7], u8); 4] = [
+            ([0x30, 0x01, 0x00, 0, 0, 0, 0], 0xce),
+            ([0x30, 0x01, 0x01, 0, 0, 0, 0], 0xcd),
+            ([0xb1, 0, 0, 0, 0, 0, 0], 0x4e),
+            ([0x08, 0x02, 0x02, 0x07, 0x32, 0x01, 0x01], 0xb8),
+        ];
+        for (head, expected) in cases {
+            let mut packet = [0u8; 8];
+            packet[..7].copy_from_slice(&head);
+            packet[7] = 0x55;
+            keyboard::checksum(&mut packet);
+            assert_eq!(packet[..7], head, "the data bytes are left alone");
+            assert_eq!(packet[7], expected, "{head:02x?}");
+        }
+    }
+
+    #[test]
+    fn the_preamble_is_the_reset_report() {
+        assert_eq!(keyboard::PREAMBLE, [0xb1, 0, 0, 0, 0, 0, 0, 0x4e]);
+    }
+
+    #[test]
+    fn the_colour_packet_writes_palette_entry_zero() {
+        assert_eq!(
+            keyboard::colour_packet(0xff, 0x80, 0x00),
+            [0x14, 0, 0, 0xff, 0x80, 0x00, 0, 0x6c]
+        );
+        assert_eq!(keyboard::colour_packet(1, 2, 3), [0x14, 0, 0, 1, 2, 3, 0, 0xe5]);
+    }
+
+    #[test]
+    fn an_effect_is_the_preamble_the_colour_and_the_effect_report() {
+        assert_eq!(
+            keyboard::effect_packets(0x02, 50, 100, 1, 2, 3, 1),
+            [
+                [0xb1, 0, 0, 0, 0, 0, 0, 0x4e],
+                [0x14, 0, 0, 1, 2, 3, 0, 0xe5],
+                // Breathing, speed 5, brightness 50, palette entry 0, dir 1.
+                [0x08, 0x02, 0x02, 0x05, 0x32, 0x01, 0x01, 0xba],
+            ]
+        );
+        // Static, as the app sends a solid colour.
+        assert_eq!(
+            keyboard::effect_packets(0x01, 0, 100, 0, 174, 199, 1)[2],
+            [0x08, 0x02, 0x01, 0x09, 0x32, 0x01, 0x01, 0xb7]
+        );
+    }
+
+    #[test]
+    fn the_effect_speed_runs_from_slow_to_fast_on_the_wire() {
+        let speed = |percent| keyboard::effect_packets(0x02, percent, 100, 0, 0, 0, 1)[2][3];
+        assert_eq!(speed(0), 9);
+        assert_eq!(speed(50), 5);
+        assert_eq!(speed(99), 2);
+        assert_eq!(speed(100), 1);
+        assert_eq!(speed(255), 1);
+    }
+
+    #[test]
+    fn the_effect_brightness_is_a_percent_on_the_controllers_scale() {
+        for percent in [0u8, 24, 50, 74, 99, 100, 255] {
+            let packets = keyboard::effect_packets(0x01, 0, percent, 0, 0, 0, 1);
+            assert_eq!(packets[2][4], keyboard::percent_to_raw(percent), "{percent} %");
+        }
+    }
+
+    #[test]
+    fn the_effect_direction_is_kept_to_the_six_the_controller_has() {
+        let direction = |dir| keyboard::effect_packets(0x03, 50, 100, 0, 0, 0, dir)[2][6];
+        for dir in 1..=6 {
+            assert_eq!(direction(dir), dir);
+        }
+        assert_eq!(direction(0), 1);
+        assert_eq!(direction(9), 6);
+    }
+
+    #[test]
+    fn every_effect_report_ends_in_its_checksum() {
+        for packet in keyboard::effect_packets(0x29, 37, 74, 9, 8, 7, 4) {
+            assert_eq!(packet[7], !byte_sum(&packet[..7]), "{packet:02x?}");
+        }
+    }
+
+    #[test]
+    fn the_auto_off_report_carries_the_timer_state_in_byte_two() {
+        assert_eq!(keyboard::auto_off_packet(false), [0x30, 0x01, 0, 0, 0, 0, 0, 0xce]);
+        assert_eq!(keyboard::auto_off_packet(true), [0x30, 0x01, 1, 0, 0, 0, 0, 0xcd]);
     }
 }

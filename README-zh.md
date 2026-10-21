@@ -624,6 +624,7 @@ predator-sense-gui/
 │   └── dkms.conf                # DKMS 自动重新编译配置
 ├── installer/                   # Rust multicall 安装程序与服务
 │   ├── Cargo.toml
+│   ├── assets/                  # 托盘图标像素图（ARGB32，来自 resources/tray）
 │   └── src/
 │       ├── main.rs              # 根据已安装可执行文件名进行的类型化分发
 │       ├── constants.rs         # 集中管理的路径、协议值和硬件常量
@@ -634,7 +635,10 @@ predator-sense-gui/
 │       └── i18n.rs              # 类型化的 EN/PT 消息
 ├── protocol/                    # 共享的类型化 GUI/helper 契约
 │   ├── Cargo.toml
-│   └── src/lib.rs               # 操作、路径、限制和二进制文件名
+│   └── src/lib.rs               # 操作、路径、限制、二进制文件名、键盘报告
+├── hidraw/                      # PH16-71 键盘灯光的 hidraw 节点（一个 ioctl）
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Rust GTK4 应用程序
 │   ├── main.rs
 │   ├── app_state.rs             # 全局窗口可见性标志（用于控制定时器）
@@ -644,11 +648,14 @@ predator-sense-gui/
 │   ├── hardware/
 │   │   ├── helper.rs            # 类型化的特权 helper 客户端
 │   │   ├── rgb.rs               # 通过 /dev/acer-gkbbl-* 实现的 RGB
+│   │   ├── keyboard_rgb.rs      # 通过 hidraw 访问的 PH16-71 键盘（Chicony 24 位）
+│   │   ├── chicony_hid.rs       # 保持打开的键盘 hidraw 节点
 │   │   ├── hwmon.rs             # /sys/class/hwmon 索引（使用 OnceLock 缓存）
 │   │   ├── sensors.rs           # 温度、风扇、RAM、网络
-│   │   ├── gpu.rs               # 带 TTL 缓存的 nvidia-smi 解析器
+│   │   ├── gpu.rs               # 通过 NVML 获取 GPU 指标，经 helper 设置功率上限
+│   │   ├── nvml.rs              # 运行时加载的 NVML（dlopen）
 │   │   ├── procs.rs             # /proc 采样器（每核 CPU、内存、进程列表）
-│   │   ├── storage.rs           # 通过 df 获取磁盘使用情况
+│   │   ├── storage.rs           # 通过 statvfs 获取磁盘使用情况
 │   │   ├── sysinfo.rs           # DMI + CPU + GPU + 操作系统规格
 │   │   ├── fan.rs               # 风扇模式 + CoolBoost
 │   │   ├── extras.rs            # 电池限制、LCD 超频、USB 充电、开机动画
@@ -659,6 +666,9 @@ predator-sense-gui/
 │   │   └── setup.rs             # 内核模块管理
 │   └── ui/                      # GTK4 页面（Cairo 自定义控件）
 │       ├── window.rs            # 主窗口、侧边栏、霓虹条、隐藏到托盘
+│       ├── still_drawing.rs     # 以像素保存的静态绘制
+│       ├── ticks.rs             # 仅在可见时运行的动画计时器
+│       ├── flow_box.rs          # 不移除子项的 FlowBox 内容更新
 │       ├── dashboard_page.rs    # 主视觉区 + 系统规格
 │       ├── temperatures_page.rs # 全部温度仪表盘
 │       ├── usage_page.rs        # 带占用最高进程的 CPU/GPU/内存/存储
@@ -673,8 +683,9 @@ predator-sense-gui/
 │       ├── setup_page.rs        # 内核模块安装向导
 │       └── gauge_widget.rs      # 虚线圆形仪表盘控件
 └── resources/
+    ├── tray/                    # 托盘图标源文件（PNG）
     ├── style.css                # 游戏风格深色主题
-    └── predator-icon.svg        # 系统托盘图标
+    └── predator-icon.svg        # 应用图标
 ```
 
 ---

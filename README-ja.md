@@ -568,6 +568,7 @@ predator-sense-gui/
 │   └── dkms.conf                # DKMS自動再ビルド設定
 ├── installer/                   # Rust製マルチコールインストーラーとサービス
 │   ├── Cargo.toml
+│   ├── assets/                  # トレイアイコンのピクセルマップ（ARGB32、resources/trayから）
 │   └── src/
 │       ├── main.rs              # インストール済みの実行ファイル名による型付きディスパッチ
 │       ├── constants.rs         # 中央集権的なパス、プロトコル値、ハードウェア定数
@@ -578,7 +579,10 @@ predator-sense-gui/
 │       └── i18n.rs              # 型付きEN/PTメッセージ
 ├── protocol/                    # 共有される型付きGUI/ヘルパー契約
 │   ├── Cargo.toml
-│   └── src/lib.rs               # アクション、パス、上限値、バイナリ名
+│   └── src/lib.rs               # アクション、パス、上限値、バイナリ名、キーボードのレポート
+├── hidraw/                      # PH16-71キーボードのライティング用hidrawノード（ioctlはひとつ）
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Rust製GTK4アプリケーション
 │   ├── main.rs
 │   ├── app_state.rs             # グローバルなウィンドウ表示状態フラグ（タイマーをゲート）
@@ -588,11 +592,14 @@ predator-sense-gui/
 │   ├── hardware/
 │   │   ├── helper.rs            # 型付き特権ヘルパークライアント
 │   │   ├── rgb.rs               # /dev/acer-gkbbl-*経由のRGB
+│   │   ├── keyboard_rgb.rs      # hidraw経由のPH16-71キーボード（Chicony 24ビット）
+│   │   ├── chicony_hid.rs       # 開いたままにするキーボードのhidrawノード
 │   │   ├── hwmon.rs             # /sys/class/hwmonインデックス（OnceLockでキャッシュ）
 │   │   ├── sensors.rs           # 温度、ファン、RAM、ネットワーク
-│   │   ├── gpu.rs               # TTLキャッシュ付きnvidia-smiパーサー
+│   │   ├── gpu.rs               # NVML経由のGPU値、ヘルパー経由の電力制限
+│   │   ├── nvml.rs              # 実行時に読み込むNVML（dlopen）
 │   │   ├── procs.rs             # /procサンプラー（コアごとのCPU、メモリ、プロセス一覧）
-│   │   ├── storage.rs           # df経由のディスク使用量
+│   │   ├── storage.rs           # statvfs経由のディスク使用量
 │   │   ├── sysinfo.rs           # DMI + CPU + GPU + OSの仕様
 │   │   ├── fan.rs               # ファンモード + CoolBoost
 │   │   ├── extras.rs            # バッテリー制限、LCDオーバードライブ、USB充電、起動アニメーション
@@ -603,6 +610,9 @@ predator-sense-gui/
 │   │   └── setup.rs             # カーネルモジュール管理
 │   └── ui/                      # GTK4ページ（Cairoカスタムウィジェット）
 │       ├── window.rs            # メインウィンドウ、サイドバー、ネオンバー、トレイへの非表示化
+│       ├── still_drawing.rs     # 静的な描画をピクセルとして保持
+│       ├── ticks.rs             # 表示中だけ動くアニメーションタイマー
+│       ├── flow_box.rs          # 子を削除しないFlowBoxの内容更新
 │       ├── dashboard_page.rs    # ヒーロー表示 + システム仕様
 │       ├── temperatures_page.rs # すべての温度ゲージ
 │       ├── usage_page.rs        # 上位プロセス付きのCPU/GPU/メモリ/ストレージ
@@ -617,8 +627,9 @@ predator-sense-gui/
 │       ├── setup_page.rs        # カーネルモジュールセットアップウィザード
 │       └── gauge_widget.rs      # 破線の円形ゲージウィジェット
 └── resources/
+    ├── tray/                    # トレイアイコンの元画像（PNG）
     ├── style.css                # ゲーミングダークテーマ
-    └── predator-icon.svg        # システムトレイアイコン
+    └── predator-icon.svg        # アプリアイコン
 ```
 
 ---

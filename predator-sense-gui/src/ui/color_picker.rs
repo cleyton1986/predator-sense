@@ -206,6 +206,7 @@ pub fn build(
         scale.set_draw_value(true);
         scale.set_value_pos(gtk::PositionType::Right);
         scale.add_css_class("accent-scale");
+        crate::ui::scroll_guard::redirect_scroll_to_page(&scale);
         row.append(&label);
         row.append(&scale);
         (row, scale)
@@ -415,33 +416,103 @@ pub fn build(
     (root, set_color)
 }
 
+/// Which scheduled run of a debounced action is the live one, and whether
+/// one is still waiting. Kept apart from the timer so it can be tested.
+#[derive(Default)]
+struct Pending {
+    generation: Cell<u64>,
+    waiting: Cell<bool>,
+}
+
+impl Pending {
+    /// A new trigger: earlier timers become stale. Returns this one's id.
+    fn schedule(&self) -> u64 {
+        let id = self.generation.get().wrapping_add(1);
+        self.generation.set(id);
+        self.waiting.set(true);
+        id
+    }
+
+    /// A timer fired: run only if it is the latest and nothing ran since.
+    fn fire(&self, id: u64) -> bool {
+        let run = self.waiting.get() && self.generation.get() == id;
+        if run {
+            self.waiting.set(false);
+        }
+        run
+    }
+
+    /// Run now if something is waiting; the waiting timer then does nothing.
+    fn flush(&self) -> bool {
+        let run = self.waiting.get();
+        if run {
+            self.waiting.set(false);
+            self.generation.set(self.generation.get().wrapping_add(1));
+        }
+        run
+    }
+}
+
 /// Debounce helper for live-applying to hardware.
 ///
 /// Every widget here reports intermediate values, so a slider drag produces
 /// dozens of events per second; each lighting write is a USB control transfer
 /// or a WMI call through a privileged helper. This coalesces a burst into one
 /// write shortly after the user stops moving.
-pub fn debouncer(delay_ms: u32, action: Rc<dyn Fn()>) -> Rc<dyn Fn()> {
-    let generation = Rc::new(Cell::new(0u64));
-    Rc::new(move || {
-        let current = generation.get().wrapping_add(1);
-        generation.set(current);
-        let generation = generation.clone();
+///
+/// Returns the trigger and a flush. The flush runs a waiting action at once,
+/// for a caller about to exit or to replace the state the action would write
+/// (a settings import), so the last edit is not lost.
+pub fn debouncer(delay_ms: u32, action: Rc<dyn Fn()>) -> (Rc<dyn Fn()>, Rc<dyn Fn()>) {
+    let pending = Rc::new(Pending::default());
+    let trigger: Rc<dyn Fn()> = {
+        let pending = pending.clone();
         let action = action.clone();
-        glib::timeout_add_local_once(
-            std::time::Duration::from_millis(delay_ms as u64),
-            move || {
-                if generation.get() == current {
-                    action();
-                }
-            },
-        );
-    })
+        Rc::new(move || {
+            let id = pending.schedule();
+            let pending = pending.clone();
+            let action = action.clone();
+            glib::timeout_add_local_once(
+                std::time::Duration::from_millis(delay_ms as u64),
+                move || {
+                    if pending.fire(id) {
+                        action();
+                    }
+                },
+            );
+        })
+    };
+    let flush: Rc<dyn Fn()> = Rc::new(move || {
+        if pending.flush() {
+            action();
+        }
+    });
+    (trigger, flush)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_latest_trigger_runs() {
+        let p = Pending::default();
+        let first = p.schedule();
+        let second = p.schedule();
+        assert!(!p.fire(first), "a stale timer does nothing");
+        assert!(p.fire(second));
+        assert!(!p.fire(second), "and runs once");
+    }
+
+    #[test]
+    fn a_flush_runs_the_waiting_edit_once() {
+        let p = Pending::default();
+        assert!(!p.flush(), "nothing waiting");
+        let id = p.schedule();
+        assert!(p.flush());
+        assert!(!p.fire(id), "the timer that follows a flush does nothing");
+        assert!(!p.flush());
+    }
 
     #[test]
     fn hsv_round_trips_through_rgb() {

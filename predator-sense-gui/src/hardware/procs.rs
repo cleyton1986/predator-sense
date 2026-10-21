@@ -89,7 +89,8 @@ impl UsageSampler {
         let cpu_total_delta = total_ticks.total.saturating_sub(self.cpu_total.total);
 
         // Processos
-        let processes = read_processes(&mut self.proc_prev, cpu_total_delta, self.num_cpus);
+        let users = read_users();
+        let processes = read_processes(&mut self.proc_prev, cpu_total_delta, self.num_cpus, &users);
 
         // Memória
         let mem = read_meminfo();
@@ -206,13 +207,14 @@ fn read_processes(
     prev: &mut HashMap<u32, (u64, u64)>,
     cpu_total_delta: u64,
     num_cpus: usize,
+    users: &HashMap<u32, String>,
 ) -> Vec<ProcessInfo> {
     let entries = match fs::read_dir("/proc") {
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
 
-    let mut seen: Vec<u32> = Vec::new();
+    let mut seen: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut out: Vec<ProcessInfo> = Vec::new();
 
     for entry in entries.flatten() {
@@ -225,7 +227,7 @@ fn read_processes(
             Ok(v) => v,
             Err(_) => continue,
         };
-        seen.push(pid);
+        seen.insert(pid);
 
         let stat_path = entry.path().join("stat");
         let stat = match fs::read_to_string(&stat_path) {
@@ -283,7 +285,9 @@ fn read_processes(
                     .and_then(|s| s.parse().ok());
             }
         }
-        let user = uid.map(uid_to_name).unwrap_or_else(|| "—".into());
+        let user = uid
+            .map(|uid| users.get(&uid).cloned().unwrap_or_else(|| uid.to_string()))
+            .unwrap_or_else(|| "—".into());
 
         // cmdline
         let cmd = fs::read_to_string(entry.path().join("cmdline")).unwrap_or_default();
@@ -306,18 +310,24 @@ fn read_processes(
     out
 }
 
-fn uid_to_name(uid: u32) -> String {
-    if let Ok(c) = fs::read_to_string("/etc/passwd") {
-        for line in c.lines() {
-            let parts: Vec<&str> = line.split(':').collect();
-            if parts.len() >= 3 {
-                if parts[2].parse::<u32>().ok() == Some(uid) {
-                    return parts[0].to_string();
-                }
+/// User names by uid from `/etc/passwd`, read once per sample: it used to be read again
+/// for every process (about 550 times a sample here).
+fn read_users() -> HashMap<u32, String> {
+    parse_users(&fs::read_to_string("/etc/passwd").unwrap_or_default())
+}
+
+fn parse_users(passwd: &str) -> HashMap<u32, String> {
+    let mut users = HashMap::new();
+    for line in passwd.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 3 {
+            if let Ok(uid) = parts[2].parse::<u32>() {
+                // The first line for a uid wins, as the old line-by-line search had it.
+                users.entry(uid).or_insert_with(|| parts[0].to_string());
             }
         }
     }
-    uid.to_string()
+    users
 }
 
 pub fn top_by_cpu(processes: &[ProcessInfo], n: usize) -> Vec<ProcessInfo> {
@@ -343,4 +353,17 @@ fn read_cpu_temperature() -> Option<f64> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_users;
+
+    #[test]
+    fn users_are_looked_up_by_uid_first_line_first() {
+        let users = parse_users("root:x:0:0::/root:/bin/bash\nghost:x:1000:1000::/home/ghost:/bin/zsh\ntwin:x:1000:1000::/:/bin/sh\nbroken line\n");
+        assert_eq!(users.get(&0).map(String::as_str), Some("root"));
+        assert_eq!(users.get(&1000).map(String::as_str), Some("ghost"));
+        assert_eq!(users.len(), 2);
+    }
 }

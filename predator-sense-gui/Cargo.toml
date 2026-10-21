@@ -13,8 +13,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "5"
 libc = "0.2"
+predator-sense-hidraw = { path = "hidraw" }
 predator-sense-protocol = { path = "protocol" }
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+
+[dev-dependencies]
+# Scratch directories for the tests, made private and new for each.
+tempfile = "3"
 
 # Same release profile the installer crate already uses (installer/Cargo.toml).
 # `panic = "abort"` is deliberately left out here: the installer is a small

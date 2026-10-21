@@ -4,6 +4,7 @@ use predator_sense_protocol::helper::{
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 const PROFILE_STATE_FILE: &str = "/opt/predator-sense/current_profile";
 
@@ -32,6 +33,46 @@ static MANAGE_CPU_POWER: AtomicBool = AtomicBool::new(true);
 
 /// Set once the GPU refused a power-limit write as unsupported by its vBIOS.
 static GPU_POWER_LIMIT_UNSUPPORTED: AtomicBool = AtomicBool::new(false);
+
+/// How many profile switches are asked for and not finished yet, the ones
+/// waiting their turn on the switching thread included (`request`).
+///
+/// A profile switch is not atomic: it writes the CPU controls, then the GPU
+/// wattage (an `nvidia-smi` call that can take seconds on a laptop dGPU that
+/// has to wake up first), then the firmware thermal index, and it runs on a
+/// background thread so the UI stays alive. A poll landing in the middle sees
+/// a machine whose controls genuinely disagree, which is exactly what
+/// [`coherent_profile`] is built to report - and what
+/// [`completion_target`] is built to act on. Without this the two combine
+/// into a redundant second apply of the mode the app is already applying,
+/// logged as though something outside the app had moved it.
+static APPLIES_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// True while any thread is part-way through a profile switch. Callers that
+/// reconcile the machine against what it displays must sit that out rather
+/// than race it.
+pub fn apply_in_flight() -> bool {
+    APPLIES_IN_FLIGHT.load(Ordering::Relaxed) > 0
+}
+
+/// Decrements on drop, so `set_profile`'s several early returns cannot leave
+/// the count stuck above zero and silence the reconciler for the rest of the
+/// session.
+struct ApplyGuard;
+
+impl ApplyGuard {
+    fn new() -> Self {
+        APPLIES_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for ApplyGuard {
+    fn drop(&mut self) {
+        APPLIES_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 pub fn set_manage_cpu_power(v: bool) {
     MANAGE_CPU_POWER.store(v, Ordering::Relaxed);
@@ -165,6 +206,42 @@ impl PowerProfile {
     }
 }
 
+/// The two `mode_cycle_*` attributes as the driver currently holds them.
+///
+/// `None` on a chassis where facer does not create them, which is the same
+/// condition [`push_mode_cycles`] checks before spending a helper round trip.
+pub fn read_mode_cycles() -> Option<(String, String)> {
+    const DIR: &str = "/sys/devices/platform/acer-wmi";
+    let ac = std::fs::read_to_string(format!("{DIR}/mode_cycle_ac")).ok()?;
+    let battery = std::fs::read_to_string(format!("{DIR}/mode_cycle_battery")).ok()?;
+    Some((ac, battery))
+}
+
+/// Has the driver lost the cycles the user configured?
+///
+/// The cycles live only in the kernel module, which creates both attributes
+/// empty. Startup pushes them down, but a module reload afterwards - an
+/// explicit `--reload-module`, or the DKMS rebuild that follows every kernel
+/// upgrade - empties them again with nothing to notice. The mode key does not
+/// die when that happens, which is what makes it easy to miss: a zero-length
+/// cycle sends `acer_mode_cycle_next()` back to the driver's own ladder, so the
+/// key still works and simply stops honouring the user's choice.
+///
+/// **Only absence counts, never a difference.** Config stores profile ids and
+/// the driver speaks per-machine WMI indices, and a tier the calibration
+/// cannot place is dropped from the encoded list. Treating "not what I would
+/// have written" as a loss would push on every tick for the life of the
+/// session, each one a privileged helper call.
+pub fn mode_cycles_lost(
+    kernel_ac: &str,
+    kernel_battery: &str,
+    cfg_ac: &[String],
+    cfg_battery: &[String],
+) -> bool {
+    let lost = |kernel: &str, cfg: &[String]| !cfg.is_empty() && kernel.trim().is_empty();
+    lost(kernel_ac, cfg_ac) || lost(kernel_battery, cfg_battery)
+}
+
 /// Pushes the user's mode-key cycles down to the driver.
 ///
 /// The mode key is handled inside the kernel on this hardware - no input event
@@ -296,11 +373,21 @@ fn settings_for(p: PowerProfile) -> ProfileSettings {
             // a constrained package budget that makes the CPU win the power
             // split against the GPU, which hurts GPU-bound games.
             //
-            // Left at 100 on purpose for now: `governor: Performance` above
-            // already forces high clocks, so lowering only this would not fix
-            // the behaviour, and both values are what detect_from_hardware()
-            // uses to tell Turbo apart from Performance. Changing it is a
-            // design call - see docs in the RE notes.
+            // That concern was tested on a PH16-71 and does not reproduce
+            // there, so it is left at 100 as a measured decision rather than an
+            // open question. Idle sits at ~1.2 GHz whether this is 100 or 17,
+            // by both `/proc/cpuinfo` and `scaling_cur_freq`, and idle package
+            // power differs by no more than the noise floor. With the GPU
+            // saturated it makes no difference either, with the CPU idle, with
+            // it partially loaded, or with the fans forced to maximum to remove
+            // the thermal cap: fifteen paired windows, GPU power deltas within
+            // +/-0.7 W and changing sign. NVIDIA's driver README says why it
+            // cannot: Dynamic Boost shifts power by writing `scaling_max_freq`,
+            // a different lever from this one, and the kernel clamps a policy's
+            // minimum down to its maximum.
+            //
+            // The PHN16-73 may still behave as the note above describes; this
+            // records what a PH16-71 does, not a correction of that machine.
             min_perf_pct: 100,
             no_turbo: false,
         },
@@ -340,10 +427,12 @@ fn detect_cpu_capabilities_at(sysfs_root: &Path) -> CpuCapabilities {
         && policy_dirs
             .iter()
             .all(|policy| policy.join("energy_performance_preference").exists());
-    let all_intel_pstate = !policy_dirs.is_empty()
-        && policy_dirs.iter().all(|policy| {
-            read_trimmed(&policy.join("scaling_driver")).as_deref() == Some("intel_pstate")
-        });
+    // One policy's driver is every policy's: the kernel registers a single
+    // cpufreq driver for the whole system. Reading all 24 on a PH16-71 made
+    // every mode read, which several timers make, cost 23 extra files.
+    let all_intel_pstate = policy_dirs.first().is_some_and(|policy| {
+        read_trimmed(&policy.join("scaling_driver")).as_deref() == Some("intel_pstate")
+    });
     let intel_pstate_active =
         read_trimmed(&sysfs_root.join("devices/system/cpu/intel_pstate/status")).as_deref()
             == Some("active");
@@ -363,6 +452,15 @@ fn detect_cpu_capabilities_at(sysfs_root: &Path) -> CpuCapabilities {
     }
 }
 
+/// Rough estimate of the lowest `min_perf_pct` the kernel will honour.
+///
+/// Only ever an estimate, and a basis-dependent one: `cpuinfo_max_freq` is the
+/// turbo ceiling while turbo is enabled and the base clock once `no_turbo` is
+/// set, so this same ratio answers 16 or 38 on one PH16-71 depending on which
+/// profile happens to be active when it is read, against a kernel floor that
+/// measured a constant 17 either way. Nothing may bake it into a plan for that
+/// reason - see `plan_for`. It is used only to recognise a request the kernel
+/// will round up regardless, in `state_satisfies_plan`.
 fn min_perf_floor_pct(policy_dirs: &[PathBuf]) -> Option<u32> {
     let policy = policy_dirs.first()?;
     let minimum = read_trimmed(&policy.join(CPUINFO_MIN_FREQ))?
@@ -379,12 +477,27 @@ fn min_perf_floor_pct(policy_dirs: &[PathBuf]) -> Option<u32> {
 
 fn plan_for(profile: PowerProfile, capabilities: &CpuCapabilities) -> CpuProfilePlan {
     let settings = settings_for(profile);
-    let governor = if capabilities.intel_pstate_hwp_active && profile == PowerProfile::Performance {
+    let governor = if capabilities.intel_pstate_hwp_active
+        && matches!(profile, PowerProfile::Performance | PowerProfile::Turbo)
+    {
         // With HWP, intel_pstate's "powersave" policy is a dynamic scaling
         // algorithm (not the generic minimum-frequency governor) and is the
         // policy under which a model-specific, non-zero EPP remains writable.
-        // This gives Performance a real dynamic 50%-to-max CPU tier while
-        // Turbo retains the kernel-defined maximum-only policy below.
+        // This gives Performance a real dynamic 50%-to-max CPU tier.
+        //
+        // Turbo joins it because the "performance" policy was buying nothing
+        // it did not already have, at a cost. The kernel documents that
+        // policy as restricting the P-state range "to the upper boundary" and
+        // rejecting "any attempts to change the EPP/EPB to a value different
+        // from 0" - and `min_perf_pct: 100` in settings_for already holds the
+        // floor at the upper boundary, since min_perf_pct is a percentage of
+        // "the highest supported turbo P-state". So the policy duplicated the
+        // pinning and added an EPP lockout on top: measured here, a write to
+        // energy_performance_preference under it fails with EBUSY, which is
+        // what left power-profiles-daemon stuck and unable to switch at all.
+        // The Windows app has no equivalent of any of this -
+        // its Turbo sets fan mode, the OC flag and the LED over WMI and
+        // leaves CPU frequency to the OS.
         CpuGovernor::Powersave
     } else {
         settings.governor
@@ -405,11 +518,24 @@ fn plan_for(profile: PowerProfile, capabilities: &CpuCapabilities) -> CpuProfile
         governor,
         epp,
         no_turbo: capabilities.no_turbo_supported.then_some(settings.no_turbo),
-        min_perf_pct: capabilities.min_perf_supported.then_some(
-            settings
-                .min_perf_pct
-                .max(capabilities.min_perf_floor_pct.unwrap_or_default()),
-        ),
+        // The profile's own number, deliberately unclamped. Raising it to
+        // `min_perf_floor_pct` here used to bake a *moving* value into the
+        // plan: that estimate is `cpuinfo_min_freq / cpuinfo_max_freq`, and
+        // intel_pstate collapses `cpuinfo_max_freq` from the turbo ceiling to
+        // the base clock whenever `no_turbo` is set. Measured on a PH16-71
+        // (i9-13900HX, 800 MHz min): 5.0 GHz -> floor 16 with turbo on,
+        // 2.1 GHz -> floor 38 with turbo off, while the kernel's own floor
+        // stayed a constant 17 in both states (written 5/10/16 all read back
+        // as 17). So a switch INTO Quiet or Eco computed 16 from the outgoing
+        // profile's basis, wrote that, and then the same code a second later
+        // recomputed 38 from the incoming one and called the machine
+        // unrecognisable - which is what let the AC/battery policy overwrite
+        // a keyed Eco with its configured target. It also pinned Quiet and
+        // Eco to a 38% minimum clock, the opposite of what those tiers are
+        // for. The kernel enforces its own floor on the way in, and
+        // `MinPerfMatch::AtLeast` exists precisely to accept that, so there
+        // is nothing for this to add.
+        min_perf_pct: capabilities.min_perf_supported.then_some(settings.min_perf_pct),
     }
 }
 
@@ -508,13 +634,14 @@ fn state_satisfies_plan(
     }
 
     if let Some(expected_epp) = plan.epp {
-        let kernel_forces_raw_zero = capabilities.intel_pstate_hwp_active
-            && plan.governor == CpuGovernor::Performance
-            && expected_epp == EnergyPreference::RawPerformance;
-        // Model-specific tables can render forced raw 0 as "default".  The
-        // active intel_pstate performance governor itself guarantees EPP 0,
-        // so comparing the label in this one case would create a false miss.
-        if !kernel_forces_raw_zero && state.epp.as_deref() != Some(expected_epp.as_str()) {
+        // There used to be an exemption here for a plan carrying the raw EPP
+        // 0 under the active performance governor, where the kernel forces
+        // the value and a model-specific table can render it as "default"
+        // rather than "performance". No plan is built that way any more:
+        // `plan_for` gives every profile the powersave policy on an HWP
+        // machine, and off HWP the exemption never applied. An exemption that
+        // cannot fire is worse than none, because it reads like a live rule.
+        if state.epp.as_deref() != Some(expected_epp.as_str()) {
             return false;
         }
     }
@@ -524,11 +651,23 @@ fn state_satisfies_plan(
         }
     }
     if let Some(expected_min_perf) = plan.min_perf_pct {
-        let satisfied = match (state.min_perf_pct, min_perf_match) {
-            (Some(actual), MinPerfMatch::Exact) => actual == expected_min_perf,
-            (Some(actual), MinPerfMatch::AtLeast) => actual >= expected_min_perf,
-            (None, _) => false,
-        };
+        // A request the kernel will not honour cannot identify anything.
+        // intel_pstate silently raises any min_perf_pct below its own floor,
+        // so every profile asking for less than that floor lands on the same
+        // readable value - comparing it would just reject them all. The
+        // controls that do carry information (governor, EPP, the turbo bit)
+        // still have to agree, and Eco and Quiet, which differ only here,
+        // stay apart through the cached selection the way they already do on
+        // any backend that cannot separate two presets.
+        let below_kernel_floor = capabilities
+            .min_perf_floor_pct
+            .is_some_and(|floor| expected_min_perf < floor);
+        let satisfied = below_kernel_floor
+            || match (state.min_perf_pct, min_perf_match) {
+                (Some(actual), MinPerfMatch::Exact) => actual == expected_min_perf,
+                (Some(actual), MinPerfMatch::AtLeast) => actual >= expected_min_perf,
+                (None, _) => false,
+            };
         if !satisfied {
             return false;
         }
@@ -552,6 +691,28 @@ fn write_took_effect(
     capabilities: &CpuCapabilities,
 ) -> bool {
     state_satisfies_plan(state, plan, capabilities, MinPerfMatch::AtLeast)
+}
+
+/// How a profile switch treats a firmware mode that already holds the target.
+///
+/// The EC on a PH16-71 flashes the light bar each time the firmware mode is
+/// written, even to the value it already has: measured 2026-10-17 by writing
+/// `balanced` to `platform_profile` while it read `balanced`. The app's own
+/// `thermal_profile` attribute ends in the same firmware call in facer.c. For
+/// a switch that flash is the firmware confirming it, and is wanted. The
+/// startup mode is applied on every start, also to a firmware that is
+/// already there, and there it is a flash for nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeWrite {
+    /// Write the firmware mode on every call. Every switch: the Mode page, the
+    /// mode key's completion, the power policy, GameSync, the assistant.
+    Always,
+    /// Leave the firmware mode alone when it already holds the target, and
+    /// leave the desktop's power daemon alone when it already shows the
+    /// matching profile, since telling it can write the firmware mode too. Only
+    /// those: the CPU controls, the GPU wattage and the record of the
+    /// selection are applied as usual.
+    IfChanged,
 }
 
 /// The firmware thermal-profile index the official Windows app uses for a
@@ -585,7 +746,10 @@ fn windows_static_index(profile: PowerProfile, supported: &[u8]) -> Option<u8> {
 ///
 /// Best-effort like the GPU wattage: a machine may not expose the attribute at
 /// all, and that must never fail the whole profile switch.
-fn apply_firmware_profile(profile: PowerProfile) {
+///
+/// `write` and `daemon_told` decide whether an index the firmware already
+/// holds is written again; see [`firmware_write_needed`].
+fn apply_firmware_profile(profile: PowerProfile, write: ModeWrite, daemon_told: bool) {
     if !crate::hardware::thermal_profile::is_available() {
         return;
     }
@@ -604,14 +768,7 @@ fn apply_firmware_profile(profile: PowerProfile) {
             );
             return;
         };
-        if let Err(e) = crate::hardware::thermal_profile::set(index) {
-            crate::hardware::applog::error(&format!(
-                "thermal profile {index} for {} not applied: {e}",
-                profile.to_id()
-            ));
-            return;
-        }
-        crate::hardware::thermal_profile::remember(index);
+        write_firmware_index(profile, index, write, daemon_told);
         return;
     };
     let Some(index) = calibration.index_for_tier(profile.index() as u8) else {
@@ -621,14 +778,57 @@ fn apply_firmware_profile(profile: PowerProfile) {
         );
         return;
     };
-    if let Err(e) = crate::hardware::thermal_profile::set(index) {
-        crate::hardware::applog::error(&format!(
-            "thermal profile {index} for {} not applied: {e}",
+    write_firmware_index(profile, index, write, daemon_told);
+}
+
+/// Writes `index` unless [`firmware_write_needed`] says the firmware already
+/// holds it, and records it for the boot service either way: an index left
+/// alone because it was already there is still the one this mode is on.
+fn write_firmware_index(profile: PowerProfile, index: u8, write: ModeWrite, daemon_told: bool) {
+    if firmware_write_needed(
+        write,
+        daemon_told,
+        // Live, not remembered: at startup the boot service may have just
+        // written the index, before the app's change watchers were armed.
+        crate::hardware::thermal_profile::read,
+        index,
+    ) {
+        if let Err(e) = crate::hardware::thermal_profile::set(index) {
+            crate::hardware::applog::error(&format!(
+                "thermal profile {index} for {} not applied: {e}",
+                profile.to_id()
+            ));
+            return;
+        }
+    } else {
+        crate::hardware::applog::info(&format!(
+            "firmware already on thermal profile {index} for {}; not written again",
             profile.to_id()
         ));
-        return;
     }
     crate::hardware::thermal_profile::remember(index);
+}
+
+/// Whether the firmware mode has to be written to `target`.
+///
+/// A switch always writes it, and does not spend a WMI call reading it first.
+/// The startup mode leaves an index the firmware already holds alone, unless
+/// the desktop's power daemon was just told to change profile
+/// (`daemon_told`): the daemon writes the firmware mode itself when told to
+/// change, so the index read here may be its write or the one before it, and
+/// the app writes its own as it always has, so that its write lands last.
+///
+/// `current` is lazy so that only the startup path pays for the read.
+pub(crate) fn firmware_write_needed(
+    write: ModeWrite,
+    daemon_told: bool,
+    current: impl FnOnce() -> Option<u8>,
+    target: u8,
+) -> bool {
+    match write {
+        ModeWrite::Always => true,
+        ModeWrite::IfChanged => daemon_told || current() != Some(target),
+    }
 }
 
 /// The tier the firmware's own thermal profile currently sits on, if this
@@ -705,6 +905,34 @@ pub fn coherent_profile() -> Option<PowerProfile> {
     policy_view().profile
 }
 
+/// What a mode change noticed by polling still needs applied, if anything.
+///
+/// The mode key does not go through [`set_profile`]. It cycles the firmware
+/// thermal index inside the kernel (`acer_mode_cycle_next()` in facer.c) and
+/// touches nothing else: no governor, no EPP, no turbo bit, no GPU wattage,
+/// and no record of the selection. [`get_current_profile`] lets that index
+/// win, so the UI, the mode page and the lighting follow the key at once -
+/// but only half the machine moved, and [`coherent_profile`] reports that
+/// mismatch as `None`.
+///
+/// The AC/battery policy reads `None` as "in no mode at all" and enforces its
+/// configured target, so a key press to Eco on battery was rewritten to the
+/// battery target one grace window later (60 s) - measured on a PH16-71,
+/// with the firmware sitting on Eco's index and the CPU still on Balanced's
+/// governor/EPP the whole time. Finishing the switch is what makes the key
+/// mean what it already displays, and it is also the only thing that makes a
+/// keyed Eco actually spend less power rather than just relabel itself.
+///
+/// `None` when the machine is already coherently in the displayed mode -
+/// every change this app made itself, since `set_profile` moves all of it at
+/// once.
+pub fn completion_target(
+    displayed: PowerProfile,
+    coherent: Option<PowerProfile>,
+) -> Option<PowerProfile> {
+    (coherent != Some(displayed)).then_some(displayed)
+}
+
 /// What the AC/battery policy needs to decide, read once.
 pub struct PolicyView {
     /// The profile the machine is coherently in - see [`coherent_profile`].
@@ -717,6 +945,12 @@ pub struct PolicyView {
     /// without this two distinct presses look identical and the second one
     /// inherits the first one's grace window instead of getting its own.
     pub firmware_index: Option<u8>,
+    /// What the CPU controls alone said, before the firmware tier was taken
+    /// into account. Carried so a caller reporting an unreadable machine can
+    /// say which half it could not read: `profile` collapses "the firmware
+    /// index did not come back", "the CPU matches no preset" and "the two
+    /// disagree" into one `None`, and they are three different faults.
+    pub cpu: Option<PowerProfile>,
 }
 
 pub fn policy_view() -> PolicyView {
@@ -725,6 +959,7 @@ pub fn policy_view() -> PolicyView {
     PolicyView {
         profile: reconcile(firmware_reading_for(firmware_index, cpu), cpu),
         firmware_index,
+        cpu,
     }
 }
 
@@ -737,11 +972,51 @@ pub fn policy_view() -> PolicyView {
 /// it as one would let the policy call a machine compliant while the CPU sits
 /// somewhere else entirely.
 fn cpu_belief() -> Option<PowerProfile> {
-    cpu_belief_for(
-        manage_cpu_power(),
-        || read_cpu_reading_at(Path::new(SYSFS_ROOT)),
-        cached_selection,
-    )
+    cpu_belief_for(manage_cpu_power(), recent_cpu_reading, cached_selection)
+}
+
+/// How long one reading of the cpufreq policies serves every caller.
+///
+/// A reading is a sweep of every policy (24 on a PH16-71: about 100 file
+/// opens, 1 ms), and the mode is asked for by the mode tick, the power policy
+/// and the fan reconciler on their own timers, and by each page's tick while
+/// it is shown, several times a second in all. A change made outside the app
+/// (the desktop's power daemon after an unplug, say) is seen up to this much
+/// later; the app's own switches drop the reading ([`forget_cpu_reading`]).
+const CPU_READING_TTL: std::time::Duration = std::time::Duration::from_millis(1500);
+
+static CPU_READING: Mutex<Option<(std::time::Instant, CpuReading)>> = Mutex::new(None);
+
+/// The cpufreq reading, at most [`CPU_READING_TTL`] old.
+fn recent_cpu_reading() -> CpuReading {
+    let mut cached = CPU_READING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((taken, reading)) = cached.as_ref() {
+        if reading_is_fresh(taken.elapsed()) {
+            return reading.clone();
+        }
+    }
+    let reading = read_cpu_reading_at(Path::new(SYSFS_ROOT));
+    *cached = Some((std::time::Instant::now(), reading.clone()));
+    reading
+}
+
+fn reading_is_fresh(age: std::time::Duration) -> bool {
+    age < CPU_READING_TTL
+}
+
+/// Drops the remembered cpufreq reading: the app has just changed what it
+/// would read.
+fn forget_cpu_reading() {
+    *CPU_READING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Drops the remembered cpufreq reading when a switch ends, however it ends.
+struct ForgetCpuReading;
+
+impl Drop for ForgetCpuReading {
+    fn drop(&mut self) {
+        forget_cpu_reading();
+    }
 }
 
 /// The decision behind [`cpu_belief`], split out to be testable without real
@@ -910,7 +1185,174 @@ fn read_cpu_reading_at(sysfs_root: &Path) -> CpuReading {
     }
 }
 
+/// Applies `profile` and waits for it. Blocks for the whole switch (helper
+/// round trips, `nvidia-smi`, the firmware write): the Mode page and the
+/// Turbo key use [`request_profile`] instead.
 pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
+    wait_for(request(profile, ModeWrite::Always))
+}
+
+/// [`set_profile`] for the mode applied at startup.
+///
+/// Everything a switch applies is applied, except that a firmware mode already
+/// on the target is not written again, by the app or through the desktop's
+/// power daemon. See [`ModeWrite`].
+pub fn set_profile_at_startup(profile: PowerProfile) -> Result<(), String> {
+    wait_for(request(profile, ModeWrite::IfChanged))
+}
+
+/// Starts applying `profile` and returns at once; the result arrives on the
+/// receiver. For a caller on the GTK thread that must not freeze the window
+/// for the 100 ms or more a switch takes.
+pub fn request_profile(profile: PowerProfile) -> std::sync::mpsc::Receiver<Result<(), String>> {
+    request(profile, ModeWrite::Always)
+}
+
+/// Waits for a switch [`request_profile`] started.
+pub fn wait_for(result: std::sync::mpsc::Receiver<Result<(), String>>) -> Result<(), String> {
+    result
+        .recv()
+        .unwrap_or_else(|_| Err("the profile switch stopped part-way".into()))
+}
+
+/// Every switch, waited for or not, goes through one thread in the order it
+/// was asked for: two switches never interleave their writes, and the last
+/// one asked for is the one the machine ends in. Counted as in flight from
+/// the moment it is asked for, so the reconciler and the mode tick sit out a
+/// switch that is waiting its turn too.
+fn request(
+    profile: PowerProfile,
+    write: ModeWrite,
+) -> std::sync::mpsc::Receiver<Result<(), String>> {
+    static APPLIER: OnceLock<InOrder> = OnceLock::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let in_flight = ApplyGuard::new();
+    *LAST_REQUESTED.lock().unwrap_or_else(|e| e.into_inner()) = Some(profile);
+    APPLIER
+        .get_or_init(|| InOrder::new("profile-apply"))
+        .run(Box::new(move || {
+            let result = apply_profile(profile, write);
+            finish(result, in_flight, &tx);
+        }));
+    rx
+}
+
+/// The last mode a switch was asked for, for [`intended_profile`].
+static LAST_REQUESTED: Mutex<Option<PowerProfile>> = Mutex::new(None);
+
+/// The mode the machine is in or on its way to: while switches are queued or
+/// running, the last one asked for; otherwise [`coherent_profile`]. For a
+/// caller that snapshots the mode to put it back later (the Turbo key), so it
+/// does not remember a mode a queued switch is about to replace.
+pub fn intended_profile() -> Option<PowerProfile> {
+    if apply_in_flight() {
+        if let Some(asked) = *LAST_REQUESTED.lock().unwrap_or_else(|e| e.into_inner()) {
+            return Some(asked);
+        }
+    }
+    coherent_profile()
+}
+
+/// Ends a switch: it stops counting as in flight before its result is
+/// delivered, so whoever wakes on the result already sees nothing in flight,
+/// and when no other switch is waiting, the GTK thread's mode check
+/// ([`on_switch_settled`]) runs at once instead of at its next tick.
+fn finish(
+    result: Result<(), String>,
+    in_flight: ApplyGuard,
+    tx: &std::sync::mpsc::Sender<Result<(), String>>,
+) {
+    drop(in_flight);
+    if !apply_in_flight() {
+        // A timeout source, not `MainContext::invoke`: invoke runs the call on
+        // this thread when the main context happens to be free between two
+        // iterations, where the GTK thread's hook is not.
+        gtk4::glib::timeout_add_once(std::time::Duration::ZERO, || {
+            let hook = SETTLED_HOOK.with(|hook| hook.borrow().clone());
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
+    }
+    let _ = tx.send(result);
+}
+
+thread_local! {
+    /// What runs on the GTK thread once a switch ends with none left in flight.
+    static SETTLED_HOOK: std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `check` on the GTK thread whenever a switch ends with no other switch
+/// queued or running. The mode watcher sits out a switch in flight, and the
+/// firmware's own notification of the mode change arrives during the switch,
+/// so without this the mode's lighting and the mode notification would wait
+/// for the watcher's next tick. Called on the GTK thread, once.
+pub fn on_switch_settled(check: std::rc::Rc<dyn Fn()>) {
+    SETTLED_HOOK.with(|hook| *hook.borrow_mut() = Some(check));
+}
+
+/// Runs jobs one at a time, in the order given, on a thread of its own. A job
+/// that panics is dropped (its result channel then reports nothing) and the
+/// next one still runs.
+struct InOrder {
+    jobs: Mutex<std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>>,
+}
+
+impl InOrder {
+    fn new(name: &str) -> Self {
+        let (jobs, inbox) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let started = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                for job in inbox {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                }
+            });
+        if let Err(e) = started {
+            crate::hardware::applog::error(&format!("{name}: thread did not start: {e}"));
+        }
+        Self {
+            jobs: Mutex::new(jobs),
+        }
+    }
+
+    /// Queues `job`. If the thread could not start the job is dropped
+    /// unrun, and whoever waits on it hears nothing.
+    fn run(&self, job: Box<dyn FnOnce() + Send>) {
+        let _ = self
+            .jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send(job);
+    }
+}
+
+fn apply_profile(profile: PowerProfile, write: ModeWrite) -> Result<(), String> {
+    let _in_flight = ApplyGuard::new();
+    // Declared after the guard above, so dropped before it: the reading is
+    // gone by the time the switch stops counting as in flight.
+    let _forget = ForgetCpuReading;
+
+    // First, before this function writes anything of its own.
+    //
+    // Telling the desktop's power daemon which profile matches this mode makes
+    // it write, and it writes more than the indicator: on the machine this was
+    // measured on it sets both the firmware index and the CPU's
+    // energy/performance preference. Anything this function writes afterwards
+    // therefore lands on top of it, which is exactly what is wanted - the app
+    // owns the mode, the daemon owns only the label.
+    //
+    // It used to sit just before the firmware index instead, which protected
+    // the index and nothing else, so on battery the daemon's own preference
+    // (it leans further toward saving once unplugged) was applied *after* this
+    // mode's and quietly replaced it. Balanced on battery then ran with the
+    // daemon's setting rather than its own.
+    let daemon_told = {
+        let cfg = crate::config::load_app_config();
+        crate::hardware::ppd::sync_to_mode(profile, cfg.ppd_sync_enabled, cfg.ppd_sync_map, write)
+    };
+
     let s = settings_for(profile);
 
     if manage_cpu_power() {
@@ -1018,7 +1460,7 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
         }
     }
 
-    apply_firmware_profile(profile);
+    apply_firmware_profile(profile, write, daemon_told);
 
     // Fan mode used to be forced here to match the profile (Performance/Turbo
     // to Max, everything else to Auto), the mapping fan_mode_for() above
@@ -1040,6 +1482,49 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
 }
 
 #[cfg(test)]
+mod mode_cycle_tests {
+    use super::*;
+
+    #[test]
+    fn a_driver_that_forgot_its_cycles_needs_them_back() {
+        // What a module reload leaves behind: the attributes exist and are
+        // empty, while config still holds what the user chose.
+        assert!(mode_cycles_lost("", "", &["quiet".into()], &["eco".into()]));
+        assert!(mode_cycles_lost("\n", "\n", &["quiet".into()], &["eco".into()]));
+    }
+
+    #[test]
+    fn one_empty_side_is_enough() {
+        assert!(mode_cycles_lost("0,1,4", "", &["quiet".into()], &["eco".into()]));
+        assert!(mode_cycles_lost("", "6,0,1", &["quiet".into()], &["eco".into()]));
+    }
+
+    #[test]
+    fn cycles_already_installed_are_left_alone() {
+        // The push costs a privileged helper round trip, so anything that is
+        // already there must not trigger one.
+        assert!(!mode_cycles_lost("0,1,4", "6,0,1", &["quiet".into()], &["eco".into()]));
+    }
+
+    #[test]
+    fn nothing_configured_means_nothing_to_install() {
+        // An empty driver attribute is correct here, not a loss: the driver
+        // falls back to its own ladder and that is what the user asked for.
+        assert!(!mode_cycles_lost("", "", &[], &[]));
+        assert!(!mode_cycles_lost("0,1,4", "", &["quiet".into()], &[]));
+    }
+
+    #[test]
+    fn the_contents_are_not_compared_only_their_absence() {
+        // Deliberate: config ids are translated to per-machine WMI indices
+        // through the calibration, and a tier the calibration cannot place is
+        // dropped from the encoded list. Comparing contents would see that as
+        // a permanent mismatch and push on every tick forever.
+        assert!(!mode_cycles_lost("9,9,9", "9", &["quiet".into()], &["eco".into()]));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn windows_static_index_follows_the_official_table_and_the_supported_mask() {
@@ -1056,6 +1541,184 @@ mod tests {
     }
 
     use super::*;
+
+    /// The startup mode on a machine that already sits in it. The EC flashes
+    /// the light bar for every write of the firmware mode, changed or not, so
+    /// neither the app nor the desktop's power daemon may write it.
+    #[test]
+    fn an_unchanged_startup_mode_writes_the_firmware_mode_from_neither_side() {
+        let shown = crate::hardware::ppd::DesktopProfile::Balanced;
+        let daemon_told =
+            crate::hardware::ppd::relabel_needed(ModeWrite::IfChanged, || Some(shown), shown);
+        assert!(!daemon_told);
+        assert!(!firmware_write_needed(
+            ModeWrite::IfChanged,
+            daemon_told,
+            || Some(1),
+            1
+        ));
+    }
+
+    /// The startup mode on a machine somewhere else: written as any switch
+    /// writes it.
+    #[test]
+    fn a_changed_startup_mode_is_written_as_a_switch_writes_it() {
+        use crate::hardware::ppd::DesktopProfile;
+        let daemon_told = crate::hardware::ppd::relabel_needed(
+            ModeWrite::IfChanged,
+            || Some(DesktopProfile::Performance),
+            DesktopProfile::Balanced,
+        );
+        assert!(daemon_told);
+        assert!(firmware_write_needed(
+            ModeWrite::IfChanged,
+            daemon_told,
+            || Some(5),
+            1
+        ));
+        // The daemon already right, the firmware not.
+        assert!(firmware_write_needed(
+            ModeWrite::IfChanged,
+            false,
+            || Some(5),
+            1
+        ));
+    }
+
+    /// An index that does not read back is not known to be the target.
+    #[test]
+    fn an_unreadable_firmware_mode_is_written_at_startup() {
+        assert!(firmware_write_needed(
+            ModeWrite::IfChanged,
+            false,
+            || None,
+            1
+        ));
+    }
+
+    /// The daemon writes the firmware mode itself when it is told to change,
+    /// so the index read afterwards may be its write or the one before it.
+    /// The app then writes its own, as it always has, so its write lands last.
+    #[test]
+    fn a_told_daemon_means_the_app_writes_its_own_firmware_mode_after_it() {
+        assert!(firmware_write_needed(
+            ModeWrite::IfChanged,
+            true,
+            || Some(1),
+            1
+        ));
+    }
+
+    /// The mode key, the Mode page, the power policy: every switch writes the
+    /// firmware mode as before, and does not spend a WMI call reading it
+    /// first. The flash there is the firmware confirming the switch.
+    #[test]
+    fn a_switch_always_writes_the_firmware_mode_without_reading_it() {
+        assert!(firmware_write_needed(
+            ModeWrite::Always,
+            false,
+            || panic!("a switch must not read the firmware mode first"),
+            1
+        ));
+    }
+
+    /// The mode key cycles the firmware thermal index inside the kernel and
+    /// moves nothing else, so the machine ends up displaying one mode while
+    /// its CPU still sits in the previous one. That is the state the power
+    /// policy used to resolve by overwriting the user's choice with the
+    /// configured battery target - a key press to Eco on battery became
+    /// Quiet a grace window later.
+    #[test]
+    fn a_firmware_only_mode_change_still_needs_applying() {
+        assert_eq!(
+            completion_target(PowerProfile::Eco, Some(PowerProfile::Balanced)),
+            Some(PowerProfile::Eco)
+        );
+    }
+
+    /// `None` from `coherent_profile()` is the usual shape of a half-moved
+    /// machine: the firmware tier and the CPU state name different modes, so
+    /// no single profile describes it.
+    #[test]
+    fn a_machine_in_no_single_mode_still_needs_applying() {
+        assert_eq!(
+            completion_target(PowerProfile::Eco, None),
+            Some(PowerProfile::Eco)
+        );
+    }
+
+    /// A switch part-way through is not evidence that anything outside the
+    /// app moved the mode: the controls disagree because this app is in the
+    /// middle of moving them.
+    /// The in-flight count is process wide: the tests that look at it take turns.
+    static IN_FLIGHT_TESTS: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn a_finished_switch_is_not_in_flight_when_its_result_arrives() {
+        let _turn = IN_FLIGHT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let in_flight = ApplyGuard::new();
+        let waiter = std::thread::spawn(move || {
+            let result = rx.recv().unwrap();
+            (result, apply_in_flight())
+        });
+        finish(Ok(()), in_flight, &tx);
+        assert_eq!(waiter.join().unwrap(), (Ok(()), false));
+    }
+
+    #[test]
+    fn an_apply_in_flight_is_visible_to_the_reconciler() {
+        let _turn = IN_FLIGHT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!apply_in_flight(), "nothing should be in flight to start with");
+        {
+            let _guard = ApplyGuard::new();
+            assert!(apply_in_flight());
+            {
+                let _nested = ApplyGuard::new();
+                assert!(apply_in_flight());
+            }
+            assert!(apply_in_flight(), "an inner switch ending is not the outer one ending");
+        }
+        assert!(!apply_in_flight());
+    }
+
+    #[test]
+    fn a_cpufreq_reading_serves_callers_for_a_moment_only() {
+        assert!(reading_is_fresh(std::time::Duration::ZERO));
+        assert!(reading_is_fresh(std::time::Duration::from_millis(1499)));
+        assert!(!reading_is_fresh(CPU_READING_TTL));
+    }
+
+    #[test]
+    fn switches_run_one_at_a_time_in_the_order_asked() {
+        let queue = InOrder::new("in-order-test");
+        let (tx, rx) = std::sync::mpsc::channel();
+        for n in 0u64..20 {
+            let tx = tx.clone();
+            queue.run(Box::new(move || {
+                if n == 5 {
+                    panic!("a job that fails part-way");
+                }
+                std::thread::sleep(std::time::Duration::from_millis((20 - n) % 3));
+                let _ = tx.send(n);
+            }));
+        }
+        drop(tx);
+        let order: Vec<u64> = rx.iter().collect();
+        let expected: Vec<u64> = (0..20).filter(|&n| n != 5).collect();
+        assert_eq!(order, expected, "in order, and on past the one that panicked");
+    }
+
+    /// Every change this app makes itself goes through `set_profile`, which
+    /// moves all of it at once. Re-applying that on the tick that notices it
+    /// would rewrite the fan preset and blink the mode key for nothing.
+    #[test]
+    fn a_mode_the_machine_is_already_coherently_in_is_left_alone() {
+        assert_eq!(
+            completion_target(PowerProfile::Eco, Some(PowerProfile::Eco)),
+            None
+        );
+    }
 
     /// The exact-match answer, which is all most of these fixtures care about.
     /// Production code goes through `cpu_belief()` instead, which also decides
@@ -1151,10 +1814,18 @@ mod tests {
         assert_eq!(performance.epp, Some(EnergyPreference::Performance));
         assert_eq!(performance.min_perf_pct, Some(50));
 
+        // Turbo is the powersave policy too, and is told apart from
+        // Performance by its floor rather than by its governor: the
+        // performance policy only duplicated what min_perf 100 already does,
+        // and cost the ability to write EPP at all.
         let turbo = plan_for(PowerProfile::Turbo, &capabilities);
-        assert_eq!(turbo.governor, CpuGovernor::Performance);
-        assert_eq!(turbo.epp, Some(EnergyPreference::RawPerformance));
+        assert_eq!(turbo.governor, CpuGovernor::Powersave);
+        assert_eq!(turbo.epp, Some(EnergyPreference::Performance));
         assert_eq!(turbo.min_perf_pct, Some(100));
+        assert_ne!(
+            turbo.min_perf_pct, performance.min_perf_pct,
+            "the two tiers must stay distinguishable on readback"
+        );
 
         assert_eq!(
             plan_for(PowerProfile::Balanced, &capabilities).epp,
@@ -1177,10 +1848,87 @@ mod tests {
         let capabilities = detect_cpu_capabilities_at(&fixture.root);
 
         assert_eq!(capabilities.min_perf_floor_pct, Some(17));
+        // The plan carries what Quiet asks for, not the floor: the estimate
+        // moves with the turbo bit and the kernel applies its own floor on
+        // the way in anyway (see `plan_for`).
         assert_eq!(
             plan_for(PowerProfile::Quiet, &capabilities).min_perf_pct,
-            Some(17)
+            Some(settings_for(PowerProfile::Quiet).min_perf_pct)
         );
+    }
+
+    /// The bug behind a mode-key Eco reverting to the battery target on a
+    /// PH16-71: the floor estimate is `cpuinfo_min_freq / cpuinfo_max_freq`,
+    /// and intel_pstate collapses `cpuinfo_max_freq` to the base clock when
+    /// `no_turbo` is set. Reading it before and after a switch into Quiet or
+    /// Eco therefore produced two different numbers, so whatever was written
+    /// on the way in no longer matched what detection expected, and the
+    /// machine read as being in no profile at all.
+    #[test]
+    fn a_plan_does_not_move_with_the_basis_the_floor_is_read_against() {
+        let turbo_on = SysfsFixture::new("intel_pstate", "active", 2, 2);
+        turbo_on.write("devices/system/cpu/cpufreq/policy0/cpuinfo_min_freq", "800000");
+        turbo_on.write(
+            "devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq",
+            "5000000",
+        );
+        let turbo_off = SysfsFixture::new("intel_pstate", "active", 2, 2);
+        turbo_off.write(
+            "devices/system/cpu/cpufreq/policy0/cpuinfo_min_freq",
+            "800000",
+        );
+        turbo_off.write(
+            "devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq",
+            "2100000",
+        );
+
+        let with_turbo = detect_cpu_capabilities_at(&turbo_on.root);
+        let without_turbo = detect_cpu_capabilities_at(&turbo_off.root);
+        assert_eq!(with_turbo.min_perf_floor_pct, Some(16));
+        assert_eq!(without_turbo.min_perf_floor_pct, Some(38));
+
+        assert_eq!(
+            plan_for(PowerProfile::Eco, &with_turbo),
+            plan_for(PowerProfile::Eco, &without_turbo),
+            "the same profile must plan the same way whichever profile preceded it"
+        );
+    }
+
+    /// The other half: the kernel raises anything below its floor to the
+    /// floor, so a state read back at 17 after Eco asked for 5 is Eco doing
+    /// exactly what it could. Requiring 5 there rejected every profile and
+    /// left `coherent_profile()` reporting None forever.
+    #[test]
+    fn a_request_the_kernel_rounds_up_still_matches_its_profile() {
+        let capabilities = CpuCapabilities {
+            policy_dirs: vec![],
+            epp_supported: false,
+            no_turbo_supported: false,
+            min_perf_supported: true,
+            min_perf_floor_pct: Some(38),
+            intel_pstate_hwp_active: false,
+        };
+        let plan = CpuProfilePlan {
+            governor: CpuGovernor::Powersave,
+            epp: None,
+            no_turbo: None,
+            min_perf_pct: Some(settings_for(PowerProfile::Eco).min_perf_pct),
+        };
+        let state = CpuState {
+            governor: CpuGovernor::Powersave.as_str().to_string(),
+            epp: None,
+            no_turbo: None,
+            min_perf_pct: Some(17),
+        };
+        assert!(state_matches_plan(&state, &plan, &capabilities));
+
+        // A profile asking for more than the floor is still compared, or
+        // Performance and Turbo would stop being told apart.
+        let performance = CpuProfilePlan {
+            min_perf_pct: Some(settings_for(PowerProfile::Performance).min_perf_pct),
+            ..plan.clone()
+        };
+        assert!(!state_matches_plan(&state, &performance, &capabilities));
     }
 
     #[test]
@@ -1441,15 +2189,33 @@ mod tests {
             Some(PowerProfile::Performance)
         );
 
-        fixture.set_policy_value("scaling_governor", "performance", 2);
-        // Model-specific EPP tables may render the forced raw zero as
-        // "default" instead of the named "performance" preference.
-        fixture.set_policy_value("energy_performance_preference", "default", 2);
+        // Turbo is the same policy and preference now, and is told apart by
+        // its floor: `min_perf_pct` 100 against Performance's 50.
         fixture.write("devices/system/cpu/intel_pstate/min_perf_pct", "100");
         assert_eq!(
             detect_from_hardware_at(&fixture.root),
             Some(PowerProfile::Turbo)
         );
+    }
+
+    /// The shape Turbo used to be written in - the active performance
+    /// governor, with the EPP the kernel forces under it - is not one of the
+    /// tiers any more, so a machine still sitting in it after an upgrade
+    /// reads as matching nothing rather than as Turbo.
+    ///
+    /// That is the honest answer and it costs nothing: `get_current_profile`
+    /// still names the tier from the firmware index, so the UI is unaffected,
+    /// and the next mode change writes the new shape. Asserted rather than
+    /// left implicit because the alternative - quietly accepting the old
+    /// shape too - would mean the app could never tell whether the CPU was
+    /// where this version of it puts Turbo.
+    #[test]
+    fn the_superseded_turbo_shape_is_no_longer_one_of_the_tiers() {
+        let fixture = SysfsFixture::new("intel_pstate", "active", 2, 2);
+        fixture.add_intel_limits(false, 100);
+        fixture.set_policy_value("scaling_governor", "performance", 2);
+        fixture.set_policy_value("energy_performance_preference", "default", 2);
+        assert_eq!(read_cpu_reading_at(&fixture.root), CpuReading::NoMatch);
     }
 
     #[test]

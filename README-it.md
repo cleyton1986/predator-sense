@@ -641,6 +641,7 @@ predator-sense-gui/
 │   └── dkms.conf                # Configurazione DKMS per la ricompilazione automatica
 ├── installer/                   # Installer multicall e servizi Rust
 │   ├── Cargo.toml
+│   ├── assets/                  # Icona tray come pixmap (ARGB32, da resources/tray)
 │   └── src/
 │       ├── main.rs              # Dispatch tipizzato in base al nome dell'eseguibile installato
 │       ├── constants.rs         # Percorsi centrali, valori di protocollo e costanti hardware
@@ -651,7 +652,10 @@ predator-sense-gui/
 │       └── i18n.rs              # Messaggi tipizzati EN/PT
 ├── protocol/                    # Contratto tipizzato condiviso tra GUI e helper
 │   ├── Cargo.toml
-│   └── src/lib.rs               # Azioni, percorsi, limiti e nomi dei binari
+│   └── src/lib.rs               # Azioni, percorsi, limiti, nomi dei binari, report della tastiera
+├── hidraw/                      # Il nodo hidraw dell'illuminazione della tastiera del PH16-71 (un ioctl)
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Applicazione Rust GTK4
 │   ├── main.rs
 │   ├── app_state.rs             # Flag globale di visibilità della finestra (blocca i timer)
@@ -661,11 +665,14 @@ predator-sense-gui/
 │   ├── hardware/
 │   │   ├── helper.rs            # Client tipizzato dell'helper privilegiato
 │   │   ├── rgb.rs               # RGB via /dev/acer-gkbbl-*
+│   │   ├── keyboard_rgb.rs      # Tastiera del PH16-71 (Chicony a 24 bit) via hidraw
+│   │   ├── chicony_hid.rs       # Nodo hidraw della tastiera, tenuto aperto
 │   │   ├── hwmon.rs             # Indice /sys/class/hwmon (cache in OnceLock)
 │   │   ├── sensors.rs           # Temperature, ventole, RAM, rete
-│   │   ├── gpu.rs               # Parser di nvidia-smi con cache TTL
+│   │   ├── gpu.rs               # Metriche GPU via NVML, limite di potenza via helper
+│   │   ├── nvml.rs              # NVML caricato a runtime (dlopen)
 │   │   ├── procs.rs             # Sampler /proc (CPU per core, memoria, elenco processi)
-│   │   ├── storage.rs           # Utilizzo disco via df
+│   │   ├── storage.rs           # Utilizzo disco via statvfs
 │   │   ├── sysinfo.rs           # Specifiche DMI + CPU + GPU + SO
 │   │   ├── fan.rs               # Modalità ventole + CoolBoost
 │   │   ├── extras.rs            # Limite batteria, LCD overdrive, ricarica USB, animazione di boot
@@ -676,6 +683,9 @@ predator-sense-gui/
 │   │   └── setup.rs             # Gestione del modulo kernel
 │   └── ui/                      # Pagine GTK4 (widget Cairo personalizzati)
 │       ├── window.rs            # Finestra principale, sidebar, barre neon, riduci a tray
+│       ├── still_drawing.rs     # Disegni statici conservati come pixel
+│       ├── ticks.rs             # Timer di animazione solo mentre visibili
+│       ├── flow_box.rs          # Contenuto di FlowBox senza rimuovere figli
 │       ├── dashboard_page.rs    # Hero + specifiche di sistema
 │       ├── temperatures_page.rs # Tutti i gauge di temperatura
 │       ├── usage_page.rs        # CPU/GPU/Mem/Storage con i processi principali
@@ -690,8 +700,9 @@ predator-sense-gui/
 │       ├── setup_page.rs        # Wizard di configurazione del modulo kernel
 │       └── gauge_widget.rs      # Widget gauge circolare tratteggiato
 └── resources/
+    ├── tray/                    # Sorgenti dell'icona tray (PNG)
     ├── style.css                # Tema scuro gaming
-    └── predator-icon.svg        # Icona del tray di sistema
+    └── predator-icon.svg        # Icona dell'app
 ```
 
 ---

@@ -627,6 +627,7 @@ predator-sense-gui/
 │   └── dkms.conf                # DKMS otomatik yeniden derleme yapılandırması
 ├── installer/                   # Rust multicall yükleyici ve servisler
 │   ├── Cargo.toml
+│   ├── assets/                  # Tepsi simgesi pixmap olarak (ARGB32, resources/tray'den)
 │   └── src/
 │       ├── main.rs              # Kurulu çalıştırılabilir dosya adına göre tipli dağıtım
 │       ├── constants.rs         # Merkezi yollar, protokol değerleri ve donanım sabitleri
@@ -637,7 +638,10 @@ predator-sense-gui/
 │       └── i18n.rs              # Tipli EN/PT mesajları
 ├── protocol/                    # Paylaşılan tipli GUI/helper sözleşmesi
 │   ├── Cargo.toml
-│   └── src/lib.rs               # Eylemler, yollar, limitler ve binary adları
+│   └── src/lib.rs               # Eylemler, yollar, limitler, binary adları, klavye raporları
+├── hidraw/                      # PH16-71 klavyesinin aydınlatma hidraw düğümü (tek ioctl)
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Rust GTK4 uygulaması
 │   ├── main.rs
 │   ├── app_state.rs             # Global pencere-görünürlüğü bayrağı (zamanlayıcıları kapatır)
@@ -647,11 +651,14 @@ predator-sense-gui/
 │   ├── hardware/
 │   │   ├── helper.rs            # Tipli ayrıcalıklı-yardımcı istemcisi
 │   │   ├── rgb.rs               # /dev/acer-gkbbl-* üzerinden RGB
+│   │   ├── keyboard_rgb.rs      # hidraw üzerinden PH16-71 klavyesi (Chicony 24 bit)
+│   │   ├── chicony_hid.rs       # Klavyenin açık tutulan hidraw düğümü
 │   │   ├── hwmon.rs             # /sys/class/hwmon indeksi (önbelleğe alınmış OnceLock)
 │   │   ├── sensors.rs           # Sıcaklıklar, fanlar, RAM, ağ
-│   │   ├── gpu.rs               # TTL önbellekli nvidia-smi ayrıştırıcı
+│   │   ├── gpu.rs               # NVML ile GPU ölçümleri, helper ile güç sınırı
+│   │   ├── nvml.rs              # Çalışırken yüklenen NVML (dlopen)
 │   │   ├── procs.rs             # /proc örnekleyici (çekirdek başına CPU, bellek, süreç listesi)
-│   │   ├── storage.rs           # df üzerinden disk kullanımı
+│   │   ├── storage.rs           # statvfs üzerinden disk kullanımı
 │   │   ├── sysinfo.rs           # DMI + CPU + GPU + işletim sistemi özellikleri
 │   │   ├── fan.rs               # Fan modu + CoolBoost
 │   │   ├── extras.rs            # Pil limiti, LCD overdrive, USB şarj, açılış animasyonu
@@ -662,6 +669,9 @@ predator-sense-gui/
 │   │   └── setup.rs             # Çekirdek modülü yönetimi
 │   └── ui/                      # GTK4 sayfaları (Cairo özel widget'ları)
 │       ├── window.rs            # Ana pencere, kenar çubuğu, neon çubuklar, tepsiye gizleme
+│       ├── still_drawing.rs     # Piksel olarak saklanan sabit çizimler
+│       ├── ticks.rs             # Yalnızca görünürken çalışan animasyon zamanlayıcıları
+│       ├── flow_box.rs          # Alt öğeleri kaldırmadan FlowBox içeriği
 │       ├── dashboard_page.rs    # Ana görsel + sistem özellikleri
 │       ├── temperatures_page.rs # Tüm sıcaklık göstergeleri
 │       ├── usage_page.rs        # En çok kaynak tüketen süreçlerle CPU/GPU/Bellek/Depolama
@@ -676,8 +686,9 @@ predator-sense-gui/
 │       ├── setup_page.rs        # Çekirdek modülü kurulum sihirbazı
 │       └── gauge_widget.rs      # Kesikli dairesel gösterge widget'ı
 └── resources/
+    ├── tray/                    # Tepsi simgesi kaynakları (PNG)
     ├── style.css                # Oyuncu koyu teması
-    └── predator-icon.svg        # Sistem tepsisi simgesi
+    └── predator-icon.svg        # Uygulama simgesi
 ```
 
 ---

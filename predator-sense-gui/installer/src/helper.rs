@@ -5,24 +5,30 @@ use crate::constants::hardware::{
 use crate::constants::{command as external, path};
 use crate::process::command_exists;
 use crate::AppResult;
+use predator_sense_hidraw::HidrawDevice;
 use predator_sense_protocol::backlight;
 use predator_sense_protocol::base64_lite;
 use predator_sense_protocol::grub_splash;
 use predator_sense_protocol::battery;
+use predator_sense_protocol::dmi;
 use predator_sense_protocol::helper::{
     Action as HelperAction, CpuGovernor, EnergyPreference, Switch, OPTIONAL_VALUE_SKIP,
 };
 use predator_sense_protocol::internal;
+use predator_sense_protocol::keyboard;
 use predator_sense_protocol::process as bounded;
 use predator_sense_protocol::temp_limit::{self, Bound, Capability};
 use predator_sense_protocol::thermal_profile;
 use serde::Deserialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, IntoRawFd};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,8 +36,6 @@ const CPUFREQ_RELATIVE_DIR: &str = "devices/system/cpu/cpufreq";
 const SCALING_DRIVER: &str = "scaling_driver";
 const SCALING_GOVERNOR: &str = "scaling_governor";
 const AVAILABLE_GOVERNORS: &str = "scaling_available_governors";
-const CPUINFO_MIN_FREQ: &str = "cpuinfo_min_freq";
-const CPUINFO_MAX_FREQ: &str = "cpuinfo_max_freq";
 const ENERGY_PREFERENCE: &str = "energy_performance_preference";
 const AVAILABLE_ENERGY_PREFERENCES: &str = "energy_performance_available_preferences";
 const INTEL_PSTATE_STATUS: &str = "devices/system/cpu/intel_pstate/status";
@@ -61,10 +65,18 @@ const DMI_SERIAL: &str = "class/dmi/id/product_serial";
 // Protocol confirmed by community reverse engineering (github.com/NT411/
 // Acer-Predator-Fan-RGB-Controller-Linux, MIT-equivalent, no license
 // restriction on reimplementing the wire format it documents), verified
-// against real PH317-56 hardware. This device answers a HID SET_REPORT
-// class request directly over USB control transfer rather than a hidraw
-// feature report, hence rusb here instead of the HIDIOCSFEATURE ioctl the
-// GUI's other RGB backends use.
+// against real PH317-56 hardware, where it went over a USB control transfer
+// (rusb) rather than a hidraw feature report, and that older 7-colour family
+// (`chicony-rgb`) still does.
+//
+// The 24-bit command family (PH16-71) is the GUI's own over the keyboard's
+// hidraw node when the user can open it (`chicony_hid.rs`); these actions are
+// its fallback. They go over the same node, which root opens whatever the
+// udev rule says, and over rusb only when the node cannot be found
+// (`chicony_24bit`). The reports are built in
+// `predator_sense_protocol::keyboard` and the node is found and written by
+// the `predator_sense_hidraw` crate, so both processes send the same bytes
+// the same way.
 const CHICONY_VENDOR_ID: u16 = 0x04F2;
 const CHICONY_PRODUCT_ID: u16 = 0x0117;
 const CHICONY_INTERFACE: u8 = 3;
@@ -91,31 +103,8 @@ fn chicony_rgb_apply(effect: u8, brightness: u8, color: u8, speed: u8) -> AppRes
     ])
 }
 
-/// Preamble this controller expects before a colour/effect packet.
-const CHICONY_PREAMBLE: [u8; 8] = [0xB1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4E];
-/// Terminator of the effect packet in the per-key generation's command family.
-const CHICONY_EFFECT_TERMINATOR: u8 = 0x9B;
-/// The controller's own brightness ceiling (percentages are scaled to this).
-const CHICONY_BRIGHT_MAX: u8 = 0x32;
-/// Speed runs 1 (fastest) to 9 (slowest) on the wire.
-const CHICONY_SPEED_FAST: u8 = 1;
-const CHICONY_SPEED_SLOW: u8 = 9;
 /// Effect opcode for a solid colour.
 const CHICONY_EFFECT_STATIC: u8 = 0x01;
-/// Colour source: 0x01 = the colour staged by the 0x14 packet, 0x08 = random.
-const CHICONY_COLOR_FROM_PACKET: u8 = 0x01;
-
-fn chicony_scale_brightness(percent: u8) -> u8 {
-    ((percent.min(100) as u16 * CHICONY_BRIGHT_MAX as u16) / 100) as u8
-}
-
-fn chicony_scale_speed(percent: u8) -> u8 {
-    if percent >= 100 {
-        return CHICONY_SPEED_FAST;
-    }
-    let range = (CHICONY_SPEED_SLOW - CHICONY_SPEED_FAST) as u16;
-    (CHICONY_SPEED_SLOW - ((percent as u16 * range) / 100) as u8).max(CHICONY_SPEED_FAST)
-}
 
 /// Solid 24-bit colour on the whole keyboard.
 ///
@@ -123,8 +112,10 @@ fn chicony_scale_speed(percent: u8) -> u8 {
 /// 7-entry palette - a limit of that command, not of the hardware. A `0x14`
 /// packet stages a real RGB triple, but on its own it changes nothing: the
 /// controller needs a preamble first and an effect packet afterwards to apply
-/// what was staged, all inside one claimed USB session. Confirmed on real
-/// hardware (PH16-71): colours outside the 7-entry palette render correctly.
+/// what was staged, all three in one command (over USB, one claimed
+/// session: separate claim/release cycles do not take effect). Confirmed on
+/// real hardware (PH16-71): colours outside the 7-entry palette render
+/// correctly.
 /// Wire format cross-checked against CPT-Dawn/Arch-Sense and
 /// Order52/ph16-71-rgb, which target this exact keyboard.
 fn chicony_color_apply(red: u8, green: u8, blue: u8, brightness: u8) -> AppResult {
@@ -148,20 +139,23 @@ fn chicony_effect_apply(
     blue: u8,
     direction: u8,
 ) -> AppResult {
-    chicony_send_many(&[
-        CHICONY_PREAMBLE,
-        [0x14, 0x00, 0x00, red, green, blue, 0x00, 0x00],
-        [
-            0x08,
-            0x02,
-            opcode,
-            chicony_scale_speed(speed),
-            chicony_scale_brightness(brightness),
-            CHICONY_COLOR_FROM_PACKET,
-            direction.clamp(1, 2),
-            CHICONY_EFFECT_TERMINATOR,
-        ],
-    ])
+    chicony_send_24bit(&keyboard::effect_packets(
+        opcode, speed, brightness, red, green, blue, direction,
+    ))
+}
+
+/// A `chicony-effect` opcode: a byte, and one the controller is known to
+/// take (`keyboard::EFFECT_OPCODES`). Anything else would reach its firmware
+/// as root as an untested command.
+fn parse_effect_opcode(value: &str) -> AppResult<u8> {
+    let opcode = parse_u16("opcode", value, 0, 255)? as u8;
+    if keyboard::is_effect_opcode(opcode) {
+        Ok(opcode)
+    } else {
+        Err(fail(format!(
+            "opcode: {opcode:#04x} is not a keyboard effect"
+        )))
+    }
 }
 
 /// Writes one mode-key cycle to facer. `skip` leaves the list untouched; an
@@ -185,14 +179,122 @@ fn write_mode_cycle(sysfs: &Path, attribute: &str, value: &str) -> AppResult {
         .map_err(|error| fail(format!("mode-cycle: writing {}: {error}", path.display())))
 }
 
+/// One packet of the older 7-colour family, over USB.
 fn chicony_send(payload: &[u8; 8]) -> AppResult {
-    chicony_send_many(&[*payload])
+    chicony_session(|handle| chicony_set_reports(handle, &[*payload]))
 }
 
 /// Every packet in one claimed session: this controller expects a preamble and
 /// an apply packet around a colour packet, and splitting them across separate
 /// claim/release cycles does not take effect.
-fn chicony_send_many(packets: &[[u8; 8]]) -> AppResult {
+fn chicony_set_reports(
+    handle: &rusb::DeviceHandle<rusb::GlobalContext>,
+    packets: &[[u8; 8]],
+) -> rusb::Result<()> {
+    for packet in packets {
+        chicony_set_report(handle, packet)?;
+    }
+    Ok(())
+}
+
+/// The keyboard's lighting interface node, if it can be found. Tests never
+/// find the real one: the machine running them may well have this keyboard.
+fn keyboard_node() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    predator_sense_hidraw::find()
+}
+
+/// `transfer` on the node at `path`, from `keyboard_node`, opened for it
+/// (checked against sysfs after the open, `HidrawDevice::open_found`) and
+/// closed after.
+fn on_keyboard_node<T>(
+    path: &Path,
+    transfer: impl FnOnce(&mut HidrawDevice) -> io::Result<T>,
+) -> AppResult<T> {
+    let class = Path::new(predator_sense_hidraw::SYSFS_CLASS);
+    let mut device = HidrawDevice::open_found(path, class).map_err(|error| {
+        fail(format!(
+            "cannot open the keyboard's hidraw node {}: {error}",
+            path.display()
+        ))
+    })?;
+    transfer(&mut device)
+        .map_err(|error| fail(format!("keyboard (hidraw {}): {error}", path.display())))
+}
+
+/// Refuses a 24-bit command on a chassis not in
+/// `dmi::CHICONY_24BIT_MODELS` (`product` is its DMI name), as the GUI does:
+/// the Helios 300 generation's keyboard shares the USB id and speaks the
+/// older family.
+fn require_24bit_keyboard(product: &str) -> AppResult {
+    if dmi::matches_model(product, dmi::CHICONY_24BIT_MODELS) {
+        Ok(())
+    } else {
+        Err(fail(format!(
+            "the 24-bit keyboard commands are only for {:?}; this is '{product}'",
+            dmi::CHICONY_24BIT_MODELS
+        )))
+    }
+}
+
+/// One command of the 24-bit family, only on a chassis with that keyboard
+/// ([`require_24bit_keyboard`] on DMI; pkexec clears the environment, so
+/// `PREDATOR_SENSE_FORCE_MODEL` does not reach a root helper, and a GUI
+/// forced onto another model gets only its own hidraw route).
+/// `over_node` on the lighting interface's
+/// hidraw node, as the GUI sends it, which leaves usbhid bound and so leaves
+/// any node the GUI holds working. `over_usb` in one claimed USB session
+/// ([`chicony_session`], which detaches usbhid from the interface for its
+/// length) only when that node cannot be found. A node that is there but
+/// fails is that failure, never a reason to detach usbhid from under it.
+fn chicony_24bit<T>(
+    over_node: impl FnOnce(&mut HidrawDevice) -> io::Result<T>,
+    over_usb: impl FnOnce(&rusb::DeviceHandle<rusb::GlobalContext>) -> rusb::Result<T>,
+) -> AppResult<T> {
+    require_24bit_keyboard(dmi::product_name())?;
+    match keyboard_node() {
+        Some(path) => on_keyboard_node(&path, over_node),
+        None => chicony_session(over_usb),
+    }
+}
+
+/// `packets` of the 24-bit family in order, as one command ([`chicony_24bit`]).
+fn chicony_send_24bit(packets: &[[u8; 8]]) -> AppResult {
+    chicony_24bit(
+        |device| {
+            packets
+                .iter()
+                .try_for_each(|packet| device.send_feature(packet))
+        },
+        |handle| chicony_set_reports(handle, packets),
+    )
+}
+
+fn chicony_set_report(
+    handle: &rusb::DeviceHandle<rusb::GlobalContext>,
+    packet: &[u8; 8],
+) -> rusb::Result<usize> {
+    handle.write_control(
+        CHICONY_REQUEST_TYPE,
+        CHICONY_SET_REPORT,
+        CHICONY_REPORT_VALUE,
+        CHICONY_INTERFACE as u16,
+        packet,
+        Duration::from_millis(1000),
+    )
+}
+
+/// Finds the keyboard, detaches the kernel driver, claims interface 3, runs
+/// `body`, then releases and reattaches on every exit path.
+fn chicony_session<T>(
+    body: impl FnOnce(&rusb::DeviceHandle<rusb::GlobalContext>) -> rusb::Result<T>,
+) -> AppResult<T> {
+    // The machine running the tests may well have this keyboard.
+    if cfg!(test) {
+        return Err(fail("tests never reach the keyboard over USB"));
+    }
     let devices =
         rusb::devices().map_err(|error| fail(format!("cannot list USB devices: {error}")))?;
     for device in devices.iter() {
@@ -215,30 +317,19 @@ fn chicony_send_many(packets: &[[u8; 8]]) -> AppResult {
                 .detach_kernel_driver(CHICONY_INTERFACE)
                 .map_err(|error| fail(format!("cannot detach kernel driver: {error}")))?;
         }
-        handle
-            .claim_interface(CHICONY_INTERFACE)
-            .map_err(|error| fail(format!("cannot claim USB interface: {error}")))?;
-        let _ = handle.clear_halt(CHICONY_ENDPOINT);
-        let mut result = Ok(0);
-        for packet in packets {
-            result = handle.write_control(
-                CHICONY_REQUEST_TYPE,
-                CHICONY_SET_REPORT,
-                CHICONY_REPORT_VALUE,
-                CHICONY_INTERFACE as u16,
-                packet,
-                Duration::from_millis(1000),
-            );
-            if result.is_err() {
-                break;
+        if let Err(error) = handle.claim_interface(CHICONY_INTERFACE) {
+            if had_kernel_driver {
+                let _ = handle.attach_kernel_driver(CHICONY_INTERFACE);
             }
+            return Err(fail(format!("cannot claim USB interface: {error}")));
         }
+        let _ = handle.clear_halt(CHICONY_ENDPOINT);
+        let result = body(&handle);
         let _ = handle.release_interface(CHICONY_INTERFACE);
         if had_kernel_driver {
             let _ = handle.attach_kernel_driver(CHICONY_INTERFACE);
         }
-        result.map_err(|error| fail(format!("USB control transfer failed: {error}")))?;
-        return Ok(());
+        return result.map_err(|error| fail(format!("USB control transfer failed: {error}")));
     }
     Err(fail(format!(
         "Chicony RGB keyboard ({CHICONY_VENDOR_ID:04x}:{CHICONY_PRODUCT_ID:04x}) not found"
@@ -348,7 +439,6 @@ impl CpuProfileRequest {
 struct CpuProfileContext {
     policies: Vec<PathBuf>,
     intel_pstate_hwp_active: bool,
-    min_perf_floor_pct: Option<u16>,
     no_turbo_path: PathBuf,
     min_perf_path: PathBuf,
 }
@@ -381,12 +471,353 @@ struct CpuProfileLock {
 pub(crate) fn run(args: &[String]) -> AppResult {
     let root = test_root().unwrap_or_else(|| PathBuf::from(path::REAL_SYSFS));
     let ec = Path::new(path::EC_DEVICE);
-    if args.first().map(String::as_str) == Some(internal::HELPER_DAEMON_ARGUMENT) {
+    if is_daemon(args) {
+        hand_back_on_exit_signals();
         let stdin = io::stdin();
         let stdout = io::stdout();
         return run_daemon(&root, ec, stdin.lock(), stdout.lock());
     }
+    // One-shot mode leaves the keyboard timer wherever its action put it. A
+    // lone `chicony-auto-off 0` here is deliberate (trying the keyboard by
+    // hand), and there is no session for it to outlive.
     run_with_paths(args, &root, ec)
+}
+
+/// Whether `args` start a daemon session. Anything else is one action, run
+/// once (one-shot mode), which never hands the keyboard timer back.
+fn is_daemon(args: &[String]) -> bool {
+    args.first().map(String::as_str) == Some(internal::HELPER_DAEMON_ARGUMENT)
+}
+
+/// A `chicony-auto-off` command: `30 01 ST`, the keyboard's own 30 s idle
+/// timer on or off, as one 24-bit command ([`chicony_send_24bit`]).
+fn set_keyboard_timer(on: bool) -> AppResult {
+    chicony_send_24bit(&[keyboard::auto_off_packet(on)])
+}
+
+/// The exit hand-back: `30 01 01`, the timer on, over the keyboard's hidraw
+/// node only. No USB session at exit: it would detach usbhid from the
+/// interface. When the node cannot be found this fails, and the timer stays
+/// where it is. One feature report, which the kernel bounds at 5 s
+/// (`USB_CTRL_SET_TIMEOUT`) against a keyboard that does not answer. The
+/// process is on its way out and has nobody left to retry for.
+fn hand_back_keyboard_timer() -> AppResult {
+    let path = keyboard_node()
+        .ok_or_else(|| fail("the keyboard's hidraw node (04f2:0117, 06 02 ff) was not found"))?;
+    on_keyboard_node(&path, |device| {
+        device.send_feature(&keyboard::auto_off_packet(true))
+    })
+}
+
+fn parse_keyboard_timer(value: &str) -> AppResult<bool> {
+    match value.trim() {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        other => Err(fail(format!(
+            "chicony-auto-off: invalid value '{other}' (must be 0 or 1)"
+        ))),
+    }
+}
+
+/// The timer state a well-formed `chicony-auto-off 0|1` asks for. Anything
+/// else, a malformed one included, is `None`.
+fn keyboard_timer_request(args: &[String]) -> Option<bool> {
+    match args {
+        [action, value] if HelperAction::parse(action) == Some(HelperAction::ChiconyAutoOff) => {
+            parse_keyboard_timer(value).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Whether this helper process holds the keyboard's own idle timer off.
+///
+/// The GUI switches that timer off while it runs and back on at exit, over
+/// the keyboard's hidraw node when the user can open it, and through this
+/// helper otherwise. On that second route, at logout, the session stops the
+/// GUI and this helper at the same moment, so the GUI's last write never
+/// lands and the keyboard stays lit at the login screen (measured
+/// 2026-10-17). So the process that switched it off switches it back on: a
+/// daemon whose last successful write was an off hands the timer back on its
+/// way out, however it ends ([`hands_back`]).
+struct KeyboardTimerHold(AtomicBool);
+
+impl KeyboardTimerHold {
+    const fn new() -> Self {
+        Self(AtomicBool::new(false))
+    }
+
+    /// One `chicony-auto-off` write and whether it landed. One that failed
+    /// changes nothing: the keyboard is still where the last write that
+    /// landed left it.
+    fn record(&self, on: bool, landed: bool) {
+        if landed {
+            self.0.store(!on, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether an exit has to switch the timer back on. True at most once
+    /// per hold, so two exit paths meeting never send it twice.
+    fn take_hand_back(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
+    }
+}
+
+/// How a daemon session ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Exit {
+    /// Its caller is gone: the input ended, or a reply found nobody reading.
+    /// The GUI has exited, or crashed.
+    CallerGone,
+    /// SIGTERM, SIGHUP or SIGINT. The GUI may well be running on: an upgrade
+    /// stops this helper with SIGTERM and leaves the GUI alone.
+    Signal,
+}
+
+/// Whether a daemon session ending by `exit` switches the keyboard's idle
+/// timer back on. `held`: this session switched the timer off itself
+/// ([`KeyboardTimerHold`]). `keyboard_24bit`: this machine is a chassis with
+/// the 24-bit keyboard (`dmi::CHICONY_24BIT_MODELS`). `privileged`: this
+/// process runs as euid 0. The session the GUI starts through pkexec does;
+/// its read session runs as the user, and so never hands back unasked,
+/// unless the GUI itself runs as root, when that read session is euid 0 too
+/// and counts, which is right for a root GUI that has gone. So nothing that
+/// starts a read session, the GUI's tests included, may run as root on a
+/// machine with this helper installed.
+///
+/// - Caller gone: a privileged session on the 24-bit keyboard hands it back
+///   whoever switched it off. The GUI holds it off over the hidraw node
+///   without this helper, and hands it back itself at exit; when the GUI
+///   crashes or is killed, this is what does it. Anywhere else, only a timer
+///   this session switched off.
+/// - Signal: only a timer this session switched off. The GUI that holds it
+///   over the node hands it back itself, and may be running on with it off,
+///   which must not be undone.
+///
+/// One-shot mode is no session and never asks ([`is_daemon`]).
+fn hands_back(exit: Exit, privileged: bool, keyboard_24bit: bool, held: bool) -> bool {
+    match exit {
+        Exit::CallerGone => held || (privileged && keyboard_24bit),
+        Exit::Signal => held,
+    }
+}
+
+/// This machine's keyboard as a daemon session sees it, and the two writes
+/// it makes to its idle timer. Passed in, so tests drive a session without
+/// the keyboard.
+#[derive(Clone, Copy)]
+struct SessionKeyboard<'a> {
+    /// See [`hands_back`].
+    privileged: bool,
+    /// See [`hands_back`].
+    is_24bit: bool,
+    /// A `chicony-auto-off` command.
+    set_timer: &'a dyn Fn(bool) -> AppResult,
+    /// The exit hand-back, the timer on.
+    hand_back: &'a dyn Fn() -> AppResult,
+}
+
+impl SessionKeyboard<'static> {
+    /// This process and this machine, with the real writes. The model is
+    /// DMI's alone: pkexec clears the environment, so
+    /// `PREDATOR_SENSE_FORCE_MODEL` never reaches the root helper, and on a
+    /// chassis the GUI was forced onto, the GUI going away does not hand the
+    /// timer back.
+    fn system() -> Self {
+        Self {
+            // SAFETY: geteuid has no preconditions.
+            privileged: unsafe { libc::geteuid() } == 0,
+            is_24bit: dmi::product_matches(dmi::CHICONY_24BIT_MODELS),
+            set_timer: &set_keyboard_timer,
+            hand_back: &hand_back_keyboard_timer,
+        }
+    }
+}
+
+/// What a daemon session shares with the thread that waits for exit signals.
+struct DaemonShared {
+    /// Held for the whole of each command, its update of `timer` included.
+    /// A hand-back takes it first, so, unless a signal's wait for it runs
+    /// out ([`Self::hand_back_after_signal`]), a hand-back never lands
+    /// between the reports of a command in flight, never finds the node gone
+    /// under a command that detached usbhid for a USB session, and the
+    /// process never exits between a write landing and its being recorded,
+    /// or halfway through a session that detached the kernel driver.
+    dispatch: Mutex<()>,
+    timer: KeyboardTimerHold,
+}
+
+/// The real daemon's. Tests make their own.
+static DAEMON: DaemonShared = DaemonShared::new();
+
+impl DaemonShared {
+    const fn new() -> Self {
+        Self {
+            dispatch: Mutex::new(()),
+            timer: KeyboardTimerHold::new(),
+        }
+    }
+
+    /// Switches the keyboard timer back on if [`hands_back`] says so for
+    /// `exit`. One attempt (`keyboard.hand_back`).
+    ///
+    /// At most one exit path sends it. The end of input takes the hold and
+    /// sends under the dispatch lock, and a signal's hand-back keeps that
+    /// lock until the process exits ([`Self::hand_back_after_signal`]). So
+    /// a signal that comes after the end of input finds the hold taken,
+    /// whether it got the lock or its wait for it ran out, and one that comes
+    /// first leaves the end of input waiting for the lock until the process
+    /// has gone.
+    fn hand_back(&self, exit: Exit, keyboard: SessionKeyboard) {
+        let held = self.timer.take_hand_back();
+        if !hands_back(exit, keyboard.privileged, keyboard.is_24bit, held) {
+            return;
+        }
+        if let Err(error) = (keyboard.hand_back)() {
+            let _ = writeln!(
+                io::stderr(),
+                "daemon: keyboard idle timer not handed back: {error}"
+            );
+        }
+    }
+
+    /// [`Self::hand_back`] for an exit signal: behind the command in flight
+    /// if that finishes within `wait`, and without it otherwise rather than
+    /// outwait a stuck write. Returns the dispatch lock when it got it, for
+    /// the caller to keep until the process is gone, so no command starts
+    /// after the hand-back.
+    #[must_use = "hold the dispatch lock until the process exits"]
+    fn hand_back_after_signal(
+        &self,
+        keyboard: SessionKeyboard,
+        wait: Duration,
+    ) -> Option<MutexGuard<'_, ()>> {
+        let in_flight = lock_within(&self.dispatch, wait);
+        self.hand_back(Exit::Signal, keyboard);
+        in_flight
+    }
+}
+
+/// SIGTERM is what the session sends at logout, SIGHUP a closed terminal,
+/// SIGINT Ctrl+C on a daemon run by hand.
+const EXIT_SIGNALS: [libc::c_int; 3] = [libc::SIGTERM, libc::SIGHUP, libc::SIGINT];
+/// How long a signal's hand-back waits for the command in flight. A healthy
+/// keyboard finishes any command in milliseconds, so this leaves room to
+/// spare without outwaiting a stuck one: against a keyboard that does not
+/// answer, an effect can take up to 15 s over the hidraw node (three feature
+/// reports, each bounded by the kernel's 5 s) and about 8 s over USB (three
+/// 1000 ms transfers plus the kernel's 5 s for the clear-halt), and this
+/// gives up first. The installer waits longer than this for the helper to
+/// exit (`timing::PROCESS_STOP_WAIT_SECS`).
+pub(crate) const IN_FLIGHT_WAIT: Duration = Duration::from_secs(3);
+const IN_FLIGHT_POLL: Duration = Duration::from_millis(10);
+
+/// Locks `mutex` if it comes free within `limit`. Polls, because std's
+/// `Mutex` has no timed lock, and this runs once, at exit.
+fn lock_within<T>(mutex: &Mutex<T>, limit: Duration) -> Option<MutexGuard<'_, T>> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(IN_FLIGHT_POLL)
+            }
+            Err(TryLockError::WouldBlock) => return None,
+        }
+    }
+}
+
+/// Write end of the pipe [`report_exit_signal`] writes to, -1 until set up.
+static EXIT_SIGNAL_PIPE: AtomicI32 = AtomicI32::new(-1);
+
+/// The exit signals' handler. It does only what a handler may: one write(2)
+/// of the signal number to a non-blocking pipe, with errno put back.
+extern "C" fn report_exit_signal(signal: libc::c_int) {
+    // SAFETY: write(2) and errno are async-signal-safe. The buffer is a live
+    // local, and the descriptor is either -1, where write fails harmlessly,
+    // or the pipe's write end, which is never closed.
+    unsafe {
+        let errno = libc::__errno_location();
+        let saved = *errno;
+        let byte = signal as u8;
+        libc::write(
+            EXIT_SIGNAL_PIPE.load(Ordering::Relaxed),
+            (&byte as *const u8).cast(),
+            1,
+        );
+        *errno = saved;
+    }
+}
+
+fn exit_signal_handler() -> libc::sighandler_t {
+    report_exit_signal as extern "C" fn(libc::c_int) as libc::sighandler_t
+}
+
+/// Sets `signal` to run `handler`, or to `libc::SIG_DFL`. False if refused.
+fn set_signal_action(signal: libc::c_int, handler: libc::sighandler_t) -> bool {
+    // SAFETY: the action is fully initialised (zeroed, then its mask
+    // emptied) before sigaction reads it, and a null old action is allowed.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = handler;
+        // A command the signal lands in carries on: the hand-back waits for
+        // it rather than cut it short.
+        action.sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(signal, &action, std::ptr::null_mut()) == 0
+    }
+}
+
+/// Waits for the handler to report a signal. `None` if the pipe broke.
+fn next_exit_signal(mut pipe: &UnixStream) -> Option<libc::c_int> {
+    let mut byte = [0u8; 1];
+    pipe.read_exact(&mut byte)
+        .ok()
+        .map(|()| libc::c_int::from(byte[0]))
+}
+
+/// On SIGTERM, SIGHUP or SIGINT: hands back a keyboard timer this session
+/// switched off ([`hands_back`] for [`Exit::Signal`]), then exits.
+///
+/// The handler only writes the signal number to a pipe; a thread waiting
+/// on the other end does the hand-back and the exit. The signal mask is
+/// left alone on purpose: std's `Command` does not clear it, so a blocked
+/// set would reach every program the helper runs, while a caught signal
+/// goes back to its default action at exec. If any step fails, the
+/// default actions stay in place, which is how the helper behaved before.
+fn hand_back_on_exit_signals() {
+    let Ok((reader, writer)) = UnixStream::pair() else {
+        return;
+    };
+    if writer.set_nonblocking(true).is_err() {
+        return;
+    }
+    let waiter = thread::Builder::new()
+        .name("exit-signals".into())
+        .spawn(move || {
+            let Some(signal) = next_exit_signal(&reader) else {
+                // Nothing can hear them any more, so they end the process
+                // as they always did.
+                for signal in EXIT_SIGNALS {
+                    set_signal_action(signal, libc::SIG_DFL);
+                }
+                return;
+            };
+            let _in_flight =
+                DAEMON.hand_back_after_signal(SessionKeyboard::system(), IN_FLIGHT_WAIT);
+            // 128 + n is the status a shell reports for death by signal n.
+            std::process::exit(128 + signal);
+        });
+    if waiter.is_err() {
+        return;
+    }
+    // Only now that something listens, so no failure above leaves the
+    // signals caught and nobody acting on them.
+    EXIT_SIGNAL_PIPE.store(writer.into_raw_fd(), Ordering::SeqCst);
+    for signal in EXIT_SIGNALS {
+        set_signal_action(signal, exit_signal_handler());
+    }
 }
 
 /// Daemon mode: reads one action line at a time (same wire format as normal
@@ -399,7 +830,61 @@ pub(crate) fn run(args: &[String]) -> AppResult {
 /// *is* the reply stream; the marker line right after it is what tells a
 /// caller where that value ends. Generic over its I/O so tests can drive it
 /// without real pipes.
-fn run_daemon(sysfs: &Path, ec: &Path, input: impl BufRead, mut output: impl Write) -> AppResult {
+///
+/// However the session ends, a keyboard timer it switched off goes back on,
+/// and when its caller is gone, a privileged session on the 24-bit keyboard
+/// switches the timer back on whoever switched it off: see [`hands_back`].
+fn run_daemon(sysfs: &Path, ec: &Path, input: impl BufRead, output: impl Write) -> AppResult {
+    run_daemon_with(sysfs, ec, input, output, &DAEMON, SessionKeyboard::system())
+}
+
+/// [`run_daemon`] with the shared state and the keyboard passed in, so tests
+/// can drive it without one.
+fn run_daemon_with(
+    sysfs: &Path,
+    ec: &Path,
+    input: impl BufRead,
+    output: impl Write,
+    shared: &DaemonShared,
+    keyboard: SessionKeyboard,
+) -> AppResult {
+    let result = serve_daemon(sysfs, ec, input, output, shared, keyboard.set_timer);
+    // End of input (the caller closed the pipe or died) or a reply nobody
+    // reads any more. The lock queues this behind a signal's hand-back.
+    let _quiet = shared
+        .dispatch
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    shared.hand_back(Exit::CallerGone, keyboard);
+    result
+}
+
+/// One daemon command. A well-formed `chicony-auto-off` goes through
+/// `set_timer` and into `timer`; everything else, a malformed one included,
+/// runs exactly as in one-shot mode.
+fn run_daemon_command(
+    args: &[String],
+    sysfs: &Path,
+    ec: &Path,
+    timer: &KeyboardTimerHold,
+    set_timer: &dyn Fn(bool) -> AppResult,
+) -> AppResult {
+    let Some(on) = keyboard_timer_request(args) else {
+        return run_with_paths(args, sysfs, ec);
+    };
+    let result = set_timer(on);
+    timer.record(on, result.is_ok());
+    result
+}
+
+fn serve_daemon(
+    sysfs: &Path,
+    ec: &Path,
+    input: impl BufRead,
+    mut output: impl Write,
+    shared: &DaemonShared,
+    set_timer: &dyn Fn(bool) -> AppResult,
+) -> AppResult {
     for line in input.lines() {
         let line = match line {
             Ok(line) => line,
@@ -425,7 +910,14 @@ fn run_daemon(sysfs: &Path, ec: &Path, input: impl BufRead, mut output: impl Wri
             // session down.
             continue;
         }
-        let reply = match run_with_paths(&args, sysfs, ec) {
+        let result = {
+            let _running = shared
+                .dispatch
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            run_daemon_command(&args, sysfs, ec, &shared.timer, set_timer)
+        };
+        let reply = match result {
             Ok(()) => internal::HELPER_DAEMON_OK.to_string(),
             Err(message) => {
                 let message = message.replace('\n', " ");
@@ -495,7 +987,7 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
                 hardware::GPU_POWER_MIN_WATTS,
                 hardware::GPU_POWER_MAX_WATTS,
             )?;
-            set_gpu_power_limit(watts, command)
+            set_gpu_power_limit(watts, &PERSISTENCE_ASKED, command)
         }
         HelperAction::SetNoTurbo => {
             let value = parse_bool(&args[1])?;
@@ -670,15 +1162,18 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
             write_mode_cycle(sysfs, "mode_cycle_battery", &args[2])
         }
         HelperAction::ChiconyEffect => {
-            let opcode = parse_u16("opcode", &args[1], 0, 255)? as u8;
+            let opcode = parse_effect_opcode(&args[1])?;
             let speed = parse_u16("speed", &args[2], 0, 100)? as u8;
             let brightness = parse_u16("brightness", &args[3], 0, 100)? as u8;
             let red = parse_u16("red", &args[4], 0, 255)? as u8;
             let green = parse_u16("green", &args[5], 0, 255)? as u8;
             let blue = parse_u16("blue", &args[6], 0, 255)? as u8;
-            let direction = parse_u16("direction", &args[7], 1, 2)? as u8;
+            let direction = parse_u16("direction", &args[7], 1, 6)? as u8;
             chicony_effect_apply(opcode, speed, brightness, red, green, blue, direction)
         }
+        // The daemon takes a well-formed one before it gets here (see
+        // `run_daemon_command`), so this is one-shot mode or a bad value.
+        HelperAction::ChiconyAutoOff => set_keyboard_timer(parse_keyboard_timer(&args[1])?),
         HelperAction::GrubSplashApply => grub_splash_apply(&args[1], &args[2], sysfs),
         HelperAction::GrubSplashReset => grub_splash_reset(sysfs),
     }
@@ -1223,14 +1718,22 @@ fn apply_cpu_profile_with(
 ) -> AppResult {
     let context = preflight_cpu_profile(sysfs, request)?;
     let snapshot = snapshot_cpu_profile(&context)?;
-    let writes = cpu_profile_writes(request, &context);
 
+    // Ask the kernel what its own min_perf_pct floor is before writing the
+    // real value, so verification compares against fact rather than an
+    // estimate. See `probe_min_perf_floor`.
+    let floor = match probe_min_perf_floor(request, &context, write) {
+        Ok(floor) => floor,
+        Err(error) => return Err(rollback_error(error, &context, &snapshot, write)),
+    };
+
+    let writes = cpu_profile_writes(request, &context);
     for update in writes {
         if let Err(error) = write(update.label, &update.value, &update.path) {
             return Err(rollback_error(error, &context, &snapshot, write));
         }
     }
-    if let Err(error) = verify_cpu_profile(request, &context) {
+    if let Err(error) = verify_cpu_profile(request, &context, floor) {
         return Err(rollback_error(error, &context, &snapshot, write));
     }
     Ok(())
@@ -1269,7 +1772,6 @@ fn preflight_cpu_profile(sysfs: &Path, request: CpuProfileRequest) -> AppResult<
 
     Ok(CpuProfileContext {
         intel_pstate_hwp_active: intel_pstate_hwp_active(sysfs, &policies),
-        min_perf_floor_pct: min_perf_floor_pct(&policies),
         policies,
         no_turbo_path,
         min_perf_path,
@@ -1311,20 +1813,42 @@ fn intel_pstate_hwp_active(sysfs: &Path, policies: &[PathBuf]) -> bool {
         })
 }
 
-fn min_perf_floor_pct(policies: &[PathBuf]) -> Option<u16> {
-    let policy = policies.first()?;
-    let minimum = read_attr("cpuinfo-min-freq", &policy.join(CPUINFO_MIN_FREQ))
-        .ok()?
-        .parse::<u64>()
-        .ok()?;
-    let maximum = read_attr("cpuinfo-max-freq", &policy.join(CPUINFO_MAX_FREQ))
-        .ok()?
-        .parse::<u64>()
-        .ok()?;
-    if maximum == 0 {
-        return None;
+/// The lowest `min_perf_pct` this kernel will actually hold, measured rather
+/// than estimated.
+///
+/// intel_pstate stores `max(requested, its own floor)` and silently rounds
+/// anything lower up, so asking for 0 and reading back returns that floor
+/// exactly. Verified on a PH16-71: writes of 0, 1 and 5 all read back 17, with
+/// turbo both on and off.
+///
+/// It is measured because every way of deriving it from sysfs frequencies
+/// moves with the turbo bit. `cpuinfo_max_freq` is the turbo ceiling with
+/// turbo on and the base clock with it off, giving 16 or 38 on this machine
+/// against a kernel floor that never moves from 17. Verifying against that
+/// estimate made Quiet apply from Balanced and fail from Eco, rolling the
+/// whole profile back.
+///
+/// `None` when this request does not set `min_perf_pct` at all, or the
+/// attribute is absent; the caller then has nothing to compare and says so.
+fn probe_min_perf_floor(
+    request: CpuProfileRequest,
+    context: &CpuProfileContext,
+    write: &mut impl FnMut(&str, &str, &Path) -> AppResult,
+) -> AppResult<Option<u16>> {
+    if request.min_perf_pct.is_none() || !context.min_perf_path.exists() {
+        return Ok(None);
     }
-    u16::try_from(minimum.saturating_mul(100) / maximum).ok()
+    write("min-perf-probe", "0", &context.min_perf_path)?;
+    let floor = read_attr("min-perf-probe", &context.min_perf_path)?
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| {
+            fail(format!(
+                "probing the min_perf_pct floor returned a non-numeric value from {}",
+                context.min_perf_path.display()
+            ))
+        })?;
+    Ok(Some(floor))
 }
 
 fn snapshot_cpu_profile(context: &CpuProfileContext) -> AppResult<CpuProfileSnapshot> {
@@ -1422,7 +1946,11 @@ fn push_policy_writes(
     }));
 }
 
-fn verify_cpu_profile(request: CpuProfileRequest, context: &CpuProfileContext) -> AppResult {
+fn verify_cpu_profile(
+    request: CpuProfileRequest,
+    context: &CpuProfileContext,
+    min_perf_floor: Option<u16>,
+) -> AppResult {
     let kernel_forces_epp_zero = request.governor == CpuGovernor::Performance
         && request.epp == Some(EnergyPreference::RawPerformance)
         && context.intel_pstate_hwp_active;
@@ -1444,31 +1972,31 @@ fn verify_cpu_profile(request: CpuProfileRequest, context: &CpuProfileContext) -
                 context.min_perf_path.display()
             ))
         })?;
-        // The kernel is free to round a requested min_perf_pct up to its own
-        // internal frequency step. `min_perf_floor_pct`'s cpuinfo-ratio math
-        // is only ever an estimate of that step, truncated to a whole
-        // percent, and can itself land a point or two under the CPU's real
-        // floor (issue #23: estimated 16%, kernel's actual floor was 17%).
-        // Requiring the actual value to match the estimate exactly made
-        // Quiet permanently fail to apply on any CPU where the estimate
-        // undershot. A small tolerance around the estimate still catches a
-        // write that silently did nothing (the readback would then be
-        // whatever unrelated value the attribute already held, not a number
-        // anywhere near our own floor estimate).
-        const FLOOR_ESTIMATE_TOLERANCE_PCT: u16 = 2;
-        let accepted_hardware_floor = actual > min_perf_pct
-            && context
-                .min_perf_floor_pct
-                .is_some_and(|floor| actual.abs_diff(floor) <= FLOOR_ESTIMATE_TOLERANCE_PCT);
-        if actual != min_perf_pct && !accepted_hardware_floor {
+        // The kernel stores `max(requested, its own floor)`, and that floor was
+        // measured a moment ago by `probe_min_perf_floor` rather than derived
+        // from a frequency ratio that moves with the turbo bit. So the value
+        // to expect is exact, and a mismatch is a real failure again rather
+        // than a mode the machine happened to arrive from.
+        let expected = match min_perf_floor {
+            Some(floor) => min_perf_pct.max(floor),
+            // Nothing was probed, so there is no floor to reason about and the
+            // only safe statement is that the kernel never stores less than
+            // asked.
+            None => min_perf_pct,
+        };
+        let satisfied = match min_perf_floor {
+            Some(_) => actual == expected,
+            None => actual >= expected,
+        };
+        if !satisfied {
             return Err(fail(format!(
-                "verification failed for {}: expected '{min_perf_pct}', got '{actual}'",
+                "verification failed for {}: expected '{expected}', got '{actual}'",
                 context.min_perf_path.display()
             )));
         }
-        if accepted_hardware_floor {
+        if actual > min_perf_pct {
             eprintln!(
-                "predator-sense-helper: min_perf_pct was clamped by the kernel from {min_perf_pct} to the hardware floor {actual}"
+                "predator-sense-helper: min_perf_pct was clamped by the kernel from {min_perf_pct} to its floor {actual}"
             );
         }
     }
@@ -1865,19 +2393,35 @@ fn command(name: &str, args: &[&str]) -> AppResult {
     Ok(())
 }
 
+/// Whether this helper process has already asked for persistence mode: once
+/// per process, so a privileged session runs `nvidia-smi -pm 1` at its first
+/// GPU power change and not again at every mode switch (each run is 28 to
+/// 50 ms of a full NVML start, measured on a PH16-71, where persistence was
+/// already on).
+static PERSISTENCE_ASKED: AtomicBool = AtomicBool::new(false);
+
 fn set_gpu_power_limit(
     watts: u16,
+    persistence_asked: &AtomicBool,
     mut execute: impl FnMut(&str, &[&str]) -> AppResult,
 ) -> AppResult {
     // Persistence mode is best effort, but a tool that did not answer at all
-    // would only hang the next call the same way.
-    if let Err(error) = execute(external::NVIDIA_SMI, &["-pm", "1"]) {
-        if error.to_string().contains(TIMED_OUT_MARKER) {
-            return Err(error);
+    // would only hang the next call the same way. A timeout leaves it to be
+    // asked again next time.
+    if !persistence_asked.load(Ordering::SeqCst) {
+        match execute(external::NVIDIA_SMI, &["-pm", "1"]) {
+            Err(error) if error.to_string().contains(TIMED_OUT_MARKER) => return Err(error),
+            _ => persistence_asked.store(true, Ordering::SeqCst),
         }
     }
     let watts = watts.to_string();
-    execute(external::NVIDIA_SMI, &["-pl", watts.as_str()])
+    let result = execute(external::NVIDIA_SMI, &["-pl", watts.as_str()]);
+    if result.is_err() {
+        // Persistence mode resets with the driver: after a module reload in a
+        // long session, the next change asks for it again.
+        persistence_asked.store(false, Ordering::SeqCst);
+    }
+    result
 }
 
 /// `sysfs`'s real parent, in production and in every test fixture alike:
@@ -2375,8 +2919,19 @@ mod tests {
         );
     }
 
+    /// The kernel stores `max(requested, its own floor)`, so a readback above
+    /// the request is that clamp and is accepted, while one below it cannot be
+    /// anything but a failed write.
+    ///
+    /// This deliberately no longer rejects a write that silently did nothing
+    /// and left a stale value above the request: telling that apart from a
+    /// genuine clamp needs the kernel's real floor, and every way of guessing
+    /// it from `cpuinfo_max_freq` moves with the turbo bit, which is what made
+    /// Quiet unreachable from Eco. The governor, EPP and
+    /// no_turbo written in the same transaction are still compared exactly, so
+    /// a write failing for a real reason is still caught.
     #[test]
-    fn accepts_only_the_kernel_reported_minimum_performance_clamp() {
+    fn accepts_the_kernel_clamp_but_never_a_value_below_the_request() {
         let fixture = TempDir::new().unwrap();
         policy(fixture.path(), 0, "intel_pstate", true);
         intel_controls(fixture.path(), "active", false, 17);
@@ -2396,27 +2951,33 @@ mod tests {
             no_turbo: Some(true),
             min_perf_pct: Some(10),
         };
+        // A faithful kernel: it stores max(requested, its own floor of 17) for
+        // every write, the helper's probe included, rather than reacting to
+        // one magic value. The probe is what makes that floor knowable.
         apply_cpu_profile_with(fixture.path(), request, &mut |label, value, path| {
-            if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) && value == "10" {
-                write_attr(label, "17", path)
-            } else {
-                write_attr(label, value, path)
+            if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) {
+                let asked = value.parse::<u16>().unwrap_or(0);
+                return write_attr(label, &asked.max(17).to_string(), path);
             }
+            write_attr(label, value, path)
         })
         .unwrap();
         assert_eq!(read(fixture.path(), INTEL_PSTATE_MIN_PERF), "17");
 
-        write(fixture.path(), INTEL_PSTATE_MIN_PERF, "50");
+        // A readback below the request is the one thing the kernel will never
+        // produce, so it still fails and still rolls back.
         let error = apply_cpu_profile_with(fixture.path(), request, &mut |label, value, path| {
             if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) && value == "10" {
-                Ok(())
+                write_attr(label, "4", path)
             } else {
                 write_attr(label, value, path)
             }
         })
         .unwrap_err();
-        assert!(error.contains("expected '10', got '50'"));
-        assert_eq!(read(fixture.path(), INTEL_PSTATE_MIN_PERF), "50");
+        assert!(
+            error.contains("expected '10', got '4'"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -2444,14 +3005,46 @@ mod tests {
             min_perf_pct: Some(10),
         };
         apply_cpu_profile_with(fixture.path(), request, &mut |label, value, path| {
-            if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) && value == "10" {
-                write_attr(label, "17", path)
-            } else {
-                write_attr(label, value, path)
+            if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) {
+                let asked = value.parse::<u16>().unwrap_or(0);
+                return write_attr(label, &asked.max(17).to_string(), path);
             }
+            write_attr(label, value, path)
         })
         .unwrap();
         assert_eq!(read(fixture.path(), INTEL_PSTATE_MIN_PERF), "17");
+    }
+
+    /// The probe is what makes the exact comparison possible, so it is worth
+    /// asserting that it happens at all: without it the helper would be back
+    /// to guessing, and a kernel floor above the request would read as a
+    /// failure.
+    #[test]
+    fn the_floor_is_probed_before_the_real_write() {
+        let fixture = TempDir::new().unwrap();
+        policy(fixture.path(), 0, "intel_pstate", true);
+        intel_controls(fixture.path(), "active", false, 17);
+        let request = CpuProfileRequest {
+            governor: CpuGovernor::Powersave,
+            epp: Some(EnergyPreference::Power),
+            no_turbo: Some(true),
+            min_perf_pct: Some(10),
+        };
+        let mut min_perf_writes = Vec::new();
+        apply_cpu_profile_with(fixture.path(), request, &mut |label, value, path| {
+            if path == fixture.path().join(INTEL_PSTATE_MIN_PERF) {
+                min_perf_writes.push(value.to_string());
+                let asked = value.parse::<u16>().unwrap_or(0);
+                return write_attr(label, &asked.max(17).to_string(), path);
+            }
+            write_attr(label, value, path)
+        })
+        .unwrap();
+        assert_eq!(
+            min_perf_writes,
+            vec!["0".to_string(), "10".to_string()],
+            "the floor probe must come first, then the profile's own value"
+        );
     }
 
     #[test]
@@ -2823,7 +3416,7 @@ mod tests {
     #[test]
     fn applies_gpu_power_limit_when_persistence_mode_is_unsupported() {
         let mut invocations = Vec::new();
-        let result = set_gpu_power_limit(80, |name, args| {
+        let result = set_gpu_power_limit(80, &AtomicBool::new(false), |name, args| {
             invocations.push((name.to_string(), args.join(" ")));
             if args == ["-pm", "1"] {
                 Err("persistence mode unsupported".into())
@@ -2844,7 +3437,7 @@ mod tests {
 
     #[test]
     fn reports_gpu_power_limit_failure() {
-        let result = set_gpu_power_limit(80, |_name, args| {
+        let result = set_gpu_power_limit(80, &AtomicBool::new(false), |_name, args| {
             if args == ["-pl", "80"] {
                 Err("power limit rejected".into())
             } else {
@@ -2853,6 +3446,57 @@ mod tests {
         });
 
         assert_eq!(result.unwrap_err(), "power limit rejected");
+    }
+
+    #[test]
+    fn asks_for_persistence_mode_once_per_helper_process() {
+        let asked = AtomicBool::new(false);
+        let mut invocations = Vec::new();
+        for watts in [80, 60, 100] {
+            set_gpu_power_limit(watts, &asked, |_name, args| {
+                invocations.push(args.join(" "));
+                Ok(())
+            })
+            .unwrap();
+        }
+        assert_eq!(invocations, ["-pm 1", "-pl 80", "-pl 60", "-pl 100"]);
+    }
+
+    #[test]
+    fn a_refused_power_limit_asks_for_persistence_mode_again() {
+        let asked = AtomicBool::new(false);
+        let mut invocations = Vec::new();
+        for _ in 0..2 {
+            let _ = set_gpu_power_limit(80, &asked, |_name, args| {
+                invocations.push(args.join(" "));
+                if args == ["-pl", "80"] {
+                    Err("power limit rejected".into())
+                } else {
+                    Ok(())
+                }
+            });
+        }
+        assert_eq!(invocations, ["-pm 1", "-pl 80", "-pm 1", "-pl 80"]);
+    }
+
+    #[test]
+    fn a_persistence_mode_timeout_is_asked_again() {
+        let asked = AtomicBool::new(false);
+        let timed_out = set_gpu_power_limit(80, &asked, |_name, args| {
+            if args == ["-pm", "1"] {
+                Err(format!("nvidia-smi {TIMED_OUT_MARKER} 10s").into())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(timed_out.is_err());
+        let mut invocations = Vec::new();
+        set_gpu_power_limit(80, &asked, |_name, args| {
+            invocations.push(args.join(" "));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(invocations, ["-pm 1", "-pl 80"]);
     }
 
     #[test]
@@ -2953,6 +3597,418 @@ mod tests {
         run_daemon(ec, ec, input, &mut output).unwrap();
 
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn keyboard_timer_hold_starts_empty() {
+        assert!(!KeyboardTimerHold::new().take_hand_back());
+    }
+
+    #[test]
+    fn keyboard_timer_hold_hands_back_once_after_a_successful_off() {
+        let hold = KeyboardTimerHold::new();
+        hold.record(false, true);
+
+        assert!(hold.take_hand_back());
+        // Taken: a second exit path must not send the packet again.
+        assert!(!hold.take_hand_back());
+    }
+
+    #[test]
+    fn keyboard_timer_hold_ends_when_the_timer_goes_back_on() {
+        let hold = KeyboardTimerHold::new();
+        hold.record(false, true);
+        hold.record(true, true);
+
+        assert!(!hold.take_hand_back());
+    }
+
+    #[test]
+    fn keyboard_timer_hold_ignores_a_failed_off() {
+        let hold = KeyboardTimerHold::new();
+        hold.record(false, false);
+
+        assert!(!hold.take_hand_back());
+    }
+
+    #[test]
+    fn keyboard_timer_hold_survives_a_failed_on() {
+        // The keyboard is still where the last write that landed left it.
+        let hold = KeyboardTimerHold::new();
+        hold.record(false, true);
+        hold.record(true, false);
+
+        assert!(hold.take_hand_back());
+    }
+
+    #[test]
+    fn a_privileged_session_whose_caller_is_gone_always_hands_the_24bit_keyboard_back() {
+        // The GUI switched it off over the hidraw node and is gone: crashed,
+        // or killed before its own hand-back.
+        for held in [false, true] {
+            assert!(
+                hands_back(Exit::CallerGone, true, true, held),
+                "held {held}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_whose_caller_is_gone_hands_another_keyboard_back_only_if_it_switched_it_off() {
+        for privileged in [false, true] {
+            assert!(!hands_back(Exit::CallerGone, privileged, false, false));
+            assert!(hands_back(Exit::CallerGone, privileged, false, true));
+        }
+    }
+
+    #[test]
+    fn the_unprivileged_read_session_hands_back_only_what_it_switched_off() {
+        // `helper::read` starts one as the user, the GUI's tests included,
+        // and its end must not reach a keyboard the running app holds.
+        assert!(!hands_back(Exit::CallerGone, false, true, false));
+        assert!(hands_back(Exit::CallerGone, false, true, true));
+    }
+
+    #[test]
+    fn a_signal_hands_back_only_a_timer_this_session_switched_off() {
+        // An upgrade sends SIGTERM while the GUI runs on with the timer off.
+        for privileged in [false, true] {
+            for keyboard_24bit in [false, true] {
+                assert!(!hands_back(Exit::Signal, privileged, keyboard_24bit, false));
+                assert!(hands_back(Exit::Signal, privileged, keyboard_24bit, true));
+            }
+        }
+    }
+
+    #[test]
+    fn one_shot_mode_is_no_session_and_hands_nothing_back() {
+        // What `--internal-helper ...` and `predator-sense-helper ...` hand
+        // to `run`: only `--daemon` first starts a session, and only a
+        // session reaches a hand-back.
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        assert!(is_daemon(&args(&[internal::HELPER_DAEMON_ARGUMENT])));
+        assert!(!is_daemon(&args(&["chicony-auto-off", "0"])));
+        assert!(!is_daemon(&args(&["fan-auto"])));
+        assert!(!is_daemon(&args(&[
+            "thermal-profile",
+            internal::HELPER_DAEMON_ARGUMENT
+        ])));
+        assert!(!is_daemon(&[]));
+    }
+
+    /// What reached the stand-in keyboard, in order.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Wrote {
+        /// A `chicony-auto-off` command.
+        Timer(bool),
+        /// The exit hand-back.
+        HandBack,
+    }
+
+    /// A stand-in keyboard recording into `sent`, every write answering
+    /// `result`: the command write and the hand-back.
+    fn stand_in<'a>(
+        sent: &'a std::cell::RefCell<Vec<Wrote>>,
+        result: &'a AppResult,
+    ) -> (impl Fn(bool) -> AppResult + 'a, impl Fn() -> AppResult + 'a) {
+        let set_timer = move |on: bool| {
+            sent.borrow_mut().push(Wrote::Timer(on));
+            result.clone()
+        };
+        let hand_back = move || {
+            sent.borrow_mut().push(Wrote::HandBack);
+            result.clone()
+        };
+        (set_timer, hand_back)
+    }
+
+    /// Runs one daemon session against a stand-in for the keyboard and
+    /// returns what reached it, in order, plus the reply lines.
+    /// `answers_unasked`: a privileged session on the 24-bit keyboard.
+    fn daemon_session(
+        input: &[u8],
+        answers_unasked: bool,
+        keyboard: AppResult,
+    ) -> (AppResult, Vec<Wrote>, Vec<String>) {
+        let sent = std::cell::RefCell::new(Vec::new());
+        let (set_timer, hand_back) = stand_in(&sent, &keyboard);
+        let session = SessionKeyboard {
+            privileged: answers_unasked,
+            is_24bit: answers_unasked,
+            set_timer: &set_timer,
+            hand_back: &hand_back,
+        };
+        let mut output = Vec::new();
+        let ec = Path::new("/dev/null");
+        let result = run_daemon_with(ec, ec, input, &mut output, &DaemonShared::new(), session);
+        let replies = std::str::from_utf8(&output)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+        (result, sent.take(), replies)
+    }
+
+    #[test]
+    fn daemon_hands_the_keyboard_timer_back_when_input_ends() {
+        for answers_unasked in [false, true] {
+            let (result, sent, replies) =
+                daemon_session(b"chicony-auto-off 0\n", answers_unasked, Ok(()));
+
+            result.unwrap();
+            assert_eq!(sent, vec![Wrote::Timer(false), Wrote::HandBack]);
+            assert_eq!(replies, vec![internal::HELPER_DAEMON_OK]);
+        }
+    }
+
+    #[test]
+    fn daemon_on_the_24bit_keyboard_hands_the_timer_back_when_input_ends_unasked() {
+        // The GUI held the timer over the node and never sent this session
+        // a keyboard command.
+        let (result, sent, _) = daemon_session(b"\n", true, Ok(()));
+
+        result.unwrap();
+        assert_eq!(sent, vec![Wrote::HandBack]);
+    }
+
+    #[test]
+    fn daemon_hands_back_once_however_many_offs_it_sent() {
+        let (result, sent, _) =
+            daemon_session(b"chicony-auto-off 0\nchicony-auto-off 0\n", true, Ok(()));
+
+        result.unwrap();
+        assert_eq!(
+            sent,
+            vec![Wrote::Timer(false), Wrote::Timer(false), Wrote::HandBack]
+        );
+    }
+
+    #[test]
+    fn daemon_elsewhere_leaves_the_keyboard_timer_alone_once_the_caller_handed_it_back() {
+        let (result, sent, _) =
+            daemon_session(b"chicony-auto-off 0\nchicony-auto-off 1\n", false, Ok(()));
+
+        result.unwrap();
+        assert_eq!(sent, vec![Wrote::Timer(false), Wrote::Timer(true)]);
+    }
+
+    #[test]
+    fn daemon_elsewhere_does_not_hand_back_a_timer_it_failed_to_switch_off() {
+        let (result, sent, replies) = daemon_session(
+            b"chicony-auto-off 0\n",
+            false,
+            Err("keyboard not found".into()),
+        );
+
+        result.unwrap();
+        assert_eq!(sent, vec![Wrote::Timer(false)]);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].starts_with(internal::HELPER_DAEMON_ERR));
+    }
+
+    #[test]
+    fn daemon_elsewhere_sends_nothing_to_the_keyboard_when_never_asked() {
+        let (result, sent, _) = daemon_session(b"\n", false, Ok(()));
+
+        result.unwrap();
+        assert!(sent.is_empty());
+    }
+
+    #[test]
+    fn daemon_rejects_a_bad_timer_value_without_touching_the_keyboard() {
+        let (result, sent, replies) = daemon_session(b"chicony-auto-off 2\n", false, Ok(()));
+
+        result.unwrap();
+        assert!(sent.is_empty());
+        assert!(replies[0].starts_with(internal::HELPER_DAEMON_ERR));
+        assert!(replies[0].contains("invalid value '2'"));
+    }
+
+    /// A reply pipe whose reader is gone.
+    struct ClosedPipe;
+    impl Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// One session whose first reply finds the caller gone.
+    fn session_with_the_caller_gone(
+        input: &[u8],
+        answers_unasked: bool,
+    ) -> (AppResult, Vec<Wrote>) {
+        let sent = std::cell::RefCell::new(Vec::new());
+        let ok = Ok(());
+        let (set_timer, hand_back) = stand_in(&sent, &ok);
+        let session = SessionKeyboard {
+            privileged: answers_unasked,
+            is_24bit: answers_unasked,
+            set_timer: &set_timer,
+            hand_back: &hand_back,
+        };
+        let ec = Path::new("/dev/null");
+        let result = run_daemon_with(ec, ec, input, ClosedPipe, &DaemonShared::new(), session);
+        (result, sent.take())
+    }
+
+    #[test]
+    fn daemon_hands_the_keyboard_timer_back_when_the_caller_is_gone() {
+        // The caller died: its end of the reply pipe is closed, so the first
+        // reply fails and the session ends there, not at end of input.
+        let (result, sent) =
+            session_with_the_caller_gone(b"chicony-auto-off 0\nthermal-profile 3\n", false);
+
+        assert!(result.is_err());
+        assert_eq!(sent, vec![Wrote::Timer(false), Wrote::HandBack]);
+    }
+
+    #[test]
+    fn daemon_on_the_24bit_keyboard_hands_the_timer_back_when_the_caller_is_gone_unasked() {
+        let (result, sent) = session_with_the_caller_gone(b"not-a-real-action\n", true);
+
+        assert!(result.is_err());
+        assert_eq!(sent, vec![Wrote::HandBack]);
+    }
+
+    #[test]
+    fn signal_hand_back_sends_the_timer_on_only_while_held() {
+        // Even a privileged session on the 24-bit keyboard: the GUI may be
+        // running on with the timer off.
+        let sent = std::cell::RefCell::new(Vec::new());
+        let ok = Ok(());
+        let (set_timer, hand_back) = stand_in(&sent, &ok);
+        let session = SessionKeyboard {
+            privileged: true,
+            is_24bit: true,
+            set_timer: &set_timer,
+            hand_back: &hand_back,
+        };
+        let shared = DaemonShared::new();
+
+        drop(shared.hand_back_after_signal(session, Duration::ZERO));
+        assert!(sent.borrow().is_empty());
+
+        shared.timer.record(false, true);
+        drop(shared.hand_back_after_signal(session, Duration::ZERO));
+        drop(shared.hand_back_after_signal(session, Duration::ZERO));
+        assert_eq!(sent.take(), vec![Wrote::HandBack]);
+    }
+
+    /// A session keyboard whose hand-back pushes to `sent`, usable across
+    /// threads. Nothing else is written.
+    fn hand_back_into(sent: &Mutex<Vec<Wrote>>) -> impl Fn() -> AppResult + Sync + '_ {
+        move || {
+            sent.lock().unwrap().push(Wrote::HandBack);
+            Ok(())
+        }
+    }
+
+    fn never_set_timer(_: bool) -> AppResult {
+        panic!("no command runs in this test")
+    }
+
+    #[test]
+    fn signal_hand_back_waits_for_the_command_in_flight() {
+        let shared = DaemonShared::new();
+        let sent = Mutex::new(Vec::new());
+        let hand_back = hand_back_into(&sent);
+        thread::scope(|scope| {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let shared = &shared;
+            scope.spawn(move || {
+                // A `chicony-auto-off 0` still running when the signal lands:
+                // the hand-back has to see the hold it is about to record.
+                let _running = shared.dispatch.lock().unwrap();
+                started_tx.send(()).unwrap();
+                thread::sleep(Duration::from_millis(50));
+                shared.timer.record(false, true);
+            });
+            started_rx.recv().unwrap();
+            let session = SessionKeyboard {
+                privileged: true,
+                is_24bit: false,
+                set_timer: &never_set_timer,
+                hand_back: &hand_back,
+            };
+            let in_flight = shared.hand_back_after_signal(session, Duration::from_secs(5));
+            assert!(in_flight.is_some());
+        });
+        assert_eq!(sent.lock().unwrap().clone(), vec![Wrote::HandBack]);
+    }
+
+    #[test]
+    fn signal_hand_back_gives_up_waiting_on_a_stuck_command() {
+        let shared = DaemonShared::new();
+        shared.timer.record(false, true);
+        let _stuck = shared.dispatch.lock().unwrap();
+        let sent = Mutex::new(Vec::new());
+        let hand_back = hand_back_into(&sent);
+        let session = SessionKeyboard {
+            privileged: true,
+            is_24bit: false,
+            set_timer: &never_set_timer,
+            hand_back: &hand_back,
+        };
+
+        let started = Instant::now();
+        let in_flight = shared.hand_back_after_signal(session, Duration::from_millis(50));
+
+        assert!(in_flight.is_none());
+        assert!(started.elapsed() >= Duration::from_millis(50));
+        assert_eq!(sent.lock().unwrap().clone(), vec![Wrote::HandBack]);
+    }
+
+    #[test]
+    fn tests_never_reach_the_real_keyboard() {
+        // The machine running the tests may have this keyboard: the real
+        // node is never found and USB is never opened, so neither the real
+        // commands nor the real hand-back can reach it.
+        assert_eq!(keyboard_node(), None);
+        let error = hand_back_keyboard_timer().unwrap_err();
+        assert!(error.contains("not found"), "{error}");
+        // Past the model gate (on a PH16-71) or stopped by it (elsewhere).
+        let error = set_keyboard_timer(true).unwrap_err();
+        assert!(
+            error.contains("tests never reach the keyboard") || error.contains("only for"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_24bit_commands_are_only_for_the_listed_models() {
+        assert_eq!(require_24bit_keyboard("Predator PH16-71"), Ok(()));
+        // The Helios 300 generation: the same USB id, the older family.
+        assert!(require_24bit_keyboard("Predator PH317-56").is_err());
+        assert!(require_24bit_keyboard("Predator PH16-71X").is_err());
+        assert!(require_24bit_keyboard("").is_err());
+    }
+
+    #[test]
+    fn an_exit_signal_reaches_the_waiting_thread_through_the_pipe() {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        EXIT_SIGNAL_PIPE.store(writer.as_raw_fd(), Ordering::SeqCst);
+        // SIGHUP alone: nothing else in the test process uses it, and it goes
+        // straight back to its default action below.
+        assert!(set_signal_action(libc::SIGHUP, exit_signal_handler()));
+        // SAFETY: raise has no preconditions, and SIGHUP is caught just above.
+        let raised = unsafe { libc::raise(libc::SIGHUP) };
+        assert!(set_signal_action(libc::SIGHUP, libc::SIG_DFL));
+        EXIT_SIGNAL_PIPE.store(-1, Ordering::SeqCst);
+
+        assert_eq!(raised, 0);
+        assert_eq!(next_exit_signal(&reader), Some(libc::SIGHUP));
+    }
+
+    #[test]
+    fn the_exit_signal_wait_ends_when_the_pipe_breaks() {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        drop(writer);
+
+        assert_eq!(next_exit_signal(&reader), None);
     }
 
     #[test]
@@ -3204,5 +4260,74 @@ mod tests {
             fs::read_to_string(fixture.path().join("etc/default/grub")).unwrap(),
             "GRUB_TIMEOUT=5\n"
         );
+    }
+
+    #[test]
+    fn chicony_effect_takes_only_known_opcodes() {
+        for opcode in keyboard::EFFECT_OPCODES {
+            assert_eq!(parse_effect_opcode(&opcode.to_string()), Ok(opcode));
+        }
+        for value in ["0", "4", "7", "16", "42", "255", "256", "x"] {
+            assert!(parse_effect_opcode(value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn chicony_effect_accepts_all_six_wave_directions() {
+        for direction in 1..=6u16 {
+            assert!(parse_u16("direction", &direction.to_string(), 1, 6).is_ok());
+        }
+        assert!(parse_u16("direction", "7", 1, 6).is_err());
+    }
+
+    #[test]
+    fn chicony_checksum_is_the_complement_of_the_byte_sum() {
+        let cases: [([u8; 7], u8); 4] = [
+            ([0x30, 0x01, 0x00, 0, 0, 0, 0], 0xce),
+            ([0x30, 0x01, 0x01, 0, 0, 0, 0], 0xcd),
+            ([0xb1, 0, 0, 0, 0, 0, 0], 0x4e),
+            ([0x08, 0x02, 0x02, 0x07, 0x32, 0x01, 0x01], 0xb8),
+        ];
+        for (head, expected) in cases {
+            let mut packet = [0u8; 8];
+            packet[..7].copy_from_slice(&head);
+            keyboard::checksum(&mut packet);
+            assert_eq!(packet[7], expected, "{head:02x?}");
+        }
+    }
+
+    #[test]
+    fn chicony_effect_packets_carry_computed_checksums() {
+        let packets = keyboard::effect_packets(0x02, 50, 100, 1, 2, 3, 1);
+        assert_eq!(packets[0], keyboard::PREAMBLE);
+        assert_eq!(packets[1], [0x14, 0, 0, 1, 2, 3, 0, 0xe5]);
+        let effect = packets[2];
+        assert_eq!(effect[..7], [0x08, 0x02, 0x02, 0x05, 0x32, 0x01, 0x01]);
+        let sum = effect[..7].iter().fold(0u8, |a, b| a.wrapping_add(*b));
+        assert_eq!(effect[7], !sum);
+        assert_ne!(effect[7], 0x9b);
+    }
+
+    #[test]
+    fn chicony_color_packet_ends_in_its_checksum() {
+        assert_eq!(
+            keyboard::colour_packet(0xff, 0x80, 0x00),
+            [0x14, 0, 0, 0xff, 0x80, 0x00, 0, 0x6c]
+        );
+    }
+
+    #[test]
+    fn chicony_auto_off_packet_layout() {
+        assert_eq!(keyboard::auto_off_packet(false), [0x30, 0x01, 0, 0, 0, 0, 0, 0xce]);
+        assert_eq!(keyboard::auto_off_packet(true), [0x30, 0x01, 1, 0, 0, 0, 0, 0xcd]);
+    }
+
+    #[test]
+    fn chicony_brightness_is_scaled_on_the_protocol_scale() {
+        for percent in [0u8, 24, 50, 74, 99, 100, 255] {
+            let packets = keyboard::effect_packets(0x01, 0, percent, 0, 0, 0, 1);
+            let raw = keyboard::percent_to_raw(percent);
+            assert_eq!(packets[2][4], raw, "{percent} %");
+        }
     }
 }

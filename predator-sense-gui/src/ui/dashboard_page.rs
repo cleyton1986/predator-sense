@@ -1,5 +1,7 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
+use std::cell::Cell;
+use std::rc::Rc;
 
 use crate::hardware::sysinfo::{self, SystemInfo};
 
@@ -196,19 +198,39 @@ pub fn build() -> gtk::ScrolledWindow {
 
     page.append(&grid);
 
-    // Passive Dashboard refreshes never runtime-resume a suspended dGPU.
-    // They can consume an already-live sample (including one loaded after the
-    // user explicitly opens the GPU page), or query an already-active device
-    // on the shared background path without blocking GTK.
+    // The card shows the GPU's name, VRAM and driver, which cannot change while the app
+    // runs: read once from the GPU (never waking a suspended one) and kept, instead of
+    // asking for the full metrics every two seconds while the Dashboard is shown.
     if nvidia_available {
         if let Some(gpu_value_label) = gpu_value_label {
-            let map_label = gpu_value_label.clone();
-            scroll.connect_map(move |_| refresh_gpu_detail(&map_label));
-
-            let scroll = scroll.clone();
+            let fallback = (
+                info.gpu_name.clone(),
+                info.gpu_vram_mb,
+                info.gpu_driver.clone(),
+            );
+            let loading = Rc::new(Cell::new(false));
+            {
+                let (label, fallback, loading) =
+                    (gpu_value_label.clone(), fallback.clone(), loading.clone());
+                scroll.connect_map(move |_| refresh_gpu_detail(&label, &fallback, &loading));
+            }
+            // Until the identity is known: shown by the first reading any page
+            // makes, and read once more when a suspended dGPU wakes up. A
+            // cheap check every 2 s while the Dashboard is on screen, gone for
+            // good once the identity is shown.
+            let scroll_c = scroll.clone();
+            let was_awake = Cell::new(crate::hardware::nvidia::live_query_is_safe());
             glib::timeout_add_seconds_local(2, move || {
-                if scroll.is_mapped() {
-                    refresh_gpu_detail(&gpu_value_label);
+                if !crate::app_state::is_window_visible() || !scroll_c.is_mapped() {
+                    return glib::ControlFlow::Continue;
+                }
+                if crate::hardware::gpu::identity().is_some() {
+                    refresh_gpu_detail(&gpu_value_label, &fallback, &loading);
+                    return glib::ControlFlow::Break;
+                }
+                let awake = crate::hardware::nvidia::live_query_is_safe();
+                if awake != was_awake.replace(awake) {
+                    refresh_gpu_detail(&gpu_value_label, &fallback, &loading);
                 }
                 glib::ControlFlow::Continue
             });
@@ -219,32 +241,48 @@ pub fn build() -> gtk::ScrolledWindow {
     scroll
 }
 
-fn refresh_gpu_detail(label: &gtk::Label) {
-    let metrics = crate::hardware::gpu::read_gpu_metrics();
-    let status = if metrics.live {
-        None
-    } else {
-        Some(match crate::hardware::gpu::live_data_state() {
-            crate::hardware::gpu::GpuLiveState::Loading => crate::i18n::t("gpu_loading_live"),
-            crate::hardware::gpu::GpuLiveState::Unavailable => {
-                crate::i18n::t("gpu_live_unavailable")
-            }
-            crate::hardware::gpu::GpuLiveState::Static => {
-                if crate::hardware::nvidia::live_query_is_safe() {
-                    crate::i18n::t("gpu_loading_live")
-                } else {
-                    crate::i18n::t("gpu_suspended_static")
-                }
-            }
-            crate::hardware::gpu::GpuLiveState::Live => crate::i18n::t("gpu_live_unavailable"),
-        })
+/// Shows the GPU's identity on `label`, once known; until then the static `fallback`
+/// (name, VRAM in MB, driver) with a word on why, and a one-time read on a worker if the
+/// GPU is awake (`loading` while it runs).
+fn refresh_gpu_detail(
+    label: &gtk::Label,
+    fallback: &(String, u32, String),
+    loading: &Rc<Cell<bool>>,
+) {
+    use crate::hardware::gpu;
+    let show = |label: &gtk::Label, identity: Option<gpu::GpuIdentity>, status: Option<&str>| {
+        let text = match identity {
+            Some(id) => format_gpu_detail(&id.name, id.vram_total_mb, &id.driver, None),
+            None => format_gpu_detail(&fallback.0, fallback.1, &fallback.2, status),
+        };
+        label.set_text(&text);
     };
-    label.set_text(&format_gpu_detail(
-        &metrics.name,
-        metrics.vram_total_mb,
-        &metrics.driver,
-        status,
-    ));
+    if let Some(identity) = gpu::identity() {
+        show(label, Some(identity), None);
+        return;
+    }
+    if !crate::hardware::nvidia::live_query_is_safe() {
+        show(label, None, Some(crate::i18n::t("gpu_suspended_static")));
+        return;
+    }
+    show(label, None, Some(crate::i18n::t("gpu_loading_live")));
+    if loading.replace(true) {
+        return;
+    }
+    let (label, fallback, loading) = (label.clone(), fallback.clone(), loading.clone());
+    crate::ui::background::run(gpu::load_identity_blocking, move |identity| {
+        loading.set(false);
+        let text = match identity {
+            Some(id) => format_gpu_detail(&id.name, id.vram_total_mb, &id.driver, None),
+            None => format_gpu_detail(
+                &fallback.0,
+                fallback.1,
+                &fallback.2,
+                Some(crate::i18n::t("gpu_live_unavailable")),
+            ),
+        };
+        label.set_text(&text);
+    });
 }
 
 fn format_gpu_detail(name: &str, vram_mb: u32, driver: &str, status: Option<&str>) -> String {

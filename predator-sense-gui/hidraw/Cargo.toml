@@ -1,0 +1,19 @@
+[package]
+name = "predator-sense-hidraw"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "The Chicony keyboard's hidraw node, shared by the Predator Sense GUI and privileged helper"
+license = "GPL-3.0"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The feature-report ioctls, which std has no wrapper for.
+libc = "0.2"
+# The keyboard's report sizes and reply check.
+predator-sense-protocol = { path = "../protocol" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -60,8 +60,8 @@ pub fn build() -> gtk::ScrolledWindow {
         suppress: false,
     }));
 
-    let have_keyboard = keyboard_rgb::is_available();
-    let have_bar = light_bar::is_available();
+    let have_keyboard = crate::hardware::capabilities::get().keyboard_rgb;
+    let have_bar = crate::hardware::capabilities::get().light_bar;
 
     if !have_keyboard && !have_bar {
         let note = gtk::Label::new(Some(crate::i18n::t("lighting_no_devices")));
@@ -334,7 +334,7 @@ fn build_keyboard_section(
             show_error(&status, result);
         })
     };
-    let commit = color_picker::debouncer(APPLY_DEBOUNCE_MS, commit);
+    let (commit, _) = color_picker::debouncer(APPLY_DEBOUNCE_MS, commit);
 
     let effects = gtk::FlowBox::new();
     effects.set_selection_mode(gtk::SelectionMode::None);
@@ -547,7 +547,7 @@ fn build_light_bar_section(
             show_error(&status, result);
         })
     };
-    let commit = color_picker::debouncer(APPLY_DEBOUNCE_MS, commit);
+    let (commit, _) = color_picker::debouncer(APPLY_DEBOUNCE_MS, commit);
 
     let modes = gtk::FlowBox::new();
     modes.set_selection_mode(gtk::SelectionMode::None);
@@ -714,37 +714,6 @@ fn build_idle_section(have_keyboard: bool, have_bar: bool) -> gtk::Box {
     page.append(&master_row);
     page.append(&hint(crate::i18n::t("lighting_idle_desc")));
 
-    // Deliberately outside `details`, which is greyed out with the master
-    // switch: this setting still has an effect there. The keyboard
-    // controller's own sleep timer runs whether or not this app blanks
-    // anything, so someone who turned idle blanking off and still watched the
-    // backlight die is exactly the person who needs to reach this.
-    if have_keyboard {
-        let keepalive_row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        let keepalive_check = gtk::CheckButton::with_label(crate::i18n::t("idle_keepalive"));
-        keepalive_check.set_active(cfg.idle_keyboard_keepalive);
-        keepalive_check.connect_toggled(|check| {
-            let mut cfg = config::load_app_config();
-            cfg.idle_keyboard_keepalive = check.is_active();
-            let _ = config::save_app_config(&cfg);
-            // Live, like everything else on this page: switching it on while
-            // the controller has already slept lights the keyboard now rather
-            // than up to 20 s later. Switching it off changes nothing until
-            // that controller's own timer next expires, which is the point.
-            if check.is_active() {
-                // Same reason as the startup path: with idle blanking off the
-                // watcher is not running yet, and the keepalive needs it.
-                crate::hardware::idle::start();
-                if !keyboard_rgb::is_blanked() {
-                    let _ = keyboard_rgb::refresh();
-                }
-            }
-        });
-        keepalive_row.append(&keepalive_check);
-        page.append(&keepalive_row);
-        page.append(&hint(crate::i18n::t("idle_keepalive_desc")));
-    }
-
     // Everything below is meaningless while the master switch is off.
     let details = gtk::Box::new(gtk::Orientation::Vertical, 10);
     details.set_margin_start(12);
@@ -848,7 +817,7 @@ fn build_idle_section(have_keyboard: bool, have_bar: bool) -> gtk::Box {
             if active {
                 // One owner - see this function's doc comment. Only worth
                 // taking if this app can blank the keyboard itself.
-                if crate::hardware::keyboard_rgb::is_available() {
+                if crate::hardware::capabilities::get().keyboard_rgb {
                     let _ = crate::hardware::extras::set_backlight_timeout(false);
                 }
                 crate::hardware::idle::start();
@@ -1176,8 +1145,8 @@ fn build_scheme_bar(
             let mut cfg = config::load_app_config();
             let scheme = LightingScheme {
                 name: name.clone(),
-                keyboard: keyboard_rgb::is_available().then_some(live.keyboard),
-                light_bar: light_bar::is_available().then_some(live.light_bar),
+                keyboard: crate::hardware::capabilities::get().keyboard_rgb.then_some(live.keyboard),
+                light_bar: crate::hardware::capabilities::get().light_bar.then_some(live.light_bar),
             };
             match cfg
                 .lighting_schemes
@@ -1217,7 +1186,7 @@ fn apply_scheme_by_name(name: &str, state: Option<&Rc<RefCell<LightingState>>>) 
         return;
     };
     if let Some(keyboard) = scheme.keyboard {
-        if keyboard_rgb::is_available() && keyboard_rgb::apply(&keyboard).is_ok() {
+        if crate::hardware::capabilities::get().keyboard_rgb && keyboard_rgb::apply(&keyboard).is_ok() {
             cfg.keyboard_rgb = Some(keyboard);
             if let Some(state) = state {
                 state.borrow_mut().keyboard = keyboard;
@@ -1229,7 +1198,7 @@ fn apply_scheme_by_name(name: &str, state: Option<&Rc<RefCell<LightingState>>>) 
             .light_bar
             .map(|previous| previous.mode == LightBarMode::Off)
             .unwrap_or(true);
-        if light_bar::is_available() && light_bar::apply(&bar, wake).is_ok() {
+        if crate::hardware::capabilities::get().light_bar && light_bar::apply(&bar, wake).is_ok() {
             cfg.light_bar = Some(bar);
             if let Some(state) = state {
                 state.borrow_mut().light_bar = bar;

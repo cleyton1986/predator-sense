@@ -21,13 +21,24 @@ pub(crate) mod binary {
 pub(crate) mod path {
     pub use predator_sense_protocol::path::*;
 
-    pub const DESKTOP_ENTRY: &str = "/usr/share/applications/predator-sense.desktop";
+    /// Named after the application id, not the binary. GNotification resolves
+    /// a notification's name and icon by looking for `<app id>.desktop`, so a
+    /// mismatch here means a notification with no icon, or on some backends no
+    /// notification at all.
+    pub const DESKTOP_ENTRY: &str = "/usr/share/applications/com.predator.sense.desktop";
+    /// What the entry was called before that. Removed on install and uninstall
+    /// so an upgrade does not leave the app listed twice.
+    pub const LEGACY_DESKTOP_ENTRY: &str = "/usr/share/applications/predator-sense.desktop";
     pub const ICON: &str = "/usr/share/icons/hicolor/128x128/apps/predator-sense.png";
     pub const ICON_THEME: &str = "/usr/share/icons/hicolor";
     pub const POLKIT_POLICY: &str = "/usr/share/polkit-1/actions/com.predator.sense.policy";
     pub const POLKIT_RULE: &str = "/etc/polkit-1/rules.d/49-predator-sense.rules";
     pub const HID_UDEV_RULE: &str = "/etc/udev/rules.d/99-predator-hid-rgb.rules";
     pub const EC_UDEV_RULE: &str = "/etc/udev/rules.d/99-predator-ec.rules";
+    /// Rules that give the active local session's user access to a node
+    /// (`TAG+="uaccess"`). Numbered below systemd's `73-seat-late.rules`,
+    /// which applies that tag: a uaccess tag set after it does nothing.
+    pub const SEAT_UDEV_RULE: &str = "/etc/udev/rules.d/70-predator-sense-uaccess.rules";
     /// Fn+F9/F10 keyboard-illumination fix for the PH315-54 only (issue
     /// #64) - see `install::keyboard_hwdb_fix_for`.
     pub const KEYBOARD_HWDB_FIX: &str = "/etc/udev/hwdb.d/70-predator-sense-keyboard.hwdb";
@@ -273,6 +284,15 @@ pub(crate) mod timing {
     pub const SERVICE_START_LIMIT_BURST: u32 = 5;
     pub const SERVICE_START_LIMIT_INTERVAL_SECS: u64 = 300;
     pub const PROCESS_SHUTDOWN_GRACE_SECS: u64 = 1;
+    /// How long an upgrade waits in all, the grace above included, for the
+    /// services it stopped to exit before it says it could not stop them.
+    /// The helper takes longer than the others: on SIGTERM it waits up to
+    /// `helper::IN_FLIGHT_WAIT` (3 s) for a command in flight, then hands back
+    /// the keyboard's idle timer if it switched that off itself, before it
+    /// exits.
+    pub const PROCESS_STOP_WAIT_SECS: u64 = 5;
+    /// How often that wait looks again.
+    pub const PROCESS_STOP_POLL_MS: u64 = 100;
 }
 
 pub(crate) mod installer {

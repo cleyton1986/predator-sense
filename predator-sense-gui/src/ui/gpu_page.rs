@@ -318,6 +318,8 @@ pub fn build() -> gtk::Box {
         glib::idle_add_local_once(move || update(&s, &w));
     }
 
+    shows_full_metrics(&page);
+
     // Entering the explicit GPU monitor opts into waking a suspended dGPU,
     // but the query remains on a worker and all controls keep their real
     // static identity while live metrics are loading.
@@ -352,6 +354,18 @@ pub fn build() -> gtk::Box {
     });
 
     page
+}
+
+/// Marks `widget` as one that shows the full GPU metrics: the NVML reading
+/// query behind them runs only while such a widget is mapped and the window
+/// is on screen (see `gpu::read_gpu_metrics`). Call it before the widget's
+/// own map handlers, so a read made from them already counts it.
+pub fn shows_full_metrics(widget: &impl IsA<gtk::Widget>) {
+    widget.connect_map(|_| gpu::full_metrics_shown(true));
+    widget.connect_unmap(|_| gpu::full_metrics_shown(false));
+    if widget.is_mapped() {
+        gpu::full_metrics_shown(true);
+    }
 }
 
 #[derive(Clone)]
