@@ -636,6 +636,9 @@ predator-sense-gui/
 ├── protocol/                    # Shared typed GUI/helper contract
 │   ├── Cargo.toml
 │   └── src/lib.rs               # Actions, paths, limits, binary names, keyboard reports
+├── hidraw/                      # The PH16-71 keyboard's lighting hidraw node (one ioctl)
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Rust GTK4 application
 │   ├── main.rs
 │   ├── app_state.rs             # Global window-visibility flag (gates timers)

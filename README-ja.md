@@ -579,6 +579,9 @@ predator-sense-gui/
 ├── protocol/                    # 共有される型付きGUI/ヘルパー契約
 │   ├── Cargo.toml
 │   └── src/lib.rs               # アクション、パス、上限値、バイナリ名、キーボードのレポート
+├── hidraw/                      # PH16-71キーボードのライティング用hidrawノード（ioctlはひとつ）
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Rust製GTK4アプリケーション
 │   ├── main.rs
 │   ├── app_state.rs             # グローバルなウィンドウ表示状態フラグ（タイマーをゲート）

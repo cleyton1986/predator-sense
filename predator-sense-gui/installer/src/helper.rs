@@ -5,6 +5,7 @@ use crate::constants::hardware::{
 use crate::constants::{command as external, path};
 use crate::process::command_exists;
 use crate::AppResult;
+use predator_sense_hidraw::HidrawDevice;
 use predator_sense_protocol::backlight;
 use predator_sense_protocol::base64_lite;
 use predator_sense_protocol::grub_splash;
@@ -61,10 +62,15 @@ const DMI_SERIAL: &str = "class/dmi/id/product_serial";
 // Protocol confirmed by community reverse engineering (github.com/NT411/
 // Acer-Predator-Fan-RGB-Controller-Linux, MIT-equivalent, no license
 // restriction on reimplementing the wire format it documents), verified
-// against real PH317-56 hardware. This device answers a HID SET_REPORT
-// class request directly over USB control transfer rather than a hidraw
-// feature report, hence rusb here instead of the HIDIOCSFEATURE ioctl the
-// GUI's other RGB backends use.
+// against real PH317-56 hardware, where it went over a USB control transfer
+// (rusb) rather than a hidraw feature report, and that older 7-colour family
+// (`chicony-rgb`) still does.
+//
+// The 24-bit command family (PH16-71) goes over the keyboard's hidraw node,
+// which root opens whatever the udev rules say, and over rusb only when the
+// node cannot be found (`chicony_24bit`). The reports are built in
+// `predator_sense_protocol::keyboard` and the node is found and written by
+// the `predator_sense_hidraw` crate.
 const CHICONY_VENDOR_ID: u16 = 0x04F2;
 const CHICONY_PRODUCT_ID: u16 = 0x0117;
 const CHICONY_INTERFACE: u8 = 3;
@@ -100,8 +106,10 @@ const CHICONY_EFFECT_STATIC: u8 = 0x01;
 /// 7-entry palette - a limit of that command, not of the hardware. A `0x14`
 /// packet stages a real RGB triple, but on its own it changes nothing: the
 /// controller needs a preamble first and an effect packet afterwards to apply
-/// what was staged, all inside one claimed USB session. Confirmed on real
-/// hardware (PH16-71): colours outside the 7-entry palette render correctly.
+/// what was staged, all three in one command (over USB, one claimed
+/// session: separate claim/release cycles do not take effect). Confirmed on
+/// real hardware (PH16-71): colours outside the 7-entry palette render
+/// correctly.
 /// Wire format cross-checked against CPT-Dawn/Arch-Sense and
 /// Order52/ph16-71-rgb, which target this exact keyboard.
 fn chicony_color_apply(red: u8, green: u8, blue: u8, brightness: u8) -> AppResult {
@@ -165,8 +173,49 @@ fn write_mode_cycle(sysfs: &Path, attribute: &str, value: &str) -> AppResult {
         .map_err(|error| fail(format!("mode-cycle: writing {}: {error}", path.display())))
 }
 
+/// One packet of the older 7-colour family, over USB.
 fn chicony_send(payload: &[u8; 8]) -> AppResult {
-    chicony_send_many(&[*payload])
+    chicony_session(|handle| chicony_set_reports(handle, &[*payload]))
+}
+
+/// Every packet in one claimed session: this controller expects a preamble and
+/// an apply packet around a colour packet, and splitting them across separate
+/// claim/release cycles does not take effect.
+fn chicony_set_reports(
+    handle: &rusb::DeviceHandle<rusb::GlobalContext>,
+    packets: &[[u8; 8]],
+) -> rusb::Result<()> {
+    for packet in packets {
+        chicony_set_report(handle, packet)?;
+    }
+    Ok(())
+}
+
+/// The keyboard's lighting interface node, if it can be found. Tests never
+/// find the real one: the machine running them may well have this keyboard.
+fn keyboard_node() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    predator_sense_hidraw::find()
+}
+
+/// `transfer` on the node at `path`, from `keyboard_node`, opened for it
+/// (checked against sysfs after the open, `HidrawDevice::open_found`) and
+/// closed after.
+fn on_keyboard_node<T>(
+    path: &Path,
+    transfer: impl FnOnce(&mut HidrawDevice) -> io::Result<T>,
+) -> AppResult<T> {
+    let class = Path::new(predator_sense_hidraw::SYSFS_CLASS);
+    let mut device = HidrawDevice::open_found(path, class).map_err(|error| {
+        fail(format!(
+            "cannot open the keyboard's hidraw node {}: {error}",
+            path.display()
+        ))
+    })?;
+    transfer(&mut device)
+        .map_err(|error| fail(format!("keyboard (hidraw {}): {error}", path.display())))
 }
 
 /// Refuses a 24-bit command on a chassis not in
@@ -184,19 +233,62 @@ fn require_24bit_keyboard(product: &str) -> AppResult {
     }
 }
 
-/// `packets` of the 24-bit family in order, as one command, only on a
-/// chassis with that keyboard ([`require_24bit_keyboard`] on DMI; pkexec
-/// clears the environment, so `PREDATOR_SENSE_FORCE_MODEL` does not reach a
-/// root helper).
-fn chicony_send_24bit(packets: &[[u8; 8]]) -> AppResult {
+/// One command of the 24-bit family, only on a chassis with that keyboard
+/// ([`require_24bit_keyboard`] on DMI; pkexec clears the environment, so
+/// `PREDATOR_SENSE_FORCE_MODEL` does not reach a root helper, and a GUI
+/// forced onto another model gets only its own hidraw route).
+/// `over_node` on the lighting interface's
+/// hidraw node, as the GUI sends it, which leaves usbhid bound and so leaves
+/// any node the GUI holds working. `over_usb` in one claimed USB session
+/// ([`chicony_session`], which detaches usbhid from the interface for its
+/// length) only when that node cannot be found. A node that is there but
+/// fails is that failure, never a reason to detach usbhid from under it.
+fn chicony_24bit<T>(
+    over_node: impl FnOnce(&mut HidrawDevice) -> io::Result<T>,
+    over_usb: impl FnOnce(&rusb::DeviceHandle<rusb::GlobalContext>) -> rusb::Result<T>,
+) -> AppResult<T> {
     require_24bit_keyboard(dmi::product_name())?;
-    chicony_send_many(packets)
+    match keyboard_node() {
+        Some(path) => on_keyboard_node(&path, over_node),
+        None => chicony_session(over_usb),
+    }
 }
 
-/// Every packet in one claimed session: this controller expects a preamble and
-/// an apply packet around a colour packet, and splitting them across separate
-/// claim/release cycles does not take effect.
-fn chicony_send_many(packets: &[[u8; 8]]) -> AppResult {
+/// `packets` of the 24-bit family in order, as one command ([`chicony_24bit`]).
+fn chicony_send_24bit(packets: &[[u8; 8]]) -> AppResult {
+    chicony_24bit(
+        |device| {
+            packets
+                .iter()
+                .try_for_each(|packet| device.send_feature(packet))
+        },
+        |handle| chicony_set_reports(handle, packets),
+    )
+}
+
+fn chicony_set_report(
+    handle: &rusb::DeviceHandle<rusb::GlobalContext>,
+    packet: &[u8; 8],
+) -> rusb::Result<usize> {
+    handle.write_control(
+        CHICONY_REQUEST_TYPE,
+        CHICONY_SET_REPORT,
+        CHICONY_REPORT_VALUE,
+        CHICONY_INTERFACE as u16,
+        packet,
+        Duration::from_millis(1000),
+    )
+}
+
+/// Finds the keyboard, detaches the kernel driver, claims interface 3, runs
+/// `body`, then releases and reattaches on every exit path.
+fn chicony_session<T>(
+    body: impl FnOnce(&rusb::DeviceHandle<rusb::GlobalContext>) -> rusb::Result<T>,
+) -> AppResult<T> {
+    // The machine running the tests may well have this keyboard.
+    if cfg!(test) {
+        return Err(fail("tests never reach the keyboard over USB"));
+    }
     let devices =
         rusb::devices().map_err(|error| fail(format!("cannot list USB devices: {error}")))?;
     for device in devices.iter() {
@@ -219,30 +311,19 @@ fn chicony_send_many(packets: &[[u8; 8]]) -> AppResult {
                 .detach_kernel_driver(CHICONY_INTERFACE)
                 .map_err(|error| fail(format!("cannot detach kernel driver: {error}")))?;
         }
-        handle
-            .claim_interface(CHICONY_INTERFACE)
-            .map_err(|error| fail(format!("cannot claim USB interface: {error}")))?;
-        let _ = handle.clear_halt(CHICONY_ENDPOINT);
-        let mut result = Ok(0);
-        for packet in packets {
-            result = handle.write_control(
-                CHICONY_REQUEST_TYPE,
-                CHICONY_SET_REPORT,
-                CHICONY_REPORT_VALUE,
-                CHICONY_INTERFACE as u16,
-                packet,
-                Duration::from_millis(1000),
-            );
-            if result.is_err() {
-                break;
+        if let Err(error) = handle.claim_interface(CHICONY_INTERFACE) {
+            if had_kernel_driver {
+                let _ = handle.attach_kernel_driver(CHICONY_INTERFACE);
             }
+            return Err(fail(format!("cannot claim USB interface: {error}")));
         }
+        let _ = handle.clear_halt(CHICONY_ENDPOINT);
+        let result = body(&handle);
         let _ = handle.release_interface(CHICONY_INTERFACE);
         if had_kernel_driver {
             let _ = handle.attach_kernel_driver(CHICONY_INTERFACE);
         }
-        result.map_err(|error| fail(format!("USB control transfer failed: {error}")))?;
-        return Ok(());
+        return result.map_err(|error| fail(format!("USB control transfer failed: {error}")));
     }
     Err(fail(format!(
         "Chicony RGB keyboard ({CHICONY_VENDOR_ID:04x}:{CHICONY_PRODUCT_ID:04x}) not found"

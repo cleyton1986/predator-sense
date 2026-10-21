@@ -652,6 +652,9 @@ predator-sense-gui/
 ├── protocol/                    # Contratto tipizzato condiviso tra GUI e helper
 │   ├── Cargo.toml
 │   └── src/lib.rs               # Azioni, percorsi, limiti, nomi dei binari, report della tastiera
+├── hidraw/                      # Il nodo hidraw dell'illuminazione della tastiera del PH16-71 (un ioctl)
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Applicazione Rust GTK4
 │   ├── main.rs
 │   ├── app_state.rs             # Flag globale di visibilità della finestra (blocca i timer)

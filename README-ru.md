@@ -665,6 +665,9 @@ predator-sense-gui/
 ├── protocol/                    # Общий типизированный контракт GUI/helper
 │   ├── Cargo.toml
 │   └── src/lib.rs               # Действия, пути, лимиты, имена бинарников, отчёты клавиатуры
+├── hidraw/                      # Узел hidraw подсветки клавиатуры PH16-71 (один ioctl)
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Приложение на Rust GTK4
 │   ├── main.rs
 │   ├── app_state.rs             # Глобальный флаг видимости окна (блокирует таймеры)

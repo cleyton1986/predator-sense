@@ -638,6 +638,9 @@ predator-sense-gui/
 ├── protocol/                    # Paylaşılan tipli GUI/helper sözleşmesi
 │   ├── Cargo.toml
 │   └── src/lib.rs               # Eylemler, yollar, limitler, binary adları, klavye raporları
+├── hidraw/                      # PH16-71 klavyesinin aydınlatma hidraw düğümü (tek ioctl)
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Rust GTK4 uygulaması
 │   ├── main.rs
 │   ├── app_state.rs             # Global pencere-görünürlüğü bayrağı (zamanlayıcıları kapatır)
