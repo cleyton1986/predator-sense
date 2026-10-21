@@ -177,8 +177,8 @@ pub(crate) fn relabel_needed(
 /// How long to wait for the daemon before giving up on the indicator.
 ///
 /// This call is deliberately synchronous - see `set_active_profile` - so it is
-/// time the caller's thread spends blocked, and `set_profile` runs on the GTK
-/// main loop from two different timers. A `Set` on this property measured 83 ms
+/// time the switch spends blocked, and the GTK thread waits for a switch made
+/// through `set_profile` (the power policy and GameSync ticks). A `Set` on this property measured 83 ms
 /// against a healthy daemon, so this is an order of magnitude of headroom while
 /// still bounding what a hung or restarting daemon can cost the UI. Missing the
 /// indicator update is not worth a visible freeze.
@@ -186,13 +186,14 @@ const CALL_TIMEOUT_MS: i32 = 800;
 
 /// Ask the daemon to point its indicator at `target`.
 ///
-/// **Synchronous on purpose, despite running on the GTK main loop.** Setting
+/// **Synchronous on purpose.** Setting
 /// this property makes the daemon write the firmware index, and the caller
 /// writes its own straight afterwards precisely so that its write lands last
 /// and wins. Doing this on a background thread would let the two race, and the
 /// losing case is the daemon's index sticking - which changes the mode the user
 /// just picked, the exact failure this ordering exists to prevent. So it is
-/// bounded by `CALL_TIMEOUT_MS` rather than moved off the thread.
+/// bounded by `CALL_TIMEOUT_MS` and runs in the switch's own sequence, on the
+/// thread that applies every switch in turn (`profile::request_profile`).
 fn set_active_profile(target: DesktopProfile) -> Result<(), SetFailure> {
     use gtk4::gio;
     use gtk4::prelude::*;

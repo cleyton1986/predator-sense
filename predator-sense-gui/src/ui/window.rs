@@ -259,6 +259,22 @@ pub fn start_in_background(app: &adw::Application) {
     }
 }
 
+/// Logs a switch that failed, once it ends, for a caller that does not wait
+/// for it.
+fn log_switch_failure(
+    what: &'static str,
+    switching: std::sync::mpsc::Receiver<Result<(), String>>,
+) {
+    background::run(
+        move || crate::hardware::profile::wait_for(switching),
+        move |result| {
+            if let Err(e) = result {
+                crate::hardware::applog::error(&format!("{what}: profile switch failed: {e}"));
+            }
+        },
+    );
+}
+
 fn hide_to_tray<W: IsA<gtk::Widget>>(win: &W, app: &adw::Application) {
     crate::app_state::set_window_visible(false);
     win.set_visible(false);
@@ -553,6 +569,9 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // Both also keep the remembered firmware index current (see
         // thermal_profile::current), which is what lets the timers below ask
         // for the mode without a WMI read each time.
+        // A switch made by this app ends while the watcher sits it out: the
+        // check runs again the moment the last one ends.
+        crate::hardware::profile::on_switch_settled(react_to_mode.clone());
         let mut watched = Vec::new();
         let index_path = crate::hardware::thermal_profile::index_path();
         for path in [
@@ -911,6 +930,13 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             if applying.get() {
                 return glib::ControlFlow::Continue;
             }
+            // Sits out a switch queued or running, as the mode watcher and the
+            // power policy do: part-way through, the firmware can be on the
+            // desktop daemon's index (hardware::ppd) and the tick would write
+            // the plan of a mode the user did not pick.
+            if crate::hardware::profile::apply_in_flight() {
+                return glib::ControlFlow::Continue;
+            }
 
             // Observe before asserting anything. FanState::Unknown reads as a
             // disagreement with every plan, so the first tick used to write on
@@ -1168,8 +1194,15 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 // handles it: the key still gets its Turbo, restoring on
                 // release just falls back to Balanced since there is
                 // nothing truthful to go back to.
-                before_turbo.set(profile::coherent_profile());
-                let _ = profile::set_profile(profile::PowerProfile::Turbo);
+                // The mode it is in or on its way to: a switch still queued
+                // when the key goes down is the one to come back to.
+                before_turbo.set(profile::intended_profile());
+                // Not waited for: the switch runs on its own thread, after
+                // any switch asked for before it.
+                log_switch_failure(
+                    "Turbo key: Turbo",
+                    profile::request_profile(profile::PowerProfile::Turbo),
+                );
                 // Only the profile is claimed here. What the fans do is
                 // whatever plan Turbo is bound to, and the reconciler logs
                 // that decision itself when it acts on it.
@@ -1180,7 +1213,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                 let restore = before_turbo
                     .get()
                     .unwrap_or(profile::PowerProfile::Balanced);
-                let _ = profile::set_profile(restore);
+                log_switch_failure("Turbo key: restore", profile::request_profile(restore));
                 crate::hardware::applog::info(&format!(
                     "Turbo key: released, restored profile={}, fan follows that mode's plan",
                     restore.to_id()

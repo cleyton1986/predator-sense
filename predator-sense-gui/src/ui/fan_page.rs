@@ -583,6 +583,9 @@ pub fn build() -> gtk::Box {
     // from both the click handler and the periodic reconcile timer further
     // down) reads this instead of walking the GTK tree, since a card is now
     // an Overlay wrapping a faceted_card, not a plain Box it could downcast.
+    // Which click the status line belongs to: completions arrive on their own
+    // threads' schedule, so only the latest click's result is shown.
+    let latest_click: Rc<Cell<u64>> = Rc::new(Cell::new(0));
     let cards: Rc<RefCell<Vec<(crate::ui::faceted_card::FacetedCard, gtk::Button)>>> =
         Rc::new(RefCell::new(Vec::new()));
 
@@ -693,22 +696,47 @@ pub fn build() -> gtk::Box {
         let profile_copy = *profile_val;
         let status_clone = status_label.clone();
         let cards_c = cards.clone();
-        select_btn.connect_clicked(move |_btn| match profile::set_profile(profile_copy) {
-            Ok(()) => {
-                status_clone.set_text(&format!(
-                    "{} '{}'",
-                    crate::i18n::t("profile_activated"),
-                    profile_copy.label()
-                ));
-                status_clone.remove_css_class("status-error");
-                status_clone.add_css_class("status-success");
-                apply_active_visuals(&cards_c.borrow(), profile::get_current_profile());
-            }
-            Err(e) => {
-                status_clone.set_text(&format!("Erro: {}", e));
-                status_clone.remove_css_class("status-success");
-                status_clone.add_css_class("status-error");
-            }
+        let latest_click = latest_click.clone();
+        // The switch runs off the GTK thread (helper round trips, nvidia-smi,
+        // the firmware write): the window stays live, and the card turns
+        // active when it is done.
+        select_btn.connect_clicked(move |_btn| {
+            let switching = profile::request_profile(profile_copy);
+            let click = latest_click.get() + 1;
+            latest_click.set(click);
+            let latest_click = latest_click.clone();
+            let status_clone = status_clone.clone();
+            let cards_c = cards_c.clone();
+            crate::ui::background::run(
+                move || profile::wait_for(switching),
+                move |result| match result {
+                    _ if latest_click.get() != click => {
+                        // A later click's switch is queued or done: its
+                        // result is the one to show.
+                        if let Err(e) = result {
+                            crate::hardware::applog::error(&format!(
+                                "Mode page: switch to {} failed: {e}",
+                                profile_copy.to_id()
+                            ));
+                        }
+                    }
+                    Ok(()) => {
+                        status_clone.set_text(&format!(
+                            "{} '{}'",
+                            crate::i18n::t("profile_activated"),
+                            profile_copy.label()
+                        ));
+                        status_clone.remove_css_class("status-error");
+                        status_clone.add_css_class("status-success");
+                        apply_active_visuals(&cards_c.borrow(), profile::get_current_profile());
+                    }
+                    Err(e) => {
+                        status_clone.set_text(&format!("Erro: {}", e));
+                        status_clone.remove_css_class("status-success");
+                        status_clone.add_css_class("status-error");
+                    }
+                },
+            );
         });
 
         card.append(&select_btn);

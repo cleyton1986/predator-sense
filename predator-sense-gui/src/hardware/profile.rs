@@ -4,6 +4,7 @@ use predator_sense_protocol::helper::{
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 const PROFILE_STATE_FILE: &str = "/opt/predator-sense/current_profile";
 
@@ -33,7 +34,8 @@ static MANAGE_CPU_POWER: AtomicBool = AtomicBool::new(true);
 /// Set once the GPU refused a power-limit write as unsupported by its vBIOS.
 static GPU_POWER_LIMIT_UNSUPPORTED: AtomicBool = AtomicBool::new(false);
 
-/// How many `set_profile` calls are part-way through right now.
+/// How many profile switches are asked for and not finished yet, the ones
+/// waiting their turn on the switching thread included (`request`).
 ///
 /// A profile switch is not atomic: it writes the CPU controls, then the GPU
 /// wattage (an `nvidia-smi` call that can take seconds on a laptop dGPU that
@@ -1143,8 +1145,11 @@ fn read_cpu_reading_at(sysfs_root: &Path) -> CpuReading {
     }
 }
 
+/// Applies `profile` and waits for it. Blocks for the whole switch (helper
+/// round trips, `nvidia-smi`, the firmware write): the Mode page and the
+/// Turbo key use [`request_profile`] instead.
 pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
-    apply_profile(profile, ModeWrite::Always)
+    wait_for(request(profile, ModeWrite::Always))
 }
 
 /// [`set_profile`] for the mode applied at startup.
@@ -1153,7 +1158,134 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
 /// on the target is not written again, by the app or through the desktop's
 /// power daemon. See [`ModeWrite`].
 pub fn set_profile_at_startup(profile: PowerProfile) -> Result<(), String> {
-    apply_profile(profile, ModeWrite::IfChanged)
+    wait_for(request(profile, ModeWrite::IfChanged))
+}
+
+/// Starts applying `profile` and returns at once; the result arrives on the
+/// receiver. For a caller on the GTK thread that must not freeze the window
+/// for the 100 ms or more a switch takes.
+pub fn request_profile(profile: PowerProfile) -> std::sync::mpsc::Receiver<Result<(), String>> {
+    request(profile, ModeWrite::Always)
+}
+
+/// Waits for a switch [`request_profile`] started.
+pub fn wait_for(result: std::sync::mpsc::Receiver<Result<(), String>>) -> Result<(), String> {
+    result
+        .recv()
+        .unwrap_or_else(|_| Err("the profile switch stopped part-way".into()))
+}
+
+/// Every switch, waited for or not, goes through one thread in the order it
+/// was asked for: two switches never interleave their writes, and the last
+/// one asked for is the one the machine ends in. Counted as in flight from
+/// the moment it is asked for, so the reconciler and the mode tick sit out a
+/// switch that is waiting its turn too.
+fn request(
+    profile: PowerProfile,
+    write: ModeWrite,
+) -> std::sync::mpsc::Receiver<Result<(), String>> {
+    static APPLIER: OnceLock<InOrder> = OnceLock::new();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let in_flight = ApplyGuard::new();
+    *LAST_REQUESTED.lock().unwrap_or_else(|e| e.into_inner()) = Some(profile);
+    APPLIER
+        .get_or_init(|| InOrder::new("profile-apply"))
+        .run(Box::new(move || {
+            let result = apply_profile(profile, write);
+            finish(result, in_flight, &tx);
+        }));
+    rx
+}
+
+/// The last mode a switch was asked for, for [`intended_profile`].
+static LAST_REQUESTED: Mutex<Option<PowerProfile>> = Mutex::new(None);
+
+/// The mode the machine is in or on its way to: while switches are queued or
+/// running, the last one asked for; otherwise [`coherent_profile`]. For a
+/// caller that snapshots the mode to put it back later (the Turbo key), so it
+/// does not remember a mode a queued switch is about to replace.
+pub fn intended_profile() -> Option<PowerProfile> {
+    if apply_in_flight() {
+        if let Some(asked) = *LAST_REQUESTED.lock().unwrap_or_else(|e| e.into_inner()) {
+            return Some(asked);
+        }
+    }
+    coherent_profile()
+}
+
+/// Ends a switch: it stops counting as in flight before its result is
+/// delivered, so whoever wakes on the result already sees nothing in flight,
+/// and when no other switch is waiting, the GTK thread's mode check
+/// ([`on_switch_settled`]) runs at once instead of at its next tick.
+fn finish(
+    result: Result<(), String>,
+    in_flight: ApplyGuard,
+    tx: &std::sync::mpsc::Sender<Result<(), String>>,
+) {
+    drop(in_flight);
+    if !apply_in_flight() {
+        // A timeout source, not `MainContext::invoke`: invoke runs the call on
+        // this thread when the main context happens to be free between two
+        // iterations, where the GTK thread's hook is not.
+        gtk4::glib::timeout_add_once(std::time::Duration::ZERO, || {
+            let hook = SETTLED_HOOK.with(|hook| hook.borrow().clone());
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
+    }
+    let _ = tx.send(result);
+}
+
+thread_local! {
+    /// What runs on the GTK thread once a switch ends with none left in flight.
+    static SETTLED_HOOK: std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `check` on the GTK thread whenever a switch ends with no other switch
+/// queued or running. The mode watcher sits out a switch in flight, and the
+/// firmware's own notification of the mode change arrives during the switch,
+/// so without this the mode's lighting and the mode notification would wait
+/// for the watcher's next tick. Called on the GTK thread, once.
+pub fn on_switch_settled(check: std::rc::Rc<dyn Fn()>) {
+    SETTLED_HOOK.with(|hook| *hook.borrow_mut() = Some(check));
+}
+
+/// Runs jobs one at a time, in the order given, on a thread of its own. A job
+/// that panics is dropped (its result channel then reports nothing) and the
+/// next one still runs.
+struct InOrder {
+    jobs: Mutex<std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>>,
+}
+
+impl InOrder {
+    fn new(name: &str) -> Self {
+        let (jobs, inbox) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let started = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                for job in inbox {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                }
+            });
+        if let Err(e) = started {
+            crate::hardware::applog::error(&format!("{name}: thread did not start: {e}"));
+        }
+        Self {
+            jobs: Mutex::new(jobs),
+        }
+    }
+
+    /// Queues `job`. If the thread could not start the job is dropped
+    /// unrun, and whoever waits on it hears nothing.
+    fn run(&self, job: Box<dyn FnOnce() + Send>) {
+        let _ = self
+            .jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send(job);
+    }
 }
 
 fn apply_profile(profile: PowerProfile, write: ModeWrite) -> Result<(), String> {
@@ -1475,8 +1607,25 @@ mod tests {
     /// A switch part-way through is not evidence that anything outside the
     /// app moved the mode: the controls disagree because this app is in the
     /// middle of moving them.
+    /// The in-flight count is process wide: the tests that look at it take turns.
+    static IN_FLIGHT_TESTS: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn a_finished_switch_is_not_in_flight_when_its_result_arrives() {
+        let _turn = IN_FLIGHT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let in_flight = ApplyGuard::new();
+        let waiter = std::thread::spawn(move || {
+            let result = rx.recv().unwrap();
+            (result, apply_in_flight())
+        });
+        finish(Ok(()), in_flight, &tx);
+        assert_eq!(waiter.join().unwrap(), (Ok(()), false));
+    }
+
     #[test]
     fn an_apply_in_flight_is_visible_to_the_reconciler() {
+        let _turn = IN_FLIGHT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         assert!(!apply_in_flight(), "nothing should be in flight to start with");
         {
             let _guard = ApplyGuard::new();
@@ -1488,6 +1637,26 @@ mod tests {
             assert!(apply_in_flight(), "an inner switch ending is not the outer one ending");
         }
         assert!(!apply_in_flight());
+    }
+
+    #[test]
+    fn switches_run_one_at_a_time_in_the_order_asked() {
+        let queue = InOrder::new("in-order-test");
+        let (tx, rx) = std::sync::mpsc::channel();
+        for n in 0u64..20 {
+            let tx = tx.clone();
+            queue.run(Box::new(move || {
+                if n == 5 {
+                    panic!("a job that fails part-way");
+                }
+                std::thread::sleep(std::time::Duration::from_millis((20 - n) % 3));
+                let _ = tx.send(n);
+            }));
+        }
+        drop(tx);
+        let order: Vec<u64> = rx.iter().collect();
+        let expected: Vec<u64> = (0..20).filter(|&n| n != 5).collect();
+        assert_eq!(order, expected, "in order, and on past the one that panicked");
     }
 
     /// Every change this app makes itself goes through `set_profile`, which
