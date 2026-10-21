@@ -2,6 +2,7 @@ use predator_sense_protocol::helper::{Action, Switch};
 use predator_sense_protocol::{internal, path};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 const PRIVILEGE_BROKER: &str = "pkexec";
@@ -376,7 +377,48 @@ fn invoke_session(action: Action, arguments: &[&str]) -> Result<Reply, String> {
             .map_err(|error| format!("Failed to launch hardware helper: {error}"))?;
         return Ok(Reply::from_output(&output));
     }
-    call_session(&SESSION, spawn_session, action, arguments)
+    let (reply, started) = call_session(&SESSION, spawn_session, action, arguments)?;
+    if started {
+        privileged_session_started();
+    }
+    Ok(reply)
+}
+
+/// Set once a privileged session has answered a call. Every session started
+/// after that replaces one that went away.
+static PRIVILEGED_SESSION_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// A new privileged helper has just answered its first call. The helper
+/// that sent the keyboard's idle-timer off switches the timer back on when a
+/// signal stops it, so one that went away while the app runs (an upgrade's
+/// install sends it SIGTERM) left that timer on under an app that keeps it
+/// off. The new helper gets `keyboard_rgb::apply_keyboard_idle` again, which
+/// switches it off again through the new helper, which then holds it. (When the app's end of the session closes, the app gone,
+/// the privileged helper hands the timer back on a PH16-71
+/// (`dmi::CHICONY_24BIT_MODELS`) whoever sent the off. The unprivileged
+/// read session never does.)
+fn privileged_session_started() {
+    let replaced = PRIVILEGED_SESSION_STARTED.swap(true, Ordering::SeqCst);
+    if reapply_keyboard_idle_after_start(
+        replaced,
+        crate::hardware::capabilities::get().keyboard_rgb,
+        crate::hardware::keyboard_rgb::reapplying(),
+    ) {
+        crate::hardware::keyboard_rgb::reapply_keyboard_idle_in_background();
+    }
+}
+
+/// Whether a privileged session that just started needs the keyboard's idle
+/// timer switched off again: only when it `replaced` an earlier one (the
+/// first is covered by startup's `lighting::restore_saved`), only with the
+/// 24-bit keyboard, and never when the re-apply itself started it, which
+/// would only ask for itself again.
+fn reapply_keyboard_idle_after_start(
+    replaced: bool,
+    keyboard_rgb: bool,
+    from_reapply: bool,
+) -> bool {
+    replaced && keyboard_rgb && !from_reapply
 }
 
 /// Like [`invoke_session`], but for `read()`'s unprivileged hot path: always
@@ -386,26 +428,28 @@ fn invoke_session(action: Action, arguments: &[&str]) -> Result<Reply, String> {
 /// the fork+exec itself, which happens whether or not the caller is root.
 fn invoke_read_session(action: Action) -> Result<Reply, String> {
     validate_arity(action, &[])?;
-    call_session(&READ_SESSION, spawn_read_session, action, &[])
+    call_session(&READ_SESSION, spawn_read_session, action, &[]).map(|(reply, _)| reply)
 }
 
 /// Shared by [`invoke_session`] and [`invoke_read_session`]: send one call
 /// down whichever persistent session `slot` names, spawning it first if
 /// this is the first call, and respawning it exactly once if the pipe turns
-/// out to be broken.
+/// out to be broken. The flag says whether the reply came from a session
+/// this call started.
 fn call_session(
     slot: &Mutex<Option<(Child, RealSession)>>,
     spawn: fn() -> Result<(Child, RealSession), String>,
     action: Action,
     arguments: &[&str],
-) -> Result<Reply, String> {
+) -> Result<(Reply, bool), String> {
     let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if guard.is_none() {
+    let started = guard.is_none();
+    if started {
         *guard = Some(spawn()?);
     }
     let (_, session) = guard.as_mut().expect("just populated above");
     match session.call(action, arguments) {
-        Ok(reply) => Ok(reply),
+        Ok(reply) => Ok((reply, started)),
         Err(SessionBroken) => {
             // The session is dead - authorization refused, or the process
             // crashed. Reap it (the pipe closing means it is exiting, if it
@@ -422,7 +466,7 @@ fn call_session(
             match session.call(action, arguments) {
                 Ok(reply) => {
                     *guard = Some((child, session));
-                    Ok(reply)
+                    Ok((reply, true))
                 }
                 Err(SessionBroken) => {
                     // The fresh session died too (e.g. authorization refused
@@ -576,5 +620,74 @@ mod tests {
         let mut session = session_with_reply("");
 
         assert!(session.call(Action::PwmCpu, &["1"]).is_err());
+    }
+
+    #[test]
+    fn the_first_privileged_session_leaves_the_keyboard_idle_to_startup() {
+        assert!(!reapply_keyboard_idle_after_start(false, true, false));
+    }
+
+    #[test]
+    fn a_session_that_replaces_one_reapplies_the_keyboard_idle() {
+        assert!(reapply_keyboard_idle_after_start(true, true, false));
+    }
+
+    #[test]
+    fn a_replacement_session_reapplies_nothing_without_the_keyboard() {
+        assert!(!reapply_keyboard_idle_after_start(true, false, false));
+    }
+
+    #[test]
+    fn a_session_the_reapply_itself_started_asks_for_no_other() {
+        assert!(!reapply_keyboard_idle_after_start(true, true, true));
+    }
+
+    /// Answers every line with the success marker, like the real daemon
+    /// does for a write, until its stdin closes.
+    fn answering_daemon() -> Result<(Child, RealSession), String> {
+        let script = format!(
+            "while read line; do echo {}; done",
+            internal::HELPER_DAEMON_OK
+        );
+        spawn_daemon(Command::new("sh").args(["-c", script.as_str()]))
+    }
+
+    /// Closes the session's stdin, which ends the stand-in, and reaps it.
+    fn close(slot: Mutex<Option<(Child, RealSession)>>) {
+        if let Some((mut child, session)) = slot.into_inner().unwrap() {
+            drop(session);
+            child.wait().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_call_says_whether_it_started_the_session() {
+        let slot = Mutex::new(None);
+
+        let (reply, started) =
+            call_session(&slot, answering_daemon, Action::FanAuto, &[]).unwrap();
+        assert!(reply.success);
+        assert!(started);
+
+        let (_, started) =
+            call_session(&slot, answering_daemon, Action::FanAuto, &[]).unwrap();
+        assert!(!started, "the session already running answered");
+
+        close(slot);
+    }
+
+    #[test]
+    fn a_call_that_replaces_a_dead_session_says_it_started_one() {
+        // A helper killed under a running app, as an upgrade's install does.
+        let (mut dead, session) = spawn_daemon(&mut Command::new("true")).unwrap();
+        dead.wait().unwrap();
+        let slot = Mutex::new(Some((dead, session)));
+
+        let (reply, started) =
+            call_session(&slot, answering_daemon, Action::FanAuto, &[]).unwrap();
+
+        assert!(reply.success);
+        assert!(started);
+        close(slot);
     }
 }

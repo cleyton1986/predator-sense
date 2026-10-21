@@ -778,8 +778,8 @@ Pre-existing upstream behaviour, not introduced by this branch.
 > ST 0 = off and 1 = on, which is what the keyboard comes up with at every
 > boot. Tested on a PH16-71: with 1 the backlight went dark at 30 s, with 0
 > it was still lit at 40 s. The app switches the timer off (`30 01 00 ..`)
-> whenever it runs: at startup, on resume, and on a retry while a write
-> has failed. It switches it back on
+> whenever it runs: at startup, on resume, after a privileged helper
+> restart, and on a retry while a write has failed. It switches it back on
 > (`30 01 01 ..`) when the app exits, and the helper does the same itself
 > when it is stopped with the session. So "Turn off when idle" off now means
 > nothing turns the keyboard off, and with it on the app's own timer, which

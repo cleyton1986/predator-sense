@@ -534,6 +534,40 @@ pub fn apply_keyboard_idle() -> KeyboardIdleApplied {
     })
 }
 
+thread_local! {
+    /// Set on the thread running [`reapply_keyboard_idle_in_background`]'s work.
+    static REAPPLYING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the calling thread is running [`apply_keyboard_idle`] again after
+/// a helper restart. A privileged session that thread has to start then asks
+/// for no further re-apply.
+pub fn reapplying() -> bool {
+    REAPPLYING.with(std::cell::Cell::get)
+}
+
+/// Runs `work` with [`reapplying`] true on this thread.
+fn as_reapply<T>(work: impl FnOnce() -> T) -> T {
+    REAPPLYING.with(|flag| flag.set(true));
+    let result = work();
+    REAPPLYING.with(|flag| flag.set(false));
+    result
+}
+
+/// [`apply_keyboard_idle`] on a thread of its own, for a privileged helper
+/// that replaced one which went away: see `helper::privileged_session_started`.
+/// A failure is logged, except the refusal at exit.
+pub fn reapply_keyboard_idle_in_background() {
+    std::thread::spawn(|| {
+        let applied = as_reapply(apply_keyboard_idle);
+        if let Err(e) = applied.result {
+            if !EXITING.load(std::sync::atomic::Ordering::SeqCst) {
+                crate::hardware::applog::error(&format!("helper restarted: keyboard idle: {e}"));
+            }
+        }
+    });
+}
+
 /// At app exit: switches the controller's own timer back on, so that quitting
 /// or logging out leaves the keyboard with its stock behaviour instead of lit
 /// until the next boot.
@@ -913,5 +947,12 @@ mod tests {
     fn the_timer_argument_is_one_for_on_and_zero_for_off() {
         assert_eq!(auto_off_argument(true), "1");
         assert_eq!(auto_off_argument(false), "0");
+    }
+
+    #[test]
+    fn only_work_run_as_the_reapply_counts_as_the_reapply() {
+        assert!(!reapplying());
+        assert!(as_reapply(reapplying));
+        assert!(!reapplying(), "cleared once the work is done");
     }
 }
