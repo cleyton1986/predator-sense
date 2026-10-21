@@ -44,6 +44,14 @@ fn slot_has_live_session<T>(slot: &Mutex<Option<T>>, alive: impl FnOnce(&mut T) 
     }
 }
 
+/// [`read_privileged`], but only through a privileged session that is already
+/// running, like [`execute_in_open_session`]: `None` when there is none, and
+/// no authentication dialog. For reads the user did not ask for in the app,
+/// such as following the keyboard's Fn keys.
+pub fn read_in_open_session(action: Action) -> Option<Result<String, String>> {
+    call_in_open_session(action, &[])
+}
+
 /// One call through the open privileged session, or `None` when none is
 /// open. `Ok` carries what the action printed.
 fn call_in_open_session(action: Action, arguments: &[&str]) -> Option<Result<String, String>> {
@@ -622,6 +630,20 @@ mod tests {
         assert!(validate_arity(Action::FanAuto, &["unexpected"]).is_err());
         assert!(validate_arity(Action::SetGpuPower, &["80"]).is_ok());
         assert!(validate_arity(Action::SetGpuPower, &[]).is_err());
+    }
+
+    #[test]
+    fn an_open_session_read_starts_nothing_when_no_session_is_open() {
+        // Root runs the helper directly, which would touch the hardware here.
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        // No test opens the privileged session, so this must not either.
+        assert!(read_in_open_session(Action::ChiconyEffectRead).is_none());
+        assert!(SESSION.lock().unwrap_or_else(|e| e.into_inner()).is_none());
+        // An action that takes arguments is refused before any session is looked at.
+        assert!(matches!(read_in_open_session(Action::PwmCpu), Some(Err(_))));
     }
 
     #[test]

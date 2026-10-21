@@ -662,6 +662,24 @@ pub fn percent_from_effect_read(line: &str) -> Result<u8, String> {
     EffectReading::parse(line).map(|reading| keyboard::raw_to_percent(reading.brightness))
 }
 
+/// Reads the keyboard's current brightness back from the controller, as a
+/// percent. Through the hidraw node, or else only through a privileged
+/// session that is already open, so it never brings up an authentication
+/// dialog: `None` when neither is there.
+///
+/// Blocking (one USB query); call it off the UI thread.
+pub fn read_brightness_percent() -> Option<Result<u8, String>> {
+    on_keyboard(
+        |node| Some(read_effect(node).map(|reading| keyboard::raw_to_percent(reading.brightness))),
+        || {
+            let line = crate::hardware::helper::read_in_open_session(
+                predator_sense_protocol::helper::Action::ChiconyEffectRead,
+            )?;
+            Some(line.and_then(|line| percent_from_effect_read(&line)))
+        },
+    )
+}
+
 /// The keyboard state to store after the keyboard reached `percent` by
 /// itself (its Fn keys), or `None` when nothing should be stored: the app has
 /// the keyboard blanked (it then reads 0, and the saved level is what the

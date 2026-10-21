@@ -4,6 +4,7 @@ pub mod columns;
 pub mod control;
 pub mod control_model;
 pub mod effect_icon;
+pub mod fn_brightness;
 pub mod frame_model;
 pub mod idle;
 pub mod key_bar;

@@ -5,7 +5,8 @@
 
 pub(crate) mod app {
     pub use predator_sense_protocol::application::{
-        DBUS_ACTIVATE_METHOD, DBUS_ID, DBUS_OBJECT_PATH,
+        DBUS_ACTIVATE_ACTION_METHOD, DBUS_ACTIVATE_METHOD, DBUS_ID, DBUS_OBJECT_PATH,
+        KEYBOARD_BRIGHTNESS_DOWN, KEYBOARD_BRIGHTNESS_KEY_ACTION, KEYBOARD_BRIGHTNESS_UP,
     };
 
     pub const VERSION: &str = env!("CARGO_PKG_VERSION");

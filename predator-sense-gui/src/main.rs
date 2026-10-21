@@ -174,6 +174,10 @@ fn main() {
         );
         CSS_PROVIDER.with(|p| *p.borrow_mut() = Some(provider));
 
+        // Run by the hotkey daemon over D-Bus when the keyboard's Fn
+        // backlight keys change its brightness.
+        ui::lighting::fn_brightness::register(app);
+
         // Key presses for the reactive themes, on the one keyboard whose presses
         // are read: the reader parks with nothing open, and logind is watched on
         // a thread of its own. Nothing is read until a theme that uses keys runs.

@@ -6,6 +6,18 @@ pub mod application {
     pub const DBUS_ID: &str = "com.predator.sense";
     pub const DBUS_OBJECT_PATH: &str = "/com/predator/sense";
     pub const DBUS_ACTIVATE_METHOD: &str = "org.gtk.Application.Activate";
+    /// Runs one of the app's actions without raising its window.
+    pub const DBUS_ACTIVATE_ACTION_METHOD: &str = "org.freedesktop.Application.ActivateAction";
+    /// The app action the hotkey daemon runs when the keyboard's Fn backlight
+    /// keys have changed its brightness. Its parameter is a string naming the
+    /// key, [`KEYBOARD_BRIGHTNESS_UP`] or [`KEYBOARD_BRIGHTNESS_DOWN`]. The app
+    /// reads the new level back, or takes the key's step itself while it draws
+    /// the keyboard, whose frames then carry their own brightness.
+    pub const KEYBOARD_BRIGHTNESS_KEY_ACTION: &str = "keyboard-brightness-key";
+    /// [`KEYBOARD_BRIGHTNESS_KEY_ACTION`]'s parameter for the Fn backlight up key.
+    pub const KEYBOARD_BRIGHTNESS_UP: &str = "up";
+    /// [`KEYBOARD_BRIGHTNESS_KEY_ACTION`]'s parameter for the Fn backlight down key.
+    pub const KEYBOARD_BRIGHTNESS_DOWN: &str = "down";
 }
 
 pub mod binary {

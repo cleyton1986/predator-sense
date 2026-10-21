@@ -1207,6 +1207,19 @@ pub enum BacklightStep {
 }
 
 impl BacklightStep {
+    /// From the action's parameter: `protocol::application::KEYBOARD_BRIGHTNESS_UP` or
+    /// `KEYBOARD_BRIGHTNESS_DOWN`.
+    pub fn from_name(name: &str) -> Option<BacklightStep> {
+        use predator_sense_protocol::application::{
+            KEYBOARD_BRIGHTNESS_DOWN, KEYBOARD_BRIGHTNESS_UP,
+        };
+        match name {
+            KEYBOARD_BRIGHTNESS_UP => Some(BacklightStep::Up),
+            KEYBOARD_BRIGHTNESS_DOWN => Some(BacklightStep::Down),
+            _ => None,
+        }
+    }
+
     /// The keyboard brightness one Fn level up or down from `percent`, as a percent: the
     /// next of the keyboard's own levels above or below it (`FN_LEVELS`), at the ends the
     /// end.
@@ -2721,6 +2734,10 @@ mod tests {
     #[test]
     fn an_fn_key_steps_through_the_keyboards_own_levels() {
         use BacklightStep::{Down, Up};
+        assert_eq!(BacklightStep::from_name("up"), Some(Up));
+        assert_eq!(BacklightStep::from_name("down"), Some(Down));
+        assert_eq!(BacklightStep::from_name("Up"), None);
+        assert_eq!(BacklightStep::from_name(""), None);
         // The levels 0, 12, 25, 37 and 50 of 50, as percents.
         let levels = [0, 24, 50, 74, 100];
         for pair in levels.windows(2) {
