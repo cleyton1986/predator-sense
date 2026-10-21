@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use predator_sense_hidraw::HidrawDevice;
-use predator_sense_protocol::keyboard::FEATURE_LEN;
+use predator_sense_protocol::keyboard::{FEATURE_LEN, FRAME_REPORTS, OUTPUT_LEN};
 
 /// How long after a failed open the node is not looked for again. For a
 /// node that never opened, [`Keyboard::is_writable`] answers false that
@@ -36,10 +36,15 @@ use predator_sense_protocol::keyboard::FEATURE_LEN;
 /// opened, calls fail at once that long instead of scanning sysfs each time.
 pub const RECHECK_AFTER: Duration = Duration::from_secs(5);
 
-/// One open node: the transfer the controller takes.
+/// One open node: the three transfers the controller takes.
 pub trait Device {
     /// One 8-byte feature report.
     fn send_feature(&mut self, report: &[u8; FEATURE_LEN]) -> io::Result<()>;
+    /// The 8-byte feature report the controller holds, the reply to the
+    /// query sent before it.
+    fn get_feature(&mut self) -> io::Result<[u8; FEATURE_LEN]>;
+    /// One 64-byte output report.
+    fn write_report(&mut self, report: &[u8; OUTPUT_LEN]) -> io::Result<()>;
 }
 
 /// Finds and opens the node. The real one is [`Hidraw`]; tests use a fake.
@@ -91,6 +96,14 @@ impl Device for HidrawDevice {
     fn send_feature(&mut self, report: &[u8; FEATURE_LEN]) -> io::Result<()> {
         HidrawDevice::send_feature(self, report)
     }
+
+    fn get_feature(&mut self) -> io::Result<[u8; FEATURE_LEN]> {
+        HidrawDevice::get_feature(self)
+    }
+
+    fn write_report(&mut self, report: &[u8; OUTPUT_LEN]) -> io::Result<()> {
+        HidrawDevice::write_report(self, report)
+    }
 }
 
 /// Whether `error` says the node has gone.
@@ -106,6 +119,10 @@ pub struct Keyboard<N: Node> {
     opened_before: bool,
     /// When the last open failed, and how. `None` once one succeeds.
     open_failed: Option<(Instant, String)>,
+    /// The last open failed because this user may not open the node (`EACCES`): the
+    /// installer's udev rule, which gives it to the active session's user, is missing.
+    /// Cleared by an open that succeeds or fails otherwise.
+    denied: bool,
 }
 
 impl<N: Node> Keyboard<N> {
@@ -115,7 +132,15 @@ impl<N: Node> Keyboard<N> {
             device: None,
             opened_before: false,
             open_failed: None,
+            denied: false,
         }
+    }
+
+    /// The last open of the node was refused for permission: the node is there, and this
+    /// user cannot open it (no udev rule gives it to them). Asked by the Lighting page, which
+    /// says how to fix it.
+    pub fn denied(&self) -> bool {
+        self.denied
     }
 
     /// Whether this process writes the keyboard through its node.
@@ -156,10 +181,12 @@ impl<N: Node> Keyboard<N> {
                 self.device = Some(device);
                 self.opened_before = true;
                 self.open_failed = None;
+                self.denied = false;
                 Ok(())
             }
             Err(error) => {
                 self.open_failed = Some((now, error.to_string()));
+                self.denied = error.kind() == io::ErrorKind::PermissionDenied;
                 Err(error)
             }
         }
@@ -210,6 +237,12 @@ impl<N: Node> Keyboard<N> {
         }
     }
 
+    // A GET_FEATURE or an output report has no meaning without the reports
+    // around it (the query it answers, the rest of the frame), and a reopen
+    // repeats only what one transfer holds. So the node's single
+    // `get_feature` and `write_report` are reached through `query` and
+    // `send_frame`, never one at a time.
+
     /// One feature report.
     pub fn send_feature(&mut self, report: &[u8; FEATURE_LEN]) -> io::Result<()> {
         self.run(|device| device.send_feature(report))
@@ -221,6 +254,31 @@ impl<N: Node> Keyboard<N> {
             reports
                 .iter()
                 .try_for_each(|report| device.send_feature(report))
+        })
+    }
+
+    /// `query` and the reply read after it, as one transfer.
+    pub fn query(&mut self, query: &[u8; FEATURE_LEN]) -> io::Result<[u8; FEATURE_LEN]> {
+        self.run(|device| {
+            device.send_feature(query)?;
+            device.get_feature()
+        })
+    }
+
+    /// One per-key frame (`keyboard::per_key_reports`): the enter report, the
+    /// output reports in order, then the commit, as one transfer.
+    pub fn send_frame(
+        &mut self,
+        enter: &[u8; FEATURE_LEN],
+        reports: &[[u8; OUTPUT_LEN]; FRAME_REPORTS],
+        commit: &[u8; FEATURE_LEN],
+    ) -> io::Result<()> {
+        self.run(|device| {
+            device.send_feature(enter)?;
+            reports
+                .iter()
+                .try_for_each(|report| device.write_report(report))?;
+            device.send_feature(commit)
         })
     }
 }
@@ -238,6 +296,8 @@ pub(crate) mod fake {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum Sent {
         Feature(u32, [u8; FEATURE_LEN]),
+        Get(u32),
+        Report(u32, [u8; OUTPUT_LEN]),
     }
 
     #[derive(Debug, Default)]
@@ -250,6 +310,8 @@ pub(crate) mod fake {
         pub open_errors: VecDeque<i32>,
         /// errno for the next transfers, in order; 0 lets one through.
         pub transfer_errors: VecDeque<i32>,
+        /// What a GET_FEATURE returns.
+        pub reply: [u8; FEATURE_LEN],
     }
 
     #[derive(Debug, Clone, Default)]
@@ -317,6 +379,15 @@ pub(crate) mod fake {
         fn send_feature(&mut self, report: &[u8; FEATURE_LEN]) -> io::Result<()> {
             self.transfer(Sent::Feature(self.open, *report))
         }
+
+        fn get_feature(&mut self) -> io::Result<[u8; FEATURE_LEN]> {
+            self.transfer(Sent::Get(self.open))?;
+            Ok(self.script.borrow().reply)
+        }
+
+        fn write_report(&mut self, report: &[u8; OUTPUT_LEN]) -> io::Result<()> {
+            self.transfer(Sent::Report(self.open, *report))
+        }
     }
 }
 
@@ -324,6 +395,7 @@ pub(crate) mod fake {
 mod tests {
     use super::fake::{FakeNode, Sent};
     use super::*;
+    use predator_sense_protocol::keyboard;
 
     const A: [u8; 8] = [1, 0, 0, 0, 0, 0, 0, 0xfe];
     const B: [u8; 8] = [2, 0, 0, 0, 0, 0, 0, 0xfd];
@@ -413,6 +485,24 @@ mod tests {
         assert!(node.sent().is_empty());
     }
 
+    /// The Lighting page's "need keyboard access" reads this: only a refusal for
+    /// permission counts, and an open that works, or fails otherwise, clears it.
+    #[test]
+    fn a_refusal_for_permission_is_told_apart_from_a_missing_node() {
+        let node = FakeNode::locked();
+        let mut keyboard = Keyboard::new(node.clone());
+        let t0 = Instant::now();
+        assert!(!keyboard.denied(), "nothing asked yet");
+        assert!(!keyboard.is_writable_at(t0));
+        assert!(keyboard.denied());
+        node.0.borrow_mut().open_errors.push_back(libc::ENOENT);
+        assert!(!keyboard.is_writable_at(t0 + RECHECK_AFTER));
+        assert!(!keyboard.denied(), "a node that is not there is no refusal");
+        node.0.borrow_mut().locked = false;
+        assert!(keyboard.is_writable_at(t0 + RECHECK_AFTER * 2));
+        assert!(!keyboard.denied());
+    }
+
     #[test]
     fn a_writable_node_is_opened_by_asking_and_kept() {
         let (mut keyboard, node) = keyboard();
@@ -454,6 +544,79 @@ mod tests {
         keyboard.send_feature(&B).unwrap();
         assert_eq!(node.opens(), 2);
         assert_eq!(node.sent(), [Sent::Feature(2, B)]);
+    }
+
+    #[test]
+    fn a_query_reads_its_reply_after_sending_it() {
+        let (mut keyboard, node) = keyboard();
+        let reply = [0x88, 0x00, 0x25, 0x06, 0x32, 0x01, 0x06, 0x13];
+        node.0.borrow_mut().reply = reply;
+        let query = keyboard::effect_query();
+        assert_eq!(keyboard.query(&query).unwrap(), reply);
+        assert_eq!(node.sent(), [Sent::Feature(1, query), Sent::Get(1)]);
+    }
+
+    #[test]
+    fn a_query_whose_node_went_is_asked_again_on_the_new_one() {
+        // The reply belongs to the query, so the query goes again too.
+        let (mut keyboard, node) = keyboard();
+        node.fail_transfers(&[0, libc::ENODEV]);
+        let query = keyboard::effect_query();
+        keyboard.query(&query).unwrap();
+        assert_eq!(
+            node.sent(),
+            [
+                Sent::Feature(1, query),
+                Sent::Feature(2, query),
+                Sent::Get(2)
+            ]
+        );
+    }
+
+    fn numbered_slots() -> [[u8; 3]; keyboard::SLOTS] {
+        let mut colours = [[0u8; 3]; keyboard::SLOTS];
+        for (slot, colour) in colours.iter_mut().enumerate() {
+            *colour = [slot as u8, 0x80 | slot as u8, 0xff - slot as u8];
+        }
+        colours
+    }
+
+    #[test]
+    fn a_per_key_frame_goes_out_as_enter_eight_reports_and_the_commit() {
+        let (mut keyboard, node) = keyboard();
+        let colours = numbered_slots();
+        let (enter, reports, commit) = keyboard::per_key_reports(&colours, 25);
+        keyboard.send_frame(&enter, &reports, &commit).unwrap();
+        let sent = node.sent();
+        assert_eq!(sent.len(), 10);
+        assert_eq!(sent[0], Sent::Feature(1, keyboard::PER_KEY_ENTER));
+        assert_eq!(sent[9], Sent::Feature(1, keyboard::brightness_commit(25)));
+        // The reports in slot order: slot s is the s % 16th entry of report
+        // s / 16 as it reached the node.
+        for (slot, [red, green, blue]) in colours.iter().copied().enumerate() {
+            let Sent::Report(1, report) = &sent[1 + slot / 16] else {
+                panic!("report {} is {:?}", slot / 16, sent[1 + slot / 16]);
+            };
+            let at = 4 * (slot % 16);
+            assert_eq!(report[at..at + 4], [0, red, green, blue], "slot {slot}");
+        }
+    }
+
+    #[test]
+    fn a_frame_whose_node_went_is_sent_whole_again() {
+        let (mut keyboard, node) = keyboard();
+        let (enter, reports, commit) = keyboard::per_key_reports(&numbered_slots(), 50);
+        // The enter and three reports reached the old node.
+        node.fail_transfers(&[0, 0, 0, 0, libc::ENODEV]);
+        keyboard.send_frame(&enter, &reports, &commit).unwrap();
+        let on_new: Vec<Sent> = node
+            .sent()
+            .into_iter()
+            .filter(|sent| matches!(sent, Sent::Feature(2, _) | Sent::Report(2, _)))
+            .collect();
+        assert_eq!(on_new.len(), 10);
+        assert_eq!(on_new[0], Sent::Feature(2, enter));
+        assert_eq!(on_new[9], Sent::Feature(2, commit));
     }
 
     /// A keyboard whose node has opened, gone (ENODEV) and failed to open

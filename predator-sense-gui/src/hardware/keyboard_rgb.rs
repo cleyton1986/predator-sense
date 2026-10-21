@@ -1364,7 +1364,9 @@ mod tests {
     fn off_reaches_the_node_as_static_at_zero_brightness() {
         let (node, mut keyboard) = node_and_keyboard();
         send_effect(&mut keyboard, &sample_state(Effect::Off)).unwrap();
-        let Sent::Feature(_, effect) = node.sent()[2];
+        let Sent::Feature(_, effect) = node.sent()[2] else {
+            panic!("{:?}", node.sent());
+        };
         assert_eq!((effect[2], effect[4]), (0x01, 0));
     }
 

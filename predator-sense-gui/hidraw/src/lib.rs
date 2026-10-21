@@ -1,6 +1,6 @@
 //! The Chicony 24-bit keyboard's lighting interface (04F2:0117, the
 //! interface whose report descriptor starts `06 02 ff`, vendor page 0xFF02)
-//! as a hidraw node: where it is, and the one transfer it takes.
+//! as a hidraw node: where it is, and the three transfers it takes.
 //!
 //! Two processes use it. The GUI opens it as the user, which the installer's
 //! udev rule allows for the active local session's user, and keeps it open.
@@ -9,11 +9,12 @@
 //! here.
 //!
 //! The reports carry no IDs, so each goes out behind a 0, as hidapi sends
-//! them: 9 bytes for a feature report (`HIDIOCSFEATURE`). What goes in
-//! them is [`predator_sense_protocol::keyboard`]'s. Writing the node
-//! leaves usbhid bound to the interface, unlike a USB control transfer
-//! through libusb, which has to detach it first and so takes the node away
-//! from anyone holding it.
+//! them: 9 bytes for a feature report (`HIDIOCSFEATURE`, read back with
+//! `HIDIOCGFEATURE`), 65 for an output report (`write`). What goes in them
+//! is [`predator_sense_protocol::keyboard`]'s. Writing the node leaves usbhid
+//! bound to the interface, unlike a USB control transfer through libusb,
+//! which has to detach it first and so takes the node away from anyone
+//! holding it.
 //!
 //! A crate of its own because of the ioctl: `predator-sense-protocol`
 //! forbids `unsafe`, and the GUI and the helper share this rather than carry
@@ -23,9 +24,9 @@
 // `unsafe` block here, allowed on that function alone.
 #![deny(unsafe_code)]
 
-use predator_sense_protocol::keyboard::FEATURE_LEN;
+use predator_sense_protocol::keyboard::{self, FEATURE_LEN, OUTPUT_LEN};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -83,7 +84,7 @@ fn is_lighting_entry(entry: &Path) -> bool {
 
 /// Whether the class entry at `entry` (`<sys>/class/hidraw/<name>`, a link
 /// into `<sys>/devices`) resolves under `<sys>/devices` and not under
-/// `<sys>/devices/virtual`.
+/// `<sys>/devices/virtual`, as `key_input::device` requires of its node.
 fn is_physical(entry: &Path) -> bool {
     let Some(sys) = entry.parent().and_then(Path::parent).and_then(Path::parent) else {
         return false;
@@ -142,15 +143,17 @@ fn is_lighting_interface(path: &Path) -> bool {
 }
 
 /// `_IOC(_IOC_READ | _IOC_WRITE, 'H', nr, len)`, as `HIDIOCSFEATURE(len)`
-/// is defined in `linux/hidraw.h`.
+/// and `HIDIOCGFEATURE(len)` are defined in `linux/hidraw.h`.
 pub(crate) fn request(nr: u8, len: usize) -> libc::c_ulong {
     ((3u64 << 30) | ((len as u64) << 16) | ((b'H' as u64) << 8) | nr as u64) as libc::c_ulong
 }
 
 pub(crate) const HIDIOCSFEATURE: u8 = 0x06;
+pub(crate) const HIDIOCGFEATURE: u8 = 0x07;
 
 /// An open hidraw node. usbhid bounds each feature report it carries
-/// with the kernel's USB control timeout (`USB_CTRL_SET_TIMEOUT`, 5 s).
+/// with the kernel's USB control timeout (`USB_CTRL_SET_TIMEOUT`, 5 s),
+/// and each output report with the same.
 #[derive(Debug)]
 pub struct HidrawDevice {
     file: File,
@@ -228,6 +231,33 @@ impl HidrawDevice {
         if sent != buffer.len() {
             return Err(io::Error::other(format!(
                 "feature report: {sent} of {} bytes sent",
+                buffer.len()
+            )));
+        }
+        Ok(())
+    }
+
+    /// The 8-byte feature report the controller holds: the reply to the
+    /// query sent before it. A short one is an error
+    /// ([`keyboard::check_reply_length`]).
+    pub fn get_feature(&mut self) -> io::Result<[u8; FEATURE_LEN]> {
+        let mut buffer = [0u8; 1 + FEATURE_LEN];
+        let read = self.feature_ioctl(HIDIOCGFEATURE, &mut buffer)?;
+        // The kernel counts the report ID byte it kept in front.
+        keyboard::check_reply_length(read.saturating_sub(1)).map_err(io::Error::other)?;
+        let mut reply = [0u8; FEATURE_LEN];
+        reply.copy_from_slice(&buffer[1..]);
+        Ok(reply)
+    }
+
+    /// One 64-byte output report.
+    pub fn write_report(&mut self, report: &[u8; OUTPUT_LEN]) -> io::Result<()> {
+        let mut buffer = [0u8; 1 + OUTPUT_LEN];
+        buffer[1..].copy_from_slice(report);
+        let written = self.file.write(&buffer)?;
+        if written != buffer.len() {
+            return Err(io::Error::other(format!(
+                "output report: {written} of {} bytes written",
                 buffer.len()
             )));
         }
@@ -433,9 +463,29 @@ mod tests {
     }
 
     #[test]
-    fn the_feature_ioctl_is_the_kernels() {
-        // HIDIOCSFEATURE(9): a report ID byte and 8.
+    fn the_feature_ioctls_are_the_kernels() {
+        // HIDIOCSFEATURE(9) and HIDIOCGFEATURE(9): a report ID byte and 8.
         assert_eq!(request(HIDIOCSFEATURE, 9), 0xC009_4806);
+        assert_eq!(request(HIDIOCGFEATURE, 9), 0xC009_4807);
+    }
+
+    #[test]
+    fn an_output_report_goes_out_behind_a_zero_report_id() {
+        // A plain file stands in for the node: `write` is all an output
+        // report is.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hidraw");
+        fs::write(&path, b"").unwrap();
+        let mut report = [0u8; OUTPUT_LEN];
+        for (at, byte) in report.iter_mut().enumerate() {
+            *byte = at as u8 + 1;
+        }
+        let mut device = HidrawDevice::open(&path).unwrap();
+        device.write_report(&report).unwrap();
+        let written = fs::read(&path).unwrap();
+        assert_eq!(written.len(), 1 + OUTPUT_LEN);
+        assert_eq!(written[0], 0);
+        assert_eq!(written[1..], report);
     }
 
     #[test]
@@ -447,6 +497,8 @@ mod tests {
         let mut device = HidrawDevice::open(&path).unwrap();
         let sent = device.send_feature(&[0x30, 0x01, 0x01, 0, 0, 0, 0, 0xcd]);
         assert_eq!(sent.unwrap_err().raw_os_error(), Some(libc::ENOTTY));
+        let read: io::Result<[u8; FEATURE_LEN]> = device.get_feature();
+        assert_eq!(read.unwrap_err().raw_os_error(), Some(libc::ENOTTY));
         assert!(fs::read(&path).unwrap().is_empty(), "nothing written");
     }
 

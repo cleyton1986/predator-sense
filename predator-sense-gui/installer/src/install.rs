@@ -1429,9 +1429,9 @@ pub(crate) const HID_RULE: &str = concat!(
     "SUBSYSTEM==\"hidraw\", ENV{ID_VENDOR_ID}==\"04f2\", ENV{ID_MODEL_ID}==\"0117\", ENV{ID_USB_INTERFACE_NUM}==\"02\", MODE=\"0640\", GROUP=\"input\"\n",
 );
 
-/// The Chicony keyboard's vendor lighting interface (3): the GUI writes the keyboard's
-/// effects and its idle timer to it unprivileged, so it needs read and write here, unlike
-/// the read-only interface 2 in [`HID_RULE`]. Through uaccess, for the user of the active
+/// The Chicony keyboard's vendor lighting interface (3): the GUI streams colour and
+/// per-key frames to it unprivileged, so it needs read and write here, unlike the
+/// read-only interface 2 in [`HID_RULE`]. Through uaccess, for the user of the active
 /// local session only, not through the `input` group: nothing else unprivileged opens
 /// this interface (the hotkey daemon reads interface 2), and a group grant would hand
 /// every feature report of the controller to any process of any member, services

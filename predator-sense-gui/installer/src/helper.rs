@@ -86,6 +86,8 @@ const CHICONY_TERMINATOR: u8 = 0xBE;
 const CHICONY_REQUEST_TYPE: u8 = 0x21;
 /// bRequest: HID SET_REPORT.
 const CHICONY_SET_REPORT: u8 = 0x09;
+/// bRequest: HID GET_REPORT (read with bmRequestType 0xA1).
+const CHICONY_GET_REPORT: u8 = 0x01;
 /// wValue: report type 3 (Feature) in the high byte, report ID 0 in the low
 /// byte - this device does not use numbered reports.
 const CHICONY_REPORT_VALUE: u16 = 0x0300;
@@ -156,6 +158,12 @@ fn parse_effect_opcode(value: &str) -> AppResult<u8> {
             "opcode: {opcode:#04x} is not a keyboard effect"
         )))
     }
+}
+
+/// What `chicony-effect-read` prints for `reply`: the protocol's line
+/// (`EffectReading::to_line`), which `EffectReading::parse` reads back.
+fn effect_read_line(reply: &[u8; 8]) -> String {
+    keyboard::EffectReading::from_reply(reply).to_line()
 }
 
 /// Writes one mode-key cycle to facer. `skip` leaves the list untouched; an
@@ -284,6 +292,38 @@ fn chicony_set_report(
         packet,
         Duration::from_millis(1000),
     )
+}
+
+/// Sends `packet`, a query from `keyboard::query_packet`, and returns the
+/// 8-byte reply once `keyboard::check_reply` accepts it: a full report whose
+/// byte 0 echoes the query. The reply checksum is not validated. One command
+/// of the 24-bit family ([`chicony_24bit`]).
+fn chicony_query(packet: [u8; 8]) -> AppResult<[u8; 8]> {
+    chicony_24bit(
+        |device| {
+            device.send_feature(&packet)?;
+            // A short reply is already an error here.
+            Ok((device.get_feature()?, keyboard::FEATURE_LEN))
+        },
+        |handle| {
+            chicony_set_report(handle, &packet)?;
+            let mut reply = [0u8; 8];
+            let read = handle.read_control(
+                CHICONY_REQUEST_TYPE | 0x80,
+                CHICONY_GET_REPORT,
+                CHICONY_REPORT_VALUE,
+                CHICONY_INTERFACE as u16,
+                &mut reply,
+                Duration::from_millis(1000),
+            )?;
+            Ok((reply, read))
+        },
+    )
+    .and_then(|(reply, read)| {
+        keyboard::check_reply(packet[0], &reply, read)
+            .map(|()| reply)
+            .map_err(fail)
+    })
 }
 
 /// Finds the keyboard, detaches the kernel driver, claims interface 3, runs
@@ -1174,6 +1214,11 @@ fn run_with_paths(args: &[String], sysfs: &Path, ec: &Path) -> AppResult {
         // The daemon takes a well-formed one before it gets here (see
         // `run_daemon_command`), so this is one-shot mode or a bad value.
         HelperAction::ChiconyAutoOff => set_keyboard_timer(parse_keyboard_timer(&args[1])?),
+        HelperAction::ChiconyEffectRead => {
+            let reply = chicony_query(keyboard::effect_query())?;
+            println!("{}", effect_read_line(&reply));
+            Ok(())
+        }
         HelperAction::GrubSplashApply => grub_splash_apply(&args[1], &args[2], sysfs),
         HelperAction::GrubSplashReset => grub_splash_reset(sysfs),
     }
@@ -4320,6 +4365,50 @@ mod tests {
     fn chicony_auto_off_packet_layout() {
         assert_eq!(keyboard::auto_off_packet(false), [0x30, 0x01, 0, 0, 0, 0, 0, 0xce]);
         assert_eq!(keyboard::auto_off_packet(true), [0x30, 0x01, 1, 0, 0, 0, 0, 0xcd]);
+    }
+
+    #[test]
+    fn chicony_reply_check_accepts_a_normal_reply() {
+        let reply = [0x88, 0x00, 0x25, 0x06, 0x32, 0x01, 0x06, 0x13];
+        assert!(keyboard::check_reply(0x88, &reply, 8).is_ok());
+    }
+
+    #[test]
+    fn chicony_reply_check_rejects_short_reads() {
+        let reply = [0x88, 0x00, 0x25, 0x06, 0x32, 0, 0, 0];
+        let error = keyboard::check_reply(0x88, &reply, 5).unwrap_err();
+        assert!(error.contains("5 of 8"), "{error}");
+    }
+
+    #[test]
+    fn chicony_reply_check_rejects_a_wrong_first_byte() {
+        let reply = [0x94, 0x00, 0x25, 0x06, 0x32, 0x01, 0x06, 0x13];
+        let error = keyboard::check_reply(0x88, &reply, 8).unwrap_err();
+        assert!(error.contains("0x94") && error.contains("0x88"), "{error}");
+    }
+
+    #[test]
+    fn chicony_effect_reply_reads_data_bytes_and_ignores_the_checksum() {
+        let expected = keyboard::EffectReading {
+            mode: 37,
+            speed: 6,
+            brightness: 50,
+            sel: 1,
+            dir: 6,
+        };
+        let reply = [0x88, 0x00, 0x25, 0x06, 0x32, 0x01, 0x06, 0x13];
+        assert_eq!(keyboard::EffectReading::from_reply(&reply), expected);
+        let other = [0x88, 0x00, 0x25, 0x06, 0x32, 0x01, 0x06, 0x00];
+        assert_eq!(keyboard::EffectReading::from_reply(&other), expected);
+    }
+
+    #[test]
+    fn chicony_effect_read_prints_the_protocols_line() {
+        let reply = [0x88, 0x00, 0x25, 0x06, 0x19, 0x01, 0x06, 0x13];
+        let line = effect_read_line(&reply);
+        let reading = keyboard::EffectReading::parse(&line).expect("the protocol's own line");
+        assert_eq!(reading.brightness, 25);
+        assert_eq!(keyboard::raw_to_percent(reading.brightness), 50);
     }
 
     #[test]
