@@ -538,6 +538,8 @@ struct quirk_entry {
 	u8 pwm;
 	u8 four_zone_kb;
 	u8 lightbar_zones;
+	/* Physical base of the EC window ERM2, for direct light bar colours. */
+	u32 lightbar_erm2;
 };
 
 static struct quirk_entry *quirks;
@@ -626,6 +628,8 @@ static struct quirk_entry quirk_acer_predator_ph16_71 = {
 	.predator_v4 = 1,
 	.pwm = 1,
 	.lightbar_zones = 1,
+	/* ERM2, the DSDT's SystemMemory OperationRegion (BIOS V1.18). */
+	.lightbar_erm2 = 0xFE708F00,
 };
 
 
@@ -2733,6 +2737,32 @@ static void acer_led_exit(void)
  * uses method 21, method 7 for each zone and method 4. Any failed call or
  * non-zero status makes the write or read fail with -EIO.
  *
+ * For animation the node also takes a direct colour frame, which makes none:
+ *   a 9-byte write, left RGB, middle RGB, right RGB
+ * It goes straight into the EC's shared-memory window ERM2 (a SystemMemory
+ * OperationRegion in the DSDT; method 6 writes the same bytes from SMM):
+ * the zone colours at 0x73-0x7b, then bit 6 (0x40) of 0x4b, read-modify-
+ * write, which tells the EC to apply them. The EC clears that bit when it
+ * has (65-106 ms on BIOS V1.18; it polls about every 100 ms). A direct frame
+ * never waits: while the bit from the previous frame is still set it fails
+ * at once with -EBUSY, writing nothing, and the caller sends its next frame
+ * later. Mode, speed, brightness and the zone on/off state are left as the
+ * last 16-byte frame set them, so a 16-byte frame sets those up before
+ * direct frames follow.
+ *
+ * The direct route is on only for a quirk that names the window, and only
+ * when a probe at load proves the mapping is that window: the three zone
+ * colours read in it equal what method 7 returns for each zone, then
+ * method 6 sets each zone to a distinctive probe colour and the window must
+ * hold exactly those nine bytes, then method 6 puts the colours read first
+ * back (the bar shows the probe colours for that moment). A passive compare
+ * alone can match by chance (a black or white bar against memory that
+ * reads all zeros or all ones). Any failed call or mismatch, the restore
+ * included, leaves the route off for the module's life, and a direct frame
+ * then fails with -EOPNOTSUPP; it never falls back to WMI. The device
+ * attribute direct_route (/sys/class/acer-lightbar/acer-lightbar-0/
+ * direct_route) reads 1 when it is on, 0 when it is off.
+ *
  * Gated to the PH16-71 quirk and to WMID_GUID4, and created only when a
  * method-7 query of the left zone succeeds at load.
  */
@@ -2747,13 +2777,26 @@ static void acer_led_exit(void)
 #define LIGHTBAR_LED_ZONES_BYTE	9
 #define LIGHTBAR_GET_CHANNEL	2	/* method 21 input: the light bar */
 #define LIGHTBAR_CHR		"acer-lightbar"
+#define LIGHTBAR_COLOURS_LEN	9	/* direct frame: three zones' RGB */
+#define LIGHTBAR_ERM2_LEN	0x100
+#define ERM2_APPLY		0x4b
+#define ERM2_APPLY_LIGHTBAR	0x40
+#define ERM2_ZONE_RGB		0x73
 
 /*
- * Held around a whole light bar frame here (methods 20, 6 and 2) and around
- * each method-20 frame gkbbl_drv_write sends, so a frame written to
- * /dev/acer-gkbbl-0 cannot land in the middle of a per-zone write.
+ * Held around a whole light bar frame here (methods 20, 6 and 2, or a
+ * direct colour frame) and around each method-20 frame gkbbl_drv_write
+ * sends, so a frame written to /dev/acer-gkbbl-0 cannot land in the middle
+ * of a per-zone write, and no two writers read-modify-write ERM2 0x4b at
+ * once.
  */
 static DEFINE_MUTEX(lightbar_lock);
+/*
+ * ERM2, mapped while the direct route is on, else NULL. Set at load before
+ * the node exists; cleared under lightbar_lock, and unmapped, after the node
+ * is gone (lightbar_direct_exit).
+ */
+static void __iomem *lightbar_erm2;
 /*
  * Method-2 zone byte this driver last sent successfully, under
  * lightbar_lock. -1 is never a valid byte, so the first write after load,
@@ -2828,14 +2871,62 @@ static int lightbar_wmi(u32 method_id, const u8 *in, size_t in_len,
 	return lightbar_wmi_call(method_id, in, in_len, out, out_len, NULL);
 }
 
-/* Method 6 for one bar zone: zone (0 left, 1 middle, 2 right) to rgb. */
-static int lightbar_set_zone(int zone, const u8 *rgb)
+/*
+ * Method 6 for one bar zone: zone (0 left, 1 middle, 2 right) to rgb. probe
+ * as for lightbar_wmi_call.
+ */
+static int lightbar_set_zone(int zone, const u8 *rgb, const char *probe)
 {
 	u8 in[8] = { 0, rgb[0], rgb[1], rgb[2],
 		     LIGHTBAR_RGB_KB_BAR, BIT(zone), 0, 0 };
 
-	return lightbar_wmi(ACER_WMID_SET_GAMING_STATIC_LED_METHODID,
-			    in, sizeof(in), NULL, 0);
+	return lightbar_wmi_call(ACER_WMID_SET_GAMING_STATIC_LED_METHODID,
+				 in, sizeof(in), NULL, 0, probe);
+}
+
+/*
+ * A direct colour frame (see above): the nine zone colour bytes into ERM2,
+ * then the apply bit, or -EBUSY if the EC has not taken the previous frame
+ * yet. Nothing else in the window is written. The apply bit is set by a
+ * read-modify-write of 0x4b, under lightbar_lock, which every light bar and
+ * gaming keyboard writer of this driver also takes (this node,
+ * /dev/acer-gkbbl-0, /dev/acer-gkbbl-static-0, resume). Not under it: the
+ * turbo LED's method 2 (the turbo key), the "all zones on" method 2 sent once
+ * at load (gaming_kbbl_poll_and_enable_zones), and the root-only debugfs
+ * gkbbl_set probe; whether their SMM handlers touch 0x4b is not known.
+ * Bit 0x20 of 0x4b is the keyboard's apply flag (method 20's SMM handler
+ * sets it for a keyboard frame); the other bits are undocumented. The EC
+ * itself may clear a bit between the read and the write, which the write
+ * would then set again: re-reading 0x4b just before the write narrows that
+ * window but cannot close it.
+ */
+static ssize_t lightbar_write_colours(const char __user *buf)
+{
+	u8 rgb[LIGHTBAR_COLOURS_LEN];
+	u8 apply;
+	int i, err = 0;
+
+	if (copy_from_user(rgb, buf, sizeof(rgb)))
+		return -EFAULT;
+
+	mutex_lock(&lightbar_lock);
+	if (!lightbar_erm2) {
+		err = -EOPNOTSUPP;
+		goto unlock;
+	}
+	apply = ioread8(lightbar_erm2 + ERM2_APPLY);
+	if (apply & ERM2_APPLY_LIGHTBAR) {
+		err = -EBUSY;
+		goto unlock;
+	}
+	for (i = 0; i < LIGHTBAR_COLOURS_LEN; i++)
+		iowrite8(rgb[i], lightbar_erm2 + ERM2_ZONE_RGB + i);
+	iowrite8(ioread8(lightbar_erm2 + ERM2_APPLY) | ERM2_APPLY_LIGHTBAR,
+		 lightbar_erm2 + ERM2_APPLY);
+unlock:
+	mutex_unlock(&lightbar_lock);
+
+	return err ? err : LIGHTBAR_COLOURS_LEN;
 }
 
 static ssize_t lightbar_write(struct file *file, const char __user *buf,
@@ -2847,6 +2938,8 @@ static ssize_t lightbar_write(struct file *file, const char __user *buf,
 	u8 zones_on = 0;
 	int i, err;
 
+	if (count == LIGHTBAR_COLOURS_LEN)
+		return lightbar_write_colours(buf);
 	if (count != LIGHTBAR_FRAME_LEN)
 		return -EINVAL;
 	if (copy_from_user(frame, buf, LIGHTBAR_FRAME_LEN))
@@ -2876,7 +2969,7 @@ static ssize_t lightbar_write(struct file *file, const char __user *buf,
 	err = lightbar_wmi(ACER_WMID_SET_GAMINGKBBL_METHODID, kbbl, sizeof(kbbl),
 			   NULL, 0);
 	for (i = 0; !err && i < LIGHTBAR_ZONES; i++)
-		err = lightbar_set_zone(i, &frame[4 + 3 * i]);
+		err = lightbar_set_zone(i, &frame[4 + 3 * i], NULL);
 	if (!err && zones_on != lightbar_zones_sent) {
 		err = lightbar_wmi(ACER_WMID_SET_GAMING_LED_METHODID, led,
 				   sizeof(led), NULL, 0);
@@ -2953,8 +3046,119 @@ static const struct file_operations lightbar_fops = {
 	.write = lightbar_write,
 };
 
-static int __init lightbar_cdev_init(void)
+/* The direct_route attribute: see the comment above LIGHTBAR_FRAME_LEN. */
+static ssize_t direct_route_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%d\n", lightbar_erm2 ? 1 : 0);
+}
+static DEVICE_ATTR_RO(direct_route);
 
+static struct attribute *lightbar_attrs[] = {
+	&dev_attr_direct_route.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(lightbar);
+
+/* The window's colour bytes for all three zones, in frame order. */
+static void lightbar_read_window(void __iomem *erm2,
+				 u8 rgb[LIGHTBAR_COLOURS_LEN])
+{
+	int i;
+
+	for (i = 0; i < LIGHTBAR_COLOURS_LEN; i++)
+		rgb[i] = ioread8(erm2 + ERM2_ZONE_RGB + i);
+}
+
+/*
+ * Turns the direct route on (see the comment above LIGHTBAR_FRAME_LEN): maps
+ * the window the quirk names and keeps it only when the probe described
+ * there passes: the window holds what method 7 reports for each zone, then
+ * exactly the probe colours method 6 sets, and the colours read first are
+ * put back. Reads only the nine colour bytes of the window and writes
+ * nothing to it. Otherwise logs why, once, and leaves the route off. Called
+ * once at load, before the node exists, with lightbar_lock held.
+ */
+static void __init lightbar_direct_init(void)
+{
+	/* Distinctive per zone, and neither all zeros nor all ones. */
+	static const u8 probe_rgb[LIGHTBAR_COLOURS_LEN] = {
+		0x5a, 0xa5, 0x3c,  0x3c, 0x5a, 0xa5,  0xa5, 0x3c, 0x5a,
+	};
+	static const char *const off = "direct colour frames off";
+	u8 saved[LIGHTBAR_COLOURS_LEN], ec[LIGHTBAR_COLOURS_LEN];
+	void __iomem *erm2;
+	bool ok = true;
+	int i;
+
+	if (!quirks->lightbar_erm2)
+		return;
+	erm2 = ioremap(quirks->lightbar_erm2, LIGHTBAR_ERM2_LEN);
+	if (!erm2) {
+		pr_info("light bar: could not map the EC window at %#x; direct colour frames off\n",
+			quirks->lightbar_erm2);
+		return;
+	}
+
+	/* What the zones show now, through WMI and in the window. */
+	for (i = 0; i < LIGHTBAR_ZONES; i++) {
+		u8 zone_in[4] = { 0, LIGHTBAR_RGB_KB_BAR, BIT(i), 0 };
+		u8 wmi[4];
+
+		if (lightbar_wmi_call(ACER_WMID_GET_GAMING_RGB_KB_METHODID,
+				      zone_in, sizeof(zone_in), wmi, sizeof(wmi),
+				      off))
+			goto unmap;
+		memcpy(&saved[3 * i], &wmi[1], 3);
+	}
+	lightbar_read_window(erm2, ec);
+	if (memcmp(ec, saved, sizeof(ec))) {
+		pr_info("light bar: zones are %*phN through WMI but %*phN in the EC window; direct colour frames off\n",
+			LIGHTBAR_COLOURS_LEN, saved, LIGHTBAR_COLOURS_LEN, ec);
+		goto unmap;
+	}
+
+	/* The probe colours through WMI must show up in the window. */
+	for (i = 0; ok && i < LIGHTBAR_ZONES; i++)
+		ok = !lightbar_set_zone(i, &probe_rgb[3 * i], off);
+	if (ok) {
+		lightbar_read_window(erm2, ec);
+		if (memcmp(ec, probe_rgb, sizeof(ec))) {
+			pr_info("light bar: probe colours %*phN set through WMI but %*phN in the EC window; direct colour frames off\n",
+				LIGHTBAR_COLOURS_LEN, probe_rgb,
+				LIGHTBAR_COLOURS_LEN, ec);
+			ok = false;
+		}
+	}
+
+	/* Every zone back to what it showed, whatever happened above. */
+	for (i = 0; i < LIGHTBAR_ZONES; i++)
+		if (lightbar_set_zone(i, &saved[3 * i], off))
+			ok = false;
+	if (!ok)
+		goto unmap;
+
+	lightbar_erm2 = erm2;
+	return;
+
+unmap:
+	iounmap(erm2);
+}
+
+/* Turns the direct route off for good; for after the node is gone. */
+static void lightbar_direct_exit(void)
+{
+	void __iomem *erm2;
+
+	mutex_lock(&lightbar_lock);
+	erm2 = lightbar_erm2;
+	lightbar_erm2 = NULL;
+	mutex_unlock(&lightbar_lock);
+	if (erm2)
+		iounmap(erm2);
+}
+
+static int __init lightbar_cdev_init(void)
 {
 	static const u8 probe_in[4] = { 0, LIGHTBAR_RGB_KB_BAR, BIT(0), 0 };
 	struct device *dev;
@@ -2972,13 +3176,15 @@ static int __init lightbar_cdev_init(void)
 	err = lightbar_wmi_call(ACER_WMID_GET_GAMING_RGB_KB_METHODID, probe_in,
 				sizeof(probe_in), probe_out, sizeof(probe_out),
 				"per-zone node not created");
+	if (!err)
+		lightbar_direct_init();
 	mutex_unlock(&lightbar_lock);
 	if (err)
 		return 0;
 
 	err = alloc_chrdev_region(&lightbar_devt, 0, 1, LIGHTBAR_CHR);
 	if (err < 0)
-		return err;
+		goto direct_off;
 
 	#if RTLNX_VER_MIN(6, 4, 0)
 		lightbar_class = class_create(LIGHTBAR_CHR);
@@ -2997,14 +3203,16 @@ static int __init lightbar_cdev_init(void)
 	if (err < 0)
 		goto destroy_class;
 
-	dev = device_create(lightbar_class, NULL, lightbar_devt, NULL, "%s-%d",
-			    LIGHTBAR_CHR, 0);
+	dev = device_create_with_groups(lightbar_class, NULL, lightbar_devt,
+					NULL, lightbar_groups, "%s-%d",
+					LIGHTBAR_CHR, 0);
 	if (IS_ERR(dev)) {
 		err = PTR_ERR(dev);
 		goto del_cdev;
 	}
 
-	pr_info("light bar: per-zone control on /dev/%s-0\n", LIGHTBAR_CHR);
+	pr_info("light bar: per-zone control on /dev/%s-0%s\n", LIGHTBAR_CHR,
+		lightbar_erm2 ? ", direct colour frames on" : "");
 	return 0;
 
 del_cdev:
@@ -3014,6 +3222,8 @@ destroy_class:
 	lightbar_class = NULL;
 unregister:
 	unregister_chrdev_region(lightbar_devt, 1);
+direct_off:
+	lightbar_direct_exit();
 	return err;
 }
 
@@ -3026,6 +3236,7 @@ static void lightbar_cdev_exit(void)
 	class_destroy(lightbar_class);
 	lightbar_class = NULL;
 	unregister_chrdev_region(lightbar_devt, 1);
+	lightbar_direct_exit();
 }
 
 /*
