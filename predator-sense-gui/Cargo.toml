@@ -17,6 +17,10 @@ predator-sense-hidraw = { path = "hidraw" }
 predator-sense-protocol = { path = "protocol" }
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 
+[dev-dependencies]
+# Scratch directories for the tests, made private and new for each.
+tempfile = "3"
+
 # Same release profile the installer crate already uses (installer/Cargo.toml).
 # `panic = "abort"` is deliberately left out here: the installer is a small
 # root-owned helper where killing the whole process on any panic is the safer

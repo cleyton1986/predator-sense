@@ -982,17 +982,138 @@ pub fn delete_macro(name: &str) -> Result<(), String> {
     }
 }
 
-/// Save app config
+/// Save app config. The file is replaced whole ([`write_replacing`]), so a reader in this
+/// process or another one never finds it half written.
 pub fn save_app_config(config: &AppConfig) -> Result<(), String> {
     ensure_dirs();
     let path = config_dir().join("config.json");
+    save_through(config, |json| {
+        write_replacing(&path, json.as_bytes()).map_err(|e| format!("Erro ao salvar config: {}", e))
+    })
+}
+
+/// `save_app_config` with the file write passed in (the tests pass their own).
+fn save_through(
+    config: &AppConfig,
+    write: impl FnOnce(String) -> Result<(), String>,
+) -> Result<(), String> {
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("Erro ao serializar config: {}", e))?;
-    fs::write(&path, json).map_err(|e| format!("Erro ao salvar config: {}", e))?;
+    write(json)?;
     // Tells `load_app_config_cached` its copy is stale. After the write, so a
     // failed save does not invalidate a cache that still matches the file.
     CONFIG_GENERATION.fetch_add(1, Ordering::Relaxed);
     Ok(())
+}
+
+/// Writes `contents` to `path` so that a reader sees the old file or the new one, never part
+/// of either: into a new file in the same directory, flushed to disk, then renamed over
+/// `path`. `fs::write` truncates the file in place, and a reader opening it meanwhile got a
+/// parse error, which the app takes as an unreadable config and runs on defaults; the next
+/// save from any page then wrote those defaults over every setting.
+///
+/// A symlink at `path` is followed, as `fs::write` followed it: the file it points to is
+/// replaced and the link stays (a dotfile manager's link keeps working). The new file takes
+/// the old one's permissions, and as root its owner ([`keep_owner`]). On failure the old file
+/// is untouched and the new one removed.
+fn write_replacing(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let path = &link_target(path);
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // Unique per write, so two writers never share one, and hidden.
+    let temp = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    replace_through(path, dir, &temp, contents)
+}
+
+/// `path` with the symbolic links it names followed, a chain of them included (at most 40,
+/// the kernel's own limit); `path` itself when it is no link. A link's target may be missing:
+/// it is created there, as `fs::write` created it.
+fn link_target(path: &Path) -> PathBuf {
+    let mut path = path.to_path_buf();
+    for _ in 0..40 {
+        let Ok(to) = fs::read_link(&path) else {
+            break;
+        };
+        path = match path.parent() {
+            Some(dir) if to.is_relative() => dir.join(to),
+            _ => to,
+        };
+    }
+    path
+}
+
+/// Run as root (the GUI started with sudo), a replaced file would become root's, and the user
+/// could no longer save their own settings: the new file gets the old one's owner and group.
+/// Best effort: if that fails, the file stays root's, as before.
+fn keep_owner(file: &fs::File, old: &fs::Metadata) {
+    use std::os::unix::fs::MetadataExt;
+    if unsafe { libc::geteuid() } == 0 {
+        let _ = std::os::unix::fs::fchown(file, Some(old.uid()), Some(old.gid()));
+    }
+}
+
+/// [`write_replacing`] with the new file's name `temp` (the tests pick their own).
+///
+/// Only a file this process may write is replaced, as `fs::write` required: a rename needs
+/// only the directory to be writable, and would otherwise put a new file over a read-only
+/// or root-owned config.json (one the app may not even read, which it then runs on
+/// defaults). So `path` is opened for writing first, without truncating it and without
+/// waiting (`O_NONBLOCK`: a FIFO there would otherwise hold the UI thread until something
+/// reads it), and any error but its absence fails the save with the old file untouched, as
+/// does anything there that is not a regular file. Only the new file this call created is
+/// ever removed.
+fn replace_through(path: &Path, dir: &Path, temp: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    match fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(existing) if !existing.metadata()?.is_file() => {
+            return Err(std::io::Error::other(format!(
+                "{} is not a regular file",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp)?;
+    let written = (|| {
+        if let Ok(old) = fs::metadata(path) {
+            keep_owner(&file, &old);
+            file.set_permissions(old.permissions())?;
+        }
+        file.write_all(contents)?;
+        file.sync_all()?;
+        fs::rename(temp, path)?;
+        // The rename reaches the disk with the directory. A failure here leaves the new
+        // file in place, readable, so it is not one.
+        if let Ok(dir) = fs::File::open(dir) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    written
 }
 
 /// A timestamp shaped for a filename, `2026-09-18-1611`.
@@ -1358,6 +1479,210 @@ mod tests {
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(&dir);
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        tempfile::Builder::new()
+            .prefix(&format!("predator-sense-{name}-"))
+            .tempdir()
+            .expect("temp dir")
+            .keep()
+    }
+
+    /// A save used to truncate config.json in place, and a load in the middle of it found a
+    /// parse error: the app then ran on defaults and the next save from any page wrote them
+    /// over every setting.
+    #[test]
+    fn a_reader_racing_saves_never_finds_the_file_half_written() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+        let dir = scratch_dir("atomic-save");
+        let path = dir.join("config.json");
+        // A large file and a small one in turn, so a write in place would leave a reader
+        // plenty of partial files to find.
+        let large = AppConfig {
+            saved_colors: (0..20_000).map(|i| format!("#{i:06x}")).collect(),
+            ..AppConfig::default()
+        };
+        let files = [
+            serde_json::to_string_pretty(&large).expect("json"),
+            serde_json::to_string_pretty(&AppConfig::default()).expect("json"),
+        ];
+        write_replacing(&path, files[1].as_bytes()).expect("first write");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reader = {
+            let (stop, loads, path) = (stop.clone(), loads.clone(), path.clone());
+            std::thread::spawn(move || {
+                let mut other = Vec::new();
+                while !stop.load(Ordering::Relaxed) {
+                    match read_app_config_at(&path) {
+                        AppConfigSource::Loaded(_) => {
+                            loads.fetch_add(1, Ordering::Relaxed);
+                        }
+                        AppConfigSource::Missing => other.push("missing".to_string()),
+                        AppConfigSource::Unreadable(e) => other.push(e),
+                    }
+                }
+                other
+            })
+        };
+        // Writing starts once the reader has read the file, and goes on (300 writes at
+        // least) until it has read it 100 times more, however late its thread ran.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while loads.load(Ordering::Relaxed) == 0 {
+            assert!(std::time::Instant::now() < deadline, "the reader never ran");
+            std::thread::yield_now();
+        }
+        let first = loads.load(Ordering::Relaxed);
+        let mut writes = 0;
+        while writes < 300 || loads.load(Ordering::Relaxed) < first + 100 {
+            write_replacing(&path, files[writes % 2].as_bytes()).expect("write");
+            writes += 1;
+            assert!(std::time::Instant::now() < deadline, "the reader stalled");
+        }
+        stop.store(true, Ordering::Relaxed);
+        let other = reader.join().expect("reader");
+        assert!(
+            other.is_empty(),
+            "{} bad reads: {:?}",
+            other.len(),
+            other.first()
+        );
+
+        let left: Vec<_> = fs::read_dir(&dir)
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, ["config.json"], "no temporary file is left behind");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A rename needs only the directory: without the check, a read-only config.json, which
+    /// a write in place could never change, would be replaced.
+    #[test]
+    fn a_config_this_process_may_not_write_is_not_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root writes whatever the mode says; the tests never run as root.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = scratch_dir("atomic-save-read-only");
+        let path = dir.join("config.json");
+        fs::write(&path, "{\"font_scale\": 1.25}").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).expect("chmod");
+        let refused = write_replacing(&path, b"{}").expect_err("refused");
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&path).expect("read"), b"{\"font_scale\": 1.25}");
+        let left: Vec<_> = fs::read_dir(&dir)
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, ["config.json"], "no new file left either");
+        // A missing config.json is created, as before.
+        let fresh = dir.join("fresh.json");
+        write_replacing(&fresh, b"{}").expect("created");
+        assert_eq!(fs::read(&fresh).expect("read"), b"{}");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod back");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A FIFO, or anything else that is not a regular file, where config.json should be
+    /// fails the save at once (the probe never waits for a reader) and is left alone.
+    #[test]
+    fn a_save_over_something_that_is_not_a_file_fails_without_waiting() {
+        use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
+        let dir = scratch_dir("atomic-save-fifo");
+        let path = dir.join("config.json");
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a NUL-terminated path that lives for the call.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let started = std::time::Instant::now();
+        assert!(write_replacing(&path, b"{}").is_err(), "no reader: refused");
+        // With a reader the open succeeds, and it is still no regular file.
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .expect("reader");
+        assert!(write_replacing(&path, b"{}").is_err(), "a reader: refused");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        drop(reader);
+        assert!(fs::symlink_metadata(&path)
+            .expect("still there")
+            .file_type()
+            .is_fifo());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A new file of the same name already there (a crashed process's, whose pid was
+    /// reused) fails that save, and is left alone: only a file this call created is removed.
+    #[test]
+    fn a_save_never_removes_a_file_it_did_not_create() {
+        let dir = scratch_dir("atomic-save-existing-temp");
+        let path = dir.join("config.json");
+        let temp = dir.join(".config.json.1.0.tmp");
+        fs::write(&path, "{}").expect("write");
+        fs::write(&temp, "someone else's").expect("write");
+        let failed = replace_through(&path, &dir, &temp, b"{\"font_scale\": 1.25}");
+        assert_eq!(
+            failed.expect_err("taken").kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&temp).expect("still there"), b"someone else's");
+        assert_eq!(fs::read(&path).expect("read"), b"{}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A dotfile manager links config.json into its own tree: the link stays, and the file it
+    /// points to gets the new settings, as `fs::write` gave it them.
+    #[test]
+    fn a_symlinked_config_is_written_through_its_link() {
+        let dir = scratch_dir("atomic-save-link");
+        let dotfiles = dir.join("dotfiles");
+        fs::create_dir_all(&dotfiles).expect("dir");
+        let target = dotfiles.join("config.json");
+        fs::write(&target, "{}").expect("write");
+        // A relative link, then a chain ending in an absolute one.
+        let link = dir.join("config.json");
+        std::os::unix::fs::symlink("dotfiles/config.json", &link).expect("link");
+        write_replacing(&link, b"{\"font_scale\": 1.0}").expect("replace");
+        assert!(fs::symlink_metadata(&link)
+            .expect("metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).expect("read"), b"{\"font_scale\": 1.0}");
+        let chain = dir.join("chain.json");
+        std::os::unix::fs::symlink(&link, &chain).expect("link");
+        write_replacing(&chain, b"{\"font_scale\": 1.25}").expect("replace");
+        assert_eq!(fs::read(&target).expect("read"), b"{\"font_scale\": 1.25}");
+        // A link whose file is not there yet gets it.
+        let missing = dotfiles.join("new.json");
+        let dangling = dir.join("dangling.json");
+        std::os::unix::fs::symlink(&missing, &dangling).expect("link");
+        write_replacing(&dangling, b"{}").expect("created");
+        assert_eq!(fs::read(&missing).expect("read"), b"{}");
+        let left: Vec<_> = fs::read_dir(&dotfiles)
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(left.len(), 2, "no temporary file is left behind: {left:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_replaced_config_keeps_its_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("atomic-save-mode");
+        let path = dir.join("config.json");
+        fs::write(&path, "{}").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
+        write_replacing(&path, b"{\"font_scale\": 1.0}").expect("replace");
+        let mode = fs::metadata(&path).expect("metadata").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(fs::read(&path).expect("read"), b"{\"font_scale\": 1.0}");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The round trip the feature exists for. Not a serde smoke test: the
