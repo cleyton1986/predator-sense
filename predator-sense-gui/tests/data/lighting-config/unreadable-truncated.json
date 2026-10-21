@@ -1,0 +1,10 @@
+{
+  "last_profile": null,
+  "auto_apply_on_start": false,
+  "minimize_on_close": true,
+  "lighting_schemes": [
+    {
+      "name": "Night",
+      "keyboard": {
+        "effect": "Static",
+        "red": 0,

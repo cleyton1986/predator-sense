@@ -1,0 +1,30 @@
+{
+  "last_profile": null,
+  "auto_apply_on_start": false,
+  "minimize_on_close": true,
+  "keyboard_rgb": {
+    "effect": "Breathing",
+    "red": 138,
+    "green": 43,
+    "blue": 255,
+    "brightness": 45,
+    "speed": 35,
+    "direction": 1
+  },
+  "light_bar": {
+    "mode": "Static",
+    "speed": 3,
+    "brightness": 80,
+    "red": 138,
+    "green": 43,
+    "blue": 255,
+    "per_zone": false,
+    "zones": [
+      [138, 43, 255],
+      [255, 46, 136],
+      [138, 43, 255]
+    ],
+    "direction": 1
+  },
+  "saved_colors": []
+}

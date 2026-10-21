@@ -23,6 +23,7 @@ use predator_sense_protocol::thermal_profile as shared;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 pub use shared::{Calibration, Measured};
 
@@ -57,7 +58,10 @@ const SETTLE_MS: u64 = 1500;
 /// because retrying forever against someone holding the mode key would hang.
 const SETTLE_ATTEMPTS: u8 = 3;
 
-fn index_path() -> PathBuf {
+/// The attribute the driver notifies on when the profile changes, so a caller
+/// can wait on it instead of asking again on a timer. See `facer.c`'s
+/// `acer_thermal_profile_notify`.
+pub fn index_path() -> PathBuf {
     Path::new(SYSFS_ROOT).join(shared::SYSFS_INDEX)
 }
 
@@ -76,12 +80,105 @@ pub fn is_available() -> bool {
     index_path().exists() && supported_path().exists()
 }
 
-/// Currently active firmware index.
+/// How long a remembered index is trusted before it is read again.
 ///
-/// Note this is a WMI call behind a sysfs read, not a cached value, so callers
-/// on a UI timer should not poll it faster than they need to.
-pub fn current() -> Option<u8> {
+/// Changes normally reach [`INDEX`] the moment they happen: the driver
+/// notifies on both mode attributes (the app's window watches them), and the
+/// app forgets the index after each of its own writes. This only bounds how long a change that came
+/// with no notification at all can go unseen.
+const BACKSTOP: Duration = Duration::from_secs(60);
+
+/// The last firmware index read or written, and when.
+///
+/// Reading `thermal_profile` is a WMI method behind a sysfs file, and on a
+/// PH16-71 each read costs about 19 SMIs (measured with turbostat: ten reads a
+/// second added about 1900 SMIs over ten seconds). The mode is asked for by
+/// several timers, so reading it on every call kept the CPU taking SMIs for as
+/// long as the app ran, window closed or not.
+struct IndexCache {
+    last: Mutex<Option<(u8, Instant)>>,
+}
+
+impl IndexCache {
+    const fn new() -> Self {
+        Self {
+            last: Mutex::new(None),
+        }
+    }
+
+    /// The remembered index while it is younger than [`BACKSTOP`], otherwise
+    /// whatever `read` returns, remembered from now.
+    fn get(&self, now: Instant, read: impl FnOnce() -> Option<u8>) -> Option<u8> {
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((index, at)) = *last {
+            if now.saturating_duration_since(at) < BACKSTOP {
+                return Some(index);
+            }
+        }
+        let index = read();
+        *last = index.map(|index| (index, now));
+        index
+    }
+
+    /// Remembers an index known to be current. `None`, a read that failed, is
+    /// not remembered: the next caller reads again rather than being told
+    /// "unreadable" for a minute.
+    fn put(&self, index: Option<u8>, now: Instant) {
+        *self.last.lock().unwrap_or_else(|e| e.into_inner()) = index.map(|index| (index, now));
+    }
+
+    /// Reads now and remembers the answer, holding the lock across the read so
+    /// a value recorded meanwhile is not overwritten by an older one.
+    fn refresh(&self, now: Instant, read: impl FnOnce() -> Option<u8>) -> Option<u8> {
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        let index = read();
+        *last = index.map(|index| (index, now));
+        index
+    }
+
+    /// Forgets the index, so the next caller reads it.
+    fn clear(&self) {
+        self.put(None, Instant::now());
+    }
+}
+
+static INDEX: IndexCache = IndexCache::new();
+
+fn read_index() -> Option<u8> {
     read_trimmed(&index_path())?.parse().ok()
+}
+
+/// Currently active firmware index, as last read or written.
+///
+/// Remembered rather than read on every call; see [`IndexCache`]. Callers that
+/// must see the firmware itself, such as calibration confirming a write took,
+/// use [`read`].
+pub fn current() -> Option<u8> {
+    INDEX.get(Instant::now(), read_index)
+}
+
+/// The firmware index read now, bypassing the remembered one (and replacing
+/// it).
+pub fn read() -> Option<u8> {
+    INDEX.refresh(Instant::now(), read_index)
+}
+
+/// An index as the attribute prints it.
+fn parse_index(value: &str) -> Option<u8> {
+    value.trim().parse().ok()
+}
+
+/// Records an index just read from `thermal_profile` by someone else, such as
+/// the change notification that had to read the attribute to re-arm.
+pub fn observed(value: &str) {
+    INDEX.put(parse_index(value), Instant::now());
+}
+
+/// Makes the next [`current`] read the firmware: the mode may have changed
+/// with nothing to say what to (a change through `platform_profile`, or a
+/// suspend, during which the firmware does not always keep its index).
+pub fn forget() {
+    INDEX.clear();
 }
 
 /// Identity of the firmware currently installed, empty when unreadable.
@@ -104,7 +201,13 @@ pub fn supported() -> Vec<u8> {
 /// index this machine does not have comes back as `EINVAL` rather than being
 /// written and silently ignored.
 pub fn set(index: u8) -> Result<(), String> {
-    crate::hardware::helper::execute(HelperAction::ThermalProfile, &[&index.to_string()])
+    crate::hardware::helper::execute(HelperAction::ThermalProfile, &[&index.to_string()])?;
+    // Forgotten rather than recorded: the helper reporting success does not
+    // prove the firmware took the index (this firmware advertises indices it
+    // refuses, and a refused write leaves no notification behind). The next
+    // caller reads what the firmware actually holds.
+    INDEX.clear();
+    Ok(())
 }
 
 /// Records the index so the boot service can put the machine back on it.
@@ -241,7 +344,7 @@ pub fn calibrate() -> Result<Calibration, String> {
         );
     }
 
-    let original = current();
+    let original = read();
     let mut profiles = Vec::new();
 
     for index in &indices {
@@ -329,7 +432,7 @@ fn measure_one(index: u8, limits: Option<&(PathBuf, PathBuf)>) -> Result<Option<
     // index is confirmed after settling and the write is retried if it moved.
     for attempt in 1..=SETTLE_ATTEMPTS {
         std::thread::sleep(std::time::Duration::from_millis(SETTLE_MS));
-        if current() == Some(index) {
+        if read() == Some(index) {
             let (pl1_uw, pl2_uw) = sample_limits(limits);
             return Ok(Some(Measured {
                 index,
@@ -460,7 +563,7 @@ fn restore(original: Option<u8>, probed: &[Measured]) {
         Err(error) => crate::hardware::applog::error(&format!(
             "could not restore thermal profile {original:?}, and the fallback to {fallback} \
              also failed ({error}); the machine is now on {:?}",
-            current()
+            read()
         )),
     }
 }
@@ -725,5 +828,84 @@ mod tests {
             measured(6, 45_000_000, 50_000_000),
         ];
         assert!(readings_are_meaningful(&profiles));
+    }
+
+    // --- the remembered index ---
+
+    fn reads_none() -> Option<u8> {
+        panic!("the remembered index should have been used")
+    }
+
+    #[test]
+    fn a_fresh_index_is_served_without_reading_the_firmware() {
+        let cache = IndexCache::new();
+        let start = Instant::now();
+        assert_eq!(cache.get(start, || Some(4)), Some(4));
+        assert_eq!(cache.get(start + Duration::from_secs(59), reads_none), Some(4));
+    }
+
+    /// The backstop: a change nothing announced is seen within a minute.
+    #[test]
+    fn an_index_older_than_the_backstop_is_read_again() {
+        let cache = IndexCache::new();
+        let start = Instant::now();
+        cache.get(start, || Some(4));
+        assert_eq!(cache.get(start + BACKSTOP, || Some(5)), Some(5));
+        assert_eq!(cache.get(start + BACKSTOP + Duration::from_secs(1), reads_none), Some(5));
+    }
+
+    /// A notification replaces the index outright and
+    /// restarts the backstop, with no read of its own.
+    #[test]
+    fn a_notified_index_replaces_the_remembered_one() {
+        let cache = IndexCache::new();
+        let start = Instant::now();
+        cache.get(start, || Some(4));
+        let later = start + Duration::from_secs(50);
+        cache.put(Some(6), later);
+        assert_eq!(cache.get(later + Duration::from_secs(30), reads_none), Some(6));
+    }
+
+    /// Resume and a change through platform_profile: the next caller reads.
+    #[test]
+    fn a_forgotten_index_is_read_by_the_next_caller() {
+        let cache = IndexCache::new();
+        let start = Instant::now();
+        cache.get(start, || Some(4));
+        cache.clear();
+        assert_eq!(cache.get(start, || Some(1)), Some(1));
+    }
+
+    /// A failed read says nothing about the mode, so it must not hide the
+    /// next successful one for a minute.
+    #[test]
+    fn a_failed_read_is_not_remembered() {
+        let cache = IndexCache::new();
+        let start = Instant::now();
+        assert_eq!(cache.get(start, || None), None);
+        assert_eq!(cache.get(start, || Some(4)), Some(4));
+        cache.put(None, start);
+        assert_eq!(cache.get(start, || Some(5)), Some(5));
+    }
+
+    /// What the change notification hands over: the attribute's text, with
+    /// its newline. Anything else is no index, which clears the cache.
+    #[test]
+    fn the_notified_text_parses_as_an_index() {
+        assert_eq!(parse_index("4\n"), Some(4));
+        assert_eq!(parse_index(""), None);
+        assert_eq!(parse_index("quiet\n"), None);
+    }
+
+    /// A live read replaces whatever was remembered, however fresh.
+    #[test]
+    fn a_live_read_replaces_the_remembered_index() {
+        let cache = IndexCache::new();
+        let start = Instant::now();
+        cache.put(Some(4), start);
+        assert_eq!(cache.refresh(start, || Some(6)), Some(6));
+        assert_eq!(cache.get(start, reads_none), Some(6));
+        assert_eq!(cache.refresh(start, || None), None);
+        assert_eq!(cache.get(start, || Some(1)), Some(1));
     }
 }

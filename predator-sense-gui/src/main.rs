@@ -115,6 +115,12 @@ fn reload_css(scale: f64) {
 
 fn main() {
     STARTUP_STARTED.get_or_init(Instant::now);
+    // The GTK main loop runs on this thread: only its saves of config.json may switch
+    // "React to typing" on.
+    config::mark_ui_thread();
+    // Before any thread starts: a panic on a thread that sees key presses prints
+    // fixed text, never its message.
+    hardware::quiet_panics::install();
     startup_mark("main entered");
     if std::env::args().any(|argument| {
         argument == predator_sense_protocol::internal::DELAYED_APPLICATION_START_ARGUMENT
@@ -168,6 +174,19 @@ fn main() {
         );
         CSS_PROVIDER.with(|p| *p.borrow_mut() = Some(provider));
 
+        // Run by the hotkey daemon over D-Bus when the keyboard's Fn
+        // backlight keys change its brightness.
+        ui::lighting::fn_brightness::register(app);
+
+        // Key presses for the reactive themes, on the one keyboard whose presses
+        // are read: the reader parks with nothing open, and logind is watched on
+        // a thread of its own. Nothing is read until a theme that uses keys runs.
+        if hardware::capabilities::get().keyboard_rgb {
+            hardware::key_input::start(config::react_to_typing_at_start(
+                &config::load_app_config_source(),
+            ));
+        }
+
         // Set application window icon via icon theme search path
         if let Some(path) = find_icon_path() {
             if let Some(dir) = std::path::Path::new(&path).parent() {
@@ -178,14 +197,66 @@ fn main() {
         startup_mark("startup complete");
     });
 
+    // Runs when the main loop ends through `app.quit()`. Closing to tray
+    // never fires this (that path only hides the window, see
+    // `window.rs::hide_to_tray`). The real exits arrive as signals: the tray's
+    // Quit sends SIGTERM, and so does the session at logout. Without the
+    // handlers below the default action killed the process and this never
+    // ran.
+    //
     // Audio Sync spawns a real child process (`parec`) that has no reason
-    // to know the app is exiting - closing to tray never fires this (that
-    // path only hides the window, see `window.rs::hide_to_tray`), but the
-    // real process exit (tray "Sair", session logout, `kill`) does, and
-    // without this the capture thread and its `parec` child would leak
-    // for as long as the audio device keeps producing data, i.e. forever.
+    // to know the app is exiting, and without this the capture thread and
+    // its `parec` child would leak for as long as the audio device keeps
+    // producing data, i.e. forever.
     app.connect_shutdown(|_| {
+        // A Settings slider value still waiting out its save debounce.
+        ui::window::flush_pending_saves();
+        // Then, before any hardware: "Show on my laptop" puts the active mode's lighting
+        // back, bounded, before anything below stops the renderer or hands the keyboard's
+        // timer back, and the Lighting page starts no apply from here on.
+        ui::lighting_page::at_exit();
         hardware::audio_sync::stop();
+        // The keyboard node closes before the renderer stops.
+        hardware::key_input::shutdown(std::time::Duration::from_millis(200));
+        // The lighting renderer stops first, with its `parec` child, so no
+        // frame of it lands on a light the exit writes below.
+        let drew = hardware::lighting_renderer::shutdown(std::time::Duration::from_millis(500));
+        // An animation the app drew would stay on the keyboard and the bar as
+        // a frozen frame, and a light the idle timer has dark would stay dark
+        // until the app runs again (the keyboard was blanked with the Off
+        // effect, which a key press does not wake). Each gets the active
+        // mode's look with nothing drawn: a theme's firmware fallback. A still
+        // picture (a per-key painting) stays, and is sent again if dark.
+        let looks = hardware::lighting::exit_looks(drew);
+        let bar_done = looks.light_bar.map(|state| {
+            let blanked = hardware::light_bar::is_blanked();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(hardware::light_bar::show_at_exit(&state, blanked));
+            });
+            rx
+        });
+        // The app keeps the controller's own keyboard timer off while it
+        // runs, and the controller keeps that until the next boot. Switched
+        // back on here, or a quit or logout would leave the keyboard lit for
+        // good. The keyboard's look goes first, inside the same bounded
+        // shutdown (2 s for the keyboard and the hand-back, at most 0.5 s
+        // more for the bar).
+        hardware::keyboard_rgb::hand_back_firmware_timer(
+            std::time::Duration::from_secs(2),
+            looks.keyboard,
+        );
+        if let Some(rx) = bar_done {
+            match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => hardware::applog::error(&format!(
+                    "exit: the app did not write the light bar's look ({e})"
+                )),
+                Err(_) => hardware::applog::error(
+                    "exit: the app did not write the light bar's look within 500 ms",
+                ),
+            }
+        }
     });
 
     app.connect_activate(|app| {
@@ -232,6 +303,20 @@ fn main() {
         }
         startup_mark("window build returned");
     });
+
+    // SIGTERM (tray Quit, logout, `kill`), SIGINT (Ctrl+C) and SIGHUP (a
+    // closed terminal) end the app through `quit()`, so `connect_shutdown`
+    // runs. `quit()` ignores the hold `hide_to_tray` takes. Each handler
+    // stays installed: a second signal while shutdown is still handing the
+    // keyboard timer back (at most 2 s) asks for the same thing again rather
+    // than killing the process halfway. SIGKILL still ends it at once.
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        let app = app.clone();
+        glib::unix_signal_add_local(signal, move || {
+            app.quit();
+            glib::ControlFlow::Continue
+        });
+    }
 
     // Internal lifecycle arguments are consumed above and never exposed to GTK/GApplication.
     app.run_with_args::<String>(&[]);

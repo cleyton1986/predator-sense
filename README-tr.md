@@ -112,6 +112,7 @@ Acer oyuncu dizüstü bilgisayarları için RGB klavye aydınlatması ve Turbo m
 | **Kullanım** | 4 sekmeli görünüm: CPU / GPU / Bellek / Depolama, en çok kaynak tüketen süreçler, tıkla-genişlet detaylar ve sıcaklık göstergelerinde CSS tabanlı alev animasyonu |
 | **Ağ** | Zirve takibi ve otomatik arayüz algılamasıyla gerçek zamanlı indirme/yükleme grafikleri |
 | **RGB Klavye Kontrolü** | WMI üzerinden bölge bazlı statik (4 bölge) ve dinamik efektler (Breathing, Neon, Wave, Shifting, Zoom). Çekirdek modülü olmayan donanımlarda RGB, bunun yerine USB/I2C-HID üzerinden yerel olarak çalışır — ENEK5130 çip (4 bölgeli statik, Breathing/Neon), 2024+ Sunrex çip (tek bölge, tam efekt listesi) veya Chicony çip (7 renkli palet, Helios 300) — otomatik algılanır, bkz. [Uyumluluk](#uyumluluk) |
+| **Güç moduna göre aydınlatma** | Her güç modu kendi aydınlatmasını adlandırılmış ön ayarlarla saklar: her ışığın kendi efektleri ya da klavye, ışık çubuğu ve logo için 32 yerleşik temadan biri. Değişiklikler hemen uygulanır. Bkz. [Aydınlatma](#aydınlatma) |
 | **RGB Kapak Logosu** | Ekranın arkasındaki amblem için bağımsız açma/kapama, düz renk, parlaklık, Breathing ve Neon kontrolleri, canlı vektör önizlemesiyle. Yalnızca çalışma zamanı HID yetenek algılamasından sonra gösterilir |
 | **Performans Profilleri** | Sessiz / Dengeli / Performans / Turbo modları, artı yalnızca pilde kullanılabilen bir Eco katmanı (CPU governor + Intel EPP + GPU güç limiti) |
 | **Fan Kontrolü** | Animasyonlu dönen fanlarla canlı RPM, CoolBoost anahtarı, Auto/Max modları, artı deneysel fan başına PWM kontrolü ve otomatik sıcaklık eğrisi (destekleniyorsa) |
@@ -336,7 +337,26 @@ sudo installer/target/release/predator-sense-installer --install
 
 ## Kullanım
 
+### Aydınlatma
+
+Her güç modunun kendi aydınlatması vardır. Güç modu uygulamadan, mod tuşundan veya masaüstünden değiştiğinde, ışıklar o modun aydınlatmasına geçer.
+
+1. Kenar çubuğunda **Aydınlatma**'ya gidin. Sayfa etkin güç modunda açılır; başka bir modun aydınlatmasını düzenlemek için üstten o modu seçin.
+2. **Aydınlatma kontrolü** her ışığın kendi efektlerini ayarlar. Önizlemede bir ışık seçin (dizüstünüzde hangisi varsa klavye, ışık çubuğu veya logo), ardından bir efekt ve efektte varsa rengini, hızını ve yönünü. PH16-71 klavyesinde **Tuş başına renkler** önizlemede tek tek tuşları boyar.
+3. **Temalar** klavyeyi, ışık çubuğunu ve logoyu yerleşik bir temadan birlikte ayarlar. Bir kart seçin, ardından renk seçeneklerinden birini veya kendi renklerinizi (**Özel**) ve temanın sahip olduğu ayarları.
+4. Önizlemenin altında her ışığın parlaklığını ayarlayın.
+
+Değişiklikler hemen uygulanır ve kaydedilir; Uygula düğmesi yoktur. Kendi ayarlarınızın üzerine bir tema seçmek, bir boyamayı temizlemek ve bir ön ayarı silmek **Geri al** sunar.
+
+**Ön ayarlar.** **Yeni ön ayar olarak kaydet…** bir modun aydınlatmasını bir adla saklar, **Ön ayar yükle** onu düzenlediğiniz moda koyar. Bir ön ayarı kullanan mod, siz düzenleyince **Değiştirildi** gösterir: **Kaydet** değişiklikleri ön ayara yazar, **Değişiklikleri at** ön ayara geri döner.
+
+**Dizüstümde göster.** Etkin olmayan bir modu düzenlerken bu anahtar o modun aydınlatmasını ışıklara koyar. Siz kapatınca, sayfadan ayrılınca veya güç modu değişince sona erer.
+
+**Uygulamanın çizdiği temalar.** PH16-71'in tuş başına renkli klavyesinde ve üç bölgeli ışık çubuğunda uygulama bir temanın hareketli görünümlerini kendisi çizer. Basılan tuşları yakan temalar, temanın panelinde **Yazmaya tepki ver** açıksa, çalışırken yerleşik klavyeyi okur. Bunun için hesabınızın `input` grubunda olması gerekir. Diğer tüm ışıklarda ve uygulama çizemediği sürece (örneğin yükleyicinin aygıt kuralları oturumunuza klavye ve ışık çubuğu erişimi vermeden önce) tema en yakın firmware efektini gösterir. **Pilde animasyonları duraklat** pildeyken onları durdurur. Uygulama kapandığında veya oturumu kapattığınızda, uygulamanın canlandırdığı ışıklar temanın firmware görünümüne geçer; hareketsiz bir resim (tuş başına bir boyama veya hareket etmeyen bir tema resmi) olduğu gibi kalır.
+
 ### Klavye RGB
+
+Diğer modellerde (PH16-71, PH16-72 ve PH18-72 dışındakiler) Aydınlatma sayfası aşağıda anlatılan eski sayfadır.
 
 1. Kenar çubuğundan **Aydınlatma**'ya gidin
 2. **Statik** (bölge başına renkler) veya **Dinamik** (efektler) seçin
@@ -627,6 +647,7 @@ predator-sense-gui/
 │   └── dkms.conf                # DKMS otomatik yeniden derleme yapılandırması
 ├── installer/                   # Rust multicall yükleyici ve servisler
 │   ├── Cargo.toml
+│   ├── assets/                  # Tepsi simgesi pixmap olarak (ARGB32, resources/tray'den)
 │   └── src/
 │       ├── main.rs              # Kurulu çalıştırılabilir dosya adına göre tipli dağıtım
 │       ├── constants.rs         # Merkezi yollar, protokol değerleri ve donanım sabitleri
@@ -637,7 +658,10 @@ predator-sense-gui/
 │       └── i18n.rs              # Tipli EN/PT mesajları
 ├── protocol/                    # Paylaşılan tipli GUI/helper sözleşmesi
 │   ├── Cargo.toml
-│   └── src/lib.rs               # Eylemler, yollar, limitler ve binary adları
+│   └── src/lib.rs               # Eylemler, yollar, limitler, binary adları, klavye raporları
+├── hidraw/                      # PH16-71 klavyesinin aydınlatma hidraw düğümü (tek ioctl)
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Rust GTK4 uygulaması
 │   ├── main.rs
 │   ├── app_state.rs             # Global pencere-görünürlüğü bayrağı (zamanlayıcıları kapatır)
@@ -647,11 +671,21 @@ predator-sense-gui/
 │   ├── hardware/
 │   │   ├── helper.rs            # Tipli ayrıcalıklı-yardımcı istemcisi
 │   │   ├── rgb.rs               # /dev/acer-gkbbl-* üzerinden RGB
+│   │   ├── keyboard_rgb.rs      # hidraw üzerinden PH16-71 klavyesi (Chicony 24 bit)
+│   │   ├── chicony_hid.rs       # Klavyenin açık tutulan hidraw düğümü
+│   │   ├── light_bar.rs         # Kasa ışık çubuğu
+│   │   ├── light_bar_zones.rs   # Işık çubuğunun üç bölgesi (facer düğümü)
+│   │   ├── lighting.rs          # Her güç modunun aydınlatmasını ışıklara koyar
+│   │   ├── lighting_model/      # Mod başına aydınlatma, ön ayarlar, bir ayarın yazdıkları
+│   │   ├── lighting_renderer/   # Temaların uygulamanın çizdiği görünümlerini çizer
+│   │   ├── effects/             # Efekt motoru ve tema kataloğu
+│   │   ├── key_input/           # Yazmaya tepki veren temalar için tuş basışları
 │   │   ├── hwmon.rs             # /sys/class/hwmon indeksi (önbelleğe alınmış OnceLock)
 │   │   ├── sensors.rs           # Sıcaklıklar, fanlar, RAM, ağ
-│   │   ├── gpu.rs               # TTL önbellekli nvidia-smi ayrıştırıcı
+│   │   ├── gpu.rs               # NVML ile GPU ölçümleri, helper ile güç sınırı
+│   │   ├── nvml.rs              # Çalışırken yüklenen NVML (dlopen)
 │   │   ├── procs.rs             # /proc örnekleyici (çekirdek başına CPU, bellek, süreç listesi)
-│   │   ├── storage.rs           # df üzerinden disk kullanımı
+│   │   ├── storage.rs           # statvfs üzerinden disk kullanımı
 │   │   ├── sysinfo.rs           # DMI + CPU + GPU + işletim sistemi özellikleri
 │   │   ├── fan.rs               # Fan modu + CoolBoost
 │   │   ├── extras.rs            # Pil limiti, LCD overdrive, USB şarj, açılış animasyonu
@@ -659,14 +693,21 @@ predator-sense-gui/
 │   │   ├── ai_assistant.rs      # Ollama tool-calling: mevcut hardware:: setter'larına eşlenen sabit izin listesi
 │   │   ├── ai_snapshot.rs       # Yapay zekaya beslenen, her okumadan sonra temizlenen geçici donanım durumu anlık görüntüsü
 │   │   ├── ai_actionlog.rs      # Yapay zekanın önerdiği/uyguladığı her şeyin kalıcı, incelenebilir günlüğü
+│   │   ├── quiet_panics.rs      # Panik kancası: tuş basışlarını gören iş parçacıklarından mesaj yok
 │   │   └── setup.rs             # Çekirdek modülü yönetimi
 │   └── ui/                      # GTK4 sayfaları (Cairo özel widget'ları)
 │       ├── window.rs            # Ana pencere, kenar çubuğu, neon çubuklar, tepsiye gizleme
+│       ├── still_drawing.rs     # Piksel olarak saklanan sabit çizimler
+│       ├── ticks.rs             # Yalnızca görünürken çalışan animasyon zamanlayıcıları
+│       ├── flow_box.rs          # Alt öğeleri kaldırmadan FlowBox içeriği
+│       ├── toasts.rs            # Pencere düzeyinde bildirimler (Geri al)
 │       ├── dashboard_page.rs    # Ana görsel + sistem özellikleri
 │       ├── temperatures_page.rs # Tüm sıcaklık göstergeleri
 │       ├── usage_page.rs        # En çok kaynak tüketen süreçlerle CPU/GPU/Bellek/Depolama
 │       ├── network_page.rs      # Zirve takibiyle indirme/yükleme
 │       ├── rgb_page.rs          # Görsel bölgeli klavye RGB'si
+│       ├── lighting_page.rs     # Aydınlatma sayfası: modlar, ön ayarlar, önizleme
+│       ├── lighting/            # Sekmeleri (Aydınlatma kontrolü, Temalar), önizleme, satırlar
 │       ├── fan_control_page.rs  # Animasyonlu fanlar + CoolBoost
 │       ├── fan_page.rs          # Performans profilleri
 │       ├── battery_page.rs      # Pil istatistikleri + şarj limiti
@@ -675,9 +716,12 @@ predator-sense-gui/
 │       ├── ai_page.rs           # Yapay Zeka Asistanı: sohbet, model yöneticisi, kaynak izleyicisi, eylem günlüğü
 │       ├── setup_page.rs        # Çekirdek modülü kurulum sihirbazı
 │       └── gauge_widget.rs      # Kesikli dairesel gösterge widget'ı
+├── tests/data/                  # Efektlerin referans kareleri, tema ve yapılandırma verileri
+├── tools/                       # gen-golden.js ve çalıştırdığı effects.js (gjs)
 └── resources/
+    ├── tray/                    # Tepsi simgesi kaynakları (PNG)
     ├── style.css                # Oyuncu koyu teması
-    └── predator-icon.svg        # Sistem tepsisi simgesi
+    └── predator-icon.svg        # Uygulama simgesi
 ```
 
 ---

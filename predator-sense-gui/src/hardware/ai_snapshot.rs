@@ -21,7 +21,7 @@ fn snapshot_path() -> PathBuf {
 /// exists only between writes and the next `read_and_clear_snapshot()` call -
 /// it is meant to be consumed and deleted, never to accumulate history.
 pub fn append_snapshot() {
-    let s = sensors::read_all_sensors();
+    let s = sensors::read_core_sensors();
     let current_profile = profile::get_current_profile().map(|p| p.to_id().to_string());
     let battery = crate::hardware::capabilities::battery_device();
     let battery_attribute = |name: &str| {

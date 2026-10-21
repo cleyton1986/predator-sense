@@ -1,6 +1,6 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk, glib};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::f64::consts::PI;
 use std::rc::Rc;
 
@@ -8,7 +8,105 @@ use crate::hardware::profile;
 use crate::hardware::sensors::SensorData;
 use crate::ui::gauge_widget;
 
-/// Página de temperaturas do sistema (antigo home_page).
+/// What a built page updates in place: its cards' names (the sensors this machine
+/// showed), each card's value label and ring, and the mode label.
+struct Live {
+    page: glib::WeakRef<gtk::Box>,
+    names: Vec<String>,
+    cards: Vec<(gtk::Label, Rc<Cell<Option<f64>>>, gtk::DrawingArea)>,
+    mode: gtk::Label,
+    /// What the cards were built with: the power mode's accent and the
+    /// custom icons setting. Either changing builds the page again.
+    accent: (f64, f64, f64),
+    custom_icons: bool,
+}
+
+thread_local! {
+    static LIVE: RefCell<Option<Live>> = const { RefCell::new(None) };
+}
+
+/// Shows `sensor_data` on the page built last, in place: the page is built
+/// once and kept, with its focus and scroll position. `false` when there is
+/// no page, the sensors this machine shows changed (a drive appeared or
+/// went), or the accent or the custom icons setting changed since the build,
+/// so the caller builds it again.
+pub fn update(sensor_data: &SensorData) -> bool {
+    LIVE.with(|live| {
+        let live = live.borrow();
+        let Some(live) = live.as_ref().filter(|live| live.page.upgrade().is_some()) else {
+            return false;
+        };
+        if live.accent != crate::ui::brand_theme::accent().bright
+            || live.custom_icons != crate::config::load_app_config_cached().custom_icons_enabled
+        {
+            return false;
+        }
+        let gauges = gauges(sensor_data);
+        if gauges.len() != live.names.len()
+            || gauges.iter().zip(&live.names).any(|(g, name)| g.0 != name)
+        {
+            return false;
+        }
+        for ((_, temp, _), (label, value, ring)) in gauges.iter().zip(&live.cards) {
+            label.set_text(&temperature_text(*temp));
+            if value.replace(*temp) != *temp {
+                ring.queue_draw();
+            }
+        }
+        live.mode.set_text(&mode_text());
+        true
+    })
+}
+
+fn temperature_text(temp: Option<f64>) -> String {
+    temp.map(|t| format!("{}°", t as i32))
+        .unwrap_or("--°".into())
+}
+
+fn mode_text() -> String {
+    profile::get_current_profile()
+        .map(|p| p.label().to_string())
+        .unwrap_or(crate::i18n::t("default").into())
+}
+
+/// One entry per sensor this machine actually has: name, value, icon file.
+fn gauges(sensor_data: &SensorData) -> Vec<(&'static str, Option<f64>, &'static str)> {
+    let ram1_label = if sensor_data.ram1_temp.is_some() {
+        "RAM 1"
+    } else {
+        "RAM"
+    };
+    [
+        Some(("CPU", sensor_data.cpu_temp, "cpu.png")),
+        Some(("GPU", sensor_data.gpu_temp, "gpu.png")),
+        Some((
+            crate::i18n::t("system_label"),
+            sensor_data.system_temp,
+            "linux.png",
+        )),
+        sensor_data
+            .nvme0_temp
+            .map(|t| ("SSD 1", Some(t), "ssd.png")),
+        sensor_data
+            .nvme1_temp
+            .map(|t| ("SSD 2", Some(t), "ssd.png")),
+        sensor_data
+            .wifi_temp
+            .map(|t| ("WiFi", Some(t), "internet.png")),
+        sensor_data
+            .ram0_temp
+            .map(|t| (ram1_label, Some(t), "memoria-ram.png")),
+        sensor_data
+            .ram1_temp
+            .map(|t| ("RAM 2", Some(t), "memoria-ram.png")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// Página de temperaturas do sistema (antigo home_page). Kept up to date by
+/// [`update`].
 pub fn build(sensor_data: &SensorData) -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     page.set_hexpand(true);
@@ -48,10 +146,15 @@ pub fn build(sensor_data: &SensorData) -> gtk::Box {
     }
     {
         let phase = blink_phase.clone();
-        let area = icons.clone();
-        // This page is rebuilt periodically; stop the timer once this area is
-        // detached (no root) so old instances don't leak.
-        glib::timeout_add_local(std::time::Duration::from_millis(450), move || {
+        let weak = icons.downgrade();
+        // This page is built again when the sensors it shows change, so the
+        // timer lives only while this area is mapped, holds it weakly (its own
+        // map handlers keep the timer), and stops for good once the area is
+        // detached.
+        crate::ui::ticks::while_mapped(&icons, 450, move || {
+            let Some(area) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
             if area.root().is_none() {
                 return glib::ControlFlow::Break;
             }
@@ -70,43 +173,10 @@ pub fn build(sensor_data: &SensorData) -> gtk::Box {
     header.append(&icons);
     page.append(&header);
 
-    let custom_icons = crate::config::load_app_config().custom_icons_enabled;
-    let icon = |name: &'static str| custom_icons.then_some(name);
-    let ram1_label = if sensor_data.ram1_temp.is_some() {
-        "RAM 1"
-    } else {
-        "RAM"
-    };
-
-    // One entry per sensor this machine actually has - each becomes its own
-    // faceted card, laid out two per row below.
-    let gauges: Vec<(&str, Option<f64>, Option<&'static str>)> = [
-        Some(("CPU", sensor_data.cpu_temp, icon("cpu.png"))),
-        Some(("GPU", sensor_data.gpu_temp, icon("gpu.png"))),
-        Some((
-            crate::i18n::t("system_label"),
-            sensor_data.system_temp,
-            icon("linux.png"),
-        )),
-        sensor_data
-            .nvme0_temp
-            .map(|t| ("SSD 1", Some(t), icon("ssd.png"))),
-        sensor_data
-            .nvme1_temp
-            .map(|t| ("SSD 2", Some(t), icon("ssd.png"))),
-        sensor_data
-            .wifi_temp
-            .map(|t| ("WiFi", Some(t), icon("internet.png"))),
-        sensor_data
-            .ram0_temp
-            .map(|t| (ram1_label, Some(t), icon("memoria-ram.png"))),
-        sensor_data
-            .ram1_temp
-            .map(|t| ("RAM 2", Some(t), icon("memoria-ram.png"))),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let custom_icons = crate::config::load_app_config_cached().custom_icons_enabled;
+    let gauges = gauges(sensor_data);
+    let names: Vec<String> = gauges.iter().map(|g| g.0.to_string()).collect();
+    let mut cards = Vec::with_capacity(gauges.len());
 
     // FlowBox instead of a fixed Grid so the cards reflow to one column on
     // their own once the window is too narrow for two - same responsive
@@ -124,6 +194,7 @@ pub fn build(sensor_data: &SensorData) -> gtk::Box {
     flow.set_margin_bottom(16);
     let accent = crate::ui::brand_theme::accent().bright;
     for (label, temp, icon_file) in gauges.into_iter() {
+        let icon_file = custom_icons.then_some(icon_file);
         let card = crate::ui::faceted_card::build(accent, None);
         card.widget.set_size_request(460, 190);
         card.content.set_valign(gtk::Align::Center);
@@ -145,18 +216,16 @@ pub fn build(sensor_data: &SensorData) -> gtk::Box {
         let name_l = gtk::Label::new(Some(label));
         name_l.add_css_class("gauge-label");
         name_l.set_halign(gtk::Align::Start);
-        let value_l = gtk::Label::new(Some(
-            &temp
-                .map(|t| format!("{}°", t as i32))
-                .unwrap_or("--°".into()),
-        ));
+        let value_l = gtk::Label::new(Some(&temperature_text(temp)));
         value_l.add_css_class("monitor-temp-big");
         value_l.set_halign(gtk::Align::Start);
         info.append(&name_l);
         info.append(&value_l);
 
         // Right: the ring alone, no text/icon inside it.
-        let ring = gauge_widget::create_bare_ring(temp, 100.0, 110);
+        let value = Rc::new(Cell::new(temp));
+        let ring = gauge_widget::create_bare_ring(value.clone(), 100.0, 110);
+        cards.push((value_l.clone(), value, ring.clone()));
 
         card.content.append(&info);
         card.content.append(&ring);
@@ -182,25 +251,34 @@ pub fn build(sensor_data: &SensorData) -> gtk::Box {
     // Bottom settings
     let settings = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     settings.set_margin_top(10);
-    let mode = profile::get_current_profile()
-        .map(|p| p.label().to_string())
-        .unwrap_or(crate::i18n::t("default").into());
-    let b1 = create_setting_block(
+    let mode = mode_text();
+    let (b1, _) = create_setting_block(
         crate::i18n::t("lighting_profile"),
         crate::i18n::t("default"),
         true,
     );
     b1.set_hexpand(true);
-    let b2 = create_setting_block(crate::i18n::t("mode"), &mode, false);
+    let (b2, mode_label) = create_setting_block(crate::i18n::t("mode"), &mode, false);
     b2.set_hexpand(true);
     settings.append(&b1);
     settings.append(&b2);
     page.append(&settings);
 
+    LIVE.with(|live| {
+        *live.borrow_mut() = Some(Live {
+            page: page.downgrade(),
+            names,
+            cards,
+            mode: mode_label,
+            accent,
+            custom_icons,
+        })
+    });
     page
 }
 
-fn create_setting_block(label: &str, value: &str, is_diamond: bool) -> gtk::Box {
+/// A setting block and its value label.
+fn create_setting_block(label: &str, value: &str, is_diamond: bool) -> (gtk::Box, gtk::Label) {
     let block = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     block.set_halign(gtk::Align::Start);
     let icon = gtk::DrawingArea::new();
@@ -254,5 +332,37 @@ fn create_setting_block(label: &str, value: &str, is_diamond: bool) -> gtk::Box 
     det.append(&v);
     block.append(&icon);
     block.append(&det);
-    block
+    (block, v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_page_updates_in_place_until_its_sensors_change() {
+        crate::ui::gtk_test::run("temperatures in place", || {
+            let reading = |cpu: f64| SensorData {
+                cpu_temp: Some(cpu),
+                gpu_temp: Some(40.0),
+                ..SensorData::default()
+            };
+            let page = build(&reading(50.0));
+            assert!(update(&reading(61.0)));
+            let shown = LIVE.with(|live| {
+                let live = live.borrow();
+                let (label, value, _) = &live.as_ref().unwrap().cards[0];
+                (label.text().to_string(), value.get())
+            });
+            assert_eq!(shown, ("61°".to_string(), Some(61.0)));
+            // A drive's temperature appeared: a card more, so the page is built again.
+            let with_drive = SensorData {
+                nvme0_temp: Some(35.0),
+                ..reading(61.0)
+            };
+            assert!(!update(&with_drive));
+            drop(page);
+            assert!(!update(&reading(50.0)), "no page, nothing updated");
+        });
+    }
 }

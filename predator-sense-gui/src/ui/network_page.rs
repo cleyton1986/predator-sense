@@ -245,7 +245,7 @@ pub fn build() -> gtk::Box {
         let dl_da = dl_anim_da.clone();
         let ul_da = ul_anim_da.clone();
         let page_c = page.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+        crate::ui::ticks::while_mapped(&page_c.clone(), 60, move || {
             if !crate::app_state::is_window_visible() || !page_c.is_mapped() {
                 return glib::ControlFlow::Continue;
             }

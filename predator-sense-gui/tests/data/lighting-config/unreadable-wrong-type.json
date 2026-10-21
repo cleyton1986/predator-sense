@@ -1,0 +1,26 @@
+{
+  "last_profile": null,
+  "auto_apply_on_start": false,
+  "minimize_on_close": true,
+  "lighting_schemes": [
+    {
+      "name": "Night",
+      "keyboard": {
+        "effect": "Plasma",
+        "red": 0,
+        "green": 40,
+        "blue": 120,
+        "brightness": 20,
+        "speed": 50,
+        "direction": 1
+      },
+      "light_bar": null
+    }
+  ],
+  "mode_bindings": [
+    {
+      "mode": "quiet",
+      "scheme": "Night"
+    }
+  ]
+}

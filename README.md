@@ -112,6 +112,7 @@ Inspired by and based on the [acer-predator-turbo-and-rgb-keyboard-linux-module]
 | **Usage** | 4-tab view: CPU / GPU / Memory / Storage with top processes, click-to-expand details and CSS-style fire animation on the temperature gauges |
 | **Network** | Real-time download/upload graphs with peak tracking and auto interface detection |
 | **RGB Keyboard Control** | Static per-zone (4 zones) and dynamic effects (Breathing, Neon, Wave, Shifting, Zoom) over WMI. On hardware without the kernel module, RGB works natively over USB/I2C-HID instead — ENEK5130 chip (4-zone static, Breathing/Neon), 2024+ Sunrex chip (single-zone, full effect list) or Chicony chip (7-color palette, Helios 300) — auto-detected, see [Compatibility](#compatibility) |
+| **Lighting per power mode** | Each power mode keeps its own lighting, with named presets: each light's own effects, or one of 32 built-in themes across the keyboard, light bar and logo. Changes apply live. See [Lighting](#lighting) |
 | **RGB Cover Logo** | Independent power, solid-color, brightness, Breathing and Neon controls for the emblem on the back of the display, with a live vector preview. Exposed only after runtime HID capability detection |
 | **Performance Profiles** | Quiet / Balanced / Performance / Turbo modes, plus a battery-only Eco tier (CPU governor + Intel EPP + GPU power limit) |
 | **Fan Control** | Live RPM with animated spinning fans, CoolBoost toggle, Auto/Max modes, plus experimental per-fan PWM control & auto temperature curve (where supported) |
@@ -336,7 +337,26 @@ sudo installer/target/release/predator-sense-installer --install
 
 ## Usage
 
+### Lighting
+
+Every power mode has its own lighting. When the power mode changes, from the app, the mode key or the desktop, the lights take that mode's lighting.
+
+1. Go to **Lighting** in the sidebar. The page opens on the active power mode; choose another mode at the top to edit its lighting.
+2. **Lighting control** sets each light's own effects. Pick a light in the preview (keyboard, light bar or logo, as your machine has them), then an effect, and its colour, speed and direction where the effect has them. On the PH16-71 keyboard, **Per-key colours** paints single keys on the preview.
+3. **Themes** sets the keyboard, light bar and logo together from a built-in theme. Pick a card, then one of its colourways or your own colours (**Custom**), and the settings that theme has.
+4. Under the preview, set each light's brightness.
+
+Changes apply at once and are saved; there is no Apply button. Picking a theme over your own settings, clearing a painting and deleting a preset offer **Undo**.
+
+**Presets.** **Save as new preset…** keeps a mode's lighting under a name, and **Load preset** puts it on the mode you edit. A mode that holds a preset shows **Changed** once you edit it: **Save** writes the changes into the preset, **Discard changes** goes back to it.
+
+**Show on my laptop.** While you edit a mode that is not the active one, this switch puts its lighting on the lights. It ends when you switch it off, leave the page or the power mode changes.
+
+**Themes the app draws.** On the PH16-71's per-key keyboard and three-zone light bar the app draws a theme's animated looks itself. Themes that light the keys you press read the built-in keyboard while they run, when **React to typing** is on in the theme's panel; reading it needs your account in the `input` group. On every other light, and while the app cannot draw (before the installer's device rules give your session access to the keyboard and the light bar, for example), a theme shows its nearest firmware effect. **Pause animations on battery** holds them on battery. When the app quits or you log out, the lights it was animating switch to the theme's firmware look; a still picture (a per-key painting, or a theme picture that does not move) stays as it is.
+
 ### Keyboard RGB
+
+On other models (all but the PH16-71, PH16-72 and PH18-72) the Lighting page is the older one below.
 
 1. Go to **Lighting** in the sidebar
 2. Choose **Static** (per-zone colors) or **Dynamic** (effects)
@@ -625,6 +645,7 @@ predator-sense-gui/
 │   └── dkms.conf                # DKMS auto-rebuild config
 ├── installer/                   # Rust multicall installer and services
 │   ├── Cargo.toml
+│   ├── assets/                  # Tray icon pixmaps (ARGB32, from resources/tray)
 │   └── src/
 │       ├── main.rs              # Typed dispatch by installed executable name
 │       ├── constants.rs         # Central paths, protocol values and hardware constants
@@ -635,7 +656,10 @@ predator-sense-gui/
 │       └── i18n.rs              # Typed EN/PT messages
 ├── protocol/                    # Shared typed GUI/helper contract
 │   ├── Cargo.toml
-│   └── src/lib.rs               # Actions, paths, limits and binary names
+│   └── src/lib.rs               # Actions, paths, limits, binary names, keyboard reports
+├── hidraw/                      # The PH16-71 keyboard's lighting hidraw node (one ioctl)
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Rust GTK4 application
 │   ├── main.rs
 │   ├── app_state.rs             # Global window-visibility flag (gates timers)
@@ -645,11 +669,21 @@ predator-sense-gui/
 │   ├── hardware/
 │   │   ├── helper.rs            # Typed privileged-helper client
 │   │   ├── rgb.rs               # RGB via /dev/acer-gkbbl-*
+│   │   ├── keyboard_rgb.rs      # PH16-71 keyboard (Chicony 24-bit) over hidraw
+│   │   ├── chicony_hid.rs       # The keyboard's hidraw node, kept open
+│   │   ├── light_bar.rs         # Chassis light bar
+│   │   ├── light_bar_zones.rs   # The light bar's three zones (facer node)
+│   │   ├── lighting.rs          # Puts each power mode's lighting on the lights
+│   │   ├── lighting_model/      # Per-mode lighting, presets, what a setup writes
+│   │   ├── lighting_renderer/   # Draws the themes' app-drawn looks
+│   │   ├── effects/             # Effects engine and theme catalogue
+│   │   ├── key_input/           # Key presses for themes that react to typing
 │   │   ├── hwmon.rs             # /sys/class/hwmon index (cached OnceLock)
 │   │   ├── sensors.rs           # Temps, fans, RAM, network
-│   │   ├── gpu.rs               # nvidia-smi parser with TTL cache
+│   │   ├── gpu.rs               # GPU metrics through NVML, power limit through the helper
+│   │   ├── nvml.rs              # NVML, loaded at run time (dlopen)
 │   │   ├── procs.rs             # /proc sampler (CPU per-core, memory, process list)
-│   │   ├── storage.rs           # Disk usage via df
+│   │   ├── storage.rs           # Disk usage via statvfs
 │   │   ├── sysinfo.rs           # DMI + CPU + GPU + OS specs
 │   │   ├── fan.rs               # Fan mode + CoolBoost
 │   │   ├── extras.rs            # Battery limit, LCD overdrive, USB charging, boot anim
@@ -657,14 +691,21 @@ predator-sense-gui/
 │   │   ├── ai_assistant.rs      # Ollama tool-calling: fixed allow-list mapped to existing hardware:: setters
 │   │   ├── ai_snapshot.rs       # Ephemeral hardware-state snapshot fed to the AI, cleared after each read
 │   │   ├── ai_actionlog.rs      # Persistent, reviewable log of everything the AI suggested/applied
+│   │   ├── quiet_panics.rs      # Panic hook: no message from threads that see key presses
 │   │   └── setup.rs             # Kernel module management
 │   └── ui/                      # GTK4 pages (Cairo custom widgets)
 │       ├── window.rs            # Main window, sidebar, neon bars, hide-to-tray
+│       ├── still_drawing.rs     # Static drawings kept as pixels
+│       ├── ticks.rs             # Animation timers only while shown
+│       ├── flow_box.rs          # Flow box contents without removing children
+│       ├── toasts.rs            # Window-level toasts (Undo)
 │       ├── dashboard_page.rs    # Hero + system specs
 │       ├── temperatures_page.rs # All temperature gauges
 │       ├── usage_page.rs        # CPU/GPU/Mem/Storage with top processes
 │       ├── network_page.rs      # Download/upload with peak tracking
 │       ├── rgb_page.rs          # Keyboard RGB with visual zones
+│       ├── lighting_page.rs     # Lighting page: modes, presets, preview
+│       ├── lighting/            # Its tabs (Lighting control, Themes), preview, rows
 │       ├── fan_control_page.rs  # Animated fans + CoolBoost
 │       ├── fan_page.rs          # Performance profiles
 │       ├── battery_page.rs      # Battery stats + charge limit
@@ -673,9 +714,12 @@ predator-sense-gui/
 │       ├── ai_page.rs           # AI Assistant: chat, model manager, resource monitor, action log
 │       ├── setup_page.rs        # Kernel module setup wizard
 │       └── gauge_widget.rs      # Dashed circular gauge widget
+├── tests/data/                  # Golden effect frames, theme and config fixtures
+├── tools/                       # gen-golden.js and the effects.js it runs (gjs)
 └── resources/
+    ├── tray/                    # Tray icon sources (PNG)
     ├── style.css                # Gaming dark theme
-    └── predator-icon.svg        # System tray icon
+    └── predator-icon.svg        # App icon
 ```
 
 ---
