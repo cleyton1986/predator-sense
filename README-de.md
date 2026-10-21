@@ -688,6 +688,7 @@ predator-sense-gui/
 │   │   └── setup.rs             # Verwaltung des Kernelmoduls
 │   └── ui/                      # GTK4-Seiten (benutzerdefinierte Cairo-Widgets)
 │       ├── window.rs            # Hauptfenster, Seitenleiste, Neon-Balken, Ausblenden in den Tray
+│       ├── still_drawing.rs     # Statische Zeichnungen, als Pixel behalten
 │       ├── ticks.rs             # Animations-Timer nur, solange sichtbar
 │       ├── flow_box.rs          # FlowBox-Inhalt, ohne Kinder zu entfernen
 │       ├── dashboard_page.rs    # Hero-Bereich + Systemspezifikationen

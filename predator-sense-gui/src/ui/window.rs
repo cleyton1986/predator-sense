@@ -1235,12 +1235,16 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
     // 5x/second forever — one of the issue #13 idle-CPU culprits. 32 px
     // covers the 4 px core bar plus the widest glow layer (10 px outward,
     // clipped by the window edge exactly like before, and 14 px inward), so
-    // the result is pixel-identical to the old full-window draw.
-    let pulse_phase: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
+    // the result is pixel-identical to the old full-window draw. Kept as pixels, one set
+    // per phase of the pulse (`StillDrawing`): as a Cairo node each tick drew it again on
+    // the CPU.
     let mut neon_bars = Vec::new();
     for left in [true, false] {
-        let bar = gtk::DrawingArea::new();
-        bar.set_content_width(32);
+        let bar = crate::ui::still_drawing::StillDrawing::frames(
+            move |cr, w, h, step| draw_neon_bar(cr, w, h, pulse_phase(step), left),
+            Some(|| crate::ui::brand_theme::accent().bright),
+        );
+        bar.set_size_request(32, -1);
         bar.set_vexpand(true);
         bar.set_halign(if left {
             gtk::Align::Start
@@ -1248,10 +1252,6 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             gtk::Align::End
         });
         bar.set_can_target(false);
-        let phase = pulse_phase.clone();
-        bar.set_draw_func(move |_a, cr, w, h| {
-            draw_neon_bar(cr, w as f64, h as f64, *phase.borrow(), left);
-        });
         root_overlay.add_overlay(&bar);
         neon_bars.push(bar);
     }
@@ -1259,19 +1259,15 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
     // Animate at ~5fps. The neon edge is a slow background pulse — full 60fps
     // here was visually identical but burned ~30% CPU drawing layered Cairo
     // strokes on every redraw cycle of the entire window.
-    let phase_c = pulse_phase.clone();
+    let step = std::cell::Cell::new(0);
     // No timer at all while the window sits in the tray, which unmaps it.
     crate::ui::ticks::while_mapped(&neon_bars[0].clone(), 200, move || {
         if !crate::app_state::is_window_visible() {
             return glib::ControlFlow::Continue;
         }
-        let mut p = phase_c.borrow_mut();
-        *p += 0.12;
-        if *p > 1.0 {
-            *p -= 1.0;
-        }
-        drop(p);
+        step.set(next_pulse_step(step.get()));
         for bar in &neon_bars {
+            bar.set_frame(step.get());
             bar.queue_draw();
         }
         glib::ControlFlow::Continue
@@ -1297,7 +1293,6 @@ fn ensure_page_built(stack: &gtk::Stack, pending: &PendingPages, name: &str) {
     }
 }
 
-/// Build main area matching nova-ui.html: main-area with padding, sidebar + content-panel
 /// Where the keyboard focus is, for the window's Up and Down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArrowFocus {
@@ -1316,6 +1311,7 @@ fn sidebar_takes_arrows(focus: ArrowFocus) -> bool {
     focus != ArrowFocus::Elsewhere
 }
 
+/// Build main area matching nova-ui.html: main-area with padding, sidebar + content-panel
 fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -> gtk::Overlay {
     // Main area overlay (for the diagonal stripe background)
     let main_overlay = gtk::Overlay::new();
@@ -1328,55 +1324,14 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     // app): a near-black vertical gradient, a soft cyan glow anchored just
     // above the top-left corner, and a faint 34px technical grid on top.
     // This replaces the previous diagonal-stripe Cairo background - not a
-    // CSS rule, because this DrawingArea (not `.content-panel`, which turned
+    // CSS rule, because this drawing (not `.content-panel`, which turned
     // out to be dead CSS no widget ever applied) is what actually paints
     // behind the whole sidebar+content layout.
-    let stripe_bg = gtk::DrawingArea::new();
+    // Kept as pixels (`StillDrawing`): as a Cairo node it was drawn again on the CPU, for
+    // the part behind it, in every frame of anything animating over it.
+    let stripe_bg = crate::ui::still_drawing::StillDrawing::new(draw_window_background, None);
     stripe_bg.set_hexpand(true);
     stripe_bg.set_vexpand(true);
-    stripe_bg.set_draw_func(|_a, cr, w, h| {
-        let wf = w as f64;
-        let hf = h as f64;
-
-        // Base vertical gradient: #060a0e at top to #05070a at bottom.
-        let base = gtk4::cairo::LinearGradient::new(0.0, 0.0, 0.0, hf);
-        base.add_color_stop_rgb(0.0, 6.0 / 255.0, 10.0 / 255.0, 14.0 / 255.0);
-        base.add_color_stop_rgb(1.0, 5.0 / 255.0, 7.0 / 255.0, 10.0 / 255.0);
-        let _ = cr.set_source(&base);
-        cr.rectangle(0.0, 0.0, wf, hf);
-        let _ = cr.fill();
-
-        // Soft cyan glow centered just above the top-left corner (18%, -8%
-        // of the panel), fading out by 60% of its own radius.
-        let cx = wf * 0.18;
-        let cy = hf * -0.08;
-        let radius = wf.max(hf) * 0.85;
-        let glow = gtk4::cairo::RadialGradient::new(cx, cy, 0.0, cx, cy, radius);
-        glow.add_color_stop_rgba(0.0, 0.0, 0.831, 0.941, 0.07);
-        glow.add_color_stop_rgba(0.6, 0.0, 0.831, 0.941, 0.0);
-        glow.add_color_stop_rgba(1.0, 0.0, 0.831, 0.941, 0.0);
-        let _ = cr.set_source(&glow);
-        cr.rectangle(0.0, 0.0, wf, hf);
-        let _ = cr.fill();
-
-        // Fine 34px grid, discreet on purpose - same alpha as the POC.
-        cr.set_source_rgba(148.0 / 255.0, 177.0 / 255.0, 184.0 / 255.0, 0.05);
-        cr.set_line_width(1.0);
-        let mut x = 0.5;
-        while x < wf {
-            cr.move_to(x, 0.0);
-            cr.line_to(x, hf);
-            let _ = cr.stroke();
-            x += 34.0;
-        }
-        let mut y = 0.5;
-        while y < hf {
-            cr.move_to(0.0, y);
-            cr.line_to(wf, y);
-            let _ = cr.stroke();
-            y += 34.0;
-        }
-    });
     main_overlay.set_child(Some(&stripe_bg));
 
     // Layout box with padding 30px 40px and gap 20px (matching .main-area)
@@ -1737,10 +1692,14 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     panel_wrapper.set_vexpand(true);
 
     // Gradient polygon border background
-    let border_bg = gtk::DrawingArea::new();
+    // Kept as pixels, as the window's background is (`StillDrawing`), drawn again when the
+    // accent its gradient takes changes.
+    let border_bg = crate::ui::still_drawing::StillDrawing::new(
+        draw_panel_border,
+        Some(|| crate::ui::brand_theme::accent().bright),
+    );
     border_bg.set_hexpand(true);
     border_bg.set_vexpand(true);
-    border_bg.set_draw_func(|_a, cr, w, h| draw_panel_border(cr, w as f64, h as f64));
     panel_wrapper.set_child(Some(&border_bg));
 
     // Content directly in the panel (no scrollbar on home)
@@ -1838,12 +1797,27 @@ fn find_resource_path(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
+/// The neon edge's pulse has this many phases: it steps 0.12 of a cycle a tick, which comes
+/// back to the start after 25 ticks (3 cycles).
+const PULSE_STEPS: usize = 25;
+
+/// The pulse's step after `step`: 0.12 of a cycle on, as 3 of [`PULSE_STEPS`]. Counted in
+/// whole steps so the phases stay exactly 25 and their kept pixels are reused.
+fn next_pulse_step(step: usize) -> usize {
+    (step + 3) % PULSE_STEPS
+}
+
+/// The pulse's phase (0.0 to 1.0) at `step`.
+fn pulse_phase(step: usize) -> f64 {
+    step as f64 / PULSE_STEPS as f64
+}
+
 /// Draw pulsing cyan neon glow bars on left and right edges
 /// phase: 0.0 to 1.0, controls the pulse intensity
 /// Draw one neon edge bar (left or right) inside its own slim DrawingArea.
 /// Geometry matches the old full-window draw_neon_edges() exactly, just
 /// expressed in the slim area's local coordinates.
-fn draw_neon_bar(cr: &gtk4::cairo::Context, w: f64, h: f64, phase: f64, left: bool) {
+pub(crate) fn draw_neon_bar(cr: &gtk4::cairo::Context, w: f64, h: f64, phase: f64, left: bool) {
     // Smooth sine pulse: oscillates between 0.4 and 1.0
     let pulse = 0.4 + 0.6 * ((phase * 2.0 * PI).sin() * 0.5 + 0.5);
     let (r, g, b) = crate::ui::brand_theme::accent().bright;
@@ -1988,8 +1962,52 @@ fn draw_menu_item(cr: &gtk4::cairo::Context, w: f64, h: f64, is_active: bool) {
     }
 }
 
+/// The window's background, behind the sidebar and the content panel: a near-black
+/// vertical gradient, a soft cyan glow just above the top-left corner and a faint 34 px
+/// grid, `wf` by `hf`.
+pub(crate) fn draw_window_background(cr: &gtk4::cairo::Context, wf: f64, hf: f64) {
+    // Base vertical gradient: #060a0e at top to #05070a at bottom.
+    let base = gtk4::cairo::LinearGradient::new(0.0, 0.0, 0.0, hf);
+    base.add_color_stop_rgb(0.0, 6.0 / 255.0, 10.0 / 255.0, 14.0 / 255.0);
+    base.add_color_stop_rgb(1.0, 5.0 / 255.0, 7.0 / 255.0, 10.0 / 255.0);
+    let _ = cr.set_source(&base);
+    cr.rectangle(0.0, 0.0, wf, hf);
+    let _ = cr.fill();
+
+    // Soft cyan glow centered just above the top-left corner (18%, -8%
+    // of the panel), fading out by 60% of its own radius.
+    let cx = wf * 0.18;
+    let cy = hf * -0.08;
+    let radius = wf.max(hf) * 0.85;
+    let glow = gtk4::cairo::RadialGradient::new(cx, cy, 0.0, cx, cy, radius);
+    glow.add_color_stop_rgba(0.0, 0.0, 0.831, 0.941, 0.07);
+    glow.add_color_stop_rgba(0.6, 0.0, 0.831, 0.941, 0.0);
+    glow.add_color_stop_rgba(1.0, 0.0, 0.831, 0.941, 0.0);
+    let _ = cr.set_source(&glow);
+    cr.rectangle(0.0, 0.0, wf, hf);
+    let _ = cr.fill();
+
+    // Fine 34px grid, discreet on purpose - same alpha as the POC.
+    cr.set_source_rgba(148.0 / 255.0, 177.0 / 255.0, 184.0 / 255.0, 0.05);
+    cr.set_line_width(1.0);
+    let mut x = 0.5;
+    while x < wf {
+        cr.move_to(x, 0.0);
+        cr.line_to(x, hf);
+        let _ = cr.stroke();
+        x += 34.0;
+    }
+    let mut y = 0.5;
+    while y < hf {
+        cr.move_to(0.0, y);
+        cr.line_to(wf, y);
+        let _ = cr.stroke();
+        y += 34.0;
+    }
+}
+
 /// Draw content panel polygon gradient border
-fn draw_panel_border(cr: &gtk4::cairo::Context, w: f64, h: f64) {
+pub(crate) fn draw_panel_border(cr: &gtk4::cairo::Context, w: f64, h: f64) {
     let cut = 15.0;
 
     // Outer polygon
@@ -3033,7 +3051,31 @@ fn confirm_and_replace_settings(
 
 #[cfg(test)]
 mod tests {
-    use super::{sidebar_takes_arrows, ArrowFocus};
+    use super::{next_pulse_step, pulse_phase, sidebar_takes_arrows, ArrowFocus, PULSE_STEPS};
+
+    /// The pulse in whole steps goes through the phases the old `+= 0.12, -1.0 past 1.0`
+    /// float did, to float noise, and comes back to the start after 25 ticks.
+    #[test]
+    fn the_neon_pulse_steps_through_the_old_phases() {
+        let pulse = |p: f64| (p * 2.0 * std::f64::consts::PI).sin();
+        let (mut old, mut step) = (0.0f64, 0);
+        let mut seen = std::collections::BTreeSet::new();
+        for tick in 1..=200 {
+            old += 0.12;
+            if old > 1.0 {
+                old -= 1.0;
+            }
+            step = next_pulse_step(step);
+            seen.insert(step);
+            assert!(step < PULSE_STEPS);
+            assert!(
+                (pulse(old) - pulse(pulse_phase(step))).abs() < 1e-9,
+                "tick {tick}: {old} against step {step}"
+            );
+        }
+        assert_eq!(seen.len(), PULSE_STEPS);
+        assert_eq!((0..PULSE_STEPS).fold(0, |s, _| next_pulse_step(s)), 0);
+    }
 
     #[test]
     fn up_and_down_move_the_sidebar_only_without_a_focused_page_widget() {

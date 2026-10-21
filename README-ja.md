@@ -609,6 +609,7 @@ predator-sense-gui/
 │   │   └── setup.rs             # カーネルモジュール管理
 │   └── ui/                      # GTK4ページ（Cairoカスタムウィジェット）
 │       ├── window.rs            # メインウィンドウ、サイドバー、ネオンバー、トレイへの非表示化
+│       ├── still_drawing.rs     # 静的な描画をピクセルとして保持
 │       ├── ticks.rs             # 表示中だけ動くアニメーションタイマー
 │       ├── flow_box.rs          # 子を削除しないFlowBoxの内容更新
 │       ├── dashboard_page.rs    # ヒーロー表示 + システム仕様

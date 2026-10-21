@@ -685,6 +685,7 @@ predator-sense-gui/
 │   │   └── setup.rs             # Gestión del módulo del kernel
 │   └── ui/                      # Páginas GTK4 (widgets personalizados con Cairo)
 │       ├── window.rs            # Ventana principal, barra lateral, barras neón, ocultar a la bandeja
+│       ├── still_drawing.rs     # Dibujos estáticos guardados como píxeles
 │       ├── ticks.rs             # Temporizadores de animación solo mientras se ven
 │       ├── flow_box.rs          # Contenido de FlowBox sin quitar hijos
 │       ├── dashboard_page.rs    # Hero + especificaciones del sistema

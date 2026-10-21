@@ -665,6 +665,7 @@ predator-sense-gui/
 │   │   └── setup.rs             # 内核模块管理
 │   └── ui/                      # GTK4 页面（Cairo 自定义控件）
 │       ├── window.rs            # 主窗口、侧边栏、霓虹条、隐藏到托盘
+│       ├── still_drawing.rs     # 以像素保存的静态绘制
 │       ├── ticks.rs             # 仅在可见时运行的动画计时器
 │       ├── flow_box.rs          # 不移除子项的 FlowBox 内容更新
 │       ├── dashboard_page.rs    # 主视觉区 + 系统规格
