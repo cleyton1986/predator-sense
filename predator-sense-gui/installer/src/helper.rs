@@ -9,6 +9,7 @@ use predator_sense_protocol::backlight;
 use predator_sense_protocol::base64_lite;
 use predator_sense_protocol::grub_splash;
 use predator_sense_protocol::battery;
+use predator_sense_protocol::dmi;
 use predator_sense_protocol::helper::{
     Action as HelperAction, CpuGovernor, EnergyPreference, Switch, OPTIONAL_VALUE_SKIP,
 };
@@ -124,7 +125,7 @@ fn chicony_effect_apply(
     blue: u8,
     direction: u8,
 ) -> AppResult {
-    chicony_send_many(&keyboard::effect_packets(
+    chicony_send_24bit(&keyboard::effect_packets(
         opcode, speed, brightness, red, green, blue, direction,
     ))
 }
@@ -166,6 +167,30 @@ fn write_mode_cycle(sysfs: &Path, attribute: &str, value: &str) -> AppResult {
 
 fn chicony_send(payload: &[u8; 8]) -> AppResult {
     chicony_send_many(&[*payload])
+}
+
+/// Refuses a 24-bit command on a chassis not in
+/// `dmi::CHICONY_24BIT_MODELS` (`product` is its DMI name), as the GUI does:
+/// the Helios 300 generation's keyboard shares the USB id and speaks the
+/// older family.
+fn require_24bit_keyboard(product: &str) -> AppResult {
+    if dmi::matches_model(product, dmi::CHICONY_24BIT_MODELS) {
+        Ok(())
+    } else {
+        Err(fail(format!(
+            "the 24-bit keyboard commands are only for {:?}; this is '{product}'",
+            dmi::CHICONY_24BIT_MODELS
+        )))
+    }
+}
+
+/// `packets` of the 24-bit family in order, as one command, only on a
+/// chassis with that keyboard ([`require_24bit_keyboard`] on DMI; pkexec
+/// clears the environment, so `PREDATOR_SENSE_FORCE_MODEL` does not reach a
+/// root helper).
+fn chicony_send_24bit(packets: &[[u8; 8]]) -> AppResult {
+    require_24bit_keyboard(dmi::product_name())?;
+    chicony_send_many(packets)
 }
 
 /// Every packet in one claimed session: this controller expects a preamble and
@@ -3264,6 +3289,15 @@ mod tests {
             fs::read_to_string(fixture.path().join("etc/default/grub")).unwrap(),
             "GRUB_TIMEOUT=5\n"
         );
+    }
+
+    #[test]
+    fn the_24bit_commands_are_only_for_the_listed_models() {
+        assert_eq!(require_24bit_keyboard("Predator PH16-71"), Ok(()));
+        // The Helios 300 generation: the same USB id, the older family.
+        assert!(require_24bit_keyboard("Predator PH317-56").is_err());
+        assert!(require_24bit_keyboard("Predator PH16-71X").is_err());
+        assert!(require_24bit_keyboard("").is_err());
     }
 
     #[test]

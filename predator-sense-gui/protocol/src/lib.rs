@@ -2472,6 +2472,18 @@ pub mod dmi {
     /// it on real hardware.
     pub const PREDATOR_KEY_MODELS: &[&str] = &["PH16-71"];
 
+    /// Chassis whose Chicony keyboard is confirmed to accept the 24-bit
+    /// command family ([`keyboard`](crate::keyboard): `B1..` preamble, `0x14`
+    /// RGB packet, `08 02 ..` effect packet).
+    ///
+    /// Deliberately a model list rather than a USB-ID check: `04F2:0117` is
+    /// also the Helios 300 (PH317-56) generation, which the GUI drives with
+    /// the older `08 00 .. BE` family. Keying off the USB ID alone would send
+    /// this generation's packets to that one and take over its working RGB
+    /// page. One list for the GUI, which drives this keyboard, and for the
+    /// privileged helper, which sends this family only there.
+    pub const CHICONY_24BIT_MODELS: &[&str] = &["PH16-71"];
+
     /// True when `product_name` names one of `models`.
     ///
     /// Model codes are compared as whole whitespace-separated words, so
@@ -2562,6 +2574,15 @@ mod dmi_tests {
     #[test]
     fn the_predator_key_list_is_the_one_both_crates_use() {
         assert_eq!(dmi::PREDATOR_KEY_MODELS, &["PH16-71"]);
+    }
+
+    #[test]
+    fn the_24bit_keyboard_list_is_the_one_both_crates_use() {
+        assert_eq!(dmi::CHICONY_24BIT_MODELS, &["PH16-71"]);
+        assert!(!dmi::matches_model(
+            "Predator PH317-56",
+            dmi::CHICONY_24BIT_MODELS
+        ));
     }
 }
 

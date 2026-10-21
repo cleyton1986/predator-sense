@@ -137,22 +137,18 @@ impl Default for KeyboardState {
     }
 }
 
-/// Chassis whose Chicony keyboard is confirmed to accept this newer command
-/// family (`B1..` preamble, `0x14` RGB packet, `08 02 .. 9B` effect packet).
-///
-/// Deliberately a model list rather than a USB-ID check: `04F2:0117` is also
-/// the Helios 300 (PH317-56) generation, which
-/// [`chicony_rgb`](super::chicony_rgb) already drives with its own older
-/// `08 00 .. BE` family. Keying off the USB ID alone would send this
-/// generation's packets to that one and take over its working RGB page.
-const PER_KEY_MODELS: &[&str] = &["PH16-71"];
-
-/// The controller *and* a chassis known to speak this command family.
+/// The controller *and* a chassis known to speak this command family
+/// (`predator_sense_protocol::dmi::CHICONY_24BIT_MODELS`, the list the
+/// privileged helper checks too). A model list rather than the USB ID,
+/// because `04F2:0117` is also the Helios 300 (PH317-56) generation, which
+/// [`chicony_rgb`](super::chicony_rgb) drives with its own older
+/// `08 00 .. BE` family.
 ///
 /// `PREDATOR_SENSE_FORCE_MODEL=PH16-71` opts an unlisted chassis in, for
 /// anyone who wants to try it and report back.
 pub fn is_available() -> bool {
-    super::chicony_rgb::is_available() && super::sysinfo::product_matches(PER_KEY_MODELS)
+    super::chicony_rgb::is_available()
+        && super::sysinfo::product_matches(predator_sense_protocol::dmi::CHICONY_24BIT_MODELS)
 }
 
 /// Applies `state`. `Off` is the static opcode at zero brightness, which is how
