@@ -7,7 +7,7 @@ use std::rc::Rc;
 
 use crate::config::CoverLogoSettings;
 use crate::hardware::hid_rgb;
-use crate::hardware::rgb::{self, Direction, RgbConfig, RgbMode, StaticZoneConfig};
+use crate::hardware::rgb::{self, Direction, RgbConfig, RgbMode};
 
 struct RgbState {
     mode: RgbMode,
@@ -761,120 +761,43 @@ fn build_keyboard_panel() -> gtk::Box {
         let saved_effects = saved_effects.clone();
         apply_btn.connect_clicked(move |_| {
             let st = s.borrow();
-            let result = if st.is_static {
-                // Static mode - matches the controller's documented packet layout:
-                // For EACH zone: write zone color, then send dynamic payload
-                // This is how the original script works (called once per zone)
-                let mut last_err = None;
-                for (i, &(r, g, b)) in st.zone_colors.iter().enumerate() {
-                    // Step A: Write zone color to static device
-                    if let Err(e) = rgb::apply_static_zone(&StaticZoneConfig {
-                        zone: (i + 1) as u8,
-                        red: r,
-                        green: g,
-                        blue: b,
-                    }) {
-                        last_err = Some(e);
-                        break;
-                    }
-                    // Step B: Tell WMI to apply static coloring (after each zone)
-                    if let Err(e) = rgb::apply_dynamic_effect(&RgbConfig {
-                        mode: RgbMode::Static,
-                        speed: 0,
-                        brightness: st.brightness,
-                        direction: Direction::RightToLeft,
-                        red: 0,
-                        green: 0,
-                        blue: 0,
-                    }) {
-                        last_err = Some(e);
-                        break;
-                    }
-                }
-                let wmi_result = match last_err {
-                    Some(e) => Err(e),
-                    None => Ok(()),
-                };
-
-                // On hardware where the WMI static path is a confirmed no-op
-                // (e.g. PHN16-73), the real RGB controller is a separate
-                // I2C-HID chip (ENEK5130) reachable directly, bypassing WMI
-                // entirely. Try it whenever present - one HID write per zone,
-                // confirmed to be a real 4-zone controller (issue #4). Runs
-                // alongside the WMI path above, which is harmless where it's
-                // a no-op and unaffected where it isn't.
-                let hid_result = if hid_rgb::is_available() {
-                    let mut last_err = None;
-                    for (i, &(r, g, b)) in st.zone_colors.iter().enumerate() {
-                        if let Err(e) =
-                            hid_rgb::set_zone_color(hid_rgb::ZONE_MASKS[i], r, g, b, st.brightness)
-                        {
-                            last_err = Some(e);
-                            break;
-                        }
-                    }
-                    match last_err {
-                        Some(e) => Err(e),
-                        None => Ok(()),
-                    }
-                } else {
-                    wmi_result
-                };
-
-                // Persist so the Rust hotkey service can reapply it after login
-                // or resume (issue #11) - the keyboard controller has no memory
-                // of its own and resets to the default pulsing effect. Only the
-                // HID path is replayable (the service speaks raw HID, not WMI),
-                // so only persist when it applied.
-                if hid_rgb::is_available() && hid_result.is_ok() {
-                    let mut cfg = crate::config::load_app_config();
-                    cfg.rgb_static_zones = Some(
-                        st.zone_colors
-                            .iter()
-                            .enumerate()
-                            .map(|(i, &(r, g, b))| crate::config::ZoneColor {
-                                zone: (i + 1) as u8,
-                                red: r,
-                                green: g,
-                                blue: b,
-                            })
-                            .collect(),
-                    );
-                    cfg.rgb_brightness = st.brightness;
-                    let _ = crate::config::save_app_config(&cfg);
-                }
-
-                hid_result
-            } else if hid_only && mode_is_hid_native(st.mode) {
-                // Mapping and byte-5 semantics are selected by the HID
-                // backend's model quirk, then checked against A3 before send.
-                hid_rgb::set_effect(
-                    st.mode,
-                    st.brightness,
-                    st.speed,
-                    st.direction,
-                    st.dyn_color.0,
-                    st.dyn_color.1,
-                    st.dyn_color.2,
-                )
-            } else if hid_only {
-                // Module-free HID hardware has no confirmed native effect for
-                // this mode yet (Wave/Shifting/Zoom meant different things on
-                // different hardware generations, see issue #12) - the
-                // animation is on-screen only, nothing to send here.
-                Ok(())
-            } else {
-                rgb::apply_dynamic_effect(&RgbConfig {
+            let routed = rgb::apply_keyboard(
+                &rgb::KeyboardWrite {
+                    is_static: st.is_static,
+                    zone_colors: st.zone_colors,
+                    brightness: st.brightness,
                     mode: st.mode,
                     speed: st.speed,
-                    brightness: st.brightness,
                     direction: st.direction,
-                    red: st.dyn_color.0,
-                    green: st.dyn_color.1,
-                    blue: st.dyn_color.2,
-                })
-            };
-            let preview_applied = !st.is_static && hid_only && !mode_is_hid_native(st.mode);
+                    color: st.dyn_color,
+                },
+                hid_only,
+            );
+
+            // Persist so the Rust hotkey service can reapply it after login
+            // or resume (issue #11) - the keyboard controller has no memory
+            // of its own and resets to the default pulsing effect. Only the
+            // HID path is replayable (the service speaks raw HID, not WMI),
+            // so only persist when it applied.
+            if routed == Ok(rgb::KeyboardRoute::HidZones) {
+                let mut cfg = crate::config::load_app_config();
+                cfg.rgb_static_zones = Some(
+                    st.zone_colors
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &(r, g, b))| crate::config::ZoneColor {
+                            zone: (i + 1) as u8,
+                            red: r,
+                            green: g,
+                            blue: b,
+                        })
+                        .collect(),
+                );
+                cfg.rgb_brightness = st.brightness;
+                let _ = crate::config::save_app_config(&cfg);
+            }
+            let preview_applied = routed == Ok(rgb::KeyboardRoute::PreviewOnly);
+            let result = routed.map(|_| ());
             // Remember which effect is actually running so the Lighting page
             // opens back on it next time, instead of always defaulting to
             // Static/Breath (the EC/WMI itself keeps a Dynamic effect looping
