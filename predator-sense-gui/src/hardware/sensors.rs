@@ -30,34 +30,60 @@ pub struct GpuInfo {
     pub power_watts: Option<f64>,
 }
 
+/// Every sensor, the Temperatures page's set: the core ones plus the NVMe drives, the Wi-Fi
+/// card, the RAM modules and the ACPI zone.
+///
+/// About 15 ms on a PH16-71, nearly all of it the NVMe reads: each NVMe temperature is an
+/// admin command to the drive (9 ms for one of them), and the Wi-Fi one a firmware command.
+/// Call it on a worker, never on the GTK thread.
 pub fn read_all_sensors() -> SensorData {
-    let gpu_info = read_nvidia_gpu_info();
     SensorData {
-        cpu_temp: read_cpu_temp(),
-        gpu_temp: gpu_info.temp,
         system_temp: read_system_temperature(),
-        cpu_fan_rpm: read_fan("fan1_input"),
-        gpu_fan_rpm: read_fan("fan2_input"),
-        cpu_freq_mhz: read_cpu_frequency(),
-        cpu_model: read_cpu_model(),
-        gpu_info,
         nvme0_temp: find_hwmon_temp_by_name("nvme", "temp1_input"),
         nvme1_temp: find_second_hwmon_temp("nvme", "temp1_input"),
         wifi_temp: find_hwmon_temp_by_name("iwlwifi_1", "temp1_input"),
         ram0_temp: find_hwmon_temp_by_name("spd5118", "temp1_input"),
         ram1_temp: find_second_hwmon_temp("spd5118", "temp1_input"),
+        ..read_core_sensors()
     }
 }
 
-fn read_cpu_model() -> String {
-    if let Ok(c) = fs::read_to_string("/proc/cpuinfo") {
-        for l in c.lines() {
-            if l.starts_with("model name") {
-                if let Some(n) = l.split(':').nth(1) { return n.trim().to_string(); }
-            }
-        }
+/// The sensors Fan Control, Monitor and the AI snapshot show: CPU and GPU temperatures,
+/// fans, the CPU clock and model, and the GPU details from the shared metrics cache. Cheap
+/// enough for the GTK thread (no drive or Wi-Fi firmware is asked); the other fields are
+/// left empty.
+pub fn read_core_sensors() -> SensorData {
+    let gpu_info = read_nvidia_gpu_info();
+    SensorData {
+        cpu_temp: read_cpu_temp(),
+        gpu_temp: gpu_info.temp,
+        cpu_fan_rpm: read_fan("fan1_input"),
+        gpu_fan_rpm: read_fan("fan2_input"),
+        cpu_freq_mhz: read_cpu_frequency(),
+        cpu_model: read_cpu_model(),
+        gpu_info,
+        ..SensorData::default()
     }
-    "Unknown CPU".into()
+}
+
+/// The CPU's model name, read from `/proc/cpuinfo` (42 KB here) once per run: it cannot
+/// change.
+fn read_cpu_model() -> String {
+    static MODEL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    MODEL
+        .get_or_init(|| {
+            if let Ok(c) = fs::read_to_string("/proc/cpuinfo") {
+                for l in c.lines() {
+                    if l.starts_with("model name") {
+                        if let Some(n) = l.split(':').nth(1) {
+                            return n.trim().to_string();
+                        }
+                    }
+                }
+            }
+            "Unknown CPU".into()
+        })
+        .clone()
 }
 
 fn read_cpu_frequency() -> Option<u32> {

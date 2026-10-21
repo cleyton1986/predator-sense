@@ -1699,18 +1699,29 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     // Refresh periódico da página de temperaturas (gauges precisam recalcular).
     // Gated por visibilidade do window e da aba — evita rebuild quando no tray.
     let stack_c = stack.clone();
+    let reading = Rc::new(Cell::new(false));
     glib::timeout_add_seconds_local(2, move || {
         if !crate::app_state::is_window_visible() {
             return glib::ControlFlow::Continue;
         }
-        if stack_c.visible_child_name().as_deref() == Some("temperatures") {
-            let s = sensors::read_all_sensors();
-            let new_temps = temperatures_page::build(&s);
-            if let Some(old) = stack_c.child_by_name("temperatures") {
-                stack_c.remove(&old);
-            }
-            stack_c.add_named(&new_temps, Some("temperatures"));
-            stack_c.set_visible_child_name("temperatures");
+        if stack_c.visible_child_name().as_deref() == Some("temperatures") && !reading.get() {
+            // The full read takes about 15 ms (the NVMe drives): on a worker.
+            reading.set(true);
+            let stack_c = stack_c.clone();
+            let reading = reading.clone();
+            crate::ui::background::run(sensors::read_all_sensors, move |s| {
+                reading.set(false);
+                // The page may have been left while the sensors were read.
+                if stack_c.visible_child_name().as_deref() != Some("temperatures") {
+                    return;
+                }
+                let new_temps = temperatures_page::build(&s);
+                if let Some(old) = stack_c.child_by_name("temperatures") {
+                    stack_c.remove(&old);
+                }
+                stack_c.add_named(&new_temps, Some("temperatures"));
+                stack_c.set_visible_child_name("temperatures");
+            });
         }
         glib::ControlFlow::Continue
     });

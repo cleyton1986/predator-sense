@@ -946,7 +946,7 @@ pub fn build() -> gtk::Widget {
         if !crate::app_state::is_window_visible() || !page_sense.is_mapped() {
             return glib::ControlFlow::Continue;
         }
-        let data = sensors::read_all_sensors();
+        let data = sensors::read_core_sensors();
         if let Some(r) = data.cpu_fan_rpm {
             *cr2.borrow_mut() = r;
             cpu_rpm_l.set_text(&r.to_string());

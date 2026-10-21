@@ -324,7 +324,7 @@ fn do_update(
     cpu_g: &gtk::DrawingArea,
     gpu_g: &gtk::DrawingArea,
 ) {
-    let data = sensors::read_all_sensors();
+    let data = sensors::read_core_sensors();
 
     cpu_model_l.set_text(&data.cpu_model);
     gpu_model_l.set_text(&data.gpu_info.name);
