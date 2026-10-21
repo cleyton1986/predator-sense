@@ -190,6 +190,8 @@ fn main() {
     // its `parec` child would leak for as long as the audio device keeps
     // producing data, i.e. forever.
     app.connect_shutdown(|_| {
+        // A Settings slider value still waiting out its save debounce.
+        ui::window::flush_pending_saves();
         hardware::audio_sync::stop();
         // A light the idle timer has dark would stay dark until the app runs
         // again (the keyboard was blanked with the Off effect, which a key

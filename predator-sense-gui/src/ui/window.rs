@@ -15,6 +15,24 @@ use crate::ui::{
     usage_page,
 };
 
+/// How long a Settings slider rests before its value is saved to config.json.
+const SLIDER_SAVE_DEBOUNCE_MS: u32 = 300;
+
+thread_local! {
+    /// The Settings sliders' debounced saves, each run at once by [`flush_pending_saves`].
+    static PENDING_SAVES: RefCell<Vec<Rc<dyn Fn()>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Saves a slider value still waiting out its debounce, now: at exit, so the
+/// last drag is not lost, and before an import replaces config.json, so the
+/// waiting save cannot land on top of the imported file afterwards.
+pub fn flush_pending_saves() {
+    let pending = PENDING_SAVES.with(|pending| pending.borrow().clone());
+    for flush in pending {
+        flush();
+    }
+}
+
 thread_local! {
     static HOLD_GUARD: RefCell<Option<gio::ApplicationHoldGuard>> = const { RefCell::new(None) };
     static TRAY: RefCell<Option<TrayManager>> = const { RefCell::new(None) };
@@ -2263,6 +2281,19 @@ fn build_settings_page(app: &adw::Application) -> gtk::ScrolledWindow {
     crate::ui::scroll_guard::redirect_scroll_to_page(&threshold_scale);
     {
         let lbl = threshold_label.clone();
+        // The save waits for the drag to rest: each one parses, writes and
+        // fsyncs config.json, and a drag sends a value per step.
+        let (save, flush) = crate::ui::color_picker::debouncer(SLIDER_SAVE_DEBOUNCE_MS, {
+            let scale = threshold_scale.downgrade();
+            Rc::new(move || {
+                if let Some(scale) = scale.upgrade() {
+                    let mut c = config::load_app_config();
+                    c.temp_alert_c = scale.value().round() as u8;
+                    let _ = config::save_app_config(&c);
+                }
+            })
+        });
+        PENDING_SAVES.with(|pending| pending.borrow_mut().push(flush));
         threshold_scale.connect_value_changed(move |sc| {
             let celsius = sc.value().round() as u8;
             lbl.set_text(&format!("{} \u{b0}C", celsius));
@@ -2270,9 +2301,7 @@ fn build_settings_page(app: &adw::Application) -> gtk::ScrolledWindow {
             // in-memory value, so the next reading is already judged against
             // the new threshold.
             crate::hardware::alerts::set_threshold_c(celsius);
-            let mut c = config::load_app_config();
-            c.temp_alert_c = celsius;
-            let _ = config::save_app_config(&c);
+            save();
         });
     }
 
@@ -2387,14 +2416,24 @@ fn build_settings_page(app: &adw::Application) -> gtk::ScrolledWindow {
     crate::ui::scroll_guard::redirect_scroll_to_page(&font_scale);
     {
         let lbl = font_scale_label.clone();
+        // Applied at once, saved once the drag rests (as the threshold above).
+        let (save, flush) = crate::ui::color_picker::debouncer(SLIDER_SAVE_DEBOUNCE_MS, {
+            let font_scale = font_scale.downgrade();
+            Rc::new(move || {
+                if let Some(font_scale) = font_scale.upgrade() {
+                    let mut c = config::load_app_config();
+                    c.font_scale = font_scale.value() / 100.0;
+                    let _ = config::save_app_config(&c);
+                }
+            })
+        });
+        PENDING_SAVES.with(|pending| pending.borrow_mut().push(flush));
         font_scale.connect_value_changed(move |sc| {
             let pct = sc.value();
             let scale = pct / 100.0;
             lbl.set_text(&format!("{}%", pct.round() as i32));
             crate::apply_font_scale(scale);
-            let mut c = config::load_app_config();
-            c.font_scale = scale;
-            let _ = config::save_app_config(&c);
+            save();
         });
     }
     font_row.append(&font_scale_label);
@@ -2789,6 +2828,7 @@ fn build_settings_page(app: &adw::Application) -> gtk::ScrolledWindow {
                 move |result| {
                     let Ok(file) = result else { return };
                     let Some(path) = file.path() else { return };
+                    flush_pending_saves();
                     // Checked while the user's own settings are still on disk.
                     // A file that would send the app to defaults must never
                     // get as far as replacing them.

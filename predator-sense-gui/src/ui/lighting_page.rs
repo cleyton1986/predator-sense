@@ -334,7 +334,7 @@ fn build_keyboard_section(
             show_error(&status, result);
         })
     };
-    let commit = color_picker::debouncer(APPLY_DEBOUNCE_MS, commit);
+    let (commit, _) = color_picker::debouncer(APPLY_DEBOUNCE_MS, commit);
 
     let effects = gtk::FlowBox::new();
     effects.set_selection_mode(gtk::SelectionMode::None);
@@ -547,7 +547,7 @@ fn build_light_bar_section(
             show_error(&status, result);
         })
     };
-    let commit = color_picker::debouncer(APPLY_DEBOUNCE_MS, commit);
+    let (commit, _) = color_picker::debouncer(APPLY_DEBOUNCE_MS, commit);
 
     let modes = gtk::FlowBox::new();
     modes.set_selection_mode(gtk::SelectionMode::None);
