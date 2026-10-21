@@ -2704,19 +2704,28 @@ static void acer_led_exit(void)
  * for keyboard RGB backlight configurations.
  */
 
+/*
+ * One method-20 frame: exactly 16 bytes, else -EINVAL; a fault while
+ * copying it is -EFAULT and sends nothing. Of the bytes whose legal range is
+ * known, speed (byte 1) must be 0..9 and brightness (byte 2) 0..100. The
+ * mode byte is not checked: the keyboard takes 0..7 and the light bar
+ * 1..7, 0xFF and ids the firmware shows as static, so no one range holds.
+ * Byte 0 and bytes 3..15 reach method 20 unchecked too, because their
+ * legal values vary by model and caller: the app's keyboard frame sends
+ * 0x08 in byte 3 for Wave and 1 in byte 9, the light bar 0x03 and 0x02 in
+ * bytes 8 and 9. The node's 0666 mode is upstream's.
+ */
 static ssize_t gkbbl_drv_write(struct file *file,
 		const char __user *buf, size_t count, loff_t *offset)
 {
 	u8 config_buf[GAMING_KBBL_CONFIG_LEN];
-	unsigned long err;
 
-	if (count != GAMING_KBBL_CONFIG_LEN) {
-		pr_err("Invalid data given to gaming keyboard backlight");
-		return 0;
-	}
-	err = copy_from_user(config_buf, buf, GAMING_KBBL_CONFIG_LEN);
-	if (err < 0)
-		pr_err("Copying data from userspace failed with code: %lu\n", err);
+	if (count != GAMING_KBBL_CONFIG_LEN)
+		return -EINVAL;
+	if (copy_from_user(config_buf, buf, GAMING_KBBL_CONFIG_LEN))
+		return -EFAULT;
+	if (config_buf[1] > 9 || config_buf[2] > 100)
+		return -EINVAL;
 
 	set_u8_array(config_buf, GAMING_KBBL_CONFIG_LEN, ACER_CAP_GAMINGKB);
 	return count;
@@ -2850,22 +2859,12 @@ struct led_zone_set_param_u64 {
 		u8 reserved[4];
 } __packed;
 
-static ssize_t gkbbl_static_drv_write(struct file *file, const char __user *buf, size_t count, loff_t *offset)
+/* gkbbl_static_drv_write's WMI calls for config_buf. */
+static ssize_t gkbbl_static_send(const u8 *config_buf, size_t count)
 {
-	u8 config_buf[4]={0,0,0,0};
-	unsigned long err;
 	struct led_zone_set_param set_params;
 	struct led_zone_set_param_u64 set_params_u64;
 	struct acpi_buffer set_input;
-	err = copy_from_user(config_buf, buf, GAMING_KBBL_STATIC_CONFIG_LEN);
-
-	if (count != GAMING_KBBL_STATIC_CONFIG_LEN) {
-		pr_err("Invalid data given to gaming keyboard static backlight");
-		return 0;
-	}
-
-	if (err < 0)
-		pr_err("Copying data from userspace failed with code: %lu\n", err);
 
 	if (quirks->four_zone_kb) {
 		/*
@@ -2952,6 +2951,24 @@ static ssize_t gkbbl_static_drv_write(struct file *file, const char __user *buf,
 	return count;
 }
 
+
+/*
+ * One static zone frame: exactly 4 bytes, else -EINVAL; a fault while
+ * copying it is -EFAULT and sends nothing. The zone byte (byte 0) is not
+ * checked, since which zones exist varies by model; the node's 0666 mode
+ * is upstream's.
+ */
+static ssize_t gkbbl_static_drv_write(struct file *file, const char __user *buf, size_t count, loff_t *offset)
+{
+	u8 config_buf[GAMING_KBBL_STATIC_CONFIG_LEN];
+
+	if (count != GAMING_KBBL_STATIC_CONFIG_LEN)
+		return -EINVAL;
+	if (copy_from_user(config_buf, buf, GAMING_KBBL_STATIC_CONFIG_LEN))
+		return -EFAULT;
+
+	return gkbbl_static_send(config_buf, count);
+}
 
 static const struct file_operations gkbbl_static_dev_fops = {
 		.owner      = THIS_MODULE,
