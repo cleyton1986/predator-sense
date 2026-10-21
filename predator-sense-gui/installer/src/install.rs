@@ -471,6 +471,9 @@ struct Installer {
     language: Language,
     user: UserContext,
     gui_dir: Option<PathBuf>,
+    /// The private directory `prepare_release_assets` downloaded the release
+    /// into, removed when the install ends ([`Self::remove_release_dir`]).
+    release_dir: Option<PathBuf>,
 }
 
 pub(crate) fn entrypoint(args: &[String]) -> AppResult {
@@ -524,6 +527,7 @@ impl Installer {
             language: Language::detect(),
             user: UserContext::detect()?,
             gui_dir: detect_gui_dir(),
+            release_dir: None,
         })
     }
 
@@ -548,6 +552,7 @@ impl Installer {
                     started.elapsed()
                 ),
                 Err(error) => {
+                    self.remove_release_dir();
                     println!("    {RED}✗ {error}{RESET}");
                     println!("\n  {YELLOW}{}{RESET}", self.text(Message::DoneWithErrors));
                     if interactive {
@@ -557,6 +562,7 @@ impl Installer {
                 }
             }
         }
+        self.remove_release_dir();
         println!(
             "\n  {} {CYAN}{}%{RESET}",
             render_bar(defaults::COMPLETE_PERCENT),
@@ -908,14 +914,50 @@ impl Installer {
         if self.gui_dir.is_some() {
             return Ok(());
         }
-        let base = std::env::temp_dir().join(format!("{RELEASE_TEMP_PREFIX}{}", app::VERSION));
+        // A directory of its own, made here and root's alone (0700): a
+        // fixed name in the shared temp directory could be made first by
+        // another user, who would then own the tree root downloads into and
+        // runs from. Nothing in it runs as the user: a release brings its
+        // binary, so neither the cargo build nor the Rust bootstrap runs.
+        let base = private_temp_dir(
+            &std::env::temp_dir(),
+            &format!("{RELEASE_TEMP_PREFIX}{}", app::VERSION),
+        )
+        .map_err(|error| format!("falha ao criar diretório temporário: {error}"))?;
+        self.release_dir = Some(base.clone());
+        let result = self.download_release(&base);
+        if result.is_err() {
+            self.remove_release_dir();
+        }
+        result
+    }
+
+    /// Removes the release download directory, if there is one, and forgets
+    /// a GUI directory inside it. At the end of an install, whether it
+    /// succeeded or failed.
+    fn remove_release_dir(&mut self) {
+        let Some(base) = self.release_dir.take() else {
+            return;
+        };
+        fs::remove_dir_all(&base).ok();
+        if self
+            .gui_dir
+            .as_deref()
+            .is_some_and(|gui| gui.starts_with(&base))
+        {
+            self.gui_dir = None;
+        }
+    }
+
+    /// The release's sources and binary into `base`, from
+    /// [`Self::prepare_release_assets`]; sets the GUI directory on success.
+    fn download_release(&mut self, base: &Path) -> AppResult {
         let archive = base.join("source.tar.gz");
         let extracted_root = base.join("source");
         let gui = extracted_root
             .join(format!("predator-sense-{}", app::VERSION))
             .join("predator-sense-gui");
         let binary_path = gui_binary_path(&gui);
-        fs::remove_dir_all(&base).ok();
         fs::create_dir_all(
             binary_path
                 .parent()
@@ -2112,6 +2154,39 @@ mod tests {
     use std::cell::Cell;
     use std::os::unix::fs::MetadataExt;
     use tempfile::tempdir;
+
+    #[test]
+    fn the_release_directory_is_private_and_removed_at_the_end() {
+        let parent = tempdir().unwrap();
+        let base = private_temp_dir(parent.path(), "predator-sense-release-v0").unwrap();
+        let meta = fs::symlink_metadata(&base).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(meta.mode() & 0o777, 0o700);
+        let gui = base.join("source").join("predator-sense-gui");
+        fs::create_dir_all(&gui).unwrap();
+        fs::write(gui.join("file"), b"x").unwrap();
+        let mut installer = Installer {
+            language: Language::detect(),
+            user: UserContext {
+                name: "nobody".into(),
+                home: parent.path().to_path_buf(),
+                uid: 65534,
+            },
+            gui_dir: Some(gui),
+            release_dir: Some(base.clone()),
+        };
+        installer.remove_release_dir();
+        assert!(!base.exists(), "removed");
+        assert_eq!(
+            installer.gui_dir, None,
+            "no GUI directory left pointing into it"
+        );
+        assert_eq!(installer.release_dir, None);
+        // A GUI directory elsewhere (a source checkout) is kept.
+        installer.gui_dir = Some(parent.path().to_path_buf());
+        installer.remove_release_dir();
+        assert_eq!(installer.gui_dir.as_deref(), Some(parent.path()));
+    }
 
     #[test]
     fn a_private_temp_dir_is_new_and_owner_only() {
