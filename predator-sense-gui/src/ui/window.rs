@@ -701,8 +701,16 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // `keyboard_rgb::keyboard_idle_mode` says App. With idle off, or the
         // keyboard's own switch off, nothing does. The bar is always this
         // tick's.
+        //
+        // Once a second, by a seconds timer GLib wakes together with the
+        // app's other ones: it ran every 250 ms, four wakeups a second for as
+        // long as the app ran. Idle is measured in whole seconds, so a blank
+        // comes at most a second later than before; a blanked light comes
+        // back at once, because the idle watcher runs this at the first input
+        // (`idle::on_input_while_blanked`), and a resume is acted on at once
+        // where logind announces the wake (`resume::on_wake`).
         {
-            glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            let tick: Rc<dyn Fn()> = Rc::new(|| {
                 // Resume from suspend, checked before anything else in here:
                 // the early return below fires whenever idle tracking is off,
                 // and lighting still has to come back on those machines.
@@ -742,14 +750,14 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     crate::hardware::keyboard_rgb::retry_timer_off_if_due();
                 }
 
-                // Cached, not re-parsed: this runs four times a second and the
+                // Cached, not re-parsed: this runs every second and the
                 // settings it reads change only when the user edits them, which
                 // bumps the generation this cache checks. See
                 // `config::load_app_config_cached`.
                 let cfg = config::load_app_config_cached();
                 let idle = crate::hardware::idle::idle_seconds(cfg.idle_mouse_wakes);
                 let Some(idle) = idle else {
-                    return glib::ControlFlow::Continue;
+                    return;
                 };
 
                 let keyboard_limit = cfg.idle_keyboard_secs as u64;
@@ -788,7 +796,11 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                         crate::hardware::light_bar::unblank();
                     }
                 }
-
+            });
+            crate::hardware::resume::on_wake(tick.clone());
+            crate::hardware::idle::on_input_while_blanked(tick.clone());
+            glib::timeout_add_seconds_local(1, move || {
+                tick();
                 glib::ControlFlow::Continue
             });
         }

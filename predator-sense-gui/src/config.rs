@@ -907,7 +907,7 @@ pub fn config_generation() -> u64 {
 
 /// [`load_app_config`], but parsed only when something has changed it.
 ///
-/// For callers on a timer. The idle watcher runs four times a second and was
+/// For callers on a timer. The idle watcher runs every second and was
 /// opening and parsing the whole file on each tick, for settings that change
 /// only when the user edits them.
 ///
