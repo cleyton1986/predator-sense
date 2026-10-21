@@ -13,7 +13,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr;
@@ -983,9 +983,23 @@ impl Installer {
                 std::env::consts::ARCH
             )
         })?;
-        let rustup_path =
-            std::env::temp_dir().join(format!("{RUSTUP_TEMP_NAME}-{}", std::process::id()));
+        // A directory of its own, made here: a name in the shared temp
+        // directory that another user could have created first (a link to a
+        // file of theirs, say) is never written or run.
+        let rustup_dir = private_temp_dir(&std::env::temp_dir(), RUSTUP_TEMP_NAME)
+            .map_err(|error| format!("falha ao criar diretório temporário: {error}"))?;
+        // Root's alone to write; the user runs rustup-init from it.
+        set_mode(&rustup_dir, mode::EXECUTABLE)?;
+        let rustup_path = rustup_dir.join("rustup-init");
         let rustup_url = format!("{RUSTUP_BASE_URL}/{target}/rustup-init");
+        let result = self.download_and_run_rustup(&rustup_path, &rustup_url);
+        fs::remove_dir_all(&rustup_dir).ok();
+        result
+    }
+
+    /// Downloads rustup-init to `rustup_path`, in [`Self::install_rust`]'s
+    /// private directory, and runs it as the user.
+    fn download_and_run_rustup(&self, rustup_path: &Path, rustup_url: &str) -> AppResult {
         run(
             command::CURL,
             [
@@ -996,13 +1010,11 @@ impl Installer {
                 "--location",
                 "--output",
                 rustup_path.to_string_lossy().as_ref(),
-                rustup_url.as_str(),
+                rustup_url,
             ],
         )?;
-        set_mode(&rustup_path, mode::EXECUTABLE)?;
-        let result = self.run_as_user(rustup_path.as_os_str(), ["-y", "--no-modify-path"], None);
-        fs::remove_file(rustup_path).ok();
-        result
+        set_mode(rustup_path, mode::EXECUTABLE)?;
+        self.run_as_user(rustup_path.as_os_str(), ["-y", "--no-modify-path"], None)
     }
 
     fn build_application(&self) -> AppResult {
@@ -1176,6 +1188,30 @@ fn has_kernel_headers() -> bool {
                 .is_dir()
         })
         .unwrap_or(false)
+}
+
+/// A new directory under `parent`, named `prefix-<pid>-<n>`, created by this
+/// call (mode 0700, as mkdtemp makes one): an existing entry of that name,
+/// a link included, is never used, the next name is tried instead.
+fn private_temp_dir(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos())
+        .unwrap_or(0);
+    let mut last = None;
+    for attempt in 0..64u32 {
+        let path = parent.join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            seed.wrapping_add(attempt)
+        ));
+        match fs::DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => last = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::other("no free name")))
 }
 
 fn set_mode(path: &Path, bits: u32) -> AppResult {
@@ -2076,6 +2112,20 @@ mod tests {
     use std::cell::Cell;
     use std::os::unix::fs::MetadataExt;
     use tempfile::tempdir;
+
+    #[test]
+    fn a_private_temp_dir_is_new_and_owner_only() {
+        let parent = tempdir().unwrap();
+        let first = private_temp_dir(parent.path(), "rustup").unwrap();
+        let second = private_temp_dir(parent.path(), "rustup").unwrap();
+        assert_ne!(first, second);
+        for dir in [&first, &second] {
+            let meta = fs::symlink_metadata(dir).unwrap();
+            assert!(meta.is_dir());
+            assert_eq!(meta.mode() & 0o777, 0o700);
+            assert!(dir.starts_with(parent.path()));
+        }
+    }
 
     /// `wait_until_stopped` against processes that exit after `exits_after`
     /// of waiting (`None`: never), on a clock made of the sleeps it asks for.
