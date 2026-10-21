@@ -22,6 +22,7 @@ pub mod layout;
 pub mod noise;
 pub mod palette;
 pub mod sim;
+pub mod themes;
 
 // The effects, one file each (effects.js's numbering in each file's header).
 mod aurora;
