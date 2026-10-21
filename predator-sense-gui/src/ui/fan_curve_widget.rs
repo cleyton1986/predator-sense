@@ -8,18 +8,26 @@
 //! Every pixel-to-value conversion lives in `fan_curve_geometry`, which is
 //! unit tested; what is left here is Cairo and gestures, which are not.
 
+use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, cairo};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::hardware::fan;
+use crate::ui::fan_control_model as model;
 use crate::ui::fan_curve_geometry as geo;
 
 struct State {
     steps: [u8; geo::STEP_COUNT],
     temp_c: Option<f64>,
     on_change: Option<Rc<dyn Fn([u8; geo::STEP_COUNT])>>,
+    selected: usize,
+    on_select: Option<Rc<dyn Fn(usize)>>,
+    /// The bar whose top edge the pointer is over, drawn highlighted.
+    hover_edge: Option<usize>,
+    /// The bar a drag took hold of by its edge, until the button is released.
+    grabbed: Option<usize>,
 }
 
 pub struct FanCurveView {
@@ -31,6 +39,10 @@ pub struct FanCurveView {
 /// with a mouse without the page needing a scrollbar.
 const CHART_HEIGHT: i32 = 170;
 const CHART_MIN_WIDTH: i32 = 320;
+/// Pointer travel before a press becomes a drag, so a click does not edit.
+const DRAG_SLOP: f64 = 3.0;
+/// How near a bar's top edge, in pixels, the pointer takes hold of it.
+const EDGE_GRAB_PX: f64 = 6.0;
 
 pub fn build(steps: [u8; geo::STEP_COUNT]) -> FanCurveView {
     let widget = gtk::DrawingArea::new();
@@ -42,41 +54,32 @@ pub fn build(steps: [u8; geo::STEP_COUNT]) -> FanCurveView {
         steps,
         temp_c: None,
         on_change: None,
+        selected: 0,
+        on_select: None,
+        hover_edge: None,
+        grabbed: None,
     }));
 
     {
         let state = state.clone();
         widget.set_draw_func(move |_area, cr, w, h| {
             let s = state.borrow();
-            draw(cr, w as f64, h as f64, s.steps, s.temp_c);
+            let edge = s.grabbed.or(s.hover_edge);
+            draw(cr, w as f64, h as f64, s.steps, s.temp_c, s.selected, edge);
         });
     }
 
-    // One edit path for both gestures: a click sets a value, a drag keeps
-    // setting it. The callback fires only when the value really changed, so a
-    // drag across one bar writes config once per five percent, not once per
-    // motion event.
-    let edit = {
+    // The one place new steps are stored: a drag and Up/Down both end here.
+    // The callback fires only when the value really changed, so a drag across
+    // one bar writes config once per five percent, not once per motion event.
+    let change = {
         let state = state.clone();
         let widget = widget.clone();
-        Rc::new(move |x: f64, y: f64| {
-            let plot = geo::plot_for(widget.width() as f64, widget.height() as f64);
-            // Mirrors the guard in `draw`: a collapsed widget has no column to
-            // resolve a click into, and every position would read as step 0 at
-            // 0%, which is a curve edit nobody asked for.
-            if plot.w <= 0.0 || plot.h <= 0.0 {
+        Rc::new(move |next: [u8; geo::STEP_COUNT]| {
+            if state.borrow().steps == next {
                 return;
             }
-            let (changed, steps) = {
-                let mut s = state.borrow_mut();
-                let next = geo::edited(s.steps, plot, x, y);
-                let changed = next != s.steps;
-                s.steps = next;
-                (changed, next)
-            };
-            if !changed {
-                return;
-            }
+            state.borrow_mut().steps = next;
             widget.queue_draw();
             // The callback is cloned out and the borrow ends before it runs:
             // it reaches back into the page, which touches this same
@@ -84,28 +87,193 @@ pub fn build(steps: [u8; geo::STEP_COUNT]) -> FanCurveView {
             // the page pushed anything back.
             let callback = state.borrow().on_change.clone();
             if let Some(f) = callback {
-                f(steps);
+                f(next);
             }
         })
     };
 
+    // Selecting is shared by a click, a drag and the arrow keys.
+    let select_index = {
+        let state = state.clone();
+        let widget = widget.clone();
+        Rc::new(move |index: usize| {
+            if state.borrow().selected == index {
+                return;
+            }
+            state.borrow_mut().selected = index;
+            widget.queue_draw();
+            let callback = state.borrow().on_select.clone();
+            if let Some(f) = callback {
+                f(index);
+            }
+        })
+    };
+    let select_at = {
+        let widget = widget.clone();
+        let select_index = select_index.clone();
+        Rc::new(move |x: f64| {
+            let plot = geo::plot_for(widget.width() as f64, widget.height() as f64);
+            // Mirrors the guard in `draw`: a collapsed widget has no column to
+            // resolve a click into.
+            if plot.w <= 0.0 || plot.h <= 0.0 {
+                return;
+            }
+            select_index(geo::step_at_x(plot, x));
+        })
+    };
+
+    widget.set_focusable(true);
+    // A focusable drawing has nothing for a screen reader to announce.
+    widget.update_property(&[gtk::accessible::Property::Label(crate::i18n::t("fan_plan_curve"))]);
     let click = gtk::GestureClick::new();
     {
-        let edit = edit.clone();
-        click.connect_pressed(move |_, _, x, y| edit(x, y));
+        let select_at = select_at.clone();
+        let widget = widget.clone();
+        click.connect_pressed(move |_, _, x, _| {
+            widget.grab_focus();
+            select_at(x);
+        });
     }
     widget.add_controller(click);
 
+    // Hovering a bar's top edge shows a resize cursor and lights the edge,
+    // so the bar can be dragged to a value from where it already is. A drag
+    // holding an edge keeps both until release, wherever the pointer goes.
+    let set_hover = {
+        let state = state.clone();
+        let widget = widget.clone();
+        Rc::new(move |edge: Option<usize>| {
+            let changed = {
+                let mut s = state.borrow_mut();
+                let changed = s.grabbed.is_none() && s.hover_edge != edge;
+                if changed {
+                    s.hover_edge = edge;
+                }
+                changed
+            };
+            if changed {
+                widget.set_cursor_from_name(edge.map(|_| "ns-resize"));
+                widget.queue_draw();
+            }
+        })
+    };
+    let hit_at = {
+        let state = state.clone();
+        let widget = widget.clone();
+        Rc::new(move |x: f64, y: f64| {
+            let plot = geo::plot_for(widget.width() as f64, widget.height() as f64);
+            let steps = state.borrow().steps;
+            geo::edge_hit(plot, steps, x, y, EDGE_GRAB_PX)
+        })
+    };
+    let motion = gtk::EventControllerMotion::new();
+    {
+        let set_hover = set_hover.clone();
+        let hit_at = hit_at.clone();
+        motion.connect_motion(move |_, x, y| set_hover(hit_at(x, y)));
+    }
+    {
+        let set_hover = set_hover.clone();
+        motion.connect_leave(move |_| set_hover(None));
+    }
+    widget.add_controller(motion);
+
     let drag = gtk::GestureDrag::new();
     {
-        let edit = edit.clone();
-        drag.connect_drag_update(move |gesture, dx, dy| {
+        let state = state.clone();
+        let hit_at = hit_at.clone();
+        let select_index = select_index.clone();
+        let widget = widget.clone();
+        drag.connect_drag_begin(move |_, x, y| {
+            let Some(index) = hit_at(x, y) else { return };
+            state.borrow_mut().grabbed = Some(index);
+            widget.set_cursor_from_name(Some("ns-resize"));
+            widget.queue_draw();
+            select_index(index);
+        });
+    }
+    {
+        let state = state.clone();
+        let widget = widget.clone();
+        let set_hover = set_hover.clone();
+        let hit_at = hit_at.clone();
+        drag.connect_drag_end(move |gesture, dx, dy| {
+            if state.borrow_mut().grabbed.take().is_none() {
+                return;
+            }
+            // Back to plain hovering, from wherever the pointer was let go.
+            state.borrow_mut().hover_edge = None;
+            widget.set_cursor_from_name(None);
+            widget.queue_draw();
             if let Some((sx, sy)) = gesture.start_point() {
-                edit(sx + dx, sy + dy);
+                set_hover(hit_at(sx + dx, sy + dy));
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let widget = widget.clone();
+        let change = change.clone();
+        let select_at = select_at.clone();
+        drag.connect_drag_update(move |gesture, dx, dy| {
+            let Some((sx, sy)) = gesture.start_point() else {
+                return;
+            };
+            let grabbed = state.borrow().grabbed;
+            if let Some(index) = grabbed {
+                // Held by its edge: no slop, and the bar keeps following the
+                // pointer's height even if it strays into another column.
+                let plot = geo::plot_for(widget.width() as f64, widget.height() as f64);
+                if plot.w <= 0.0 || plot.h <= 0.0 {
+                    return;
+                }
+                let (left, right) = geo::column(plot, index);
+                let steps = state.borrow().steps;
+                change(geo::edited(steps, plot, (left + right) / 2.0, sy + dy));
+                return;
+            }
+            // A click with a tremble must not edit the curve.
+            if dx.abs() < DRAG_SLOP && dy.abs() < DRAG_SLOP {
+                return;
+            }
+            let plot = geo::plot_for(widget.width() as f64, widget.height() as f64);
+            if plot.w <= 0.0 || plot.h <= 0.0 {
+                return;
+            }
+            let steps = state.borrow().steps;
+            let next = geo::edited(steps, plot, sx + dx, sy + dy);
+            if next != steps {
+                // So the page's -/+ act on the bar just dragged.
+                select_at(sx + dx);
+                change(next);
             }
         });
     }
     widget.add_controller(drag);
+
+    let key = gtk::EventControllerKey::new();
+    {
+        let state = state.clone();
+        key.connect_key_pressed(move |_, keyval, _, _| {
+            use gtk::gdk::Key;
+            let (current, steps) = {
+                let s = state.borrow();
+                (s.selected, s.steps)
+            };
+            match keyval {
+                Key::Left | Key::Right => {
+                    select_index(model::moved(current, keyval == Key::Right));
+                    glib::Propagation::Stop
+                }
+                Key::Up | Key::Down => {
+                    change(model::nudge(steps, current, keyval == Key::Up));
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        });
+    }
+    widget.add_controller(key);
 
     FanCurveView { widget, state }
 }
@@ -114,6 +282,15 @@ impl FanCurveView {
     /// The callback a gesture fires. Never fired by `set_steps`.
     pub fn set_on_change(&self, f: impl Fn([u8; geo::STEP_COUNT]) + 'static) {
         self.state.borrow_mut().on_change = Some(Rc::new(f));
+    }
+
+    /// Fired when a click or an arrow key changes the selected bar.
+    pub fn set_on_select(&self, f: impl Fn(usize) + 'static) {
+        self.state.borrow_mut().on_select = Some(Rc::new(f));
+    }
+
+    pub fn selected(&self) -> usize {
+        self.state.borrow().selected
     }
 
     pub fn set_steps(&self, steps: [u8; geo::STEP_COUNT]) {
@@ -151,6 +328,8 @@ fn draw(
     height: f64,
     steps: [u8; geo::STEP_COUNT],
     temp_c: Option<f64>,
+    selected: usize,
+    edge: Option<usize>,
 ) {
     let plot = geo::plot_for(width, height);
     if plot.w <= 0.0 || plot.h <= 0.0 {
@@ -228,9 +407,32 @@ fn draw(
             cr,
             left + 6.0,
             (top - 4.0).max(plot.y + 9.0),
-            &format!("{pct}"),
+            &format!("{pct}%"),
             10.0,
         );
+
+        if edge == Some(i) {
+            // The edge under the pointer, or held by a drag.
+            cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+            cr.set_line_width(3.0);
+            cr.move_to(left, top);
+            cr.line_to(right, top);
+            let _ = cr.stroke();
+        }
+
+        if i == selected {
+            cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+            cr.set_line_width(2.0);
+            // A 0 % step has no bar, so it gets a strip at the 0 % line to
+            // stay visible.
+            let (outline_top, outline_h) = if pct > 0 {
+                (top, plot.y + plot.h - top)
+            } else {
+                (plot.y + plot.h - 4.0, 4.0)
+            };
+            cr.rectangle(left + 1.0, outline_top, (right - left) - 2.0, outline_h);
+            let _ = cr.stroke();
+        }
     }
 
     // Column boundaries and their temperatures.

@@ -102,6 +102,17 @@ pub fn edited(mut steps: [u8; STEP_COUNT], plot: Plot, x: f64, y: f64) -> [u8; S
     steps
 }
 
+/// The step whose top edge is within `grab_px` of `y` in the column under
+/// `x`, so the pointer can take hold of it. A 0 % step's edge is the 0 %
+/// line. `None` outside the plot's columns or away from the edge.
+pub fn edge_hit(plot: Plot, steps: [u8; STEP_COUNT], x: f64, y: f64, grab_px: f64) -> Option<usize> {
+    if plot.w <= 0.0 || plot.h <= 0.0 || x < plot.x || x >= plot.x + plot.w {
+        return None;
+    }
+    let step = step_at_x(plot, x);
+    ((y - y_for_pct(plot, steps[step])).abs() <= grab_px).then_some(step)
+}
+
 /// Where the shaded firmware region ends, for a boundary the caller supplies.
 ///
 /// The chart shades the curve's zero region - the temperatures where
@@ -128,6 +139,23 @@ mod tests {
             w: 600.0,
             h: 200.0,
         }
+    }
+
+    #[test]
+    fn an_edge_is_hit_only_near_the_top_of_its_own_column() {
+        let steps = [0, 50, 100, 25, 75, 10];
+        // Column 1 (x 100..200) at 50 % has its edge at y 100.
+        assert_eq!(edge_hit(plot(), steps, 150.0, 104.0, 6.0), Some(1));
+        assert_eq!(edge_hit(plot(), steps, 150.0, 110.0, 6.0), None);
+        // A 0 % step's edge is the 0 % line at the bottom.
+        assert_eq!(edge_hit(plot(), steps, 50.0, 197.0, 6.0), Some(0));
+        // 100 % sits on the top of the plot, reachable from just above it.
+        assert_eq!(edge_hit(plot(), steps, 250.0, -4.0, 6.0), Some(2));
+        // The height of column 1's edge means nothing in column 3.
+        assert_eq!(edge_hit(plot(), steps, 350.0, 100.0, 6.0), None);
+        // Outside the columns.
+        assert_eq!(edge_hit(plot(), steps, -1.0, 200.0, 6.0), None);
+        assert_eq!(edge_hit(plot(), steps, 600.0, 180.0, 6.0), None);
     }
 
     #[test]
