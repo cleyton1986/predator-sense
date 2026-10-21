@@ -787,9 +787,10 @@ Pre-existing upstream behaviour, not introduced by this branch.
 > on a PH16-71: with idle off the keyboard and the bar stayed lit for 40 s
 > with no input; with idle on both went dark together at the 10 s delay, and
 > mouse and key input woke them. The "Keep the keyboard backlight awake"
-> setting went with the keepalive (a config that still carries it loads).
-> The rest of this section is the record of what was measured and built
-> before that.
+> setting went with the keepalive (a config that still carries it loads), and
+> mouse buttons count on the same clock as keys again, since nothing needs
+> real keys on their own any more. The rest of this section is the record of
+> what was measured and built before that.
 
 **Symptom:** working with the mouse or the touchpad and never touching a key,
 the keyboard backlight blanked after ~30 s while the light bar stayed on - the
