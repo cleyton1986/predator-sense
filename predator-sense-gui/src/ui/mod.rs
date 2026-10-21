@@ -9,6 +9,7 @@ pub mod color_picker;
 pub mod dashboard_page;
 pub mod drivers_page;
 pub mod faceted_card;
+pub mod fan_control_model;
 pub mod fan_control_page;
 pub mod fan_curve_geometry;
 pub mod fan_curve_widget;

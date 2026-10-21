@@ -8,6 +8,7 @@ use crate::config::{self, FanPlan};
 use crate::hardware::profile::PowerProfile;
 use crate::hardware::{fan, sensors};
 use crate::ui::background;
+use crate::ui::fan_control_model::PlanKind;
 use crate::ui::fan_curve_widget::{self, FanCurveView};
 
 /// The five power modes a plan can be bound to, in the order the rest of the
@@ -37,44 +38,6 @@ const DEFAULT_FIXED_PERCENT: u8 = 50;
 /// How long a status message stays up: one reconciler tick (3 s) plus a
 /// margin, by which point the write has either reached the fans or failed.
 const STATUS_LINGER_MS: u64 = 4_000;
-
-/// Which of the four plan buttons a plan lights up.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PlanKind {
-    Automatic,
-    Curve,
-    Fixed,
-    Max,
-}
-
-impl PlanKind {
-    fn of(plan: FanPlan) -> Self {
-        match plan {
-            FanPlan::Automatic => PlanKind::Automatic,
-            FanPlan::Curve { .. } => PlanKind::Curve,
-            FanPlan::Fixed { .. } => PlanKind::Fixed,
-            FanPlan::Max => PlanKind::Max,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            PlanKind::Automatic => crate::i18n::t("automatic"),
-            PlanKind::Curve => crate::i18n::t("fan_plan_curve"),
-            PlanKind::Fixed => crate::i18n::t("fan_plan_fixed"),
-            PlanKind::Max => crate::i18n::t("max"),
-        }
-    }
-
-    fn description(self) -> &'static str {
-        match self {
-            PlanKind::Automatic => crate::i18n::t("fan_plan_automatic_desc"),
-            PlanKind::Curve => crate::i18n::t("fan_plan_curve_desc"),
-            PlanKind::Fixed => crate::i18n::t("fan_plan_fixed_desc"),
-            PlanKind::Max => crate::i18n::t("fan_plan_max_desc"),
-        }
-    }
-}
 
 /// Everything a refresh touches. One struct so the handlers can hold a single
 /// `Weak` and nothing has to be cloned five ways.
