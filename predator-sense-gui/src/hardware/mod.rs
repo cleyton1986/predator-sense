@@ -22,6 +22,7 @@ pub mod helper;
 pub mod hid_rgb;
 pub mod hwmon;
 pub mod idle;
+pub mod key_input;
 pub mod keyboard_rgb;
 pub mod light_bar;
 pub mod light_bar_zones;

@@ -227,13 +227,16 @@ pub fn write_switch(action: Action, enabled: bool) -> Result<(), String> {
 fn invoke_oneshot(action: Action, arguments: &[&str]) -> Result<Output, String> {
     validate_arity(action, arguments)?;
     // SAFETY: geteuid has no preconditions.
-    let mut command = if unsafe { libc::geteuid() } == 0 {
+    let root = unsafe { libc::geteuid() } == 0;
+    let mut command = if root {
         Command::new(path::HELPER)
     } else {
         let mut command = Command::new(PRIVILEGE_BROKER);
         command.arg(path::HELPER);
         command
     };
+    // pkexec may show an authentication dialog until it exits: no key is read meanwhile.
+    let _prompt = (!root).then(super::key_input::authentication_prompt);
     command
         .arg(action.as_str())
         .args(arguments)
@@ -397,7 +400,7 @@ fn invoke_session(action: Action, arguments: &[&str]) -> Result<Reply, String> {
             .map_err(|error| format!("Failed to launch hardware helper: {error}"))?;
         return Ok(Reply::from_output(&output));
     }
-    let (reply, started) = call_session(&SESSION, spawn_session, action, arguments)?;
+    let (reply, started) = call_session(&SESSION, spawn_session, true, action, arguments)?;
     if started {
         privileged_session_started();
     }
@@ -453,7 +456,7 @@ fn reapply_keyboard_idle_after_start(
 /// the fork+exec itself, which happens whether or not the caller is root.
 fn invoke_read_session(action: Action) -> Result<Reply, String> {
     validate_arity(action, &[])?;
-    call_session(&READ_SESSION, spawn_read_session, action, &[]).map(|(reply, _)| reply)
+    call_session(&READ_SESSION, spawn_read_session, false, action, &[]).map(|(reply, _)| reply)
 }
 
 /// Shared by [`invoke_session`] and [`invoke_read_session`]: send one call
@@ -461,14 +464,20 @@ fn invoke_read_session(action: Action) -> Result<Reply, String> {
 /// this is the first call, and respawning it exactly once if the pipe turns
 /// out to be broken. The flag says whether the reply came from a session
 /// this call started.
+/// `prompts`: `spawn` starts the helper through pkexec, which may show an authentication
+/// dialog until the helper answers its first call; from each spawn until that answer (or
+/// the failure) an [`AuthenticationPrompt`](super::key_input::AuthenticationPrompt) is
+/// held, so no key is read while the password may be typed.
 fn call_session(
     slot: &Mutex<Option<(Child, RealSession)>>,
     spawn: fn() -> Result<(Child, RealSession), String>,
+    prompts: bool,
     action: Action,
     arguments: &[&str],
 ) -> Result<(Reply, bool), String> {
     let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let started = guard.is_none();
+    let _prompt = (started && prompts).then(super::key_input::authentication_prompt);
     if started {
         *guard = Some(spawn()?);
     }
@@ -487,6 +496,7 @@ fn call_session(
             if let Some((mut dead_child, _)) = guard.take() {
                 let _ = dead_child.wait();
             }
+            let _prompt = prompts.then(super::key_input::authentication_prompt);
             let (mut child, mut session) = spawn()?;
             match session.call(action, arguments) {
                 Ok(reply) => {
@@ -685,17 +695,53 @@ mod tests {
         }
     }
 
+    /// Whether a prompt was held when the stand-in below was spawned.
+    static PROMPT_AT_SPAWN: AtomicBool = AtomicBool::new(false);
+
+    fn answering_daemon_noting_the_prompt() -> Result<(Child, RealSession), String> {
+        PROMPT_AT_SPAWN.store(
+            crate::hardware::key_input::authentication_pending(),
+            Ordering::SeqCst,
+        );
+        answering_daemon()
+    }
+
+    /// The privileged session's spawn may show an authentication dialog: keys are not read
+    /// from just before it until the first call has answered, and are again after.
+    #[test]
+    fn a_session_that_may_prompt_holds_the_key_gate_shut_until_it_answers() {
+        let slot = Mutex::new(None);
+        let (_, started) = call_session(
+            &slot,
+            answering_daemon_noting_the_prompt,
+            true,
+            Action::FanAuto,
+            &[],
+        )
+        .unwrap();
+        assert!(started);
+        assert!(
+            PROMPT_AT_SPAWN.load(Ordering::SeqCst),
+            "held while spawning"
+        );
+        assert!(
+            !crate::hardware::key_input::authentication_pending(),
+            "let go after"
+        );
+        close(slot);
+    }
+
     #[test]
     fn a_call_says_whether_it_started_the_session() {
         let slot = Mutex::new(None);
 
         let (reply, started) =
-            call_session(&slot, answering_daemon, Action::FanAuto, &[]).unwrap();
+            call_session(&slot, answering_daemon, false, Action::FanAuto, &[]).unwrap();
         assert!(reply.success);
         assert!(started);
 
         let (_, started) =
-            call_session(&slot, answering_daemon, Action::FanAuto, &[]).unwrap();
+            call_session(&slot, answering_daemon, false, Action::FanAuto, &[]).unwrap();
         assert!(!started, "the session already running answered");
 
         close(slot);
@@ -709,7 +755,7 @@ mod tests {
         let slot = Mutex::new(Some((dead, session)));
 
         let (reply, started) =
-            call_session(&slot, answering_daemon, Action::FanAuto, &[]).unwrap();
+            call_session(&slot, answering_daemon, false, Action::FanAuto, &[]).unwrap();
 
         assert!(reply.success);
         assert!(started);

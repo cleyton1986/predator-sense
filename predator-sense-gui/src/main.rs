@@ -168,6 +168,15 @@ fn main() {
         );
         CSS_PROVIDER.with(|p| *p.borrow_mut() = Some(provider));
 
+        // Key presses for the reactive themes, on the one keyboard whose presses
+        // are read: the reader parks with nothing open, and logind is watched on
+        // a thread of its own. Nothing is read until a theme that uses keys runs.
+        if hardware::capabilities::get().keyboard_rgb {
+            hardware::key_input::start(config::react_to_typing_at_start(
+                &config::load_app_config_source(),
+            ));
+        }
+
         // Set application window icon via icon theme search path
         if let Some(path) = find_icon_path() {
             if let Some(dir) = std::path::Path::new(&path).parent() {
@@ -193,6 +202,8 @@ fn main() {
         // A Settings slider value still waiting out its save debounce.
         ui::window::flush_pending_saves();
         hardware::audio_sync::stop();
+        // The keyboard node closes before the renderer stops.
+        hardware::key_input::shutdown(std::time::Duration::from_millis(200));
         // A light the idle timer has dark would stay dark until the app runs
         // again (the keyboard was blanked with the Off effect, which a key
         // press does not wake): each is relit first.

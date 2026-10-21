@@ -355,6 +355,12 @@ pub struct AppConfig {
     /// Default on, also for a config written before the setting existed.
     #[serde(default = "default_true")]
     pub pause_animations_on_battery: bool,
+    /// "React to typing" (lighting settings): a theme that lights the keys
+    /// you press may read key presses from the built-in keyboard while it runs. Off, such a
+    /// theme runs without presses and the keyboard is never read. Default on, also for a
+    /// config written before the setting existed.
+    #[serde(default = "default_true")]
+    pub lighting_react_to_typing: bool,
     /// Whether the start-up idle migration has run (see
     /// [`AppConfig::migrate_idle_once`]). A config written before this field
     /// reads `false` and is migrated once; after that, nothing at start-up
@@ -841,6 +847,7 @@ impl Default for AppConfig {
             idle_bar_secs: default_idle_secs(),
             idle_mouse_wakes: true,
             pause_animations_on_battery: true,
+            lighting_react_to_typing: true,
             idle_migrated: false,
             mode_cycle_ac: Vec::new(),
             mode_cycle_battery: Vec::new(),
@@ -1017,6 +1024,17 @@ pub fn load_app_config_source() -> AppConfigSource {
     source
 }
 
+/// "React to typing" as the key gate starts with: the saved setting, its default (on)
+/// before config.json exists, and off when config.json cannot be read, where nothing says
+/// the user left it on: the key gate fails closed.
+pub fn react_to_typing_at_start(source: &AppConfigSource) -> bool {
+    match source {
+        AppConfigSource::Loaded(config) => config.lighting_react_to_typing,
+        AppConfigSource::Missing => AppConfig::default().lighting_react_to_typing,
+        AppConfigSource::Unreadable(_) => false,
+    }
+}
+
 /// Load app config
 pub fn load_app_config() -> AppConfig {
     match load_app_config_source() {
@@ -1138,7 +1156,8 @@ pub fn delete_macro(name: &str) -> Result<(), String> {
 }
 
 /// Save app config. The file is replaced whole ([`write_replacing`]), so a reader in this
-/// process or another one never finds it half written.
+/// process or another one never finds it half written. A save changes nothing else: the key
+/// gate's "React to typing" follows only its own setter ([`set_react_to_typing`]).
 pub fn save_app_config(config: &AppConfig) -> Result<(), String> {
     ensure_dirs();
     let path = config_dir().join("config.json");
@@ -1171,6 +1190,46 @@ fn save_through(
     // Tells `load_app_config_cached` its copy is stale. After the write, so a
     // failed save does not invalidate a cache that still matches the file.
     CONFIG_GENERATION.fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+/// The "React to typing" setting, for its switch:
+/// with the start-up load (`key_input::start`), the only way the key gate's flag changes.
+/// A save of config.json never changes it, so no save, however stale, can switch it back on.
+///
+/// It never fails open: off reaches the gate before anything else and stays off for this
+/// session even when the save fails; on reaches it only once saved. An unreadable
+/// config.json is not saved over (off still reaches the gate).
+pub fn set_react_to_typing(on: bool) -> Result<(), String> {
+    react_to_typing_through(
+        on,
+        load_app_config_source(),
+        save_app_config,
+        crate::hardware::key_input::set_react_to_typing,
+    )
+}
+
+/// [`set_react_to_typing`] on `source`, with the save and the key gate passed in (the tests
+/// pass their own).
+fn react_to_typing_through(
+    on: bool,
+    source: AppConfigSource,
+    save: impl FnOnce(&AppConfig) -> Result<(), String>,
+    gate: impl Fn(bool),
+) -> Result<(), String> {
+    if !on {
+        gate(false);
+    }
+    let mut config = match source {
+        AppConfigSource::Loaded(config) => config,
+        AppConfigSource::Missing => AppConfig::default(),
+        AppConfigSource::Unreadable(error) => return Err(error),
+    };
+    config.lighting_react_to_typing = on;
+    save(&config)?;
+    if on {
+        gate(true);
+    }
     Ok(())
 }
 
@@ -1665,6 +1724,28 @@ mod tests {
         assert!(!back.pause_animations_on_battery);
     }
 
+    /// "React to typing" is on by default, and a config written before the setting existed
+    /// reads it as on too; switched off it stays off.
+    #[test]
+    fn reacting_to_typing_is_on_unless_switched_off() {
+        assert!(AppConfig::default().lighting_react_to_typing);
+        let mut value = serde_json::to_value(AppConfig::default()).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("a config is a JSON object")
+            .remove("lighting_react_to_typing");
+        let old: AppConfig = serde_json::from_value(value).expect("an older config still reads");
+        assert!(old.lighting_react_to_typing);
+
+        let off = AppConfig {
+            lighting_react_to_typing: false,
+            ..AppConfig::default()
+        };
+        let text = serde_json::to_string(&off).expect("serialize");
+        let back: AppConfig = serde_json::from_str(&text).expect("read back");
+        assert!(!back.lighting_react_to_typing);
+    }
+
     /// A config.json written by a build that asked a one-time question before flashing looks
     /// (since removed) still loads, every other setting with it: an unknown field is
     /// skipped, never a reason to call the file unreadable and run on defaults.
@@ -1744,6 +1825,130 @@ mod tests {
             |_| Err("disk full".to_string()),
         );
         assert_eq!(failed.err().as_deref(), Some("disk full"));
+    }
+
+    /// "React to typing" never fails open: off reaches the key gate before the save and
+    /// stays off when the save fails; on reaches it only after a save that succeeded.
+    #[test]
+    fn react_to_typing_starts_off_when_config_json_cannot_be_read() {
+        let off = AppConfig {
+            lighting_react_to_typing: false,
+            ..AppConfig::default()
+        };
+        assert!(!react_to_typing_at_start(&AppConfigSource::Loaded(off)));
+        assert!(react_to_typing_at_start(&AppConfigSource::Loaded(
+            AppConfig::default()
+        )));
+        assert!(
+            react_to_typing_at_start(&AppConfigSource::Missing),
+            "a fresh install starts with the default"
+        );
+        assert!(!react_to_typing_at_start(&AppConfigSource::Unreadable(
+            "expected value".into()
+        )));
+    }
+
+    #[test]
+    fn react_to_typing_off_applies_before_the_save_and_on_only_after_it() {
+        use std::cell::RefCell;
+        let calls = RefCell::new(Vec::new());
+        let record = |on: bool| calls.borrow_mut().push(on);
+        let loaded = || AppConfigSource::Loaded(AppConfig::default());
+
+        // Off, and the save fails: the gate was told off before the save ran.
+        let saved_after = RefCell::new(None);
+        let failed = react_to_typing_through(
+            false,
+            loaded(),
+            |config| {
+                assert!(!config.lighting_react_to_typing);
+                *saved_after.borrow_mut() = Some(calls.borrow().clone());
+                Err("disk full".into())
+            },
+            record,
+        );
+        assert!(failed.is_err());
+        assert_eq!(
+            *saved_after.borrow(),
+            Some(vec![false]),
+            "off before the save"
+        );
+        assert_eq!(
+            *calls.borrow(),
+            vec![false],
+            "and still off after the failure"
+        );
+
+        // On, and the save fails: the gate is not told on.
+        calls.borrow_mut().clear();
+        let failed = react_to_typing_through(true, loaded(), |_| Err("read-only".into()), record);
+        assert!(failed.is_err());
+        assert!(
+            calls.borrow().is_empty(),
+            "on is never applied without a save"
+        );
+
+        // On, and the save succeeds: on, after the save.
+        let saved_after = RefCell::new(None);
+        let saved = react_to_typing_through(
+            true,
+            loaded(),
+            |config| {
+                assert!(config.lighting_react_to_typing);
+                *saved_after.borrow_mut() = Some(calls.borrow().clone());
+                Ok(())
+            },
+            record,
+        );
+        assert!(saved.is_ok());
+        assert_eq!(
+            *saved_after.borrow(),
+            Some(vec![]),
+            "nothing before the save"
+        );
+        assert_eq!(*calls.borrow(), vec![true]);
+
+        // An unreadable config.json is not saved over; off still reaches the gate.
+        calls.borrow_mut().clear();
+        let unreadable = || AppConfigSource::Unreadable("truncated".into());
+        let saves = RefCell::new(0);
+        let count = |_: &AppConfig| {
+            *saves.borrow_mut() += 1;
+            Ok(())
+        };
+        assert!(react_to_typing_through(true, unreadable(), count, record).is_err());
+        assert!(react_to_typing_through(false, unreadable(), count, record).is_err());
+        assert_eq!(*saves.borrow(), 0);
+        assert_eq!(*calls.borrow(), vec![false]);
+    }
+
+    /// A save of config.json carrying "React to typing" on, from any caller, a stale one
+    /// included, never opens the key gate, which fails closed; nor does one
+    /// carrying off close it. Only the setter does.
+    #[test]
+    fn a_save_never_changes_react_to_typing_in_the_key_gate() {
+        use crate::hardware::key_input::REACT_TO_TYPING_SET;
+        let calls = || REACT_TO_TYPING_SET.with(|calls| calls.borrow().clone());
+        REACT_TO_TYPING_SET.with(|calls| calls.borrow_mut().clear());
+        for on in [true, false] {
+            let config = AppConfig {
+                lighting_react_to_typing: on,
+                ..AppConfig::default()
+            };
+            assert!(save_through(&config, |_| Ok(())).is_ok());
+            assert!(save_through(&config, |_| Err("disk full".into())).is_err());
+        }
+        assert!(calls().is_empty(), "{:?}", calls());
+
+        // The setter reaches the gate.
+        let saved = react_to_typing_through(
+            true,
+            AppConfigSource::Missing,
+            |_| Ok(()),
+            crate::hardware::key_input::set_react_to_typing,
+        );
+        assert!(saved.is_ok());
+        assert_eq!(calls(), vec![true]);
     }
 
     /// A temporary directory of its own for one test, new and private (`tempfile`),
