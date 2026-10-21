@@ -178,12 +178,17 @@ fn main() {
         startup_mark("startup complete");
     });
 
+    // Runs when the main loop ends through `app.quit()`. Closing to tray
+    // never fires this (that path only hides the window, see
+    // `window.rs::hide_to_tray`). The real exits arrive as signals: the tray's
+    // Quit sends SIGTERM, and so does the session at logout. Without the
+    // handlers below the default action killed the process and this never
+    // ran.
+    //
     // Audio Sync spawns a real child process (`parec`) that has no reason
-    // to know the app is exiting - closing to tray never fires this (that
-    // path only hides the window, see `window.rs::hide_to_tray`), but the
-    // real process exit (tray "Sair", session logout, `kill`) does, and
-    // without this the capture thread and its `parec` child would leak
-    // for as long as the audio device keeps producing data, i.e. forever.
+    // to know the app is exiting, and without this the capture thread and
+    // its `parec` child would leak for as long as the audio device keeps
+    // producing data, i.e. forever.
     app.connect_shutdown(|_| {
         hardware::audio_sync::stop();
     });
@@ -232,6 +237,20 @@ fn main() {
         }
         startup_mark("window build returned");
     });
+
+    // SIGTERM (tray Quit, logout, `kill`), SIGINT (Ctrl+C) and SIGHUP (a
+    // closed terminal) end the app through `quit()`, so `connect_shutdown`
+    // runs. `quit()` ignores the hold `hide_to_tray` takes. Each handler
+    // stays installed: a second signal while shutdown still runs asks for
+    // the same thing again rather than killing the process halfway. SIGKILL
+    // still ends it at once.
+    for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+        let app = app.clone();
+        glib::unix_signal_add_local(signal, move || {
+            app.quit();
+            glib::ControlFlow::Continue
+        });
+    }
 
     // Internal lifecycle arguments are consumed above and never exposed to GTK/GApplication.
     app.run_with_args::<String>(&[]);
