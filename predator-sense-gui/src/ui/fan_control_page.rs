@@ -725,6 +725,17 @@ pub fn build() -> gtk::Widget {
         let weak: Weak<Page> = Rc::downgrade(&page);
         page_box.connect_map(move |_| {
             let Some(page) = weak.upgrade() else { return };
+            // Reopen on the mode in force, not the one inspected last time,
+            // without waiting up to three seconds for the follow timer.
+            if !page.pinned.get() {
+                if let Some(active) = crate::hardware::profile::get_current_profile() {
+                    let moved = *page.editing.borrow() != active.to_id();
+                    if moved {
+                        flush_pending(&page);
+                        *page.editing.borrow_mut() = active.to_id().to_string();
+                    }
+                }
+            }
             refresh(&page);
         });
     }
@@ -849,7 +860,11 @@ pub fn build() -> gtk::Widget {
             }
             if !page.pinned.get() {
                 if let Some(active) = crate::hardware::profile::get_current_profile() {
-                    if *page.editing.borrow() != active.to_id() {
+                    let moved = *page.editing.borrow() != active.to_id();
+                    if moved {
+                        // A pending edit belongs to the mode it was made on,
+                        // so it is saved there before `editing` moves on.
+                        flush_pending(&page);
                         *page.editing.borrow_mut() = active.to_id().to_string();
                     }
                 }
