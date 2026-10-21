@@ -310,21 +310,28 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
         // Startup mode. Applied once, off-thread: the firmware picks its own
         // index on every power cycle, so without this the machine comes back
         // wherever the EC left it rather than where the user actually wants to
-        // start. Applied through the startup variant, which does not rewrite
-        // a firmware mode that is already there: the EC flashes the light bar
-        // for every write of it, so an unchanged write is a flash after every
-        // login.
-        if let Some(default_mode) = cfg
-            .mode_default
-            .as_deref()
-            .and_then(crate::hardware::profile::PowerProfile::from_id)
+        // start. Chosen the way arriving on the current power source would
+        // choose it when that rule is on, so starting unplugged lands where an
+        // unplug would, and the battery rules agree with it before the first
+        // tick asks them (power_profile::startup_mode, which reads the settings
+        // pushed just above). Applied through the startup variant, which does
+        // not rewrite a firmware mode that is already there: the EC flashes the
+        // light bar for every write of it, so an unchanged write is a flash
+        // after every login.
         {
+            let default_mode = cfg
+                .mode_default
+                .as_deref()
+                .and_then(crate::hardware::profile::PowerProfile::from_id);
             background::run(
-                move || crate::hardware::profile::set_profile_at_startup(default_mode),
+                move || match crate::hardware::power_profile::startup_mode(default_mode) {
+                    Some(mode) => crate::hardware::profile::set_profile_at_startup(mode),
+                    None => Ok(()),
+                },
                 |result| {
                     if let Err(error) = result {
                         crate::hardware::applog::error(&format!(
-                            "startup: default mode not applied: {error}"
+                            "startup: startup mode not applied: {error}"
                         ));
                     }
                 },
