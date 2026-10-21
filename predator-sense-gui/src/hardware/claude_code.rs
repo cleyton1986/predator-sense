@@ -19,6 +19,8 @@
 //! of restarting an animated effect every few seconds.
 
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -31,7 +33,7 @@ use crate::hardware::hid_rgb;
 use crate::hardware::rgb::{Direction, RgbConfig, RgbMode};
 
 /// Argument `main` intercepts before anything GTK-related runs.
-pub const HOOK_ARGUMENT: &str = "--claude-code-hook";
+pub const HOOK_ARGUMENT: &str = predator_sense_protocol::internal::CLAUDE_CODE_HOOK_ARGUMENT;
 
 /// The `off` state: restore every device this module changed.
 const STATE_OFF: &str = "off";
@@ -186,28 +188,36 @@ struct Session {
     cover_logo: bool,
 }
 
-fn runtime_dir() -> PathBuf {
+/// The per-user runtime directory, and nothing else: a shared fallback such
+/// as `/tmp` would let another local user plant links at the fixed names
+/// used here. Without `XDG_RUNTIME_DIR` the feature simply stays off.
+fn runtime_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("predator-sense")
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| PathBuf::from(dir).join("predator-sense"))
 }
 
-fn session_path() -> PathBuf {
-    runtime_dir().join("claude-code.json")
+fn require_runtime_dir() -> Result<PathBuf, String> {
+    let dir = runtime_dir().ok_or_else(|| "XDG_RUNTIME_DIR is not set".to_string())?;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(dir)
 }
 
 fn load_session() -> Session {
-    fs::read(session_path())
-        .ok()
+    runtime_dir()
+        .and_then(|dir| fs::read(dir.join("claude-code.json")).ok())
         .and_then(|data| serde_json::from_slice(&data).ok())
         .unwrap_or_default()
 }
 
 fn save_session(session: &Session) -> Result<(), String> {
-    let path = session_path();
+    let path = require_runtime_dir()?.join("claude-code.json");
     let json = serde_json::to_vec(session).map_err(|e| e.to_string())?;
-    write_atomically(&path, &json)
+    replace_file(&path, &json, 0o600)
 }
 
 /// Claude Code runs the hooks of one event in parallel, and several sessions
@@ -215,13 +225,12 @@ fn save_session(session: &Session) -> Result<(), String> {
 /// session file and the controller writes that go with it. Released when the
 /// returned file is dropped.
 fn lock() -> Result<File, String> {
-    let dir = runtime_dir();
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(dir.join("claude-code.lock"))
+        .mode(0o600)
+        .open(require_runtime_dir()?.join("claude-code.lock"))
         .map_err(|e| e.to_string())?;
     // SAFETY: `file` is an open descriptor owned by this function's caller
     // for as long as the lock is needed.
@@ -414,7 +423,7 @@ pub fn run_hook(argument: Option<&str>) -> i32 {
             return 0;
         }
     };
-    if !hid_rgb::is_available() {
+    if runtime_dir().is_none() || !hid_rgb::is_available() {
         return 0;
     }
     if let Err(e) = transition(state, false) {
@@ -576,19 +585,97 @@ fn read_claude_settings(path: &Path) -> Result<Option<Value>, String> {
     }
 }
 
-fn write_atomically(path: &Path, data: &[u8]) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+/// Writes `data` to a new file with exactly `mode`, refusing to reuse
+/// anything already at that name.
+fn create_exclusive(path: &Path, data: &[u8], mode: u32) -> std::io::Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(path)?;
+    // `mode` above is filtered by the umask; this sets it exactly.
+    file.set_permissions(fs::Permissions::from_mode(mode))?;
+    file.write_all(data)?;
+    file.sync_all()
+}
+
+/// Atomically replaces `path` (which must not be a symlink - callers resolve
+/// it first) through a temporary file in the same directory created with
+/// `create_new` and `mode`.
+fn replace_file(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("{}: not a file path", path.display()))?
+        .to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    // Only a leftover of this same process id could be here.
+    let _ = fs::remove_file(&tmp);
+    let result = create_exclusive(&tmp, data, mode)
+        .and_then(|_| fs::rename(&tmp, path))
+        .map_err(|e| format!("{}: {e}", path.display()));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, data).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+    result
+}
+
+/// Rewrites another tool's settings file without changing anything about it
+/// except its contents: a symlink is followed and its target rewritten (the
+/// link stays a link), the original permission bits are kept (`0600` for a
+/// new file - it can hold API tokens), and the first time it is edited a
+/// `.bak` copy is left next to it. An existing backup is never overwritten.
+fn write_settings_preserving(path: &Path, data: &[u8]) -> Result<(), String> {
+    let error = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+    let target = match fs::symlink_metadata(path) {
+        Ok(_) => fs::canonicalize(path).map_err(|e| error(path, e))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(dir) = path.parent() {
+                fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(dir)
+                    .map_err(|e| error(dir, e))?;
+            }
+            path.to_path_buf()
+        }
+        Err(e) => return Err(error(path, e)),
+    };
+    let existing = match fs::metadata(&target) {
+        Ok(meta) => Some((meta.permissions().mode() & 0o7777, fs::read(&target))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(error(&target, e)),
+    };
+    let mode = existing.as_ref().map_or(0o600, |(mode, _)| *mode);
+    if let Some((_, original)) = existing {
+        let original = original.map_err(|e| error(&target, e))?;
+        let name = target.file_name().unwrap_or_default().to_string_lossy();
+        let backup = target.with_file_name(format!("{name}.bak"));
+        match create_exclusive(&backup, &original, mode) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(error(&backup, e)),
+        }
+    }
+    replace_file(&target, data, mode)
 }
 
 fn write_claude_settings(path: &Path, root: &Value) -> Result<(), String> {
     let mut json = serde_json::to_vec_pretty(root).map_err(|e| e.to_string())?;
     json.push(b'\n');
-    write_atomically(path, &json)
+    write_settings_preserving(path, &json)
+}
+
+/// Whether `executable` and every directory above it are owned by root and
+/// writable by nobody else - i.e. no ordinary user can swap the binary that
+/// Claude Code will run on every event.
+pub fn hook_binary_is_trusted(executable: &Path) -> bool {
+    let Ok(resolved) = fs::canonicalize(executable) else {
+        return false;
+    };
+    resolved.ancestors().all(|path| {
+        fs::metadata(path)
+            .is_ok_and(|meta| meta.uid() == 0 && meta.permissions().mode() & 0o022 == 0)
+    })
 }
 
 pub fn hooks_installed() -> bool {
@@ -607,8 +694,9 @@ pub fn install_hooks() -> Result<(), String> {
     write_claude_settings(&path, &root)
 }
 
-/// Removes the hooks and restores any device a session left lit.
-pub fn uninstall_hooks() -> Result<(), String> {
+/// Removes the hooks and leaves the lighting alone. What the installer runs
+/// on uninstall (`--claude-code-remove-hooks`), as the session user.
+pub fn remove_hooks_only() -> Result<(), String> {
     let path = claude_settings_path();
     if let Some(mut root) = read_claude_settings(&path)? {
         if has_our_hooks(&root) {
@@ -616,6 +704,12 @@ pub fn uninstall_hooks() -> Result<(), String> {
             write_claude_settings(&path, &root)?;
         }
     }
+    Ok(())
+}
+
+/// Removes the hooks and restores any device a session left lit.
+pub fn uninstall_hooks() -> Result<(), String> {
+    remove_hooks_only()?;
     transition(None, true)
 }
 
@@ -748,6 +842,86 @@ mod tests {
             }
         );
         assert_eq!(wanted(&settings, None), Session::default());
+    }
+
+    /// A fresh, empty directory for one test.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "predator-sense-claude-{}-{name}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[test]
+    fn rewriting_keeps_a_private_files_mode() {
+        let dir = scratch("mode");
+        let path = dir.join("settings.json");
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        write_settings_preserving(&path, b"{\"a\":1}").unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_new_settings_file_is_private() {
+        let dir = scratch("new");
+        let path = dir.join(".claude").join("settings.json");
+        write_settings_preserving(&path, b"{}").unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+        assert!(!dir.join(".claude").join("settings.json.bak").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_symlinked_settings_file_stays_a_link_and_its_target_is_written() {
+        let dir = scratch("link");
+        let real = dir.join("dotfiles-settings.json");
+        fs::write(&real, "{}").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o640)).unwrap();
+        let link = dir.join("settings.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_settings_preserving(&link, b"{\"a\":1}").unwrap();
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&real).unwrap(), "{\"a\":1}");
+        assert_eq!(mode_of(&real), 0o640);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_first_edit_leaves_a_backup_that_later_edits_never_overwrite() {
+        let dir = scratch("backup");
+        let path = dir.join("settings.json");
+        fs::write(&path, "original").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        write_settings_preserving(&path, b"first").unwrap();
+        write_settings_preserving(&path, b"second").unwrap();
+        let backup = dir.join("settings.json.bak");
+        assert_eq!(fs::read_to_string(&backup).unwrap(), "original");
+        assert_eq!(mode_of(&backup), 0o600);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_binary_the_user_can_replace_is_not_trusted() {
+        let dir = scratch("trust");
+        let binary = dir.join("predator-sense");
+        fs::write(&binary, "").unwrap();
+        assert!(!hook_binary_is_trusted(&binary));
+        assert!(!hook_binary_is_trusted(&dir.join("missing")));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

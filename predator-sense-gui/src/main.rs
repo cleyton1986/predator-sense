@@ -117,8 +117,17 @@ fn main() {
     // Claude Code hook: one lighting write, then exit - before GTK, D-Bus or
     // the single-instance claim, so it never touches a running window.
     let mut arguments = std::env::args().skip(1);
-    if arguments.next().as_deref() == Some(hardware::claude_code::HOOK_ARGUMENT) {
-        std::process::exit(hardware::claude_code::run_hook(arguments.next().as_deref()));
+    match arguments.next().as_deref() {
+        Some(predator_sense_protocol::internal::CLAUDE_CODE_HOOK_ARGUMENT) => {
+            std::process::exit(hardware::claude_code::run_hook(arguments.next().as_deref()));
+        }
+        Some(predator_sense_protocol::internal::CLAUDE_CODE_REMOVE_HOOKS_ARGUMENT) => {
+            if let Err(e) = hardware::claude_code::remove_hooks_only() {
+                eprintln!("predator-sense: Claude Code hooks not removed: {e}");
+            }
+            std::process::exit(0);
+        }
+        _ => {}
     }
 
     STARTUP_STARTED.get_or_init(Instant::now);

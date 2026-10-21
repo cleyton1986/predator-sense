@@ -32,6 +32,13 @@ pub mod internal {
     pub const HOTKEY_ARGUMENT: &str = "--internal-hotkey";
     pub const TRAY_ARGUMENT: &str = "--internal-tray";
     pub const DELAYED_APPLICATION_START_ARGUMENT: &str = "--internal-delayed-start";
+    /// Claude Code hook: `predator-sense --claude-code-hook <state>` writes
+    /// the lighting for that session state and exits before any GTK setup.
+    pub const CLAUDE_CODE_HOOK_ARGUMENT: &str = "--claude-code-hook";
+    /// Removes this app's Claude Code hooks from the session user's
+    /// `settings.json` and exits. The installer runs it on uninstall, so no
+    /// hook is left pointing at a binary that no longer exists.
+    pub const CLAUDE_CODE_REMOVE_HOOKS_ARGUMENT: &str = "--claude-code-remove-hooks";
     /// Start without showing the window.
     ///
     /// Most of the app's continuous behaviour - idle blanking, lighting that

@@ -1826,6 +1826,17 @@ impl Installer {
         }
         println!("  {YELLOW}{}{RESET}\n", self.text(Message::Removing));
 
+        // Before the binary goes away: otherwise every Claude Code event would
+        // run a hook command that no longer exists. Runs as the session user,
+        // so their settings.json keeps its owner, mode and any symlink.
+        if Path::new(path::APPLICATION).exists() {
+            let _ = self.run_as_user_quiet(
+                path::APPLICATION,
+                [predator_sense_protocol::internal::CLAUDE_CODE_REMOVE_HOOKS_ARGUMENT],
+                None,
+            );
+        }
+
         for process in [path::APPLICATION, path::HOTKEY, path::TRAY] {
             terminate_process(process);
         }

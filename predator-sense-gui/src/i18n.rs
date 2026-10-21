@@ -755,6 +755,7 @@ fn t_pt(key: &str) -> &str {
         "claude_code_sound_filter" => "Áudio",
         "claude_code_test" => "Testar",
         "claude_code_error" => "Erro: {0}",
+        "claude_code_untrusted_binary" => "Este Predator Sense está em {0}, um local que pode ser alterado sem root. Os hooks executam este arquivo a cada evento do Claude Code; prefira ativá-los pela versão instalada em /opt/predator-sense.",
         _ => key,
     }
 }
@@ -1452,6 +1453,7 @@ fn t_en(key: &str) -> &str {
         "claude_code_sound_filter" => "Audio",
         "claude_code_test" => "Test",
         "claude_code_error" => "Error: {0}",
+        "claude_code_untrusted_binary" => "This Predator Sense runs from {0}, a location that can be changed without root. The hooks run this file on every Claude Code event; prefer turning them on from the copy installed in /opt/predator-sense.",
         _ => key,
     }
 }
@@ -2149,6 +2151,7 @@ fn t_es(key: &str) -> &str {
         "claude_code_sound_filter" => "Audio",
         "claude_code_test" => "Probar",
         "claude_code_error" => "Error: {0}",
+        "claude_code_untrusted_binary" => "Este Predator Sense se ejecuta desde {0}, una ubicación que se puede modificar sin root. Los hooks ejecutan este archivo en cada evento de Claude Code; mejor actívalos desde la copia instalada en /opt/predator-sense.",
         _ => key,
     }
 }
@@ -2845,6 +2848,7 @@ fn t_zh(key: &str) -> &str {
         "claude_code_sound_filter" => "音频",
         "claude_code_test" => "测试",
         "claude_code_error" => "错误：{0}",
+        "claude_code_untrusted_binary" => "当前 Predator Sense 运行自 {0}，该位置无需 root 即可修改。钩子会在每个 Claude Code 事件中运行此文件；建议从安装在 /opt/predator-sense 的版本启用它们。",
         _ => key,
     }
 }
@@ -3541,6 +3545,7 @@ fn t_ja(key: &str) -> &str {
         "claude_code_sound_filter" => "オーディオ",
         "claude_code_test" => "テスト",
         "claude_code_error" => "エラー: {0}",
+        "claude_code_untrusted_binary" => "この Predator Sense は {0} から実行されています。この場所は root なしで変更できます。フックは Claude Code のイベントごとにこのファイルを実行するため、/opt/predator-sense にインストールされた版から有効にすることをおすすめします。",
         _ => key,
     }
 }
@@ -4237,6 +4242,7 @@ fn t_ru(key: &str) -> &str {
         "claude_code_sound_filter" => "Аудио",
         "claude_code_test" => "Проверить",
         "claude_code_error" => "Ошибка: {0}",
+        "claude_code_untrusted_binary" => "Этот Predator Sense запущен из {0} — места, которое можно изменить без root. Хуки запускают этот файл при каждом событии Claude Code; лучше включать их из копии, установленной в /opt/predator-sense.",
         _ => key,
     }
 }
@@ -4933,6 +4939,7 @@ fn t_de(key: &str) -> &str {
         "claude_code_sound_filter" => "Audio",
         "claude_code_test" => "Testen",
         "claude_code_error" => "Fehler: {0}",
+        "claude_code_untrusted_binary" => "Dieses Predator Sense läuft aus {0}, einem Ort, der ohne root geändert werden kann. Die Hooks führen diese Datei bei jedem Claude-Code-Ereignis aus; aktiviere sie besser aus der in /opt/predator-sense installierten Version.",
         _ => key,
     }
 }
@@ -5630,6 +5637,7 @@ fn t_it(key: &str) -> &str {
         "claude_code_sound_filter" => "Audio",
         "claude_code_test" => "Prova",
         "claude_code_error" => "Errore: {0}",
+        "claude_code_untrusted_binary" => "Questo Predator Sense è in esecuzione da {0}, una posizione modificabile senza root. Gli hook eseguono questo file a ogni evento di Claude Code; meglio attivarli dalla copia installata in /opt/predator-sense.",
         _ => key,
     }
 }
@@ -6327,6 +6335,7 @@ fn t_tr(key: &str) -> &str {
         "claude_code_sound_filter" => "Ses dosyası",
         "claude_code_test" => "Test et",
         "claude_code_error" => "Hata: {0}",
+        "claude_code_untrusted_binary" => "Bu Predator Sense, root olmadan değiştirilebilen {0} konumundan çalışıyor. Hook'lar bu dosyayı her Claude Code olayında çalıştırır; bunları /opt/predator-sense içine kurulu sürümden etkinleştirmeniz önerilir.",
         _ => key,
     }
 }

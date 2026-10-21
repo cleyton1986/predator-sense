@@ -62,6 +62,24 @@ pub fn build(window: &gtk::ApplicationWindow) -> gtk::ScrolledWindow {
     group.add(&enable_row);
     shell.append(&group);
 
+    // The hooks run this exact binary on every Claude Code event. From a
+    // build directory or anything else the user can write to, it could be
+    // swapped for something else; say so rather than refuse, since running a
+    // local build is legitimate while developing.
+    if let Ok(executable) = std::env::current_exe() {
+        if !claude_code::hook_binary_is_trusted(&executable) {
+            let warning = gtk::Label::new(Some(&tf(
+                "claude_code_untrusted_binary",
+                &[&executable.to_string_lossy()],
+            )));
+            warning.add_css_class("cover-logo-hint");
+            warning.add_css_class("status-error");
+            warning.set_wrap(true);
+            warning.set_halign(gtk::Align::Start);
+            shell.append(&warning);
+        }
+    }
+
     if !hid_rgb::is_available() {
         let note = gtk::Label::new(Some(t("claude_code_no_controller")));
         note.add_css_class("cover-logo-hint");
