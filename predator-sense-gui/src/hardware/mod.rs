@@ -12,6 +12,7 @@ pub mod chicony_rgb;
 pub mod discrete_gpu;
 pub mod display;
 pub mod eco_mode;
+pub mod effects;
 pub mod extras;
 pub mod fan;
 pub mod game_sync;
