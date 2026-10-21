@@ -112,6 +112,7 @@ Ispirato e basato sul progetto [acer-predator-turbo-and-rgb-keyboard-linux-modul
 | **Utilizzo** | Vista a 4 schede: CPU / GPU / Memoria / Storage con i processi principali, dettagli espandibili al click e animazione di fuoco in stile CSS sui gauge di temperatura |
 | **Rete** | Grafici di download/upload in tempo reale con tracciamento dei picchi e rilevamento automatico dell'interfaccia |
 | **Controllo RGB Tastiera** | Colori statici per zona (4 zone) ed effetti dinamici (Breathing, Neon, Wave, Shifting, Zoom) via WMI. Su hardware senza il modulo kernel, l'RGB funziona invece nativamente via USB/I2C-HID — chip ENEK5130 (statico a 4 zone, Breathing/Neon), chip Sunrex 2024+ (zona singola, elenco completo di effetti) o chip Chicony (palette a 7 colori, Helios 300) — auto-rilevato, vedi [Compatibilità](#compatibilità) |
+| **Illuminazione per modalità** | Ogni modalità di alimentazione mantiene la propria illuminazione, con preset con nome: gli effetti propri di ogni luce, o uno dei 32 temi integrati per tastiera, barra luminosa e logo. Le modifiche si applicano subito. Vedi [Illuminazione](#illuminazione) |
 | **Logo RGB della Cover** | Controlli indipendenti di accensione, colore fisso, luminosità, Breathing e Neon per l'emblema sul retro del display, con anteprima vettoriale in tempo reale. Mostrato solo dopo il rilevamento a runtime delle capacità HID |
 | **Profili di Prestazioni** | Modalità Silenzioso / Bilanciato / Prestazioni / Turbo, più un livello Eco esclusivo per la batteria (CPU governor + Intel EPP + limite di potenza della GPU) |
 | **Controllo Ventole** | RPM in tempo reale con ventole animate, interruttore CoolBoost, modalità Auto/Max, più controllo PWM per singola ventola e curva di temperatura automatica sperimentali (dove supportato) |
@@ -336,7 +337,26 @@ sudo installer/target/release/predator-sense-installer --install
 
 ## Utilizzo
 
+### Illuminazione
+
+Ogni modalità di alimentazione ha la propria illuminazione. Quando la modalità cambia, dall'app, dal tasto modalità o dal desktop, le luci passano all'illuminazione di quella modalità.
+
+1. Vai su **Illuminazione** nella barra laterale. La pagina si apre sulla modalità attiva; scegli un'altra modalità in alto per modificarne l'illuminazione.
+2. **Controllo illuminazione** imposta gli effetti propri di ogni luce. Scegli una luce nell'anteprima (tastiera, barra luminosa o logo, secondo ciò che ha il tuo portatile), poi un effetto e, dove l'effetto li ha, colore, velocità e direzione. Sulla tastiera del PH16-71, **Colori per tasto** dipinge singoli tasti nell'anteprima.
+3. **Temi** imposta insieme tastiera, barra luminosa e logo da un tema integrato. Scegli una scheda, poi una delle sue combinazioni di colori o i tuoi colori (**Personalizzati**) e le impostazioni che quel tema ha.
+4. Sotto l'anteprima, regola la luminosità di ogni luce.
+
+Le modifiche si applicano subito e vengono salvate; non c'è un pulsante Applica. Scegliere un tema al posto delle tue impostazioni, cancellare un disegno ed eliminare un preset offrono **Annulla**.
+
+**Preset.** **Salva come nuovo preset…** conserva l'illuminazione di una modalità con un nome, e **Carica preset** la mette sulla modalità che stai modificando. Una modalità che usa un preset mostra **Modificato** appena la modifichi: **Salva** scrive le modifiche nel preset, **Annulla modifiche** torna al preset.
+
+**Mostra sul mio portatile.** Mentre modifichi una modalità che non è quella attiva, questo interruttore mette la sua illuminazione sulle luci. Termina quando lo spegni, lasci la pagina o la modalità di alimentazione cambia.
+
+**Temi disegnati dall'app.** Sulla tastiera con colori per tasto e sulla barra luminosa a tre zone del PH16-71, l'app disegna da sé gli aspetti animati di un tema. I temi che illuminano i tasti premuti leggono la tastiera integrata mentre sono in esecuzione, quando **Reagisci alla digitazione** è attivo nel pannello del tema. Per farlo il tuo account deve essere nel gruppo `input`. Su ogni altra luce, e finché l'app non può disegnare (per esempio prima che le regole dei dispositivi dell'installer diano alla tua sessione l'accesso alla tastiera e alla barra luminosa), un tema mostra l'effetto firmware più vicino. **Metti in pausa le animazioni a batteria** le ferma a batteria. Quando l'app si chiude o esci dalla sessione, le luci che animava passano all'aspetto firmware del tema; un'immagine ferma (un disegno per tasto, o un'immagine del tema che non si muove) resta com'è.
+
 ### RGB della Tastiera
+
+Sugli altri modelli (tutti tranne PH16-71, PH16-72 e PH18-72) la pagina Illuminazione è quella precedente, descritta sotto.
 
 1. Vai su **Illuminazione** nella barra laterale
 2. Scegli **Statico** (colori per zona) o **Dinamico** (effetti)
@@ -667,6 +687,13 @@ predator-sense-gui/
 │   │   ├── rgb.rs               # RGB via /dev/acer-gkbbl-*
 │   │   ├── keyboard_rgb.rs      # Tastiera del PH16-71 (Chicony a 24 bit) via hidraw
 │   │   ├── chicony_hid.rs       # Nodo hidraw della tastiera, tenuto aperto
+│   │   ├── light_bar.rs         # Barra luminosa dello chassis
+│   │   ├── light_bar_zones.rs   # Le tre zone della barra luminosa (nodo facer)
+│   │   ├── lighting.rs          # Mette sulle luci l'illuminazione di ogni modalità
+│   │   ├── lighting_model/      # Illuminazione per modalità, preset, cosa scrive un'impostazione
+│   │   ├── lighting_renderer/   # Disegna gli aspetti dei temi disegnati dall'app
+│   │   ├── effects/             # Motore degli effetti e catalogo dei temi
+│   │   ├── key_input/           # Tasti premuti per i temi che reagiscono alla digitazione
 │   │   ├── hwmon.rs             # Indice /sys/class/hwmon (cache in OnceLock)
 │   │   ├── sensors.rs           # Temperature, ventole, RAM, rete
 │   │   ├── gpu.rs               # Metriche GPU via NVML, limite di potenza via helper
@@ -680,17 +707,21 @@ predator-sense-gui/
 │   │   ├── ai_assistant.rs      # Tool-calling di Ollama: allow-list fissa mappata sui setter hardware:: già esistenti
 │   │   ├── ai_snapshot.rs       # Snapshot effimero dello stato hardware, fornito all'IA e cancellato a ogni lettura
 │   │   ├── ai_actionlog.rs      # Log persistente e consultabile di tutto ciò che l'IA ha suggerito/applicato
+│   │   ├── quiet_panics.rs      # Hook di panic: nessun messaggio dai thread che vedono i tasti
 │   │   └── setup.rs             # Gestione del modulo kernel
 │   └── ui/                      # Pagine GTK4 (widget Cairo personalizzati)
 │       ├── window.rs            # Finestra principale, sidebar, barre neon, riduci a tray
 │       ├── still_drawing.rs     # Disegni statici conservati come pixel
 │       ├── ticks.rs             # Timer di animazione solo mentre visibili
 │       ├── flow_box.rs          # Contenuto di FlowBox senza rimuovere figli
+│       ├── toasts.rs            # Toast a livello di finestra (Annulla)
 │       ├── dashboard_page.rs    # Hero + specifiche di sistema
 │       ├── temperatures_page.rs # Tutti i gauge di temperatura
 │       ├── usage_page.rs        # CPU/GPU/Mem/Storage con i processi principali
 │       ├── network_page.rs      # Download/upload con tracciamento dei picchi
 │       ├── rgb_page.rs          # RGB della tastiera con zone visive
+│       ├── lighting_page.rs     # Pagina Illuminazione: modalità, preset, anteprima
+│       ├── lighting/            # Le sue schede (Controllo illuminazione, Temi), anteprima, righe
 │       ├── fan_control_page.rs  # Ventole animate + CoolBoost
 │       ├── fan_page.rs          # Profili di prestazioni
 │       ├── battery_page.rs      # Statistiche batteria + limite di carica
@@ -699,6 +730,8 @@ predator-sense-gui/
 │       ├── ai_page.rs           # Assistente IA: chat, gestione modelli, monitor risorse, log delle azioni
 │       ├── setup_page.rs        # Wizard di configurazione del modulo kernel
 │       └── gauge_widget.rs      # Widget gauge circolare tratteggiato
+├── tests/data/                  # Fotogrammi di riferimento degli effetti, dati di temi e configurazione
+├── tools/                       # gen-golden.js e l'effects.js che esegue (gjs)
 └── resources/
     ├── tray/                    # Sorgenti dell'icona tray (PNG)
     ├── style.css                # Tema scuro gaming
