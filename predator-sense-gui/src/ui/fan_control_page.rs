@@ -918,7 +918,7 @@ pub fn build() -> gtk::Widget {
     let anim_speed_anim = anim_speed.clone();
 
     let page_anim = page_box.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+    crate::ui::ticks::while_mapped(&page_anim.clone(), 60, move || {
         if !crate::app_state::is_window_visible() || !page_anim.is_mapped() {
             return glib::ControlFlow::Continue;
         }

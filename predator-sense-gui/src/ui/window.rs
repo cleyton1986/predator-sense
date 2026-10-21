@@ -149,7 +149,7 @@ pub fn build(app: &adw::Application) {
         let last_state: Rc<Cell<ThemeState>> = Rc::new(Cell::new((None, false)));
         let apply_if_changed = move || {
             let now = crate::hardware::profile::get_current_profile();
-            let keep_default = config::load_app_config().keep_default_theme_color;
+            let keep_default = config::load_app_config_cached().keep_default_theme_color;
             let state = (now, keep_default);
             if state != last_state.get() {
                 last_state.set(state);
@@ -164,8 +164,28 @@ pub fn build(app: &adw::Application) {
             }
         };
         apply_if_changed();
+        // Only while the window is on screen: reading the mode is a WMI call
+        // and a sweep of every cpufreq policy, and a colour nobody can see
+        // can wait. Coming back from the tray maps the window again, and
+        // coming back from minimized ends its suspension; both catch up at
+        // once instead of on the next tick.
+        let apply_if_changed: Rc<dyn Fn()> = Rc::new(apply_if_changed);
+        {
+            let apply = apply_if_changed.clone();
+            window.connect_map(move |_| apply());
+        }
+        if window.find_property(SUSPENDED_PROPERTY).is_some() {
+            let apply = apply_if_changed.clone();
+            window.connect_notify_local(Some(SUSPENDED_PROPERTY), move |window, _| {
+                if !window.property::<bool>(SUSPENDED_PROPERTY) {
+                    apply();
+                }
+            });
+        }
         glib::timeout_add_seconds_local(2, move || {
-            apply_if_changed();
+            if crate::app_state::is_window_visible() {
+                apply_if_changed();
+            }
             glib::ControlFlow::Continue
         });
     }
@@ -739,11 +759,13 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
 
 
         glib::timeout_add_seconds_local(5, move || {
-            // Re-reads the game list from config every tick (cheap: a small
-            // Vec clone), same reasoning as re-reading `ai_check_interval_min`
-            // below - editing the list in the UI takes effect on the next
-            // tick, no restart needed.
-            crate::hardware::game_sync::check(&config::load_app_config().game_profiles);
+            // Re-reads the game list from config every tick, same reasoning
+            // as re-reading `ai_check_interval_min` below - editing the list
+            // in the UI takes effect on the next tick, no restart needed. The
+            // cached copy, which every save of the config invalidates, so the
+            // file is parsed only after a change instead of every five
+            // seconds.
+            crate::hardware::game_sync::check(&config::load_app_config_cached().game_profiles);
             glib::ControlFlow::Continue
         });
 
@@ -1155,7 +1177,8 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
     // here was visually identical but burned ~30% CPU drawing layered Cairo
     // strokes on every redraw cycle of the entire window.
     let phase_c = pulse_phase.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+    // No timer at all while the window sits in the tray, which unmaps it.
+    crate::ui::ticks::while_mapped(&neon_bars[0].clone(), 200, move || {
         if !crate::app_state::is_window_visible() {
             return glib::ControlFlow::Continue;
         }
@@ -1593,7 +1616,7 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
         let dot_pulses = rgb::is_module_loaded();
         let dot_c = dot.clone();
         let phase: Rc<RefCell<f64>> = Rc::new(RefCell::new(0.0));
-        glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
+        crate::ui::ticks::while_mapped(&dot, 200, move || {
             if !crate::app_state::is_window_visible() {
                 return glib::ControlFlow::Continue;
             }

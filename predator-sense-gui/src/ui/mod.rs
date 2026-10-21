@@ -32,6 +32,7 @@ pub mod rgb_page;
 pub mod scroll_guard;
 pub mod setup_page;
 pub mod tech_gauge;
+pub mod ticks;
 pub mod temperatures_page;
 pub mod tools_page;
 pub mod usage_page;

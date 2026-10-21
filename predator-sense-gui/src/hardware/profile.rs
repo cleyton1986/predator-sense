@@ -425,10 +425,12 @@ fn detect_cpu_capabilities_at(sysfs_root: &Path) -> CpuCapabilities {
         && policy_dirs
             .iter()
             .all(|policy| policy.join("energy_performance_preference").exists());
-    let all_intel_pstate = !policy_dirs.is_empty()
-        && policy_dirs.iter().all(|policy| {
-            read_trimmed(&policy.join("scaling_driver")).as_deref() == Some("intel_pstate")
-        });
+    // One policy's driver is every policy's: the kernel registers a single
+    // cpufreq driver for the whole system. Reading all 24 on a PH16-71 made
+    // every mode read, which several timers make, cost 23 extra files.
+    let all_intel_pstate = policy_dirs.first().is_some_and(|policy| {
+        read_trimmed(&policy.join("scaling_driver")).as_deref() == Some("intel_pstate")
+    });
     let intel_pstate_active =
         read_trimmed(&sysfs_root.join("devices/system/cpu/intel_pstate/status")).as_deref()
             == Some("active");

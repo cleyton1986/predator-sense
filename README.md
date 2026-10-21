@@ -666,6 +666,7 @@ predator-sense-gui/
 │   │   └── setup.rs             # Kernel module management
 │   └── ui/                      # GTK4 pages (Cairo custom widgets)
 │       ├── window.rs            # Main window, sidebar, neon bars, hide-to-tray
+│       ├── ticks.rs             # Animation timers only while shown
 │       ├── flow_box.rs          # Flow box contents without removing children
 │       ├── dashboard_page.rs    # Hero + system specs
 │       ├── temperatures_page.rs # All temperature gauges
