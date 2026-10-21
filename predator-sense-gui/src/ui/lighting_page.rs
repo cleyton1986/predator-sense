@@ -38,7 +38,7 @@ use crate::hardware::profile::{self, PowerProfile};
 use crate::ui::lighting::colour_model;
 use crate::ui::lighting::columns::{self, Arrangement};
 use crate::ui::lighting::control::ControlPane;
-use crate::ui::lighting::control_model::Facts;
+use crate::ui::lighting::control_model::{Facts, FourZoneFacts};
 use crate::ui::lighting::frame_model::{self, ModeLayout, PageLayout, Tab, MODES};
 use crate::ui::lighting::idle;
 use crate::ui::lighting::mode_select::ModeSelect;
@@ -115,12 +115,29 @@ impl Machine {
     /// This machine, from the system.
     fn system(lights: Lights) -> Machine {
         let caps = crate::hardware::capabilities::get();
+        let four_zone =
+            if lights.hw.keyboard == Some(crate::hardware::effects::themes::KeyboardKind::Zones4) {
+                use crate::hardware::{audio_sync, hid_rgb, rgb};
+                let hid = hid_rgb::is_available();
+                let writable = hid || rgb::is_static_device_available();
+                FourZoneFacts::found(
+                    hid,
+                    hid_rgb::keyboard_supports_effect,
+                    hid_rgb::keyboard_effect_supports_direction,
+                    writable && audio_sync::is_available(),
+                )
+            } else {
+                FourZoneFacts::default()
+            };
         Machine {
             lights,
             facts: Facts {
                 bar_modes: crate::hardware::light_bar::LightBarMode::available(),
                 bar_speed: crate::hardware::light_bar::speed_range(),
                 zones: caps.light_bar_zones,
+                four_zone,
+                // From its capability report, as answered when the page was built.
+                cover_logo_effects: lighting::cover_logo_effects(),
             },
             idle: (caps.keyboard_rgb, caps.light_bar),
             live: true,
@@ -140,6 +157,8 @@ pub(crate) struct Page {
     base_lights: Lights,
     /// `Machine::active`.
     fixed_active: Option<PowerProfile>,
+    /// Audio Sync is on (`audio_sync_enabled`), as config.json held it at the last show.
+    audio_sync_on: Cell<bool>,
     edited: Cell<PowerProfile>,
     show_on_laptop: Cell<bool>,
     modes: Rc<ModeSelect>,
@@ -183,20 +202,44 @@ pub(crate) struct Page {
     preview_label: RefCell<String>,
 }
 
+/// The Lighting page for every model: built from the lights the machine has,
+/// or its empty state when it has none the app can drive.
 pub fn build() -> gtk::Widget {
+    // The ENE logo's capability report, asked here as the RGB page asked it when it was
+    // built, if no apply has had an answer yet: `lights` never asks on this thread.
+    lighting::ask_cover_logo_effects();
     let lights = lighting::lights();
     if !lights.hw.has_lights() {
-        let scroll = gtk::ScrolledWindow::new();
-        let note = gtk::Label::new(Some(crate::i18n::t("lighting_no_devices")));
-        note.add_css_class("info-note");
-        note.set_wrap(true);
-        note.set_margin_top(24);
-        scroll.set_child(Some(&note));
-        return scroll.upcast();
+        return empty_state();
     }
     let page = Page::new(Machine::system(lights));
     PAGE.with(|slot| *slot.borrow_mut() = Some(page.clone()));
     page.root.clone().upcast()
+}
+
+/// The page on a machine with no light the app can drive (its empty state): its
+/// title and one line saying so.
+pub(crate) fn empty_state() -> gtk::Widget {
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    let margin = frame_model::PAGE_MARGIN;
+    column.set_margin_top(margin);
+    column.set_margin_bottom(margin);
+    column.set_margin_start(margin);
+    column.set_margin_end(margin);
+    let title = gtk::Label::new(Some(crate::i18n::t("lighting")));
+    title.add_css_class("lighting-page-title");
+    title.set_xalign(0.0);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    let note = gtk::Label::new(Some(crate::i18n::t("lighting_no_devices")));
+    note.add_css_class("lighting-row-sub");
+    note.set_wrap(true);
+    note.set_xalign(0.0);
+    column.append(&title);
+    column.append(&note);
+    scroll.set_child(Some(&column));
+    scroll.upcast()
 }
 
 /// A tab of the strip: its title and the "in use" mark.
@@ -390,6 +433,7 @@ impl Page {
                 live,
                 base_lights: lights,
                 fixed_active,
+                audio_sync_on: Cell::new(false),
                 edited: Cell::new(edited),
                 show_on_laptop: Cell::new(false),
                 modes,
@@ -695,6 +739,7 @@ impl Page {
 
     fn show(&self, cfg: &AppConfig) {
         let active = self.active();
+        self.audio_sync_on.set(cfg.audio_sync_enabled);
         let edited = self.edited.get();
         let captions: Vec<(PowerProfile, String)> = MODES
             .into_iter()
@@ -807,7 +852,8 @@ impl Page {
             &frame_model::describe_setup(&setup, &lights),
         );
         let saved = self.saved_colours.borrow().clone();
-        self.control.show(&setup, lights, &saved);
+        self.control
+            .show(&setup, lights, &saved, self.audio_sync_on.get());
         let modes = self.mode_themes.borrow().clone();
         let memory = self.theme_memory.borrow().clone();
         self.themes.show(&Shown {
@@ -933,6 +979,14 @@ impl Page {
             ));
         }
         self.refresh();
+        self.apply_lights();
+    }
+
+    /// The four-zone keyboard's "Audio Sync" switch: one setting for the app, as on its old
+    /// page. The lights then get the setup again, which starts or stops the capture
+    /// (`lighting::apply_mode`); nothing else changes on them.
+    pub(crate) fn set_audio_sync(&self, on: bool) {
+        self.change(|cfg| cfg.audio_sync_enabled = on);
         self.apply_lights();
     }
 
@@ -1282,6 +1336,11 @@ impl Page {
         self.preview.run_for_render(seconds);
     }
 
+    /// Picks `light` in the preview's switcher, as a click on it does.
+    pub(crate) fn select_light(&self, light: PreviewLight) {
+        self.preview.select_for_render(light);
+    }
+
     /// Opens `tab`, as a click on it does.
     pub(crate) fn open_tab(&self, tab: Tab) {
         match tab {
@@ -1572,7 +1631,8 @@ pub(crate) fn at_exit() {
 }
 
 /// The machine is back from a suspend: "Show on my laptop" ends, and the resume restore
-/// puts the active mode's lighting back.
+/// puts the active mode's lighting back, on every light the preview changed too
+/// (`lighting::restore_saved`).
 pub(crate) fn machine_resumed() {
     if let Some(page) = page() {
         page.end_show_on_laptop(false);
@@ -1608,6 +1668,39 @@ pub fn apply_lighting_for_mode(mode: PowerProfile) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A machine with no light the app drives gets the empty state: the page's title and the
+    /// one line saying no lighting was found, and nothing to edit. In a window never shown.
+    #[test]
+    fn a_machine_without_lights_gets_the_empty_state() {
+        crate::ui::gtk_test::run("lighting_page", || {
+            let widget = empty_state();
+            let mut texts = Vec::new();
+            let mut controls = 0;
+            let mut stack = vec![widget.clone()];
+            while let Some(w) = stack.pop() {
+                if let Some(label) = w.downcast_ref::<gtk::Label>() {
+                    texts.push(label.text().to_string());
+                }
+                if w.is::<gtk::Button>() || w.is::<gtk::Scale>() || w.is::<gtk::Switch>() {
+                    controls += 1;
+                }
+                let mut child = w.first_child();
+                while let Some(c) = child {
+                    child = c.next_sibling();
+                    stack.push(c);
+                }
+            }
+            texts.sort();
+            let mut wanted = vec![
+                crate::i18n::t("lighting").to_string(),
+                crate::i18n::t("lighting_no_devices").to_string(),
+            ];
+            wanted.sort();
+            assert_eq!(texts, wanted);
+            assert_eq!(controls, 0);
+        });
+    }
 
     /// A tab switch shows the new tab's pane at once: a transition would draw the old pane
     /// (the Themes tab's cards) over the new one while it fades or slides.

@@ -14,11 +14,13 @@
 
 use crate::hardware::effects::layout::{KB_H, KB_W};
 use crate::hardware::effects::sim::SimAudio;
-use crate::hardware::effects::themes::{Hardware, KeyboardKind, LightLook, PALETTE7};
+use crate::hardware::effects::themes::{Hardware, KeyboardKind, LightLook, LogoKind, PALETTE7};
 use crate::hardware::effects::{self, ph16_71, Effect, Input, Layout, ParamValue, Params};
 use crate::hardware::keyboard_rgb::{self, KeyboardState};
 use crate::hardware::light_bar::{LightBarMode, LightBarState};
-use crate::hardware::lighting_model::{self, DrawnLook, LightingSetup, Lights, SetupKind};
+use crate::hardware::lighting_model::{
+    self, colour_hex, DrawnLook, LightingSetup, Lights, SetupKind,
+};
 use crate::ui::lighting::key_cursor::Move;
 
 /// One preview step: the renderer's keyboard rate.
@@ -42,6 +44,18 @@ pub enum Run {
     Picture(Vec<[u8; 3]>),
     /// Nothing lit: Off, or no state for this light.
     Dark,
+    /// The light shows its own firmware look, which the app neither sets nor knows: the
+    /// four-zone keyboard left to its default ("Reset to default", `Plan::four_zone_default`;
+    /// it keeps its look until the next login, then shows its factory default). Drawn
+    /// unlit, in neutral grey, never as dark.
+    Firmware,
+}
+
+impl Run {
+    /// It is [`Run::Firmware`].
+    pub fn is_firmware(&self) -> bool {
+        matches!(self, Run::Firmware)
+    }
 }
 
 /// What each light of the machine runs; `None` for a light it does not have.
@@ -50,10 +64,6 @@ pub struct Spec {
     pub keyboard: Option<Run>,
     pub bar: Option<Run>,
     pub logo: Option<Run>,
-}
-
-fn hex([r, g, b]: [u8; 3]) -> String {
-    format!("#{r:02X}{g:02X}{b:02X}")
 }
 
 fn num(id: &str, v: f64) -> (String, ParamValue) {
@@ -97,7 +107,7 @@ pub fn keyboard_run(state: &KeyboardState) -> Run {
     ]
     .into_iter()
     .collect();
-    effect(id, params, vec![hex([state.red, state.green, state.blue])])
+    effect(id, params, vec![colour_hex([state.red, state.green, state.blue])])
 }
 
 /// The light bar's own effect as its simulation (`hw.*`). The bar's effects beyond the eight
@@ -116,9 +126,9 @@ pub fn bar_run(state: &LightBarState) -> Run {
         _ => "hw.static",
     };
     let palette = if state.per_zone && state.zones.is_some() {
-        state.zone_colours().iter().map(|c| hex(*c)).collect()
+        state.zone_colours().iter().map(|c| colour_hex(*c)).collect()
     } else {
-        vec![hex(state.single())]
+        vec![colour_hex(state.single())]
     };
     let params = [
         num("speed", f64::from(state.speed.min(5))),
@@ -169,7 +179,8 @@ pub fn spec(setup: &LightingSetup, lights: &Lights) -> Spec {
                         _,
                     ) => effect(id, params.clone(), palette.clone()),
                     (None, Some(state)) => keyboard_run(&state),
-                    (None, None) => other_keyboard(m),
+                    (None, None) if plan.four_zone_default => Run::Firmware,
+                    (None, None) => other_keyboard(m, hw.keyboard),
                 });
             }
             if hw.bar.is_some() {
@@ -182,7 +193,7 @@ pub fn spec(setup: &LightingSetup, lights: &Lights) -> Spec {
                 }));
             }
             if hw.logo.is_some() {
-                spec.logo = Some(logo_run(m));
+                spec.logo = Some(logo_run(m, hw.logo));
             }
         }
         SetupKind::Unknown(_) => {}
@@ -217,7 +228,7 @@ pub const PREVIEW_FPS: &[(u32, &[&str])] = &[
 pub const SLOW_PREVIEW_FPS: u32 = 15;
 
 /// How many frames a second the preview draws for `spec`: the fastest of its lights' looks
-/// ([`PREVIEW_FPS`]); a picture or a dark light is still.
+/// ([`PREVIEW_FPS`]); a picture, a dark light or one on its own firmware look is still.
 pub fn preview_fps(spec: &Spec) -> u32 {
     [&spec.keyboard, &spec.bar, &spec.logo]
         .into_iter()
@@ -227,57 +238,82 @@ pub fn preview_fps(spec: &Spec) -> u32 {
                 .iter()
                 .find(|(_, ids)| ids.contains(&id.as_str()))
                 .map_or(SLOW_PREVIEW_FPS, |(fps, _)| *fps),
-            Run::Picture(_) | Run::Dark => SLOW_PREVIEW_FPS,
+            Run::Picture(_) | Run::Dark | Run::Firmware => SLOW_PREVIEW_FPS,
         })
         .max()
         .unwrap_or(SLOW_PREVIEW_FPS)
 }
 
-/// Another model's keyboard state, approximately.
-fn other_keyboard(m: &lighting_model::ManualSetup) -> Run {
-    if let Some(palette) = m.palette_keyboard {
-        let colour = PALETTE7
-            .get(palette.color.saturating_sub(1))
-            .map(|(_, c)| c.to_string())
-            .unwrap_or_else(|| "#FFFFFF".into());
-        let id = if palette.effect == 1 {
-            "hw.static"
-        } else {
-            "hw.breathing"
-        };
-        return effect(id, slow(), vec![colour]);
-    }
-    if let Some(keyboard) = &m.four_zone_keyboard {
-        if keyboard.is_static {
-            let colours = keyboard.write().zone_colors;
-            return effect(
-                "hw.static",
-                Params::new(),
-                colours.iter().map(|&(r, g, b)| hex([r, g, b])).collect(),
-            );
+/// Another model's keyboard state (`kind`'s), approximately, as the reference design's `deviceFx`
+/// shows another model's effect: its plain colour still, any effect taking a colour a pulse
+/// in it, one taking none (rgb.rs's `needs_color`) a colour cycle, Off dark; an effect's
+/// own speed scaled onto the simulation's 0..5. Never an imitation of a PH16-71 effect of
+/// the same name.
+fn other_keyboard(m: &lighting_model::ManualSetup, kind: Option<KeyboardKind>) -> Run {
+    use crate::hardware::magic_rgb::KeyboardEffect;
+    match kind {
+        Some(KeyboardKind::Palette) => {
+            let Some(palette) = m.palette_keyboard else {
+                return Run::Dark;
+            };
+            let colour = PALETTE7
+                .get(palette.color.saturating_sub(1))
+                .map(|(_, c)| c.to_string())
+                .unwrap_or_else(|| "#FFFFFF".into());
+            if palette.effect == 1 {
+                return effect("hw.static", Params::new(), vec![colour]);
+            }
+            effect("hw.breathing", speed_of(palette.speed, 255), vec![colour])
         }
-        if let Some(e) = &keyboard.dynamic_last {
-            return effect("hw.breathing", slow(), vec![hex([e.red, e.green, e.blue])]);
+        Some(KeyboardKind::Zones4) => {
+            let Some(keyboard) = &m.four_zone_keyboard else {
+                return Run::Dark;
+            };
+            if keyboard.is_static {
+                return effect(
+                    "hw.static",
+                    Params::new(),
+                    keyboard.zone_colours().iter().map(|c| colour_hex(*c)).collect(),
+                );
+            }
+            match &keyboard.dynamic_last {
+                Some(e) => {
+                    let id = if e.mode.needs_color() {
+                        "hw.breathing"
+                    } else {
+                        "hw.neon"
+                    };
+                    effect(
+                        id,
+                        speed_of(e.speed, 9),
+                        vec![colour_hex([e.red, e.green, e.blue])],
+                    )
+                }
+                None => Run::Dark,
+            }
         }
+        Some(KeyboardKind::OneColour) => {
+            let Some(k) = m.magic_keyboard else {
+                return Run::Dark;
+            };
+            let colour = vec![colour_hex([k.red, k.green, k.blue])];
+            match k.effect {
+                KeyboardEffect::Off => Run::Dark,
+                KeyboardEffect::Static => effect("hw.static", Params::new(), colour),
+                _ => effect("hw.breathing", speed_of(k.speed, 9), colour),
+            }
+        }
+        Some(KeyboardKind::PerKey) | None => Run::Dark,
     }
-    if let Some(k) = m.magic_keyboard {
-        use crate::hardware::magic_rgb::KeyboardEffect;
-        let id = match k.effect {
-            KeyboardEffect::Off => return Run::Dark,
-            KeyboardEffect::Static => "hw.static",
-            _ => "hw.breathing",
-        };
-        return effect(id, slow(), vec![hex([k.red, k.green, k.blue])]);
-    }
-    Run::Dark
 }
 
-fn slow() -> Params {
-    [num("speed", 1.0)].into_iter().collect()
-}
-
-/// An effect's speed of `lo..=hi`, as the simulations' whole 0..5 (the reference design's
+/// An effect's own speed, `0..=max`, as the simulations' whole 0..5 (the reference design's
 /// `Math.round((v - min) / (max - min) * 5)`).
+fn speed_of(value: u8, max: u8) -> Params {
+    speed_between(value, 0, max)
+}
+
+/// The same for a speed of `lo..=hi`.
 fn speed_between(value: u8, lo: u8, hi: u8) -> Params {
     let span = f64::from(hi.saturating_sub(lo).max(1));
     let speed = (f64::from(value.clamp(lo, hi.max(lo)) - lo) / span * 5.0).round();
@@ -290,7 +326,7 @@ fn speed_between(value: u8, lo: u8, hi: u8) -> Params {
 /// WMI frame's 1..5) scaled onto the simulations' 0..5. Never the PH16-71 bar's effect of the
 /// same name: no one has seen this bar's.
 fn one_colour_bar_run(state: &LightBarState) -> Run {
-    let colour = vec![hex(state.single())];
+    let colour = vec![colour_hex(state.single())];
     let speed = speed_between(
         state.speed,
         crate::hardware::light_bar::SPEED_MIN,
@@ -304,27 +340,39 @@ fn one_colour_bar_run(state: &LightBarState) -> Run {
     }
 }
 
-/// A lid logo's state, approximately.
-fn logo_run(m: &lighting_model::ManualSetup) -> Run {
-    if let Some(logo) = m.magic_logo {
-        return effect(
-            "hw.static",
-            Params::new(),
-            vec![hex([logo.red, logo.green, logo.blue])],
-        );
-    }
-    if let Some(logo) = &m.cover_logo {
-        if !logo.enabled {
-            return Run::Dark;
+/// A lid logo's state (`kind`'s), approximately, as the other models' keyboards: Static its
+/// still colour, an effect taking a colour a pulse in it (the Darfon logo's Breathing), one
+/// taking none a colour cycle (the ENE logo's Breath and Neon: its page let the colour be
+/// chosen on Static only, and drew both cycling through colours), Off dark; its 0..9 speed
+/// onto the simulations' 0..5.
+fn logo_run(m: &lighting_model::ManualSetup, kind: Option<LogoKind>) -> Run {
+    use crate::hardware::magic_rgb::LogoEffect;
+    use crate::hardware::rgb::RgbMode;
+    match kind {
+        Some(LogoKind::Darfon) => {
+            let Some(l) = m.magic_logo else {
+                return Run::Dark;
+            };
+            let colour = vec![colour_hex([l.red, l.green, l.blue])];
+            match l.effect {
+                None => Run::Dark,
+                Some(LogoEffect::Static) => effect("hw.static", Params::new(), colour),
+                Some(LogoEffect::Breathing) => effect("hw.breathing", speed_of(l.speed, 9), colour),
+            }
         }
-        let c = &logo.config;
-        return effect(
-            "hw.static",
-            Params::new(),
-            vec![hex([c.red, c.green, c.blue])],
-        );
+        Some(LogoKind::Ene) => {
+            let Some(l) = m.cover_logo.as_ref().filter(|l| l.enabled) else {
+                return Run::Dark;
+            };
+            let c = &l.config;
+            let colour = vec![colour_hex([c.red, c.green, c.blue])];
+            match c.mode {
+                RgbMode::Static => effect("hw.static", Params::new(), colour),
+                _ => effect("hw.neon", speed_of(c.speed, 9), colour),
+            }
+        }
+        None => Run::Dark,
     }
-    Run::Dark
 }
 
 /// One light's running look.
@@ -360,7 +408,7 @@ impl Light {
                     .map(|key| picture.get(key.slot as usize).copied().unwrap_or([0; 3]))
                     .collect(),
             ),
-            Run::Dark => Light::Still(vec![[0; 3]; layout.len()]),
+            Run::Dark | Run::Firmware => Light::Still(vec![[0; 3]; layout.len()]),
         }
     }
 
@@ -864,10 +912,14 @@ pub fn geometry(
             });
         }
     } else {
+        // As wide as the reference design draws it, unless that is too tall for the chassis (it is:
+        // the
+        // generic rows at the PH16-71's width came out 0.3 key taller than the drawing and
+        // lost half the bottom row), then as tall as fits; centred in the chassis.
         let g = generic();
-        let gs = KB_W / g.width * 0.94;
-        let gx = ox + KB_W * u * 0.03;
-        let gy = oy - 0.33 * u + (KB_H + 0.9 - g.height * gs) * u / 2.0;
+        let gs = (KB_W / g.width * 0.94).min(chassis.h / u * 0.9 / g.height);
+        let gx = ox + (KB_W - g.width * gs) * u / 2.0;
+        let gy = chassis.y + (chassis.h - g.height * gs * u) / 2.0;
         for &(x, y, w, h, zone) in &g.keys {
             keys.push(DrawnKey {
                 rect: Rect {
@@ -1321,6 +1373,93 @@ mod tests {
         };
         let own = spec(&manual(None, Some(scanner)), &without_node);
         assert!(matches!(own.bar, Some(Run::Effect { id, .. }) if id == "hw.scanner"));
+    }
+
+    /// The lid logos are shown approximately: Static still in its colour, the Darfon logo's
+    /// Breathing a pulse in it, the ENE logo's Breath and Neon, which take no colour on its
+    /// page, a colour cycle, Off dark; their 0..9 speed onto 0..5.
+    #[test]
+    fn the_logos_are_shown_approximately() {
+        use crate::config::{CoverLogoSettings, MagicRgbLogoState};
+        use crate::hardware::lighting_model::ManualSetup;
+        use crate::hardware::magic_rgb::LogoEffect;
+        use crate::hardware::rgb::{RgbConfig, RgbMode};
+        let hw = |logo| Hardware {
+            keyboard: None,
+            bar: None,
+            logo: Some(logo),
+        };
+        let id = |run: Option<Run>| match run {
+            Some(Run::Effect {
+                id,
+                params,
+                palette,
+            }) => Some((id, params.get("speed").cloned(), palette)),
+            Some(Run::Dark) => None,
+            other => panic!("{other:?}"),
+        };
+        let darfon = |effect| {
+            let setup = LightingSetup::from_manual(ManualSetup {
+                magic_logo: Some(MagicRgbLogoState {
+                    effect,
+                    brightness: 100,
+                    speed: 9,
+                    red: 0x10,
+                    green: 0x20,
+                    blue: 0x30,
+                }),
+                ..ManualSetup::default()
+            });
+            id(spec(&setup, &lights(hw(LogoKind::Darfon))).logo)
+        };
+        let colour = vec!["#102030".to_string()];
+        assert_eq!(
+            darfon(Some(LogoEffect::Static)),
+            Some(("hw.static".into(), None, colour.clone()))
+        );
+        assert_eq!(
+            darfon(Some(LogoEffect::Breathing)),
+            Some((
+                "hw.breathing".into(),
+                Some(ParamValue::Num(5.0)),
+                colour.clone()
+            ))
+        );
+        assert_eq!(darfon(None), None);
+        let ene = |enabled, mode| {
+            let setup = LightingSetup::from_manual(ManualSetup {
+                cover_logo: Some(CoverLogoSettings {
+                    enabled,
+                    config: RgbConfig {
+                        mode,
+                        speed: 0,
+                        red: 0x10,
+                        green: 0x20,
+                        blue: 0x30,
+                        ..RgbConfig::default()
+                    },
+                }),
+                ..ManualSetup::default()
+            });
+            id(spec(&setup, &lights(hw(LogoKind::Ene))).logo).map(|(id, _, _)| id)
+        };
+        assert_eq!(ene(true, RgbMode::Static).as_deref(), Some("hw.static"));
+        assert_eq!(
+            ene(true, RgbMode::Breath).as_deref(),
+            Some("hw.neon"),
+            "Breath takes no colour there: a colour cycle"
+        );
+        assert_eq!(ene(true, RgbMode::Neon).as_deref(), Some("hw.neon"));
+        assert_eq!(ene(false, RgbMode::Static), None, "its power off");
+        // A logo with no state: dark.
+        assert_eq!(
+            spec(
+                &LightingSetup::from_manual(ManualSetup::default()),
+                &lights(hw(LogoKind::Ene))
+            )
+            .logo,
+            Some(Run::Dark)
+        );
     }
 
     #[test]
@@ -1786,6 +1925,134 @@ mod tests {
         }
     }
 
+    /// Other models' keyboards are shown approximately, by the machine's own keyboard (not
+    /// by whichever state a setup happens to hold first): zone colours as they are, an effect
+    /// that takes a colour as a pulse in it, one that takes none as a colour cycle, at its own
+    /// speed scaled to 0..5, Off dark.
+    #[test]
+    fn other_keyboards_are_shown_approximately_by_their_own_kind() {
+        use crate::config::{ChiconyRgbState, MagicRgbKeyboardState, ZoneColor};
+        use crate::hardware::lighting_model::{FourZoneKeyboardState, ManualSetup};
+        use crate::hardware::magic_rgb::KeyboardEffect;
+        use crate::hardware::rgb::{RgbConfig, RgbMode};
+        let lights = |keyboard| {
+            Lights::from(Hardware {
+                keyboard: Some(keyboard),
+                bar: None,
+                logo: None,
+            })
+        };
+        let run =
+            |m: ManualSetup, kind| spec(&LightingSetup::from_manual(m), &lights(kind)).keyboard;
+        let four = |is_static, mode, speed| FourZoneKeyboardState {
+            static_zones: Some(vec![ZoneColor {
+                zone: 3,
+                red: 0xFF,
+                green: 0,
+                blue: 0,
+            }]),
+            brightness: 100,
+            is_static,
+            dynamic_last: Some(RgbConfig {
+                mode,
+                speed,
+                red: 0,
+                green: 0,
+                blue: 0xFF,
+                ..RgbConfig::default()
+            }),
+            dynamic_effects: Default::default(),
+        };
+        let palette = Some(ChiconyRgbState {
+            effect: 2,
+            color: 1,
+            brightness: 30,
+            speed: 255,
+        });
+        let both = |k| ManualSetup {
+            four_zone_keyboard: Some(k),
+            palette_keyboard: palette,
+            ..ManualSetup::default()
+        };
+        let id_of = |r: Option<Run>| match r {
+            Some(Run::Effect {
+                id,
+                params,
+                palette,
+            }) => (id, params.get("speed").cloned(), palette),
+            other => panic!("{other:?}"),
+        };
+        let (id, _, colours) = id_of(run(
+            both(four(true, RgbMode::Breath, 9)),
+            KeyboardKind::Zones4,
+        ));
+        assert_eq!(id, "hw.static");
+        assert_eq!(colours, ["#00C8E6", "#00C8E6", "#FF0000", "#00C8E6"]);
+        let (id, speed, colours) = id_of(run(
+            both(four(false, RgbMode::Breath, 9)),
+            KeyboardKind::Zones4,
+        ));
+        assert_eq!(
+            (id.as_str(), speed),
+            ("hw.breathing", Some(ParamValue::Num(5.0)))
+        );
+        assert_eq!(colours, ["#0000FF"]);
+        let (id, speed, _) = id_of(run(
+            both(four(false, RgbMode::Wave, 0)),
+            KeyboardKind::Zones4,
+        ));
+        assert_eq!(
+            (id.as_str(), speed),
+            ("hw.neon", Some(ParamValue::Num(0.0)))
+        );
+        // The same setup on the Helios 300: its own state.
+        let (id, speed, colours) = id_of(run(
+            both(four(true, RgbMode::Breath, 9)),
+            KeyboardKind::Palette,
+        ));
+        assert_eq!(
+            (id.as_str(), speed),
+            ("hw.breathing", Some(ParamValue::Num(5.0)))
+        );
+        assert_eq!(colours, ["#FF0000"]);
+
+        let magic = |effect| ManualSetup {
+            magic_keyboard: Some(MagicRgbKeyboardState {
+                effect,
+                brightness: 100,
+                speed: 4,
+                reverse: false,
+                red: 1,
+                green: 2,
+                blue: 3,
+            }),
+            ..ManualSetup::default()
+        };
+        assert_eq!(
+            run(magic(KeyboardEffect::Off), KeyboardKind::OneColour),
+            Some(Run::Dark)
+        );
+        let (id, speed, _) = id_of(run(magic(KeyboardEffect::Star), KeyboardKind::OneColour));
+        assert_eq!(
+            (id.as_str(), speed),
+            ("hw.breathing", Some(ParamValue::Num(2.0)))
+        );
+        assert_eq!(
+            id_of(run(magic(KeyboardEffect::Static), KeyboardKind::OneColour)).0,
+            "hw.static"
+        );
+        // No four-zone state ("Reset to default"): its own firmware look, not dark.
+        assert_eq!(
+            run(magic(KeyboardEffect::Star), KeyboardKind::Zones4),
+            Some(Run::Firmware)
+        );
+        // No state for another keyboard: nothing lit.
+        assert_eq!(
+            run(ManualSetup::default(), KeyboardKind::OneColour),
+            Some(Run::Dark)
+        );
+    }
+
     #[test]
     fn other_keyboards_are_a_generic_silhouette_in_zones() {
         let geo = geometry(800.0, 340.0, Some(KeyboardKind::Zones4), false);
@@ -1793,6 +2060,21 @@ mod tests {
         assert!(geo.keys.len() > 60);
         let zones: std::collections::BTreeSet<usize> = geo.keys.iter().map(|k| k.colour).collect();
         assert_eq!(zones.into_iter().collect::<Vec<_>>(), vec![0, 1, 2, 3]);
+        // Every key inside the chassis, so none is cut off by the drawing's edge, with or
+        // without a bar, at the preview's own aspect.
+        for with_bar in [false, true] {
+            let height = 800.0 / aspect(true, with_bar);
+            let geo = geometry(800.0, height, Some(KeyboardKind::Zones4), with_bar);
+            let c = geo.chassis.expect("a keyboard's chassis");
+            assert!(c.y >= 0.0 && c.y + c.h <= height + 1e-6, "{with_bar}");
+            for key in &geo.keys {
+                let r = key.rect;
+                assert!(
+                    r.x >= c.x && r.y >= c.y && r.x + r.w <= c.x + c.w && r.y + r.h <= c.y + c.h,
+                    "{with_bar}: {r:?} in {c:?}"
+                );
+            }
+        }
         let one = geometry(800.0, 340.0, Some(KeyboardKind::OneColour), false);
         assert!(one.keys.iter().all(|k| k.colour == 0));
         let key = one.keys[20].rect;

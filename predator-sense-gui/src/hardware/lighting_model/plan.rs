@@ -6,13 +6,18 @@ use super::{
     palette_brightness, palette_raw, Brightness, FourZoneKeyboardState, LightingSetup, ManualSetup,
     SetupKind, ThemeChoice,
 };
-use crate::config::{ChiconyRgbState, CoverLogoSettings, MagicRgbKeyboardState, MagicRgbLogoState};
+use crate::config::{
+    ChiconyRgbState, CoverLogoSettings, MagicRgbKeyboardState, MagicRgbLogoState, ZoneColor,
+};
 use crate::hardware::effects::themes::{
-    nearest7, Hardware, KeyboardKind, LightKind, LightLook, LogoKind, Theme, ThemeLights, PALETTE7,
+    nearest7, Hardware, KeyboardKind, LightKind, LightLook, LogoKind, NearestKind, Theme,
+    ThemeLights, PALETTE7,
 };
 use crate::hardware::effects::{self, Params};
 use crate::hardware::keyboard_rgb::{Effect, KeyboardState};
 use crate::hardware::light_bar::{LightBarMode, LightBarState};
+use crate::hardware::magic_rgb::{KeyboardEffect as MagicEffect, LogoEffect as MagicLogoEffect};
+use crate::hardware::rgb::{Direction as RgbDirection, RgbConfig, RgbMode};
 
 /// What applying a setup does on one machine.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -31,11 +36,17 @@ pub struct Plan {
     pub magic_logo: Option<MagicRgbLogoState>,
     /// The ENE lid logo, for `hid_rgb::set_cover_logo`.
     pub cover_logo: Option<CoverLogoSettings>,
+    /// The four-zone keyboard is left to its firmware's own look: a Manual setup with no
+    /// state for it, or one that shows nothing (the RGB page's "Reset to default", or nothing
+    /// ever applied). Nothing is written to it, and the config's record of it is cleared as
+    /// that button cleared it, so the hotkey service replays nothing at the next login or
+    /// resume and the firmware's own look shows (issues #24 and #30).
+    pub four_zone_default: bool,
     /// What the app draws itself, for the renderer. A light it does not name is not drawn on.
     pub drawn: Drawn,
-    /// What the setup asks for that nothing here writes yet, in words for the log: a theme's
-    /// look on another model's keyboard or on a lid logo, a theme the catalogue does not
-    /// have, or a setup of an unknown kind.
+    /// What the setup asks for that nothing here writes, in words for the log: a theme's look
+    /// a light has no effect for, a theme the catalogue does not have, or a setup of an
+    /// unknown kind.
     pub unwritten: Vec<String>,
 }
 
@@ -97,6 +108,32 @@ pub struct Lights {
     /// them only and shows them approximately. The PH16-71's bar keeps its own icons and
     /// simulations, with or without facer's zone node.
     pub other_bar: bool,
+    /// The ENE logo's effects besides Static that its capability report advertises: a theme's
+    /// look it does not run shows as Static in the look's colour ([`Lights::looks`]).
+    pub cover_logo: LogoEffects,
+}
+
+/// Which of the ENE logo's effects besides Static its capability report advertises.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LogoEffects {
+    pub breath: bool,
+    pub neon: bool,
+}
+
+impl LogoEffects {
+    /// Both effects, as the reference design gives the ENE logo: lights not read from a machine.
+    pub const ALL: LogoEffects = LogoEffects {
+        breath: true,
+        neon: true,
+    };
+
+    /// Those of `modes`.
+    pub fn of(modes: &[RgbMode]) -> LogoEffects {
+        LogoEffects {
+            breath: modes.contains(&RgbMode::Breath),
+            neon: modes.contains(&RgbMode::Neon),
+        }
+    }
 }
 
 impl From<Hardware> for Lights {
@@ -111,6 +148,7 @@ impl From<Hardware> for Lights {
             reduced_motion: false,
             // A one-colour bar is the PH16-72's or PH18-72's here: the PH16-71's has zones.
             other_bar: hw.bar == Some(crate::hardware::effects::themes::BarKind::OneColour),
+            cover_logo: LogoEffects::ALL,
         }
     }
 }
@@ -132,10 +170,23 @@ impl Lights {
     /// look that can use key presses reacting to them (`effects::react_to_keys`: Beacon's
     /// waves from the key pressed, Hearth's stoke); and with reduced motion, the busiest
     /// drawn looks swapped for calmer ones (`effects::reduce_motion`: Spectrum as a slow
-    /// Silk). The one place the plan for the lights, the preview and the Themes tab take a
-    /// theme's looks from.
+    /// Silk); and on an ENE logo, a breathing or neon look it does not advertise as Static
+    /// in the look's colour, before anything is written. The one place the plan
+    /// for the lights, the preview and the Themes tab take a theme's looks from.
     pub fn looks(&self, theme: &Theme) -> ThemeLights {
         let mut looks = theme.lights_where(&self.hw, |kind| self.draws_on(kind));
+        if self.hw.logo == Some(LogoKind::Ene) {
+            if let Some(LightLook::Firmware { effect, .. }) = &mut looks.logo {
+                let offered = match effect.as_str() {
+                    "hw.breathing" => self.cover_logo.breath,
+                    "hw.neon" => self.cover_logo.neon,
+                    _ => true,
+                };
+                if !offered {
+                    *effect = "hw.static".to_string();
+                }
+            }
+        }
         for look in [&mut looks.keyboard, &mut looks.bar, &mut looks.logo]
             .into_iter()
             .flatten()
@@ -220,6 +271,7 @@ fn manual(plan: &mut Plan, m: &ManualSetup, brightness: Brightness, lights: &Lig
                 .as_ref()
                 .filter(|k| k.shows_something())
                 .map(|k| k.at_brightness(brightness.keyboard));
+            plan.four_zone_default = plan.four_zone_keyboard.is_none();
         }
         Some(KeyboardKind::OneColour) => {
             plan.magic_keyboard = m.magic_keyboard.map(|k| MagicRgbKeyboardState {
@@ -288,6 +340,13 @@ fn theme(plan: &mut Plan, choice: &ThemeChoice, brightness: Brightness, lights: 
             (Some(KeyboardKind::Palette), LightLook::PaletteColour { colour }) => {
                 plan.palette_keyboard = Some(palette_state(&colour, brightness.keyboard));
             }
+            (Some(KeyboardKind::Zones4), LightLook::Nearest { kind, colour }) => {
+                plan.four_zone_keyboard =
+                    Some(four_zone_nearest(kind, &colour, brightness.keyboard));
+            }
+            (Some(KeyboardKind::OneColour), LightLook::Nearest { kind, colour }) => {
+                plan.magic_keyboard = Some(magic_nearest(kind, &colour, brightness.keyboard));
+            }
             (_, look) => plan.unwritten.push(unwritten("keyboard", &look)),
         }
     }
@@ -311,7 +370,94 @@ fn theme(plan: &mut Plan, choice: &ThemeChoice, brightness: Brightness, lights: 
         }
     }
     if let Some(look) = looks.logo {
-        plan.unwritten.push(unwritten("logo", &look));
+        match (hw.logo, logo_look(&look)) {
+            (Some(LogoKind::Darfon), Some((LogoLook::Still, colour))) => {
+                plan.magic_logo = Some(magic_logo(
+                    Some(MagicLogoEffect::Static),
+                    colour,
+                    brightness.logo,
+                ));
+            }
+            (Some(LogoKind::Darfon), Some((LogoLook::Pulse, colour))) => {
+                plan.magic_logo = Some(magic_logo(
+                    Some(MagicLogoEffect::Breathing),
+                    colour,
+                    brightness.logo,
+                ));
+            }
+            (Some(LogoKind::Ene), Some((kind, colour))) => {
+                let mode = match kind {
+                    LogoLook::Still => RgbMode::Static,
+                    LogoLook::Pulse => RgbMode::Breath,
+                    LogoLook::Cycle => RgbMode::Neon,
+                };
+                plan.cover_logo = Some(cover_logo(mode, colour, brightness.logo));
+            }
+            _ => plan.unwritten.push(unwritten("logo", &look)),
+        }
+    }
+}
+
+/// A logo's firmware look (`hw.*`, `Theme::lights`) as one of its own effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogoLook {
+    /// `hw.static`.
+    Still,
+    /// `hw.breathing`.
+    Pulse,
+    /// `hw.neon`: the ENE logo's Neon; the Darfon logo has none (`Theme::lights` gives it
+    /// Breathing instead).
+    Cycle,
+}
+
+/// A theme's look on a logo as one of its effects and its one colour; `None` for a look no
+/// logo has.
+fn logo_look(look: &LightLook) -> Option<(LogoLook, [u8; 3])> {
+    let LightLook::Firmware {
+        effect, colours, ..
+    } = look
+    else {
+        return None;
+    };
+    let kind = match effect.as_str() {
+        "hw.static" => LogoLook::Still,
+        "hw.breathing" => LogoLook::Pulse,
+        "hw.neon" => LogoLook::Cycle,
+        _ => return None,
+    };
+    Some((kind, rgb(colours.first().map(String::as_str).unwrap_or(""))))
+}
+
+/// The Darfon logo showing a theme's look, at its page's starting speed (as the other
+/// models' keyboards: [`OTHER_KEYBOARD_SPEED`]).
+fn magic_logo(
+    effect: Option<MagicLogoEffect>,
+    [red, green, blue]: [u8; 3],
+    brightness: u8,
+) -> MagicRgbLogoState {
+    MagicRgbLogoState {
+        effect,
+        brightness,
+        speed: OTHER_KEYBOARD_SPEED,
+        red,
+        green,
+        blue,
+    }
+}
+
+/// The ENE logo showing a theme's look: lit, in `mode`, at its page's starting speed.
+fn cover_logo(mode: RgbMode, [red, green, blue]: [u8; 3], brightness: u8) -> CoverLogoSettings {
+    CoverLogoSettings {
+        enabled: true,
+        config: RgbConfig {
+            mode,
+            speed: OTHER_KEYBOARD_SPEED,
+            brightness,
+            red,
+            green,
+            blue,
+            ..RgbConfig::default()
+        },
     }
 }
 
@@ -358,20 +504,7 @@ pub fn bar_mode(id: &str) -> Option<LightBarMode> {
 /// `#RRGGBB` as bytes; black for anything else (the catalogue and `Theme::apply` give
 /// only valid colours).
 fn rgb(hex: &str) -> [u8; 3] {
-    let channel = |i: usize| {
-        hex.get(i..i + 2)
-            .and_then(|h| u8::from_str_radix(h, 16).ok())
-    };
-    match (
-        hex.len(),
-        hex.starts_with('#'),
-        channel(1),
-        channel(3),
-        channel(5),
-    ) {
-        (7, true, Some(r), Some(g), Some(b)) => [r, g, b],
-        _ => [0, 0, 0],
-    }
+    super::hex_colour(hex).unwrap_or_default()
 }
 
 /// A keyboard firmware look (`kb.*`, speed in percent, direction 1..6, one colour) as the
@@ -429,6 +562,68 @@ fn bar_state(look: &LightLook, brightness: u8) -> Option<LightBarState> {
         zones: three,
         direction: if dir.round() == 2.0 { 2 } else { 1 },
     })
+}
+
+/// The speed the RGB pages start an effect on (`RgbConfig::default`, the Sunrex page's and
+/// the Darfon logo's initial 4), for a theme's look on those keyboards and the logos:
+/// nothing measured says another.
+const OTHER_KEYBOARD_SPEED: u8 = 4;
+
+/// The four-zone keyboard showing a theme's look (`LightLook::Nearest`: the
+/// keyboard's own Static, its breathing effect or its colour cycle in the look's colour; the
+/// reference design's `KIND_NAMES`): Static on all four zones, Breath, or Neon, at the page's
+/// starting
+/// speed and direction. The zones hold the colour either way, so a Manual edit from the
+/// theme that picks Static starts from it.
+fn four_zone_nearest(kind: NearestKind, colour: &str, brightness: u8) -> FourZoneKeyboardState {
+    let [red, green, blue] = rgb(colour);
+    let zones = (1..=4)
+        .map(|zone| ZoneColor {
+            zone,
+            red,
+            green,
+            blue,
+        })
+        .collect();
+    let mode = match kind {
+        NearestKind::Still => None,
+        NearestKind::Pulse => Some(RgbMode::Breath),
+        NearestKind::Cycle => Some(RgbMode::Neon),
+    };
+    FourZoneKeyboardState {
+        static_zones: Some(zones),
+        brightness,
+        is_static: mode.is_none(),
+        dynamic_last: mode.map(|mode| RgbConfig {
+            mode,
+            speed: OTHER_KEYBOARD_SPEED,
+            brightness,
+            direction: RgbDirection::RightToLeft,
+            red,
+            green,
+            blue,
+        }),
+        dynamic_effects: Default::default(),
+    }
+}
+
+/// The one-colour keyboard showing a theme's look: its Static, Breathing or Neon in the
+/// look's colour, at its page's starting speed, not reversed.
+fn magic_nearest(kind: NearestKind, colour: &str, brightness: u8) -> MagicRgbKeyboardState {
+    let [red, green, blue] = rgb(colour);
+    MagicRgbKeyboardState {
+        effect: match kind {
+            NearestKind::Still => MagicEffect::Static,
+            NearestKind::Pulse => MagicEffect::Breathing,
+            NearestKind::Cycle => MagicEffect::Neon,
+        },
+        brightness,
+        speed: OTHER_KEYBOARD_SPEED,
+        reverse: false,
+        red,
+        green,
+        blue,
+    }
 }
 
 /// The Helios 300 keyboard showing `colour`: its Static (effect 1) in the nearest of its 7
@@ -915,7 +1110,7 @@ mod tests {
     }
 
     #[test]
-    fn on_another_model_a_software_bar_falls_back_and_the_rest_waits() {
+    fn on_another_model_a_software_bar_falls_back_and_every_light_is_written() {
         let p = plan(&theme_setup("synthwave"), &PH16_72.into());
         let bar = p
             .light_bar
@@ -923,9 +1118,245 @@ mod tests {
         assert!(!bar.per_zone && bar.zones.is_none());
         assert!(p.drawn.is_empty(), "nothing drawn where it is not measured");
         assert_eq!(p.keyboard, None);
-        assert_eq!(p.unwritten.len(), 2, "keyboard and logo: {:?}", p.unwritten);
-        assert!(p.unwritten[0].starts_with("keyboard: "));
-        assert!(p.unwritten[1].starts_with("logo: "));
+        assert!(
+            p.magic_keyboard.is_some(),
+            "the keyboard's own nearest effect"
+        );
+        assert!(p.magic_logo.is_some(), "the logo's own effect");
+        assert!(p.unwritten.is_empty(), "{:?}", p.unwritten);
+    }
+
+    /// A theme's look on a lid logo is written as one of that logo's own effects, in the
+    /// look's colour, at the setup's logo brightness and the pages' starting speed: Static
+    /// and Breathing on the Darfon logo (which `Theme::lights` never gives Neon), Static,
+    /// Breath and Neon on the ENE one, lit.
+    #[test]
+    fn a_theme_on_a_logo_writes_its_own_effect() {
+        let darfon = Hardware {
+            keyboard: None,
+            bar: None,
+            logo: Some(LogoKind::Darfon),
+        };
+        let ene = Hardware {
+            logo: Some(LogoKind::Ene),
+            ..darfon
+        };
+        let mut setup = theme_setup("solid");
+        setup.brightness.logo = 60;
+        let solid = ThemeChoice::new(find("solid").unwrap())
+            .theme()
+            .unwrap()
+            .lights(&darfon)
+            .logo
+            .unwrap();
+        let [r, g, b] = rgb(&solid.palette()[0]);
+        assert_eq!(solid.effect_id(), "hw.static");
+        assert_eq!(
+            plan(&setup, &darfon.into()).magic_logo,
+            Some(MagicRgbLogoState {
+                effect: Some(MagicLogoEffect::Static),
+                brightness: 60,
+                speed: 4,
+                red: r,
+                green: g,
+                blue: b,
+            })
+        );
+        let cover = plan(&setup, &ene.into()).cover_logo.expect("the ENE logo");
+        assert!(cover.enabled);
+        assert_eq!(cover.config.mode, RgbMode::Static);
+        assert_eq!(
+            (cover.config.red, cover.config.green, cover.config.blue),
+            (r, g, b)
+        );
+        assert_eq!((cover.config.brightness, cover.config.speed), (60, 4));
+        // A breathing look: Breathing on the Darfon logo, Breath on the ENE one; Daylight's
+        // software look on a logo falls back to breathing (kinds.rs).
+        for id in ["breathe", "daylight"] {
+            assert_eq!(
+                plan(&theme_setup(id), &darfon.into())
+                    .magic_logo
+                    .and_then(|l| l.effect),
+                Some(MagicLogoEffect::Breathing),
+                "{id}"
+            );
+            assert_eq!(
+                plan(&theme_setup(id), &ene.into())
+                    .cover_logo
+                    .map(|l| l.config.mode),
+                Some(RgbMode::Breath),
+                "{id}"
+            );
+        }
+        // Neon, which only the ENE logo has.
+        assert_eq!(
+            logo_look(&LightLook::Firmware {
+                effect: "hw.neon".into(),
+                speed: 1.0,
+                dir: 1.0,
+                colours: vec!["#102030".into()],
+            }),
+            Some((LogoLook::Cycle, [0x10, 0x20, 0x30]))
+        );
+        // A look no logo has is not written, and says so.
+        assert_eq!(
+            logo_look(&LightLook::Firmware {
+                effect: "hw.wave".into(),
+                speed: 1.0,
+                dir: 1.0,
+                colours: vec!["#102030".into()],
+            }),
+            None
+        );
+        // This laptop has no logo: nothing planned for one.
+        let p = plan(&theme_setup("solid"), &PH16_71.into());
+        assert!(p.magic_logo.is_none() && p.cover_logo.is_none());
+    }
+
+    /// An ENE logo whose capability report does not advertise Breath (or Neon) shows a
+    /// breathing (or neon) look as Static in the look's colour, decided before anything is
+    /// written, so no write is refused on every apply; the preview takes the same look.
+    /// One that advertises them runs them.
+    #[test]
+    fn an_ene_logo_shows_a_look_it_does_not_run_as_static() {
+        let ene = Hardware {
+            keyboard: None,
+            bar: None,
+            logo: Some(LogoKind::Ene),
+        };
+        let static_only = Lights {
+            cover_logo: LogoEffects::default(),
+            ..Lights::from(ene)
+        };
+        let breathe = theme_setup("breathe");
+        let theme = ThemeChoice::new(find("breathe").unwrap()).theme().unwrap();
+        let designed = Lights::from(ene).looks(&theme).logo.unwrap();
+        assert_eq!(designed.effect_id(), "hw.breathing");
+        let shown = static_only.looks(&theme).logo.unwrap();
+        assert_eq!(shown.effect_id(), "hw.static");
+        assert_eq!(shown.palette(), designed.palette(), "in the look's colour");
+        let cover = plan(&breathe, &static_only).cover_logo.unwrap();
+        assert_eq!(cover.config.mode, RgbMode::Static);
+        let [r, g, b] = rgb(&designed.palette()[0]);
+        assert_eq!(
+            (cover.config.red, cover.config.green, cover.config.blue),
+            (r, g, b)
+        );
+        assert!(plan(&breathe, &static_only).unwritten.is_empty());
+        // Advertised: Breath.
+        let breath = Lights {
+            cover_logo: LogoEffects {
+                breath: true,
+                neon: false,
+            },
+            ..Lights::from(ene)
+        };
+        assert_eq!(
+            plan(&breathe, &breath).cover_logo.unwrap().config.mode,
+            RgbMode::Breath
+        );
+        // The Darfon logo is not concerned.
+        let darfon = Lights {
+            cover_logo: LogoEffects::default(),
+            ..Lights::from(Hardware {
+                logo: Some(LogoKind::Darfon),
+                ..ene
+            })
+        };
+        assert_eq!(
+            darfon.looks(&theme).logo.unwrap().effect_id(),
+            "hw.breathing"
+        );
+        assert_eq!(
+            LogoEffects::of(&[RgbMode::Static, RgbMode::Neon]),
+            LogoEffects {
+                breath: false,
+                neon: true
+            }
+        );
+    }
+
+    const PHN16S_71: Hardware = Hardware {
+        keyboard: Some(KeyboardKind::Zones4),
+        bar: None,
+        logo: None,
+    };
+
+    /// A theme on the four-zone and one-colour keyboards: the keyboard's own Static, its
+    /// breathing effect or Neon, in the look's colour,
+    /// at the setup's brightness and the pages' starting speed. Never left unwritten.
+    #[test]
+    fn a_theme_on_the_other_keyboards_writes_their_nearest_effect() {
+        use crate::hardware::magic_rgb::KeyboardEffect as K;
+        for (id, mode, effect) in [
+            ("solid", None, K::Static),
+            ("predator", Some(RgbMode::Breath), K::Breathing),
+            ("banked-fire", Some(RgbMode::Breath), K::Breathing),
+        ] {
+            let mut setup = theme_setup(id);
+            setup.brightness.keyboard = 40;
+            let theme = find(id).unwrap().apply(&Default::default());
+            let Some(LightLook::Nearest { colour, .. }) = theme.lights(&PHN16S_71).keyboard else {
+                panic!("{id}: a nearest look");
+            };
+            let [r, g, b] = rgb(&colour);
+
+            let p = plan(&setup, &PHN16S_71.into());
+            assert!(p.unwritten.is_empty(), "{id}: {:?}", p.unwritten);
+            assert!(!p.four_zone_default);
+            let k = p.four_zone_keyboard.expect("written");
+            assert_eq!(k.is_static, mode.is_none(), "{id}");
+            assert_eq!(k.zone_colours(), [[r, g, b]; 4], "{id}: the zones hold it");
+            assert_eq!(k.shown_brightness(), 40);
+            if let Some(mode) = mode {
+                let e = k.dynamic_last.expect("the effect");
+                assert_eq!(
+                    (e.mode, e.speed, (e.red, e.green, e.blue)),
+                    (mode, 4, (r, g, b))
+                );
+            }
+
+            let p = plan(&setup, &PH16_72.into());
+            let m = p.magic_keyboard.expect("written");
+            assert_eq!(
+                (
+                    m.effect,
+                    m.brightness,
+                    m.speed,
+                    m.reverse,
+                    (m.red, m.green, m.blue)
+                ),
+                (effect, 40, 4, false, (r, g, b)),
+                "{id}"
+            );
+        }
+        // Wave and Rainbow cycle colours: Neon on both.
+        let wave = LightLook::Nearest {
+            kind: NearestKind::Cycle,
+            colour: "#123456".into(),
+        };
+        let LightLook::Nearest { kind, colour } = wave else {
+            unreachable!()
+        };
+        assert_eq!(
+            four_zone_nearest(kind, &colour, 50)
+                .dynamic_last
+                .map(|e| e.mode),
+            Some(RgbMode::Neon)
+        );
+        assert_eq!(magic_nearest(kind, &colour, 50).effect, K::Neon);
+    }
+
+    /// A Manual setup with no four-zone state, or one showing nothing, leaves that keyboard
+    /// to its firmware (the RGB page's "Reset to default").
+    #[test]
+    fn no_four_zone_state_leaves_that_keyboard_to_its_firmware() {
+        let p = plan(&LightingSetup::default(), &PHN16S_71.into());
+        assert!(p.four_zone_default && p.four_zone_keyboard.is_none());
+        let p = plan(&LightingSetup::default(), &PH16_71.into());
+        assert!(!p.four_zone_default, "not this keyboard");
+        let p = plan(&theme_setup("solid"), &PHN16S_71.into());
+        assert!(!p.four_zone_default, "a theme writes it");
     }
 
     #[test]
@@ -1010,7 +1441,6 @@ mod tests {
     fn colours_and_directions_convert() {
         assert_eq!(rgb("#00AEC7"), [0x00, 0xAE, 0xC7]);
         assert_eq!(rgb("#00aec7"), [0x00, 0xAE, 0xC7]);
-        assert_eq!(rgb("00AEC7"), [0, 0, 0]);
         assert_eq!(rgb("#00AEC"), [0, 0, 0]);
         assert_eq!(rgb("#GGAEC7"), [0, 0, 0]);
         let look = |dir: f64, colours: &[&str]| LightLook::Firmware {

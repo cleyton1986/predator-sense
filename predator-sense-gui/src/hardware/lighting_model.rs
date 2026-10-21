@@ -32,7 +32,7 @@ pub mod plan;
 pub mod presets;
 
 pub use migration::migrate;
-pub use plan::{plan, Drawn, DrawnLook, Lights, Plan};
+pub use plan::{plan, Drawn, DrawnLook, Lights, LogoEffects, Plan};
 pub use presets::{
     choose_theme, delete, discard, edit_setup, load, modes_holding, rename, save, save_as_new,
     undo, validate_name, PresetError, Undo,
@@ -559,6 +559,55 @@ impl FourZoneKeyboardState {
         }
     }
 
+    /// The zone colours as [`FourZoneKeyboardState::write`] sends them, by zone 1 to 4.
+    pub fn zone_colours(&self) -> [[u8; 3]; 4] {
+        self.write().zone_colors.map(|(r, g, b)| [r, g, b])
+    }
+
+    /// It shows at brightness 0: the RGB page's "Turn off keyboard light" is what reaches
+    /// the keyboard ([`FourZoneKeyboardState::command`]).
+    pub fn is_off(&self) -> bool {
+        self.shown_brightness() == 0
+    }
+
+    /// What the per-mode lighting sends for it: at brightness 0, exactly what the RGB page's
+    /// "Turn off keyboard light" sends (`rgb::turn_off_keyboard`: black at brightness 0 on
+    /// the ENE controller, the brightness-only call on WMI), not the colours at brightness
+    /// 0, which no one has seen on the hardware; otherwise its Apply's write.
+    pub fn command(&self) -> FourZoneCommand {
+        if self.is_off() {
+            FourZoneCommand::Off
+        } else {
+            FourZoneCommand::Write(self.write())
+        }
+    }
+
+    /// What the light shows once [`FourZoneKeyboardState::command`] reached it, as the
+    /// config's record keeps it: itself, or for the off command the zones black at
+    /// brightness 0, which is what the hotkey service then replays at login and resume on the
+    /// ENE controller (the same packets as the RGB page's off). The effect and the per-effect
+    /// memory are kept.
+    pub fn as_written(&self) -> FourZoneKeyboardState {
+        if !self.is_off() {
+            return self.clone();
+        }
+        FourZoneKeyboardState {
+            static_zones: Some(
+                (1..=4)
+                    .map(|zone| ZoneColor {
+                        zone,
+                        red: 0,
+                        green: 0,
+                        blue: 0,
+                    })
+                    .collect(),
+            ),
+            brightness: 0,
+            is_static: true,
+            ..self.clone()
+        }
+    }
+
     /// What its light shows at `percent`: the shown half, the hidden half and the
     /// per-effect memory left out.
     fn shown(&self, percent: u8) -> FourZoneKeyboardState {
@@ -569,6 +618,65 @@ impl FourZoneKeyboardState {
             dynamic_effects: HashMap::new(),
             ..at
         }
+    }
+}
+
+/// What the per-mode lighting sends to the four-zone keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FourZoneCommand {
+    /// The RGB page's "Turn off keyboard light" (`rgb::turn_off_keyboard`).
+    Off,
+    /// The RGB page's Apply (`rgb::apply_keyboard`).
+    Write(KeyboardWrite),
+}
+
+/// What the per-mode lighting sends to the 2024 models' one-colour keyboard
+/// (`magic_rgb::set_keyboard_effect`) for `state`: Off, and any effect at brightness 0, as
+/// the page's "Turn off keyboard light" sent it (Off with everything else 0), so that no
+/// unseen frame reaches the hardware; every other state as it is.
+pub fn magic_keyboard_command(state: &MagicRgbKeyboardState) -> MagicRgbKeyboardState {
+    use crate::hardware::magic_rgb::KeyboardEffect;
+    if state.effect == KeyboardEffect::Off || state.brightness == 0 {
+        return MagicRgbKeyboardState {
+            effect: KeyboardEffect::Off,
+            brightness: 0,
+            speed: 0,
+            reverse: false,
+            red: 0,
+            green: 0,
+            blue: 0,
+        };
+    }
+    *state
+}
+
+/// What the per-mode lighting sends to the 2024 models' lid logo (`magic_rgb::set_logo`,
+/// Darfon) for `state`: Off, and any effect at brightness 0, as its page's "Turn off" sent it
+/// (`set_logo(None, 0, 0, black)`, the logo's own off sequence), so that no unseen frame
+/// reaches the hardware; every other state as it is.
+pub fn magic_logo_command(state: &MagicRgbLogoState) -> MagicRgbLogoState {
+    if state.effect.is_none() || state.brightness == 0 {
+        return MagicRgbLogoState {
+            effect: None,
+            brightness: 0,
+            speed: 0,
+            red: 0,
+            green: 0,
+            blue: 0,
+        };
+    }
+    *state
+}
+
+/// What the per-mode lighting sends to the ENE lid logo (`hid_rgb::set_cover_logo`) for
+/// `state`, and what its record then says it shows: at brightness 0 its power switched off,
+/// exactly what its page's power switch sent (Static, black, brightness 0), which the hotkey
+/// service also replays from the record at login and resume; otherwise as it is.
+/// The effect and colour are kept for when it is lit again.
+pub fn cover_logo_command(state: &CoverLogoSettings) -> CoverLogoSettings {
+    CoverLogoSettings {
+        enabled: state.enabled && state.config.brightness > 0,
+        config: state.config.clone(),
     }
 }
 
@@ -966,6 +1074,24 @@ pub fn refresh(cfg: &mut AppConfig) -> bool {
         }
     }
     any
+}
+
+/// `#RRGGBB` (the `#` optional, surrounding blanks ignored, either case) as bytes; `None`
+/// for anything else. The one parser for the colours the app stores and shows; the effects
+/// engine keeps effects.js's own (`effects::palette::hex_to_rgb`).
+pub fn hex_colour(text: &str) -> Option<[u8; 3]> {
+    let text = text.trim();
+    let text = text.strip_prefix('#').unwrap_or(text);
+    if text.len() != 6 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let byte = |i: usize| u8::from_str_radix(&text[i..i + 2], 16).ok();
+    Some([byte(0)?, byte(2)?, byte(4)?])
+}
+
+/// A colour as `#RRGGBB`, in capitals, as the catalogue writes its colours.
+pub fn colour_hex([r, g, b]: [u8; 3]) -> String {
+    format!("#{r:02X}{g:02X}{b:02X}")
 }
 
 /// The per-key picture in config.json: one string of six hex digits per slot, `RRGGBB`
@@ -1441,6 +1567,18 @@ mod tests {
             .collect();
         assert_eq!(keys, ["balanced", "eco", "performance", "quiet", "turbo"]);
         assert_eq!(value["lighting_modes"]["quiet"]["setup"]["kind"], "manual");
+    }
+
+    #[test]
+    fn one_hex_parser_and_one_hex_format_for_colours() {
+        for text in ["#00aec7", "00AEC7", " #00AeC7 "] {
+            assert_eq!(hex_colour(text), Some([0x00, 0xAE, 0xC7]), "{text:?}");
+        }
+        for junk in ["#00aec", "zzzzzz", "##00aec7", "#+12345", "#00aec7ff", ""] {
+            assert_eq!(hex_colour(junk), None, "{junk:?}");
+        }
+        assert_eq!(colour_hex([0x00, 0xAE, 0xC7]), "#00AEC7");
+        assert_eq!(hex_colour(&colour_hex([1, 2, 3])), Some([1, 2, 3]));
     }
 
     #[test]
@@ -2316,5 +2454,95 @@ mod tests {
             .keyboard = 10;
         assert!(refresh(&mut cfg));
         assert!(cfg.lighting_modes[&PowerProfile::Quiet].changed);
+    }
+    /// At brightness 0 the four-zone keyboard gets the RGB page's off, and is recorded as
+    /// what that shows; lit, it gets the Apply's write and is recorded as it is.
+    #[test]
+    fn a_four_zone_keyboard_at_0_is_sent_and_recorded_as_turned_off() {
+        let lit = FourZoneKeyboardState {
+            static_zones: Some(vec![ZoneColor {
+                zone: 2,
+                red: 1,
+                green: 2,
+                blue: 3,
+            }]),
+            brightness: 60,
+            is_static: true,
+            dynamic_last: Some(RgbConfig {
+                mode: RgbMode::Wave,
+                brightness: 70,
+                ..RgbConfig::default()
+            }),
+            dynamic_effects: HashMap::new(),
+        };
+        assert_eq!(lit.command(), FourZoneCommand::Write(lit.write()));
+        assert_eq!(lit.as_written(), lit);
+        assert_eq!(lit.zone_colours()[1], [1, 2, 3]);
+        assert_eq!(
+            lit.zone_colours()[0],
+            [0, 200, 230],
+            "the page's default zone"
+        );
+        for off in [
+            lit.at_brightness(0),
+            FourZoneKeyboardState {
+                is_static: false,
+                ..lit.at_brightness(0)
+            },
+        ] {
+            assert!(off.is_off());
+            assert_eq!(off.command(), FourZoneCommand::Off);
+            let shown = off.as_written();
+            assert!(shown.is_static && shown.brightness == 0);
+            assert_eq!(shown.zone_colours(), [[0; 3]; 4]);
+            assert_eq!(shown.dynamic_last, off.dynamic_last, "the effect is kept");
+        }
+        // The effect at 0 while the zones are lit is not off.
+        let effect_dark = FourZoneKeyboardState {
+            dynamic_last: lit
+                .dynamic_last
+                .clone()
+                .map(|e| RgbConfig { brightness: 0, ..e }),
+            ..lit.clone()
+        };
+        assert!(!effect_dark.is_off(), "the zones show");
+    }
+
+    /// The one-colour keyboard's Off, and any effect at brightness 0, go out as its page's
+    /// "Turn off keyboard light" sent them: Off with everything else 0.
+    #[test]
+    fn the_one_colour_keyboard_is_turned_off_as_its_page_did() {
+        use crate::hardware::magic_rgb::KeyboardEffect;
+        let wave = MagicRgbKeyboardState {
+            effect: KeyboardEffect::Wave,
+            brightness: 80,
+            speed: 3,
+            reverse: true,
+            red: 9,
+            green: 8,
+            blue: 7,
+        };
+        assert_eq!(magic_keyboard_command(&wave), wave);
+        let off = MagicRgbKeyboardState {
+            effect: KeyboardEffect::Off,
+            brightness: 0,
+            speed: 0,
+            reverse: false,
+            red: 0,
+            green: 0,
+            blue: 0,
+        };
+        for state in [
+            MagicRgbKeyboardState {
+                effect: KeyboardEffect::Off,
+                ..wave
+            },
+            MagicRgbKeyboardState {
+                brightness: 0,
+                ..wave
+            },
+        ] {
+            assert_eq!(magic_keyboard_command(&state), off);
+        }
     }
 }

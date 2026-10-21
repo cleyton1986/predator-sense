@@ -32,7 +32,7 @@ pub use catalogue::{find, SettingDef, SettingKind, Theme};
 pub use catalogue::{builtin, catalogue};
 pub use kinds::{
     gallery, hidden_note, nearest7, BarKind, Hardware, HiddenSummary, HideReason, KeyboardKind,
-    LightKind, LogoKind, ThemeLights, PALETTE7,
+    LightKind, LogoKind, NearestKind, ThemeLights, PALETTE7,
 };
 pub use looks::LightLook;
 pub use resolve::{ColourwayChoice, SettingValue, Values};

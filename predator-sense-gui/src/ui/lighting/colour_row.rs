@@ -16,7 +16,7 @@ use gtk4::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
-use crate::ui::color_picker::{hex_of, parse_hex};
+use crate::hardware::lighting_model::{colour_hex, hex_colour};
 use crate::ui::flow_box;
 use crate::ui::lighting::colour_model::{self, Swatch};
 
@@ -105,13 +105,9 @@ thread_local! {
     static NEXT_ROW: Cell<u32> = const { Cell::new(0) };
 }
 
-fn show_hex([red, green, blue]: [u8; 3]) -> String {
-    hex_of(red, green, blue).to_uppercase()
-}
-
 /// What a hex entry edit writes: exactly the colour typed, or nothing.
 fn hex_input(text: &str) -> Option<[u8; 3]> {
-    parse_hex(text).map(|(r, g, b)| [r, g, b])
+    hex_colour(text)
 }
 
 /// Whether the hex entry shows its error. Not while a short entry is still being typed;
@@ -137,7 +133,7 @@ pub fn colour_words(rgb: [u8; 3]) -> String {
     }
     match colour_model::name_key(rgb) {
         Some(key) => crate::i18n::t(key).to_string(),
-        None => show_hex(rgb),
+        None => colour_hex(rgb),
     }
 }
 
@@ -152,7 +148,7 @@ pub fn spoken_words(rgb: [u8; 3]) -> String {
 
 /// The hex code of a colour, as its accessible description.
 pub fn hex_description(rgb: [u8; 3]) -> String {
-    show_hex(rgb)
+    colour_hex(rgb)
 }
 
 /// What a swatch is called: its accessible name, by the colour's name, and its tooltip,
@@ -171,7 +167,7 @@ fn swatch_names(swatch: &Swatch) -> (String, String) {
             };
             (
                 crate::i18n::tf(key, &[&colour_model::spoken_name(swatch.rgb)]),
-                crate::i18n::tf(key, &[&show_hex(swatch.rgb)]),
+                crate::i18n::tf(key, &[&colour_hex(swatch.rgb)]),
             )
         }
     }
@@ -184,8 +180,38 @@ fn name_swatch(button: &gtk::ToggleButton, swatch: &Swatch) {
     button.set_tooltip_text(Some(&tooltip));
     button.update_property(&[
         gtk::accessible::Property::Label(&name),
-        gtk::accessible::Property::Description(&show_hex(swatch.rgb)),
+        gtk::accessible::Property::Description(&colour_hex(swatch.rgb)),
     ]);
+}
+
+/// A swatch of a fixed colour for a light with only its own colours (the Helios 300
+/// keyboard's 7): the dot as the colour rows draw theirs, named `name` for its tooltip and
+/// assistive technology with the colour's code as its description, and a check shown while
+/// it is the chosen one (so the choice is not told by colour alone). No forgetting, no
+/// picker. Returns the button and its check.
+pub(crate) fn fixed_swatch(rgb: [u8; 3], name: &str) -> (gtk::ToggleButton, gtk::Image) {
+    let dot = dot_with_ring(SWATCH_AREA, SWATCH_DOT, Rc::new(Cell::new(rgb)), Ring::None);
+    dot.add_css_class("lighting-swatch-dot");
+    let content = gtk::Overlay::new();
+    content.set_child(Some(&dot));
+    let check = decorative_image("object-select-symbolic");
+    check.add_css_class("lighting-swatch-check");
+    if wants_dark_check(rgb) {
+        check.add_css_class("lighting-swatch-check-dark");
+    }
+    check.set_halign(gtk::Align::Center);
+    check.set_valign(gtk::Align::Center);
+    check.set_visible(false);
+    content.add_overlay(&check);
+    let button = gtk::ToggleButton::new();
+    button.set_child(Some(&content));
+    button.add_css_class("lighting-swatch");
+    button.set_tooltip_text(Some(name));
+    button.update_property(&[
+        gtk::accessible::Property::Label(name),
+        gtk::accessible::Property::Description(&colour_hex(rgb)),
+    ]);
+    (button, check)
 }
 
 /// The white edge every colour dot (a swatch, a palette's dots) is drawn with: its opacity
@@ -523,7 +549,7 @@ impl ColourRow {
             .state_flags()
             .contains(gtk::StateFlags::FOCUS_WITHIN);
         if keep != Keep::Hex && !typing && !colour_model::hex_names(&self.hex.text(), current) {
-            self.hex.set_text(&show_hex(current));
+            self.hex.set_text(&colour_hex(current));
             self.show_hex_error(false);
         }
         self.suppress.set(false);
@@ -631,7 +657,7 @@ impl ColourRow {
                 forget.add_css_class("lighting-swatch-forget");
                 forget.set_halign(gtk::Align::End);
                 forget.set_valign(gtk::Align::Start);
-                let hex = show_hex(swatch.rgb);
+                let hex = colour_hex(swatch.rgb);
                 forget.set_tooltip_text(Some(&crate::i18n::tf("colour_forget_one", &[&hex])));
                 forget.update_property(&[
                     gtk::accessible::Property::Label(&crate::i18n::tf(
@@ -798,7 +824,7 @@ mod tests {
         );
         assert_eq!(hex_input("00cfcf"), Some([0, 0xcf, 0xcf]));
         assert_eq!(hex_input("#00CFC"), None);
-        assert_eq!(show_hex([0, 0xcf, 0xcf]), "#00CFCF");
+        assert_eq!(colour_hex([0, 0xcf, 0xcf]), "#00CFCF");
     }
 
     #[test]

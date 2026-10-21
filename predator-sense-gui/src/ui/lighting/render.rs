@@ -1,7 +1,7 @@
-//! The render harness for checking the Lighting page by eye: the page built for each model
-//! that has it (the PH16-71, and the PH18-72 and PH16-72 with their light bar alone) with its
-//! hardware made up (`lighting_page::Machine` with `live` off), each tab, at 1480 and 900 px,
-//! saved as PNGs.
+//! The render harness for checking the other models' Lighting page by eye: the page built for each
+//! model of the device inventory with its hardware made up (`lighting_page::Machine` with `live`
+//! off), each tab and each light, the combinations of lights without a keyboard and the empty state
+//! of a machine with none, at 1480 and 900 px, saved as PNGs.
 //!
 //! Nothing is opened or written but the PNGs and a temporary config directory: the page is
 //! built with `live` off, so it never asks the system for the lights, their nodes or the
@@ -25,34 +25,50 @@ use libadwaita as adw;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use crate::config::{self, AppConfig};
-use crate::hardware::effects::themes::{BarKind, Hardware};
+use crate::config::{
+    self, AppConfig, ChiconyRgbState, CoverLogoSettings, MagicRgbKeyboardState, MagicRgbLogoState,
+    ZoneColor,
+};
+use crate::hardware::effects::themes::{BarKind, Hardware, KeyboardKind, LogoKind};
 use crate::hardware::keyboard_rgb::{Effect, KeyboardState};
 use crate::hardware::light_bar::{LightBarMode, LightBarState};
 use crate::hardware::lighting_model::{
-    self, LightingSetup, Lights, ManualSetup, SetupKind, ThemeChoice,
+    self, FourZoneKeyboardState, LightingSetup, Lights, ManualSetup, SetupKind, ThemeChoice,
 };
+use crate::hardware::magic_rgb::{KeyboardEffect, LogoEffect};
 use crate::hardware::profile::PowerProfile;
-use crate::ui::lighting::control_model::Facts;
+use crate::hardware::rgb::{Direction, RgbConfig, RgbMode};
+use crate::ui::lighting::control_model::{Facts, FourZoneFacts};
 use crate::ui::lighting::frame_model::Tab;
+use crate::ui::lighting::preview::PreviewLight;
 use crate::ui::lighting::themes_model;
 use crate::ui::lighting_page::{Machine, Page};
 
 /// The page widths rendered: a wide window and a narrower one.
 const WIDTHS: [i32; 2] = [1480, 900];
 
-/// One model, with what the page shows on each tab.
+/// One model of the device inventory, with what the page shows on each tab.
 struct Model {
     name: &'static str,
     hw: Hardware,
     facts: Facts,
     /// The idle settings' devices (the PH16-71's keyboard, the bar).
     idle: (bool, bool),
-    /// The Lighting control tab's setups, by view name.
-    control: Vec<(&'static str, LightingSetup)>,
+    /// The Lighting control tab's views: name, the light picked in the switcher, the setup.
+    control: Vec<(&'static str, PreviewLight, LightingSetup)>,
+    /// Audio Sync on.
+    audio_sync: bool,
 }
 
-fn facts(bar: Option<BarKind>) -> Facts {
+fn hw(keyboard: Option<KeyboardKind>, bar: Option<BarKind>, logo: Option<LogoKind>) -> Hardware {
+    Hardware {
+        keyboard,
+        bar,
+        logo,
+    }
+}
+
+fn facts(bar: Option<BarKind>, four_zone: FourZoneFacts) -> Facts {
     let mut bar_modes: Vec<LightBarMode> = LightBarMode::ALL
         .into_iter()
         .filter(|m| *m != LightBarMode::Off)
@@ -67,6 +83,8 @@ fn facts(bar: Option<BarKind>) -> Facts {
         bar_modes,
         bar_speed: if zones { (0, 5) } else { (1, 5) },
         zones,
+        four_zone,
+        cover_logo_effects: crate::hardware::lighting::COVER_LOGO_EFFECTS.to_vec(),
     }
 }
 
@@ -74,16 +92,148 @@ fn manual(m: ManualSetup) -> LightingSetup {
     LightingSetup::from_manual(m)
 }
 
-/// The models with this Lighting page: the PH16-71, and the bar alone, as the PH18-72 has
-/// it and the PH16-72 shows it here (its keyboard and logo stay on their own page).
+/// The keyboard's view of `setup` (the switcher's first light).
+fn keyboard_view(
+    name: &'static str,
+    setup: LightingSetup,
+) -> (&'static str, PreviewLight, LightingSetup) {
+    (name, PreviewLight::Keyboard, setup)
+}
+
+/// The Darfon logo breathing in cyan.
+fn darfon_logo() -> MagicRgbLogoState {
+    MagicRgbLogoState {
+        effect: Some(LogoEffect::Breathing),
+        brightness: 100,
+        speed: 4,
+        red: 0x00,
+        green: 0xE5,
+        blue: 0xFF,
+    }
+}
+
+/// The ENE logo in `mode`, pink.
+fn ene_logo(mode: RgbMode) -> CoverLogoSettings {
+    CoverLogoSettings {
+        enabled: true,
+        config: RgbConfig {
+            mode,
+            speed: 6,
+            red: 0xFF,
+            green: 0x2E,
+            blue: 0x88,
+            ..RgbConfig::default()
+        },
+    }
+}
+
+fn zone_colours(colours: [[u8; 3]; 4], mode: RgbMode, is_static: bool) -> FourZoneKeyboardState {
+    FourZoneKeyboardState {
+        static_zones: Some(
+            (1..=4)
+                .zip(colours)
+                .map(|(zone, [red, green, blue])| ZoneColor {
+                    zone,
+                    red,
+                    green,
+                    blue,
+                })
+                .collect(),
+        ),
+        brightness: 100,
+        is_static,
+        dynamic_last: Some(RgbConfig {
+            mode,
+            speed: 5,
+            brightness: 100,
+            direction: Direction::LeftToRight,
+            red: 0xFF,
+            green: 0x2E,
+            blue: 0x88,
+        }),
+        dynamic_effects: Default::default(),
+    }
+}
+
+/// The four-zone keyboard's setups: its zone colours, one effect, and its own default.
+fn four_zone_views(effect: RgbMode) -> Vec<(&'static str, PreviewLight, LightingSetup)> {
+    let colours = [
+        [0x00, 0xE5, 0xFF],
+        [0x00, 0x90, 0xFF],
+        [0x8A, 0x2B, 0xFF],
+        [0xFF, 0x00, 0xC8],
+    ];
+    let setup = |is_static| {
+        manual(ManualSetup {
+            four_zone_keyboard: Some(zone_colours(colours, effect, is_static)),
+            ..ManualSetup::default()
+        })
+    };
+    vec![
+        keyboard_view("control", setup(true)),
+        keyboard_view("control-effect", setup(false)),
+        // After Reset to default: no state, the keyboard on its own firmware look.
+        keyboard_view("control-default", manual(ManualSetup::default())),
+    ]
+}
+
+fn sunrex(effect: KeyboardEffect) -> MagicRgbKeyboardState {
+    MagicRgbKeyboardState {
+        effect,
+        brightness: 100,
+        speed: 4,
+        reverse: true,
+        red: 0x00,
+        green: 0xE5,
+        blue: 0xFF,
+    }
+}
+
+/// The ENE controller's facts: it runs `extra` besides Breath and Neon, with Wave's direction
+/// where `wave_direction`.
+fn ene(extra: &[RgbMode], wave_direction: bool) -> FourZoneFacts {
+    FourZoneFacts::found(
+        true,
+        |m| matches!(m, RgbMode::Breath | RgbMode::Neon) || extra.contains(&m),
+        |m| wave_direction && m == RgbMode::Wave && extra.contains(&m),
+        true,
+    )
+}
+
+/// Every model of the device inventory (`device-inventory.md`, the reference design's `MODELS`),
+/// and
+/// the combinations of lights without a keyboard it allows that no known model has (a logo
+/// alone, a bar and a logo).
 fn models() -> Vec<Model> {
+    let none = FourZoneFacts::default();
+    let wave_shift_zoom = [RgbMode::Wave, RgbMode::Shifting, RgbMode::Zoom];
+    let ph16_72 = manual(ManualSetup {
+        magic_keyboard: Some(sunrex(KeyboardEffect::Wave)),
+        light_bar: Some(LightBarState::default()),
+        magic_logo: Some(darfon_logo()),
+        ..ManualSetup::default()
+    });
+    let phn16_73 = |logo: CoverLogoSettings| {
+        let mut views = four_zone_views(RgbMode::Breath);
+        let mut setup = views[0].2.clone();
+        if let SetupKind::Manual(m) = &mut setup.kind {
+            m.cover_logo = Some(logo);
+        }
+        views.push(("control-logo", PreviewLight::Logo, setup));
+        views
+    };
+    let mut phn16_73_views = phn16_73(ene_logo(RgbMode::Static));
+    let neon = phn16_73(ene_logo(RgbMode::Neon))
+        .pop()
+        .expect("the logo view");
+    phn16_73_views.push(("control-logo-effect", neon.1, neon.2));
     vec![
         Model {
             name: "ph16-71",
             hw: Hardware::PH16_71,
-            facts: facts(Some(BarKind::Zones3)),
+            facts: facts(Some(BarKind::Zones3), none.clone()),
             idle: (true, true),
-            control: vec![(
+            control: vec![keyboard_view(
                 "control",
                 manual(ManualSetup {
                     keyboard: Some(KeyboardState {
@@ -104,23 +254,153 @@ fn models() -> Vec<Model> {
                     ..ManualSetup::default()
                 }),
             )],
+            audio_sync: false,
+        },
+        Model {
+            name: "ph16-72",
+            hw: hw(
+                Some(KeyboardKind::OneColour),
+                Some(BarKind::OneColour),
+                Some(LogoKind::Darfon),
+            ),
+            facts: facts(Some(BarKind::OneColour), none.clone()),
+            idle: (false, true),
+            control: vec![
+                keyboard_view("control", ph16_72.clone()),
+                ("control-bar", PreviewLight::Bar, ph16_72.clone()),
+                ("control-logo", PreviewLight::Logo, ph16_72),
+            ],
+            audio_sync: false,
         },
         Model {
             name: "ph18-72",
-            hw: Hardware {
-                keyboard: None,
-                bar: Some(BarKind::OneColour),
-                logo: None,
-            },
-            facts: facts(Some(BarKind::OneColour)),
+            hw: hw(None, Some(BarKind::OneColour), None),
+            facts: facts(Some(BarKind::OneColour), none.clone()),
             idle: (false, true),
             control: vec![(
                 "control",
+                PreviewLight::Bar,
                 manual(ManualSetup {
                     light_bar: Some(LightBarState::default()),
                     ..ManualSetup::default()
                 }),
             )],
+            audio_sync: false,
+        },
+        Model {
+            name: "phn16-73",
+            hw: hw(Some(KeyboardKind::Zones4), None, Some(LogoKind::Ene)),
+            facts: facts(None, ene(&[], false)),
+            idle: (false, false),
+            control: phn16_73_views,
+            audio_sync: false,
+        },
+        Model {
+            name: "phn16s-71",
+            hw: hw(Some(KeyboardKind::Zones4), None, None),
+            facts: facts(None, ene(&wave_shift_zoom, true)),
+            idle: (false, false),
+            control: four_zone_views(RgbMode::Wave),
+            audio_sync: true,
+        },
+        Model {
+            name: "an16s-61",
+            hw: hw(Some(KeyboardKind::Zones4), None, None),
+            facts: facts(None, ene(&[], false)),
+            idle: (false, false),
+            control: four_zone_views(RgbMode::Neon),
+            audio_sync: false,
+        },
+        Model {
+            name: "wmi-4-zone",
+            hw: hw(Some(KeyboardKind::Zones4), None, None),
+            facts: facts(
+                None,
+                FourZoneFacts::found(false, |_| false, |_| false, true),
+            ),
+            idle: (false, false),
+            control: four_zone_views(RgbMode::Shifting),
+            audio_sync: false,
+        },
+        Model {
+            name: "ph317-56",
+            hw: hw(Some(KeyboardKind::Palette), None, None),
+            facts: facts(None, none.clone()),
+            idle: (false, false),
+            control: vec![keyboard_view(
+                "control",
+                LightingSetup::manual(
+                    None,
+                    None,
+                    Some(ChiconyRgbState {
+                        effect: 2,
+                        color: 5,
+                        brightness: 255,
+                        speed: 128,
+                    }),
+                ),
+            )],
+            audio_sync: false,
+        },
+        Model {
+            name: "pt14-51",
+            hw: hw(Some(KeyboardKind::OneColour), None, None),
+            facts: facts(None, none.clone()),
+            idle: (false, false),
+            control: vec![
+                keyboard_view(
+                    "control",
+                    manual(ManualSetup {
+                        magic_keyboard: Some(sunrex(KeyboardEffect::Static)),
+                        ..ManualSetup::default()
+                    }),
+                ),
+                keyboard_view(
+                    "control-effect",
+                    manual(ManualSetup {
+                        magic_keyboard: Some(sunrex(KeyboardEffect::Wave)),
+                        ..ManualSetup::default()
+                    }),
+                ),
+            ],
+            audio_sync: false,
+        },
+        // No known model: a Darfon logo with nothing else, and with a one-colour bar.
+        Model {
+            name: "logo-only",
+            hw: hw(None, None, Some(LogoKind::Darfon)),
+            facts: facts(None, none.clone()),
+            idle: (false, false),
+            control: vec![(
+                "control",
+                PreviewLight::Logo,
+                manual(ManualSetup {
+                    magic_logo: Some(darfon_logo()),
+                    ..ManualSetup::default()
+                }),
+            )],
+            audio_sync: false,
+        },
+        Model {
+            name: "bar-and-logo",
+            hw: hw(None, Some(BarKind::OneColour), Some(LogoKind::Ene)),
+            facts: facts(Some(BarKind::OneColour), none),
+            idle: (false, true),
+            control: {
+                let setup = manual(ManualSetup {
+                    light_bar: Some(LightBarState {
+                        mode: LightBarMode::Static,
+                        ..LightBarState::default()
+                    }),
+                    cover_logo: Some(ene_logo(RgbMode::Breath)),
+                    ..ManualSetup::default()
+                });
+                vec![
+                    ("control", PreviewLight::Bar, setup.clone()),
+                    ("control-logo", PreviewLight::Logo, setup),
+                ]
+            },
+            audio_sync: false,
         },
     ]
 }
@@ -144,13 +424,14 @@ fn theme_setup(hw: &Hardware) -> LightingSetup {
 }
 
 /// The config the page opens on: Balanced, the active mode, holding `setup`.
-fn write_config(setup: &LightingSetup) {
+fn write_config(setup: &LightingSetup, audio_sync: bool) {
     let mut cfg = AppConfig::default();
     cfg.lighting_migrated = true;
     cfg.lighting_modes = lighting_model::all_modes();
     if let Some(balanced) = cfg.lighting_modes.get_mut(&PowerProfile::Balanced) {
         balanced.setup = setup.clone();
     }
+    cfg.audio_sync_enabled = audio_sync;
     config::save_app_config(&cfg).expect("the harness's own config directory is writable");
 }
 
@@ -260,15 +541,20 @@ fn render_all(out: PathBuf) {
     app_style();
     let mut written = Vec::new();
     for model in models() {
-        let mut views: Vec<(String, Tab, LightingSetup)> = model
+        let mut views: Vec<(String, Tab, PreviewLight, LightingSetup)> = model
             .control
             .iter()
-            .map(|(name, setup)| (name.to_string(), Tab::Control, setup.clone()))
+            .map(|(name, light, setup)| (name.to_string(), Tab::Control, *light, setup.clone()))
             .collect();
-        views.push(("themes".to_string(), Tab::Themes, theme_setup(&model.hw)));
-        for (view, tab, setup) in views {
+        views.push((
+            "themes".to_string(),
+            Tab::Themes,
+            PreviewLight::Keyboard,
+            theme_setup(&model.hw),
+        ));
+        for (view, tab, light, setup) in views {
             for width in WIDTHS {
-                write_config(&setup);
+                write_config(&setup, model.audio_sync);
                 let page = Page::for_render(Machine {
                     lights: Lights::from(model.hw),
                     facts: model.facts.clone(),
@@ -276,6 +562,7 @@ fn render_all(out: PathBuf) {
                     live: false,
                     active: Some(PowerProfile::Balanced),
                 });
+                page.select_light(light);
                 page.open_tab(tab);
                 // A second in, as it would be seen moving: a pulse starts dark.
                 page.run_preview_for_render(1.2);
@@ -284,6 +571,12 @@ fn render_all(out: PathBuf) {
                 written.push(path);
             }
         }
+    }
+    // A machine with no light the app drives: the page's empty state.
+    for width in WIDTHS {
+        let path = out.join(format!("no-lights-empty-{width}.png"));
+        render(crate::ui::lighting_page::empty_state(), width, &path);
+        written.push(path);
     }
     for path in &written {
         assert!(path.is_file(), "{} was written", path.display());
@@ -511,7 +804,7 @@ fn ph16_71_page(theme: &str, tab: Tab, width: i32) -> (Rc<Page>, gtk::Window) {
         )),
         ..LightingSetup::default()
     };
-    write_config(&setup);
+    write_config(&setup, false);
     let page = Page::for_render(Machine {
         lights: Lights::from(model.hw),
         facts: model.facts.clone(),

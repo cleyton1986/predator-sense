@@ -16,7 +16,7 @@ use gtk4::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 
-use crate::hardware::lighting_model::{LightingSetup, Lights, SetupKind};
+use crate::hardware::lighting_model::{self, LightingSetup, Lights, SetupKind};
 use crate::ui::flow_box;
 use crate::ui::lighting::colour_row::{self, ColourRow, Hooks as ColourHooks, Pick};
 use crate::ui::lighting::control_model::{
@@ -51,8 +51,23 @@ fn zone_name(zone: usize) -> &'static str {
     crate::i18n::t(ZONE_KEYS[zone.min(2)])
 }
 
-fn show_hex([r, g, b]: [u8; 3]) -> String {
-    format!("#{r:02X}{g:02X}{b:02X}")
+/// A zone's name on `light`: the bar's left, middle and right, the four-zone keyboard's
+/// zones 1 to 4.
+fn zone_name_on(light: PreviewLight, zone: usize) -> String {
+    match light {
+        PreviewLight::Keyboard => crate::i18n::tf("lighting_zone_n", &[&(zone + 1).to_string()]),
+        _ => zone_name(zone).to_string(),
+    }
+}
+
+/// A zone slot's name with its colour ("Left zone, #FF0000"; "Zone 1, #FF0000").
+fn zone_words(light: PreviewLight, zone: usize, words: &str) -> String {
+    match light {
+        PreviewLight::Keyboard => {
+            [zone_name_on(light, zone), words.to_string()].join(crate::i18n::t("lighting_list_sep"))
+        }
+        _ => crate::i18n::tf("light_bar_zone_tooltip", &[zone_name(zone), words]),
+    }
 }
 
 /// The theme a setup uses, by name, for the toast when an edit makes it Manual.
@@ -63,12 +78,18 @@ fn theme_of(setup: &LightingSetup) -> Option<String> {
     }
 }
 
-/// The key of a drag's waiting edit (`Page::edit_later`): one per control and light.
+/// The key of a drag's waiting edit (`Page::edit_later`): one per control, light and zone.
 fn soon_key(what: &str, light: PreviewLight, zone: Option<usize>) -> &'static str {
     match (what, light, zone) {
         ("speed", PreviewLight::Keyboard, _) => "speed.keyboard",
+        ("speed", PreviewLight::Logo, _) => "speed.logo",
         ("speed", _, _) => "speed.bar",
-        ("colour", PreviewLight::Keyboard, _) => "colour.keyboard",
+        ("colour", PreviewLight::Logo, _) => "colour.logo",
+        ("colour", PreviewLight::Keyboard, None) => "colour.keyboard",
+        ("colour", PreviewLight::Keyboard, Some(0)) => "colour.keyboard.0",
+        ("colour", PreviewLight::Keyboard, Some(1)) => "colour.keyboard.1",
+        ("colour", PreviewLight::Keyboard, Some(2)) => "colour.keyboard.2",
+        ("colour", PreviewLight::Keyboard, Some(_)) => "colour.keyboard.3",
         ("colour", _, Some(0)) => "colour.bar.0",
         ("colour", _, Some(1)) => "colour.bar.1",
         ("colour", _, Some(_)) => "colour.bar.2",
@@ -76,11 +97,15 @@ fn soon_key(what: &str, light: PreviewLight, zone: Option<usize>) -> &'static st
     }
 }
 
+/// The zone slots: the bar's three, the four-zone keyboard's four.
+const SLOTS: usize = 4;
+
 /// One of the bar's zone slots: selecting one picks the zone the colour row edits.
 struct ZoneSlot {
     button: gtk::ToggleButton,
     dot: gtk::DrawingArea,
     rgb: Rc<Cell<[u8; 3]>>,
+    name: gtk::Label,
     hex: gtk::Label,
     /// Shown on the selected slot, so selection is not told by tint alone.
     check: gtk::Image,
@@ -187,6 +212,8 @@ pub struct ControlPane {
     preview: Rc<PreviewCard>,
     /// The machine's facts that do not change while the app runs.
     facts: Facts,
+    /// Audio Sync is on, as the page showed it last.
+    audio_sync_on: Cell<bool>,
     light: Cell<PreviewLight>,
     effect_title: gtk::Label,
     tiles: gtk::FlowBox,
@@ -198,12 +225,19 @@ pub struct ControlPane {
     zone_label: gtk::Label,
     zone_switch: gtk::Switch,
     zone_area: gtk::Box,
+    slot_grid: gtk::Grid,
+    /// How many slots the grid is laid out for.
+    slots_placed: Cell<usize>,
     slots: Vec<ZoneSlot>,
     copy: gtk::Button,
     copy_label: gtk::Label,
     /// The bar zone the colour row edits while per-zone is on. Page-local, never saved.
     zone: Cell<usize>,
     colour: Rc<ColourRow>,
+    /// The Helios 300 keyboard's 7 colours, in place of the colour row: each button with its
+    /// check.
+    palette_box: gtk::Box,
+    palette_swatches: Vec<(gtk::ToggleButton, gtk::Image)>,
     speed_row: gtk::Box,
     speed: gtk::Scale,
     /// The Speed row's "Slow" and "Fast" ends.
@@ -213,6 +247,15 @@ pub struct ControlPane {
     direction: gtk::DropDown,
     directions: gtk::StringList,
     direction_values: RefCell<Vec<u8>>,
+    /// The one-colour keyboard's "Reverse direction".
+    reverse_row: gtk::Box,
+    reverse: gtk::Switch,
+    /// The four-zone keyboard's "Audio Sync".
+    audio_row: gtk::Box,
+    audio: gtk::Switch,
+    /// The four-zone keyboard's "Reset to default".
+    reset_row: gtk::Box,
+    reset: gtk::Button,
     /// What was shown last.
     view: RefCell<Option<View>>,
     /// Set while widgets are synced; their handlers then write nothing.
@@ -276,10 +319,14 @@ impl ControlPane {
             colour_box.append(&zone_head);
             // The zone slots and Copy, while per-zone is on.
             let zone_area = gtk::Box::new(gtk::Orientation::Vertical, 10);
-            let slot_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-            slot_row.set_homogeneous(true);
+            // The bar's three slots on one line, the keyboard's four two by two
+            // (`ControlPane::place_slots`).
+            let slot_row = gtk::Grid::new();
+            slot_row.set_column_spacing(8);
+            slot_row.set_row_spacing(8);
+            slot_row.set_column_homogeneous(true);
             let mut slots: Vec<ZoneSlot> = Vec::new();
-            for i in 0..3 {
+            for i in 0..SLOTS {
                 let rgb = Rc::new(Cell::new([0u8; 3]));
                 let dot = colour_row::painted_dot(SLOT_DOT, SLOT_DOT, rgb.clone());
                 let name = gtk::Label::new(Some(zone_name(i)));
@@ -309,11 +356,12 @@ impl ControlPane {
                 if let Some(first) = slots.first() {
                     button.set_group(Some(&first.button));
                 }
-                slot_row.append(&button);
+                slot_row.attach(&button, i as i32, 0, 1, 1);
                 slots.push(ZoneSlot {
                     button,
                     dot,
                     rgb,
+                    name,
                     hex,
                     check,
                 });
@@ -346,6 +394,24 @@ impl ControlPane {
                 },
             );
             colour_box.append(&colour.widget);
+            // The Helios 300 keyboard's colours, its only ones.
+            let palette_box = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+            palette_box.add_css_class("lighting-swatches");
+            palette_box.set_accessible_role(gtk::AccessibleRole::RadioGroup);
+            palette_box.update_relation(&[gtk::accessible::Relation::LabelledBy(&[
+                colour_title.upcast_ref()
+            ])]);
+            let mut palette_swatches: Vec<(gtk::ToggleButton, gtk::Image)> = Vec::new();
+            for (i, key) in control_model::PALETTE_COLOUR_KEYS.iter().enumerate() {
+                let (button, check) =
+                    colour_row::fixed_swatch(control_model::palette_colour(i + 1), t(key));
+                if let Some((first, _)) = palette_swatches.first() {
+                    button.set_group(Some(first));
+                }
+                palette_box.append(&button);
+                palette_swatches.push((button, check));
+            }
+            colour_box.append(&palette_box);
             colour_card.append(&colour_box);
 
             let speed_row = gtk::Box::new(gtk::Orientation::Horizontal, 14);
@@ -408,6 +474,25 @@ impl ControlPane {
             direction_row.append(&direction);
             effect_group.append(&direction_row);
 
+            let switch_row = |title: &str| {
+                let (row, _) = lighting_page::row(title, None);
+                let switch = gtk::Switch::new();
+                switch.set_valign(gtk::Align::Center);
+                switch.update_property(&[gtk::accessible::Property::Label(title)]);
+                row.append(&switch);
+                (row, switch)
+            };
+            let (reverse_row, reverse) = switch_row(t("magic_rgb_reverse_direction"));
+            effect_group.append(&reverse_row);
+            let (audio_row, audio) = switch_row(t("audio_sync_title"));
+            effect_group.append(&audio_row);
+            let reset_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            reset_row.add_css_class("lighting-row");
+            let reset = gtk::Button::with_label(t("rgb_reset_default"));
+            reset.add_css_class("lighting-small-button");
+            reset.set_halign(gtk::Align::Start);
+            reset_row.append(&reset);
+            effect_group.append(&reset_row);
             widget.append(&colour_card);
 
             // The brush bar, under the preview while painting (the reference design's ctxbar): the
@@ -481,6 +566,7 @@ impl ControlPane {
                 page,
                 preview: preview.clone(),
                 facts,
+                audio_sync_on: Cell::new(false),
                 light: Cell::new(preview.selected_light()),
                 effect_title,
                 tiles,
@@ -491,11 +577,15 @@ impl ControlPane {
                 zone_label,
                 zone_switch,
                 zone_area,
+                slot_grid: slot_row,
+                slots_placed: Cell::new(0),
                 slots,
                 copy,
                 copy_label,
                 zone: Cell::new(0),
                 colour,
+                palette_box,
+                palette_swatches,
                 speed_row,
                 speed,
                 speed_ends: ends,
@@ -504,6 +594,12 @@ impl ControlPane {
                 direction,
                 directions,
                 direction_values: RefCell::new(Vec::new()),
+                reverse_row,
+                reverse,
+                audio_row,
+                audio,
+                reset_row,
+                reset,
                 view: RefCell::new(None),
                 suppress: Cell::new(false),
                 brush_colour,
@@ -528,12 +624,22 @@ impl ControlPane {
             bar_modes: self.facts.bar_modes.clone(),
             bar_speed: self.facts.bar_speed,
             zones: self.facts.zones,
+            four_zone: self.facts.four_zone.clone(),
+            cover_logo_effects: self.facts.cover_logo_effects.clone(),
+            audio_sync_on: self.audio_sync_on.get(),
         }
     }
 
     /// Shows `light`'s controls for `setup`, the edited mode's (with the edits still
-    /// waiting), on `lights`, with `saved`, the kept colours.
-    pub fn show(self: &Rc<Self>, setup: &LightingSetup, lights: Lights, saved: &[String]) {
+    /// waiting), on `lights`, with `saved`, the kept colours, and Audio Sync on or off.
+    pub fn show(
+        self: &Rc<Self>,
+        setup: &LightingSetup,
+        lights: Lights,
+        saved: &[String],
+        audio_sync_on: bool,
+    ) {
+        self.audio_sync_on.set(audio_sync_on);
         let cx = self.context(lights);
         let light = self.light.get();
         let view = control_model::view(setup, light, &cx);
@@ -556,6 +662,7 @@ impl ControlPane {
         self.show_colour(&view, saved);
         self.show_speed(&view);
         self.show_direction(&view);
+        self.show_switches(&view);
         self.suppress.set(false);
         self.brush_colour.show(self.brush.get(), saved);
         self.key_bar.set_undo(!self.strokes.borrow().is_empty());
@@ -655,6 +762,9 @@ impl ControlPane {
             return;
         };
         self.colour_box.set_visible(true);
+        let fixed = matches!(colour, Colour::Palette(_));
+        self.colour.widget.set_visible(!fixed);
+        self.palette_box.set_visible(fixed);
         let current = match colour {
             Colour::One(rgb) => {
                 self.zone_switch.set_visible(false);
@@ -671,39 +781,99 @@ impl ControlPane {
                 self.zone_label.set_visible(true);
                 self.zone_switch.set_active(per_zone);
                 self.zone_area.set_visible(per_zone);
-                let zone = self.zone.get();
-                for (i, slot) in self.slots.iter().enumerate() {
-                    slot.rgb.set(zones[i]);
-                    slot.dot.queue_draw();
-                    let hex = show_hex(zones[i]);
-                    slot.hex.set_text(&hex);
-                    let label = crate::i18n::tf("light_bar_zone_tooltip", &[zone_name(i), &hex]);
-                    slot.button.set_tooltip_text(Some(&label));
-                    // Read out by the colour's name, with its code as the description: a code
-                    // is no help spelt out.
-                    let spoken = crate::i18n::tf(
-                        "light_bar_zone_tooltip",
-                        &[zone_name(i), &colour_row::spoken_words(zones[i])],
-                    );
-                    slot.button.update_property(&[
-                        gtk::accessible::Property::Label(&spoken),
-                        gtk::accessible::Property::Description(&hex),
-                    ]);
-                    slot.button.set_active(i == zone);
-                    slot.check.set_visible(i == zone);
-                }
-                // The zone's name as it is (a noun in German): each language's text is
-                // phrased around it.
-                self.copy_label
-                    .set_text(&crate::i18n::tf("light_bar_copy_zone", &[zone_name(zone)]));
+                let zone = self.show_slots(&zones);
                 if per_zone {
-                    zones[zone.min(2)]
+                    zones[zone]
                 } else {
                     single
                 }
             }
+            // Always one colour per zone: no switch.
+            Colour::Zones4(zones) => {
+                self.zone_switch.set_visible(false);
+                self.zone_label.set_visible(false);
+                self.zone_area.set_visible(true);
+                zones[self.show_slots(&zones)]
+            }
+            Colour::Palette(index) => {
+                self.zone_switch.set_visible(false);
+                self.zone_label.set_visible(false);
+                self.zone_area.set_visible(false);
+                self.colour.collapse();
+                for (i, (button, check)) in self.palette_swatches.iter().enumerate() {
+                    let on = i + 1 == index;
+                    button.set_active(on);
+                    check.set_visible(on);
+                }
+                return;
+            }
         };
         self.colour.show(current, saved);
+    }
+
+    /// Shows `zones` in the zone slots, as many as there are zones, the chosen one checked,
+    /// and returns the chosen one (kept in range).
+    fn show_slots(&self, zones: &[[u8; 3]]) -> usize {
+        self.place_slots(zones.len());
+        let light = self.light.get();
+        let zone = self.zone.get().min(zones.len().saturating_sub(1));
+        self.zone.set(zone);
+        for (i, slot) in self.slots.iter().enumerate() {
+            let Some(&rgb) = zones.get(i) else {
+                slot.button.set_visible(false);
+                continue;
+            };
+            slot.button.set_visible(true);
+            slot.rgb.set(rgb);
+            slot.dot.queue_draw();
+            slot.name.set_text(&zone_name_on(light, i));
+            let hex = lighting_model::colour_hex(rgb);
+            slot.hex.set_text(&hex);
+            slot.button
+                .set_tooltip_text(Some(&zone_words(light, i, &hex)));
+            // Read out by the colour's name, with its code as the description: a code is
+            // no help spelt out.
+            let spoken = zone_words(light, i, &colour_row::spoken_words(rgb));
+            slot.button.update_property(&[
+                gtk::accessible::Property::Label(&spoken),
+                gtk::accessible::Property::Description(&hex),
+            ]);
+            slot.button.set_active(i == zone);
+            slot.check.set_visible(i == zone);
+        }
+        // The zone's name as it is (a noun in German): each language's text is phrased
+        // around it.
+        self.copy_label.set_text(&crate::i18n::tf(
+            "light_bar_copy_zone",
+            &[&zone_name_on(light, zone)],
+        ));
+        zone
+    }
+
+    /// Lays the zone slots out for `count` zones: up to three on one line, four two by two,
+    /// which leaves each slot room for its name and colour code in the right column of a wide
+    /// page.
+    fn place_slots(&self, count: usize) {
+        if self.slots_placed.replace(count) == count {
+            return;
+        }
+        let across = if count > 3 { 2 } else { count.max(1) };
+        for (i, slot) in self.slots.iter().enumerate() {
+            self.slot_grid.remove(&slot.button);
+            self.slot_grid
+                .attach(&slot.button, (i % across) as i32, (i / across) as i32, 1, 1);
+        }
+    }
+
+    /// The rows only another model's lights have: Reverse direction, Audio Sync and Reset
+    /// to default.
+    fn show_switches(&self, view: &View) {
+        let editable = view.editable;
+        self.reverse_row.set_visible(view.reverse.is_some());
+        self.reverse.set_active(view.reverse.unwrap_or(false));
+        self.audio_row.set_visible(view.audio_sync.is_some());
+        self.audio.set_active(view.audio_sync.unwrap_or(false));
+        self.reset_row.set_visible(view.reset && editable);
     }
 
     fn show_speed(&self, view: &View) {
@@ -719,7 +889,7 @@ impl ControlPane {
             self.speed.set_range(f64::from(lo), f64::from(hi));
             self.speed.clear_marks();
             if let Speed::Steps { .. } = speed {
-                for step in lo..=hi {
+                for step in (lo..=hi).filter(|_| hi - lo <= 10) {
                     self.speed
                         .add_mark(f64::from(step), gtk::PositionType::Bottom, None);
                 }
@@ -793,7 +963,7 @@ impl ControlPane {
         let light = self.light.get();
         let per_zone = matches!(
             self.view.borrow().as_ref().and_then(|v| v.colour),
-            Some(Colour::Zones { per_zone: true, .. })
+            Some(Colour::Zones { per_zone: true, .. } | Colour::Zones4(_))
         );
         let zone = per_zone.then(|| self.zone.get());
         match pick {
@@ -845,8 +1015,57 @@ impl ControlPane {
             let weak = Rc::downgrade(self);
             self.copy.connect_clicked(move |_| {
                 if let Some(pane) = weak.upgrade() {
-                    let zone = pane.zone.get();
-                    pane.edit_now(move |setup, cx| control_model::copy_zone(setup, cx, zone));
+                    let (light, zone) = (pane.light.get(), pane.zone.get());
+                    pane.edit_now(move |setup, cx| {
+                        control_model::copy_zone(setup, cx, light, zone)
+                    });
+                }
+            });
+        }
+        for (i, (button, _)) in self.palette_swatches.iter().enumerate() {
+            let weak = Rc::downgrade(self);
+            button.connect_toggled(move |button| {
+                let Some(pane) = weak.upgrade() else {
+                    return;
+                };
+                if pane.suppress.get() || !button.is_active() {
+                    return;
+                }
+                pane.edit_now(move |setup, cx| control_model::set_palette_colour(setup, cx, i + 1));
+            });
+        }
+        {
+            let weak = Rc::downgrade(self);
+            self.reverse.connect_active_notify(move |switch| {
+                let Some(pane) = weak.upgrade() else {
+                    return;
+                };
+                if pane.suppress.get() {
+                    return;
+                }
+                let on = switch.is_active();
+                pane.edit_now(move |setup, cx| control_model::set_reverse(setup, cx, on));
+            });
+        }
+        {
+            let weak = Rc::downgrade(self);
+            self.audio.connect_active_notify(move |switch| {
+                let Some(pane) = weak.upgrade() else {
+                    return;
+                };
+                if pane.suppress.get() {
+                    return;
+                }
+                if let Some(page) = pane.page() {
+                    page.set_audio_sync(switch.is_active());
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(self);
+            self.reset.connect_clicked(move |_| {
+                if let Some(pane) = weak.upgrade() {
+                    pane.reset_to_default();
                 }
             });
         }
@@ -900,6 +1119,36 @@ impl ControlPane {
                     pane.select_light(light);
                 }
             });
+        }
+    }
+
+    /// "Reset to default", with Undo in a toast, as the page's other resets: on the four-zone
+    /// keyboard the edited mode leaves it to its firmware; on the ENE logo its
+    /// effect, colour, speed and brightness go back to its page's defaults.
+    fn reset_to_default(&self) {
+        let Some(page) = self.page() else {
+            return;
+        };
+        if page.current_setup().unknown_kind().is_some() {
+            return;
+        }
+        let cx = self.context(page.lights());
+        let logo = self.light.get() == PreviewLight::Logo;
+        let undo = page.edit(|setup| {
+            if logo {
+                control_model::reset_logo(setup, &cx)
+            } else {
+                control_model::reset_to_default(setup, &cx)
+            }
+        });
+        if let Some(undo) = undo {
+            let key = if logo {
+                "lighting_toast_logo_reset"
+            } else {
+                "lighting_toast_factory"
+            };
+            let text = crate::i18n::tf(key, &[page.edited().label()]);
+            page.offer_undo(&text, undo);
         }
     }
 

@@ -272,10 +272,10 @@ pub struct AppConfig {
     pub rgb_dynamic_effects: std::collections::HashMap<RgbMode, EffectParams>,
 
     /// Same "remember what was last applied" fix as rgb_is_static/
-    /// rgb_dynamic_last above, for the separate 2024+ HID lighting page
-    /// (`ui::magic_rgb_page`, issues #25/#26) and the Chicony/Helios 300
-    /// page. None means never applied - the page keeps opening on its
-    /// hardcoded Static/first-effect default until the user applies once.
+    /// rgb_dynamic_last above, for the 2024+ HID lighting (issues #25/#26)
+    /// and the Chicony/Helios 300 keyboard: the record of what those lights
+    /// show, written by the per-mode lighting (`lighting::Applied::record`).
+    /// None means never applied.
     #[serde(default)]
     pub magic_rgb_keyboard: Option<MagicRgbKeyboardState>,
     #[serde(default)]

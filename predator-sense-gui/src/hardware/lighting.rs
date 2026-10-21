@@ -39,6 +39,7 @@ use crate::hardware::lighting_model::{
 };
 use crate::hardware::lighting_renderer::{DrewOn, Light, LightingRenderer};
 use crate::hardware::profile::PowerProfile;
+use crate::hardware::rgb::RgbMode;
 
 /// Where a setup's app-drawn looks go: `lighting_renderer::LightingRenderer` implements it,
 /// and `lighting_renderer::renderer()` is the app's.
@@ -70,6 +71,9 @@ pub struct Applied {
     pub magic_keyboard: Option<MagicRgbKeyboardState>,
     pub magic_logo: Option<MagicRgbLogoState>,
     pub cover_logo: Option<CoverLogoSettings>,
+    /// The four-zone keyboard was left to its firmware's own look (`Plan::four_zone_default`):
+    /// its record is cleared. Never with `four_zone_keyboard`.
+    pub four_zone_default: bool,
     /// Each failure, already logged under `context`.
     pub errors: Vec<String>,
 }
@@ -97,6 +101,14 @@ impl Applied {
             cfg.rgb_is_static = keyboard.is_static;
             cfg.rgb_dynamic_last = keyboard.dynamic_last.clone();
             cfg.rgb_dynamic_effects = keyboard.dynamic_effects.clone();
+        } else if self.four_zone_default {
+            // As the RGB page's "Reset to default" leaves them: nothing for the hotkey
+            // service to replay, so the firmware's own look shows at the next login.
+            cfg.rgb_static_zones = None;
+            cfg.rgb_is_static = true;
+            cfg.rgb_dynamic_last = None;
+            cfg.rgb_dynamic_effects.clear();
+            cfg.rgb_brightness = 100;
         }
         if let Some(keyboard) = self.magic_keyboard {
             cfg.magic_rgb_keyboard = Some(keyboard);
@@ -119,12 +131,16 @@ impl Applied {
             magic_keyboard,
             magic_logo,
             cover_logo,
+            four_zone_default,
             errors: _,
         } = later;
         self.keyboard = keyboard.or(self.keyboard);
         self.palette_keyboard = palette_keyboard.or(self.palette_keyboard);
         self.light_bar = light_bar.or(self.light_bar);
-        self.four_zone_keyboard = four_zone_keyboard.or(self.four_zone_keyboard.take());
+        if four_zone_keyboard.is_some() || four_zone_default {
+            self.four_zone_keyboard = four_zone_keyboard;
+            self.four_zone_default = four_zone_default;
+        }
         self.magic_keyboard = magic_keyboard.or(self.magic_keyboard);
         self.magic_logo = magic_logo.or(self.magic_logo);
         self.cover_logo = cover_logo.or(self.cover_logo.take());
@@ -140,6 +156,7 @@ impl Applied {
             magic_keyboard,
             magic_logo,
             cover_logo,
+            four_zone_default,
             errors: _,
         } = self;
         keyboard.is_some()
@@ -149,6 +166,7 @@ impl Applied {
             || magic_keyboard.is_some()
             || magic_logo.is_some()
             || cover_logo.is_some()
+            || *four_zone_default
     }
 }
 
@@ -194,42 +212,66 @@ impl Writers for SystemWriters {
         })
     }
 
+    /// The RGB page's Apply (`rgb::apply_keyboard`), or at brightness 0 its "Turn off
+    /// keyboard light" (`FourZoneKeyboardState::command`). `None` when neither the ENE
+    /// controller nor the WMI node is there (a presence check of its own), and the
+    /// controller is looked for once per write, not once here and again in the write.
     fn four_zone_keyboard(&mut self, state: &FourZoneKeyboardState) -> Option<Result<(), String>> {
-        match super::rgb::apply_keyboard(&state.write(), super::hid_rgb::is_available()) {
-            Ok(super::rgb::KeyboardRoute::PreviewOnly) => None,
-            Ok(_) => Some(Ok(())),
-            Err(e) => Some(Err(e)),
+        let hid = super::hid_rgb::is_available();
+        if !hid && !super::rgb::is_module_loaded() {
+            return None;
+        }
+        match state.command() {
+            lighting_model::FourZoneCommand::Off => Some(super::rgb::turn_off_keyboard(hid)),
+            lighting_model::FourZoneCommand::Write(write) => {
+                match super::rgb::apply_keyboard(&write, hid) {
+                    Ok(super::rgb::KeyboardRoute::PreviewOnly) => None,
+                    Ok(_) => Some(Ok(())),
+                    Err(e) => Some(Err(e)),
+                }
+            }
         }
     }
 
+    /// `magic_rgb::set_keyboard_effect`, with Off and brightness 0 sent as its page's "Turn
+    /// off keyboard light" sent them (`lighting_model::magic_keyboard_command`).
     fn magic_keyboard(&mut self, state: &MagicRgbKeyboardState) -> Option<Result<(), String>> {
         super::magic_rgb::is_keyboard_available().then(|| {
+            let sent = lighting_model::magic_keyboard_command(state);
             super::magic_rgb::set_keyboard_effect(
-                state.effect,
-                state.brightness,
-                state.speed,
-                state.reverse,
-                state.red,
-                state.green,
-                state.blue,
+                sent.effect,
+                sent.brightness,
+                sent.speed,
+                sent.reverse,
+                sent.red,
+                sent.green,
+                sent.blue,
             )
         })
     }
 
+    /// `magic_rgb::set_logo`, with Off and brightness 0 sent as its page's "Turn off" sent
+    /// them (`lighting_model::magic_logo_command`).
     fn magic_logo(&mut self, state: &MagicRgbLogoState) -> Option<Result<(), String>> {
         super::magic_rgb::is_logo_available().then(|| {
+            let sent = lighting_model::magic_logo_command(state);
             super::magic_rgb::set_logo(
-                state.effect,
-                state.brightness,
-                state.speed,
-                (state.red, state.green, state.blue),
+                sent.effect,
+                sent.brightness,
+                sent.speed,
+                (sent.red, sent.green, sent.blue),
             )
         })
     }
 
+    /// `hid_rgb::set_cover_logo`, which looks for the logo's target itself (an error when the
+    /// controller has none), with brightness 0 sent as its page's power switch sent off
+    /// (`lighting_model::cover_logo_command`).
     fn cover_logo(&mut self, state: &CoverLogoSettings) -> Option<Result<(), String>> {
-        super::hid_rgb::is_available()
-            .then(|| super::hid_rgb::set_cover_logo(state.enabled, &state.config))
+        super::hid_rgb::is_available().then(|| {
+            let sent = lighting_model::cover_logo_command(state);
+            super::hid_rgb::set_cover_logo(sent.enabled, &sent.config)
+        })
     }
 }
 
@@ -329,16 +371,19 @@ fn apply_with(
         .filter(|p| written("Chicony keyboard lighting", writers.palette_keyboard(p)));
     let four_zone_applied = plan
         .four_zone_keyboard
-        .filter(|k| written("keyboard lighting", writers.four_zone_keyboard(k)));
+        .filter(|k| written("keyboard lighting", writers.four_zone_keyboard(k)))
+        .map(|k| k.as_written());
     let magic_keyboard_applied = plan
         .magic_keyboard
         .filter(|k| written("keyboard lighting", writers.magic_keyboard(k)));
     let magic_logo_applied = plan
         .magic_logo
         .filter(|l| written("logo lighting", writers.magic_logo(l)));
+    // Recorded as sent: the hotkey service replays the record on the ENE controller.
     let cover_logo_applied = plan
         .cover_logo
-        .filter(|l| written("logo lighting", writers.cover_logo(l)));
+        .filter(|l| written("logo lighting", writers.cover_logo(l)))
+        .map(|l| lighting_model::cover_logo_command(&l));
     applied.light_bar = bar_applied;
     applied.keyboard = keyboard_applied;
     applied.palette_keyboard = palette_applied;
@@ -346,34 +391,304 @@ fn apply_with(
     applied.magic_keyboard = magic_keyboard_applied;
     applied.magic_logo = magic_logo_applied;
     applied.cover_logo = cover_logo_applied;
+    applied.four_zone_default = plan.four_zone_default;
     applied
 }
 
-/// The lights a setup is applied to on this machine, from the capabilities. Never waits,
-/// so the UI thread may call it too: the keyboard's hidraw node is asked with `try_lock`,
-/// and opened at most once (again only after a refused open's back-off).
+/// The lights a setup is applied to on this machine, from the
+/// capabilities. Never waits on a device on the UI thread, so the UI thread may call it too:
+/// the keyboard's hidraw node is asked with `try_lock`, and opened at most once (again only
+/// after a refused open's back-off); the palette keyboard's sysfs scan runs only without the
+/// 24-bit keyboard; the other models' lights are found once from sysfs ([`others`]). The ENE
+/// logo's capability report, a query to its controller, is asked only off the UI thread
+/// (an apply's worker), and again after a failure, with a back-off ([`ENE_LOGO`]); the page
+/// asks for it itself when it is built ([`ask_cover_logo_effects`]).
 pub fn lights() -> Lights {
+    let ask = if config::on_ui_thread() {
+        Ask::No
+    } else {
+        Ask::WhenDue
+    };
+    lights_asking(ask)
+}
+
+/// [`lights`], asking the ENE logo's capability report as `ask` says.
+fn lights_asking(ask: Ask) -> Lights {
     let caps = super::capabilities::get();
+    let others = others();
+    let ene_logo = ene_logo_effects(others.ene_logo_wanted, ask);
     let renderer = super::lighting_renderer::renderer().status();
     lights_from(Found {
         keyboard_rgb: caps.keyboard_rgb,
         hidraw_writable: caps.keyboard_rgb && super::keyboard_rgb::is_hidraw_writable(),
-        // The other models' keyboards and logos keep their own pages ([`lights_from`]).
-        palette_keyboard: false,
-        one_colour_keyboard: false,
-        four_zone_keyboard: false,
-        darfon_logo: false,
-        ene_logo: false,
+        palette_keyboard: !caps.keyboard_rgb && super::chicony_rgb::is_available(),
+        one_colour_keyboard: others.one_colour_keyboard,
+        four_zone_keyboard: others.four_zone_keyboard,
         light_bar_zones: caps.light_bar_zones,
         bar_direct: caps.light_bar_zones
             && super::light_bar_zones::direct_route()
             && !renderer.bar_lost,
         light_bar: caps.light_bar,
         other_bar: caps.light_bar && super::light_bar::has_extended_effects(),
+        darfon_logo: others.darfon_logo,
+        ene_logo: !ene_logo.is_empty(),
+        ene_logo_effects: lighting_model::LogoEffects::of(&ene_logo),
         renderer_stopped: renderer.stopped,
         react_to_typing: super::key_input::react_to_typing(),
         reduced_motion: REDUCED_MOTION.load(Ordering::Relaxed),
     })
+}
+
+/// The ENE logo's effects, of which its page offered those its capability report advertises;
+/// its page's order.
+pub const COVER_LOGO_EFFECTS: [RgbMode; 3] = [RgbMode::Static, RgbMode::Breath, RgbMode::Neon];
+
+/// The other models' lights, besides the 24-bit and palette keyboards and the bar, which
+/// `lights` asks for on every call. Found once from sysfs, as each model's old page found
+/// them when it was built.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OtherLights {
+    /// The 2024 models' one-colour keyboard (Sunrex).
+    one_colour_keyboard: bool,
+    /// The four-zone keyboard (the ENE controller or the WMI node).
+    four_zone_keyboard: bool,
+    /// The 2024 models' lid logo (Darfon).
+    darfon_logo: bool,
+    /// The ENE logo is looked for: its controller's capability report is asked
+    /// ([`ene_logo_effects`]), here only.
+    ene_logo_wanted: bool,
+}
+
+/// What the system says, for [`OtherLights`].
+#[derive(Debug, Clone, Copy, Default)]
+struct Probe {
+    keyboard_rgb: bool,
+    light_bar: bool,
+    palette_keyboard: bool,
+    /// `magic_rgb::is_keyboard_available`, `magic_rgb::is_logo_available` (USB ids).
+    sunrex_keyboard: bool,
+    darfon_logo: bool,
+    /// `hid_rgb::is_available` (the ENEK5130 controller), `rgb::is_module_loaded` (facer's
+    /// WMI lighting node).
+    ene_controller: bool,
+    wmi_node: bool,
+}
+
+/// The other models' lights from `probe`, by the same rules that chose their old pages
+/// (upstream's `rgb_page::build`), so no gate is widened. The one-colour keyboard and the
+/// Darfon logo wherever their USB ids are found: the 2024 models' page took them (the
+/// PH16-72's bar sent that model to the Lighting page, which left both out; they now join
+/// its bar). The four-zone keyboard and the ENE logo only on a machine none of the other
+/// pages took (no 24-bit keyboard, bar, 2024 device or Helios 300 keyboard), where the RGB
+/// page drove them: the keyboard with the ENE controller or the WMI node (the node also
+/// exists on the PH16-71 generation, whose bar it carries), the logo where the ENE
+/// controller's capability report has its target (looked for only there:
+/// [`OtherLights::ene_logo_wanted`]).
+fn other_lights_from(probe: Probe) -> OtherLights {
+    let rgb_page = !probe.keyboard_rgb
+        && !probe.light_bar
+        && !probe.sunrex_keyboard
+        && !probe.darfon_logo
+        && !probe.palette_keyboard;
+    OtherLights {
+        one_colour_keyboard: probe.sunrex_keyboard,
+        four_zone_keyboard: rgb_page && (probe.ene_controller || probe.wmi_node),
+        darfon_logo: probe.darfon_logo,
+        ene_logo_wanted: rgb_page && probe.ene_controller,
+    }
+}
+
+/// [`OtherLights`] for this machine, found from sysfs on the first call.
+fn others() -> &'static OtherLights {
+    static OTHERS: std::sync::OnceLock<OtherLights> = std::sync::OnceLock::new();
+    OTHERS.get_or_init(|| {
+        let caps = super::capabilities::get();
+        other_lights_from(Probe {
+            keyboard_rgb: caps.keyboard_rgb,
+            light_bar: caps.light_bar,
+            palette_keyboard: super::chicony_rgb::is_available(),
+            sunrex_keyboard: super::magic_rgb::is_keyboard_available(),
+            darfon_logo: super::magic_rgb::is_logo_available(),
+            ene_controller: super::hid_rgb::is_available(),
+            wmi_node: super::rgb::is_module_loaded(),
+        })
+    })
+}
+
+/// One answer of the ENE controller's capability report for the logo's target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LogoReport {
+    /// The logo's target, with these of [`COVER_LOGO_EFFECTS`].
+    Found(Vec<RgbMode>),
+    /// The report lists no logo target: no logo, or (at login, while the hotkey service
+    /// restores the same controller) a discovery that came back empty.
+    NoTarget,
+    /// The controller did not answer.
+    Failed,
+}
+
+/// The ENE logo's capability report as asked so far. Only an answer
+/// that found the logo is kept, for the session; after a failure an apply's worker asks
+/// again once the back-off has passed ([`logo_backoff`]), and after
+/// [`LOGO_NO_TARGET_TRIES`] reports in a row with no logo target it asks no more. The page,
+/// as it is built, asks once more whatever these say ([`Ask::Now`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct LogoAnswers {
+    effects: Option<Vec<RgbMode>>,
+    /// Reports in a row that did not find it, and of those the ones listing no target.
+    misses: u32,
+    no_target: u32,
+    /// Not asked again before this.
+    next: Option<std::time::Instant>,
+    /// A query is under way: no other one starts.
+    asking: bool,
+}
+
+/// Reports in a row listing no logo target after which the logo is taken as absent (the
+/// hotkey service gives its own login restore three tries).
+const LOGO_NO_TARGET_TRIES: u32 = 3;
+
+/// How long after the `misses`th report in a row without the logo it is asked again: 1, 2,
+/// 4 ... seconds, at most a minute.
+fn logo_backoff(misses: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(1u64 << misses.saturating_sub(1).min(6))
+        .min(std::time::Duration::from_secs(60))
+}
+
+/// Whether a caller asks the ENE logo's capability report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    /// Never: the UI thread's `lights`, the restore, and readers.
+    No,
+    /// When a query is due ([`LogoAnswers::due`]): an apply's worker.
+    WhenDue,
+    /// Now, unless it was found or a query is under way: the page as it is built, as the RGB
+    /// page asked when it was built.
+    Now,
+}
+
+impl LogoAnswers {
+    /// Whether a query may start now for a caller that `ask`s.
+    fn due(&self, ask: Ask, now: std::time::Instant) -> bool {
+        if self.effects.is_some() || self.asking {
+            return false;
+        }
+        match ask {
+            Ask::No => false,
+            Ask::WhenDue => {
+                self.no_target < LOGO_NO_TARGET_TRIES && self.next.map_or(true, |next| now >= next)
+            }
+            Ask::Now => true,
+        }
+    }
+
+    fn take(&mut self, report: LogoReport, now: std::time::Instant) {
+        self.asking = false;
+        match report {
+            LogoReport::Found(effects) => self.effects = Some(effects),
+            miss => {
+                self.misses += 1;
+                if miss == LogoReport::NoTarget {
+                    self.no_target += 1;
+                }
+                self.next = Some(now + logo_backoff(self.misses));
+            }
+        }
+    }
+}
+
+/// The ENE logo's answers on this machine.
+static ENE_LOGO: Mutex<LogoAnswers> = Mutex::new(LogoAnswers {
+    effects: None,
+    misses: 0,
+    no_target: 0,
+    next: None,
+    asking: false,
+});
+
+/// Clears [`LogoAnswers::asking`] when the query it guards unwinds: a panic in it must not
+/// leave the logo never asked again for the session.
+struct AskingGuard<'a>(&'a Mutex<LogoAnswers>);
+
+impl Drop for AskingGuard<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).asking = false;
+        }
+    }
+}
+
+/// The ENE logo's effects from `answers`: none where it is not `wanted` (and nothing is
+/// asked), the kept answer, or, when the caller `ask`s and a query may start, `query`'s. The
+/// lock is never held across the query, so no caller waits for the device behind another's.
+fn logo_effects_from(
+    answers: &Mutex<LogoAnswers>,
+    wanted: bool,
+    ask: Ask,
+    now: std::time::Instant,
+    query: impl FnOnce() -> LogoReport,
+) -> Vec<RgbMode> {
+    if !wanted {
+        return Vec::new();
+    }
+    {
+        let mut state = answers.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(effects) = &state.effects {
+            return effects.clone();
+        }
+        if !state.due(ask, now) {
+            return Vec::new();
+        }
+        state.asking = true;
+    }
+    let report = {
+        let _asking = AskingGuard(answers);
+        query()
+    };
+    let mut state = answers.lock().unwrap_or_else(|e| e.into_inner());
+    state.take(report, now);
+    state.effects.clone().unwrap_or_default()
+}
+
+/// The ENE controller's capability report for the logo's target, now.
+fn query_cover_logo() -> LogoReport {
+    match super::hid_rgb::cover_logo_capabilities() {
+        Ok(Some(caps)) => LogoReport::Found(
+            COVER_LOGO_EFFECTS
+                .into_iter()
+                .filter(|mode| caps.supports_rgb_mode(*mode))
+                .collect(),
+        ),
+        Ok(None) => LogoReport::NoTarget,
+        Err(e) => {
+            super::applog::error(&format!("cover logo not detected, asked again later: {e}"));
+            LogoReport::Failed
+        }
+    }
+}
+
+/// [`logo_effects_from`] for this machine.
+fn ene_logo_effects(wanted: bool, ask: Ask) -> Vec<RgbMode> {
+    logo_effects_from(
+        &ENE_LOGO,
+        wanted,
+        ask,
+        std::time::Instant::now(),
+        query_cover_logo,
+    )
+}
+
+/// The ENE logo's effects on this machine (of [`COVER_LOGO_EFFECTS`]), as answered so far;
+/// empty without the logo. Asks nothing.
+pub fn cover_logo_effects() -> Vec<RgbMode> {
+    ene_logo_effects(others().ene_logo_wanted, Ask::No)
+}
+
+/// The page, as it is built: asks the ENE controller's capability report for the logo now,
+/// on the UI thread, unless it was found or another query is under way, as the RGB page
+/// asked it when it was built. Nothing on a machine where the ENE logo is not looked for.
+pub fn ask_cover_logo_effects() {
+    let _ = ene_logo_effects(others().ene_logo_wanted, Ask::Now);
 }
 
 /// The desktop asks for less motion (`gtk-interface-reduced-motion`), as the UI thread last
@@ -396,15 +711,13 @@ struct Found {
     keyboard_rgb: bool,
     /// Its hidraw node is writable by this user (`keyboard_rgb::is_hidraw_writable`).
     hidraw_writable: bool,
-    /// The Helios 300's palette keyboard, the same controller on an older generation.
+    /// The Helios 300's palette keyboard (`chicony_rgb::is_available`), the same controller
+    /// on an older generation, so asked only without the 24-bit one.
     palette_keyboard: bool,
-    /// The 2024 models' one-colour keyboard.
+    /// The 2024 models' one-colour keyboard ([`OtherLights`]).
     one_colour_keyboard: bool,
-    /// The four-zone keyboard.
+    /// The four-zone keyboard ([`OtherLights`]).
     four_zone_keyboard: bool,
-    /// The 2024 models' lid logo, and the ENE one.
-    darfon_logo: bool,
-    ene_logo: bool,
     /// The light bar's three zones (`capabilities.light_bar_zones`).
     light_bar_zones: bool,
     /// Their node takes direct colour frames (facer's direct route,
@@ -416,6 +729,11 @@ struct Found {
     /// It is the PH16-72's or PH18-72's (`light_bar::has_extended_effects`), not the
     /// PH16-71's.
     other_bar: bool,
+    /// The 2024 models' lid logo, and the ENE one ([`OtherLights`]).
+    darfon_logo: bool,
+    ene_logo: bool,
+    /// The ENE logo's effects besides Static ([`ene_logo_effects`]).
+    ene_logo_effects: lighting_model::LogoEffects,
     /// The lighting renderer has stopped for good (`Status::stopped`: an internal error,
     /// or its thread could not start), so it draws nothing any more.
     renderer_stopped: bool,
@@ -427,20 +745,14 @@ struct Found {
 
 /// The lights' kinds from what was found. The keyboard as the restore chose which one to
 /// write before per-mode lighting, the 24-bit keyboard first, else the palette one, then
-/// the 2024 models' one-colour keyboard, then the four-zone one; the logo the 2024 models'
-/// Darfon one, else the ENE one. The keyboard takes app-drawn
-/// frames only through its hidraw node, the bar only through its zone node's direct route
-/// (never streamed over WMI: without the route, or after a direct frame failed, the bar
-/// behaves as one that cannot be drawn), and neither takes any once the renderer has
-/// stopped: their looks resolve to the firmware fallbacks instead of leaving the last frame
-/// drawn up.
-///
-/// [`lights`] finds only the PH16-71's keyboard and the light bar, the lights of the models
-/// whose Lighting page this is. The other models' keyboards and logos keep their own pages,
-/// which write what those lights show; the restore puts the Helios 300's keyboard back from
-/// its page's record, and the hotkey service restores the ENE ones. A mode's setup written
-/// over them at every mode change would undo each edit with the mode's copy from the
-/// migration.
+/// the 2024 models' one-colour keyboard, then the four-zone one ([`OtherLights`] keeps the
+/// last two to the machines their old pages served); the logo the 2024 models' Darfon one,
+/// else the ENE one. Every model's lights go to the Lighting page. The
+/// keyboard takes app-drawn frames only through its hidraw node, the bar only through its
+/// zone node's direct route (never streamed over WMI: without the route, or after a direct
+/// frame failed, the bar behaves as one that cannot be drawn), and neither takes any once
+/// the renderer has stopped: their looks resolve to the firmware fallbacks instead of
+/// leaving the last frame drawn up.
 fn lights_from(found: Found) -> Lights {
     let keyboard = if found.keyboard_rgb {
         Some(KeyboardKind::PerKey)
@@ -478,6 +790,12 @@ fn lights_from(found: Found) -> Lights {
         react_to_typing: found.react_to_typing,
         reduced_motion: found.reduced_motion,
         other_bar: bar.is_some() && found.other_bar,
+        // What the ENE logo advertises; any other machine has nothing to hold back.
+        cover_logo: if logo == Some(LogoKind::Ene) {
+            found.ene_logo_effects
+        } else {
+            lighting_model::LogoEffects::ALL
+        },
     }
 }
 
@@ -763,9 +1081,8 @@ fn before_keyboard_on_restore(
 
 /// Puts the active power mode's lighting back on the lights (with no mode known, the lights
 /// as last applied), in the order the restore has always used: the bar, the keyboard's idle
-/// step, then the keyboard only if that step did not send it; then the Helios 300's keyboard
-/// from its page's record. What was written is queued for the UI thread to record
-/// ([`record_written`], which the caller's completion calls).
+/// step, then the keyboard only if that step did not send it. What was written is queued
+/// for the UI thread to record ([`record_written`], which the caller's completion calls).
 ///
 /// `wake` is passed through to the light bar: after a real power cycle the
 /// firmware needs one Breathing frame before any other mode becomes visible.
@@ -782,7 +1099,18 @@ pub fn restore_saved(wake: bool, context: &str) {
     let cfg = config_now();
     let mode = super::profile::get_current_profile();
     let setup = setup_to_restore(&cfg, mode);
-    let lights = lights();
+    // The ENE logo's capability report is not asked: the restore writes the logo only after
+    // "Show on my laptop" changed it ([`restored`]), and the page that showed it asked when it
+    // was built. At login the hotkey service restores that controller at the same time.
+    let all = lights_asking(Ask::No);
+    // A resume ends "Show on my laptop" (the page's `machine_resumed`): every light it changed
+    // gets the active mode's look too, also those the restore leaves alone otherwise.
+    let previewed = *previewed();
+    let lights = restored(all, previewed);
+    let audio = audio_sync_for(&setup, &all, cfg.audio_sync_enabled);
+    if audio == AudioSync::Stop {
+        super::audio_sync::stop_and_wait();
+    }
     let per_key = lights.hw.keyboard == Some(KeyboardKind::PerKey);
     let record = cfg.keyboard_rgb;
     let applied = apply_setup(
@@ -801,6 +1129,10 @@ pub fn restore_saved(wake: bool, context: &str) {
         },
         context,
     );
+    {
+        let mut set = self::previewed();
+        *set = after_apply(*set, false, LightSet::of(&applied));
+    }
     *shown() = Some(Shown {
         mode,
         setup,
@@ -810,22 +1142,7 @@ pub fn restore_saved(wake: bool, context: &str) {
         applied,
         activity: false,
     });
-    // The Helios 300's palette keyboard is not among the lights the setups go to
-    // ([`lights_from`]): its own page writes it, and the restore puts that back.
-    if let Some(saved) = cfg.chicony_rgb.filter(|_| !per_key) {
-        if super::chicony_rgb::is_available() {
-            if let Err(e) = super::chicony_rgb::set_effect(
-                saved.effect,
-                saved.brightness,
-                saved.color,
-                saved.speed,
-            ) {
-                super::applog::error(&format!(
-                    "{context}: Chicony keyboard lighting not restored: {e}"
-                ));
-            }
-        }
-    }
+    run_audio_sync(audio);
 }
 
 /// The keyboard and the bar at exit, once the lighting renderer has stopped.
@@ -963,6 +1280,179 @@ pub fn exit_looks(drew: DrewOn) -> ExitLooks {
     exit_looks_from(&setup, &lights(), at, cfg.keyboard_rgb, cfg.light_bar)
 }
 
+/// Lights, one flag each: those an apply writes whatever the record says
+/// ([`UnlessShown::rewrite`]), those it wrote, or those "Show on my laptop" changed
+/// ([`PREVIEWED`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct LightSet {
+    keyboard: bool,
+    palette_keyboard: bool,
+    light_bar: bool,
+    four_zone_keyboard: bool,
+    magic_keyboard: bool,
+    magic_logo: bool,
+    cover_logo: bool,
+}
+
+impl LightSet {
+    fn union(self, other: LightSet) -> LightSet {
+        LightSet {
+            keyboard: self.keyboard || other.keyboard,
+            palette_keyboard: self.palette_keyboard || other.palette_keyboard,
+            light_bar: self.light_bar || other.light_bar,
+            four_zone_keyboard: self.four_zone_keyboard || other.four_zone_keyboard,
+            magic_keyboard: self.magic_keyboard || other.magic_keyboard,
+            magic_logo: self.magic_logo || other.magic_logo,
+            cover_logo: self.cover_logo || other.cover_logo,
+        }
+    }
+
+    /// The lights of `self` that `other` does not name.
+    fn without(self, other: LightSet) -> LightSet {
+        LightSet {
+            keyboard: self.keyboard && !other.keyboard,
+            palette_keyboard: self.palette_keyboard && !other.palette_keyboard,
+            light_bar: self.light_bar && !other.light_bar,
+            four_zone_keyboard: self.four_zone_keyboard && !other.four_zone_keyboard,
+            magic_keyboard: self.magic_keyboard && !other.magic_keyboard,
+            magic_logo: self.magic_logo && !other.magic_logo,
+            cover_logo: self.cover_logo && !other.cover_logo,
+        }
+    }
+
+    /// The lights `applied` says a state reached (through the system's writers, which skip
+    /// nothing).
+    fn of(applied: &Applied) -> LightSet {
+        LightSet {
+            keyboard: applied.keyboard.is_some(),
+            palette_keyboard: applied.palette_keyboard.is_some(),
+            light_bar: applied.light_bar.is_some(),
+            four_zone_keyboard: applied.four_zone_keyboard.is_some(),
+            magic_keyboard: applied.magic_keyboard.is_some(),
+            magic_logo: applied.magic_logo.is_some(),
+            cover_logo: applied.cover_logo.is_some(),
+        }
+    }
+}
+
+/// The lights "Show on my laptop" changed and the active mode's look has not been written to
+/// since: when it ends, for any reason, the next apply of the active mode writes each of them
+/// whatever the record says, and the resume restore writes them too, those it
+/// otherwise leaves alone included ([`restored`]). Under [`APPLYING`].
+static PREVIEWED: Mutex<LightSet> = Mutex::new(LightSet {
+    keyboard: false,
+    palette_keyboard: false,
+    light_bar: false,
+    four_zone_keyboard: false,
+    magic_keyboard: false,
+    magic_logo: false,
+    cover_logo: false,
+});
+
+fn previewed() -> MutexGuard<'static, LightSet> {
+    PREVIEWED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// [`PREVIEWED`] after an apply that `wrote` these lights: a preview's add to it; any other
+/// apply puts the active mode's look on the lights it wrote, which leave it. A light it could
+/// not write stays, for the next.
+fn after_apply(previewed: LightSet, preview: bool, wrote: LightSet) -> LightSet {
+    if preview {
+        previewed.union(wrote)
+    } else {
+        previewed.without(wrote)
+    }
+}
+
+/// The lights [`restore_saved`] writes, of `lights`: only those the app has always put back
+/// itself at start-up and on resume, the PH16-71's keyboard, the Helios 300's and the light
+/// bar. Not the four-zone keyboard (the hotkey service puts the ENE one back from the
+/// record, and nothing puts the WMI one back: its controller keeps its effect), nor the
+/// one-colour keyboard or a logo (their controllers keep their state; the service puts the
+/// ENE logo back), unless "Show on my laptop" changed it (`previewed`) and it still shows
+/// that: the resume ends it, and the light gets the active mode's look. No general restore
+/// for them. A power-mode change and the page's edits write them all.
+fn restored(lights: Lights, previewed: LightSet) -> Lights {
+    let keyboard = lights.hw.keyboard.filter(|kind| match kind {
+        KeyboardKind::PerKey | KeyboardKind::Palette => true,
+        KeyboardKind::Zones4 => previewed.four_zone_keyboard,
+        KeyboardKind::OneColour => previewed.magic_keyboard,
+    });
+    let logo = lights.hw.logo.filter(|kind| match kind {
+        LogoKind::Darfon => previewed.magic_logo,
+        LogoKind::Ene => previewed.cover_logo,
+    });
+    Lights {
+        hw: Hardware {
+            keyboard,
+            logo,
+            ..lights.hw
+        },
+        ..lights
+    }
+}
+
+/// What Audio Sync does once the lights show a setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AudioSync {
+    /// Nothing: no four-zone keyboard among the lights the setups are applied to, so there is
+    /// no Audio Sync.
+    Leave,
+    /// Stop, before the keyboard's next look is written: a capture's static zone colours
+    /// would cover it.
+    Stop,
+    /// Run, or keep running, with this colour.
+    Run((u8, u8, u8)),
+}
+
+/// Audio Sync on the four-zone keyboard (one setting for the app, as on the RGB page): it
+/// runs while the lights show that keyboard's zone colours from a Manual setup, lit (not at
+/// brightness 0, which is the off command), with the setting on, in zone 1's colour as the
+/// page always took it. Any other look stops it, and the setting stays.
+fn audio_sync_for(setup: &LightingSetup, lights: &Lights, enabled: bool) -> AudioSync {
+    if lights.hw.keyboard != Some(KeyboardKind::Zones4) {
+        return AudioSync::Leave;
+    }
+    if !matches!(setup.kind, lighting_model::SetupKind::Manual(_)) {
+        return AudioSync::Stop;
+    }
+    match lighting_model::plan(setup, lights).four_zone_keyboard {
+        Some(k) if enabled && k.is_static && !k.is_off() => {
+            let [red, green, blue] = k.zone_colours()[0];
+            AudioSync::Run((red, green, blue))
+        }
+        _ => AudioSync::Stop,
+    }
+}
+
+/// Whether the four-zone keyboard shows something the record does not say: a capture ran
+/// before this stop (`capture_ran`, `audio_sync::is_running`), so the keyboard shows the
+/// capture's last frame (black in silence), never written into the record. Its look is then
+/// written whatever the record says, or turning Audio Sync off would leave it on that frame
+/// with no Apply to relight it.
+fn four_zone_drawn(audio: AudioSync, capture_ran: bool) -> bool {
+    audio == AudioSync::Stop && capture_ran
+}
+
+/// Starts Audio Sync for [`AudioSync::Run`], after the keyboard's look was written, or gives
+/// a running capture its new colour. It starts only where the RGB page offered it: `parec`
+/// on `PATH` and a way to write zone colours (the ENE controller or the WMI static node).
+fn run_audio_sync(audio: AudioSync) {
+    let AudioSync::Run(colour) = audio else {
+        return;
+    };
+    if super::audio_sync::is_running() {
+        super::audio_sync::set_colour(colour);
+        return;
+    }
+    let writable = super::hid_rgb::is_available() || super::rgb::is_static_device_available();
+    if writable && super::audio_sync::is_available() {
+        if let Err(e) = super::audio_sync::start(colour) {
+            super::applog::error(&format!("audio sync: {e}"));
+        }
+    }
+}
+
 /// Power-mode changes taken, in the order they happened ([`ModeChanges::take`]); an apply
 /// runs only for the latest.
 pub struct ModeChanges(AtomicU64);
@@ -1048,18 +1538,43 @@ pub fn apply_mode_rewriting_keyboard(change: ModeChange, preview: bool, context:
 fn apply_mode_as(change: ModeChange, preview: bool, rewrite_keyboard: bool, context: &str) -> bool {
     let _applying = applying();
     let cfg = config_now();
-    let Some((setup, applied)) = apply_mode_with(
+    let lights = lights();
+    let audio = audio_sync_for(
+        &setup_to_restore(&cfg, Some(change.mode)),
+        &lights,
+        cfg.audio_sync_enabled,
+    );
+    let capture_ran = super::audio_sync::is_running();
+    if audio == AudioSync::Stop && MODE_CHANGES.is_latest(change) {
+        super::audio_sync::stop_and_wait();
+    }
+    // Written whatever the record says: the four-zone keyboard after an Audio Sync capture,
+    // and, once "Show on my laptop" has ended, every light it changed.
+    let mut rewrite = LightSet {
+        four_zone_keyboard: four_zone_drawn(audio, capture_ran),
+        ..LightSet::default()
+    };
+    if !preview {
+        rewrite = rewrite.union(*previewed());
+    }
+    let Some((setup, applied, wrote)) = apply_mode_with(
         &mut SystemWriters,
         &cfg,
         change,
         &MODE_CHANGES,
-        &lights(),
+        &lights,
         super::lighting_renderer::renderer(),
         rewrite_keyboard,
+        rewrite,
         context,
     ) else {
         return false;
     };
+    {
+        let mut set = previewed();
+        *set = after_apply(*set, preview, wrote);
+    }
+    run_audio_sync(audio);
     *shown() = Some(Shown {
         mode: Some(change.mode),
         setup,
@@ -1082,7 +1597,10 @@ fn apply_mode_as(change: ModeChange, preview: bool, rewrite_keyboard: bool, cont
 /// again ([`UnlessShown`]): every mode owns a setup, and two modes often show the same
 /// look, which a write would restart. With `rewrite_keyboard` the keyboard is written
 /// whatever the record says, and a look the renderer draws on it is sent again whole
-/// ([`apply_mode_rewriting_keyboard`]).
+/// ([`apply_mode_rewriting_keyboard`]). The lights `rewrite` names are written whatever the
+/// record says too (the four-zone keyboard after an Audio Sync capture, [`four_zone_drawn`],
+/// and the lights "Show on my laptop" changed, [`PREVIEWED`]). Returns also the lights it
+/// wrote or the renderer draws on.
 ///
 /// The power mode was written to the firmware before this, and any write of it makes the
 /// EC flash the light bar. A look the renderer draws on the bar is sent again whole after
@@ -1096,8 +1614,9 @@ fn apply_mode_with(
     lights: &Lights,
     renderer: &LightingRenderer,
     rewrite_keyboard: bool,
+    rewrite: LightSet,
     context: &str,
-) -> Option<(LightingSetup, Applied)> {
+) -> Option<(LightingSetup, Applied, LightSet)> {
     if !changes.is_latest(change) {
         return None;
     }
@@ -1107,11 +1626,16 @@ fn apply_mode_with(
     // direct colour frame failed.
     let status = renderer.status();
     let stopped = status.stopped;
+    let drawn = LightSet {
+        keyboard: stopped || rewrite_keyboard || renderer.draws(Light::Keyboard),
+        light_bar: stopped || status.bar_lost || renderer.draws(Light::Bar),
+        ..LightSet::default()
+    };
     let mut writers = UnlessShown {
         inner: writers,
         shown: ManualSetup::record(cfg),
-        keyboard_drawn: stopped || rewrite_keyboard || renderer.draws(Light::Keyboard),
-        bar_drawn: stopped || status.bar_lost || renderer.draws(Light::Bar),
+        rewrite: drawn.union(rewrite),
+        wrote: LightSet::default(),
     };
     let applied = apply_with(
         &mut writers,
@@ -1128,70 +1652,104 @@ fn apply_mode_with(
     if rewrite_keyboard && renderer.draws(Light::Keyboard) {
         renderer.redraw(Light::Keyboard);
     }
-    Some((setup, applied))
+    let wrote = writers.wrote.union(LightSet {
+        keyboard: renderer.draws(Light::Keyboard),
+        light_bar: renderer.draws(Light::Bar),
+        ..LightSet::default()
+    });
+    Some((setup, applied, wrote))
 }
 
 /// The writers of a mode change: a light whose state equals the one the record says it
 /// shows (`shown`, `ManualSetup::record`) is not written, and is reported as applied; the
-/// rest go to `inner`. A light the renderer drew before the change, or may still show the
-/// last frame of (`keyboard_drawn`, `bar_drawn`: also every light once the renderer has
-/// stopped for good), is written whatever the record says: the record holds its last
-/// firmware look, not the frame it shows.
+/// rest go to `inner`. A light `rewrite` names is written whatever the record says: one the
+/// renderer drew before the change, or may still show the last frame of (also every light
+/// once the renderer has stopped for good), since the record holds its last firmware look,
+/// not the frame it shows; the four-zone keyboard after an Audio Sync capture; and a light
+/// "Show on my laptop" changed, once it has ended. `wrote` collects each light a write
+/// reached.
 struct UnlessShown<'a> {
     inner: &'a mut dyn Writers,
     shown: ManualSetup,
-    keyboard_drawn: bool,
-    bar_drawn: bool,
+    rewrite: LightSet,
+    wrote: LightSet,
+}
+
+/// Whether `result` says a write reached its light.
+fn reached(result: &Result<(), String>) -> bool {
+    result.is_ok()
 }
 
 impl Writers for UnlessShown<'_> {
     fn light_bar(&mut self, state: &LightBarState, wake: bool) -> Result<(), String> {
-        if !self.bar_drawn && self.shown.light_bar == Some(*state) {
+        if !self.rewrite.light_bar && self.shown.light_bar == Some(*state) {
             return Ok(());
         }
-        self.inner.light_bar(state, wake)
+        let result = self.inner.light_bar(state, wake);
+        self.wrote.light_bar |= reached(&result);
+        result
     }
 
     fn keyboard(&mut self, state: &KeyboardState) -> Result<(), String> {
-        if !self.keyboard_drawn && self.shown.keyboard == Some(*state) {
+        if !self.rewrite.keyboard && self.shown.keyboard == Some(*state) {
             return Ok(());
         }
-        self.inner.keyboard(state)
+        let result = self.inner.keyboard(state);
+        self.wrote.keyboard |= reached(&result);
+        result
     }
 
     fn palette_keyboard(&mut self, state: &ChiconyRgbState) -> Option<Result<(), String>> {
-        if self.shown.palette_keyboard == Some(*state) {
+        if !self.rewrite.palette_keyboard && self.shown.palette_keyboard == Some(*state) {
             return Some(Ok(()));
         }
-        self.inner.palette_keyboard(state)
+        let result = self.inner.palette_keyboard(state);
+        self.wrote.palette_keyboard |= result.as_ref().is_some_and(reached);
+        result
     }
 
+    /// Compared as the record keeps it (`FourZoneKeyboardState::as_written`): a keyboard
+    /// already turned off is not turned off again.
     fn four_zone_keyboard(&mut self, state: &FourZoneKeyboardState) -> Option<Result<(), String>> {
-        if self.shown.four_zone_keyboard.as_ref() == Some(state) {
+        if !self.rewrite.four_zone_keyboard
+            && self.shown.four_zone_keyboard.as_ref() == Some(&state.as_written())
+        {
             return Some(Ok(()));
         }
-        self.inner.four_zone_keyboard(state)
+        let result = self.inner.four_zone_keyboard(state);
+        self.wrote.four_zone_keyboard |= result.as_ref().is_some_and(reached);
+        result
     }
 
     fn magic_keyboard(&mut self, state: &MagicRgbKeyboardState) -> Option<Result<(), String>> {
-        if self.shown.magic_keyboard == Some(*state) {
+        if !self.rewrite.magic_keyboard && self.shown.magic_keyboard == Some(*state) {
             return Some(Ok(()));
         }
-        self.inner.magic_keyboard(state)
+        let result = self.inner.magic_keyboard(state);
+        self.wrote.magic_keyboard |= result.as_ref().is_some_and(reached);
+        result
     }
 
     fn magic_logo(&mut self, state: &MagicRgbLogoState) -> Option<Result<(), String>> {
-        if self.shown.magic_logo == Some(*state) {
+        if !self.rewrite.magic_logo && self.shown.magic_logo == Some(*state) {
             return Some(Ok(()));
         }
-        self.inner.magic_logo(state)
+        let result = self.inner.magic_logo(state);
+        self.wrote.magic_logo |= result.as_ref().is_some_and(reached);
+        result
     }
 
+    /// Compared as the record keeps it (`lighting_model::cover_logo_command`): a logo already
+    /// switched off is not switched off again.
     fn cover_logo(&mut self, state: &CoverLogoSettings) -> Option<Result<(), String>> {
-        if self.shown.cover_logo.as_ref() == Some(state) {
+        if !self.rewrite.cover_logo
+            && self.shown.cover_logo.as_ref() == Some(&lighting_model::cover_logo_command(state))
+        {
             return Some(Ok(()));
         }
-        self.inner.cover_logo(state)
+        let result = self.inner.cover_logo(state);
+        self.wrote.cover_logo |= result.as_ref().is_some_and(reached);
+        result
     }
 }
 
@@ -1493,6 +2051,8 @@ mod tests {
         palette_present: bool,
         /// The four-zone write lands on HID-only hardware without a native mapping.
         four_zone_preview_only: bool,
+        /// The ENE controller has the logo's target (else its write fails).
+        logo_target: bool,
     }
 
     impl Recording {
@@ -1502,6 +2062,7 @@ mod tests {
                 bar_fails: false,
                 palette_present: true,
                 four_zone_preview_only: false,
+                logo_target: false,
             }
         }
 
@@ -1542,11 +2103,13 @@ mod tests {
             &mut self,
             state: &FourZoneKeyboardState,
         ) -> Option<Result<(), String>> {
-            self.push(format!(
-                "four-zone static {} at {}",
-                state.is_static,
-                state.write().brightness
-            ));
+            match state.command() {
+                lighting_model::FourZoneCommand::Off => self.push("four-zone off".to_string()),
+                lighting_model::FourZoneCommand::Write(write) => self.push(format!(
+                    "four-zone static {} at {}",
+                    write.is_static, write.brightness
+                )),
+            }
             (!self.four_zone_preview_only).then_some(Ok(()))
         }
 
@@ -1559,13 +2122,25 @@ mod tests {
         }
 
         fn magic_logo(&mut self, state: &MagicRgbLogoState) -> Option<Result<(), String>> {
-            self.push(format!("magic logo at {}", state.brightness));
+            let sent = lighting_model::magic_logo_command(state);
+            match sent.effect {
+                Some(_) => self.push(format!("magic logo at {}", state.brightness)),
+                None => self.push("magic logo off".to_string()),
+            }
             Some(Ok(()))
         }
 
         fn cover_logo(&mut self, state: &CoverLogoSettings) -> Option<Result<(), String>> {
-            self.push(format!("cover logo at {}", state.config.brightness));
-            Some(Err("no logo target".into()))
+            if !lighting_model::cover_logo_command(state).enabled {
+                self.push("cover logo off".to_string());
+            } else {
+                self.push(format!("cover logo at {}", state.config.brightness));
+            }
+            if self.logo_target {
+                Some(Ok(()))
+            } else {
+                Some(Err("no logo target".into()))
+            }
         }
     }
 
@@ -1887,6 +2462,597 @@ mod tests {
         assert_eq!(record.four_zone_keyboard, Some(zones));
     }
 
+    fn zones4() -> Hardware {
+        Hardware {
+            keyboard: Some(KeyboardKind::Zones4),
+            bar: None,
+            logo: None,
+        }
+    }
+
+    fn with_four_zone(state: Option<FourZoneKeyboardState>) -> LightingSetup {
+        let mut setup = other_lights();
+        if let SetupKind::Manual(m) = &mut setup.kind {
+            m.four_zone_keyboard = state;
+        }
+        setup
+    }
+
+    /// "Reset to default" leaves the four-zone keyboard to its firmware: nothing is written
+    /// to it, and its record is cleared as the RGB page's button cleared it, so the hotkey
+    /// service replays nothing at the next login or resume. Only on a machine with that
+    /// keyboard; a state that shows nothing counts as none.
+    #[test]
+    fn a_four_zone_keyboard_left_to_its_firmware_clears_its_record() {
+        let log: Log = Rc::default();
+        let applied = run(
+            &mut Recording::new(&log),
+            &with_four_zone(None),
+            &zones4(),
+            false,
+        );
+        assert!(applied.four_zone_default && applied.four_zone_keyboard.is_none());
+        assert!(
+            !log.borrow().iter().any(|l| l.starts_with("four-zone")),
+            "nothing written: {:?}",
+            log.borrow()
+        );
+        let mut cfg = AppConfig::default();
+        Applied {
+            four_zone_keyboard: Some(four_zone(false)),
+            ..Applied::default()
+        }
+        .record(&mut cfg);
+        assert!(cfg.rgb_dynamic_last.is_some());
+        cfg.rgb_dynamic_effects
+            .insert(crate::hardware::rgb::RgbMode::Wave, Default::default());
+        applied.record(&mut cfg);
+        assert_eq!(cfg.rgb_static_zones, None);
+        assert!(cfg.rgb_is_static);
+        assert_eq!(cfg.rgb_dynamic_last, None);
+        assert!(cfg.rgb_dynamic_effects.is_empty());
+        assert_eq!(cfg.rgb_brightness, 100);
+        assert_eq!(ManualSetup::record(&cfg).four_zone_keyboard, None);
+        assert!(applied.wrote_anything(), "there is something to record");
+
+        let mut nothing = four_zone(true);
+        nothing.static_zones = None;
+        let applied = run(
+            &mut Recording::new(&Rc::default()),
+            &with_four_zone(Some(nothing)),
+            &zones4(),
+            false,
+        );
+        assert!(applied.four_zone_default);
+        // Another keyboard: nothing to clear.
+        let applied = run(
+            &mut Recording::new(&Rc::default()),
+            &with_four_zone(None),
+            &Hardware::PH16_71,
+            false,
+        );
+        assert!(!applied.four_zone_default);
+
+        // The later of two outcomes counts, as for every light.
+        let written = Applied {
+            four_zone_keyboard: Some(four_zone(true)),
+            ..Applied::default()
+        };
+        let reset = Applied {
+            four_zone_default: true,
+            ..Applied::default()
+        };
+        let mut a = written.clone();
+        a.take_newer(reset.clone());
+        assert_eq!(
+            (a.four_zone_keyboard.is_none(), a.four_zone_default),
+            (true, true)
+        );
+        let mut b = reset;
+        b.take_newer(written.clone());
+        assert_eq!(b.four_zone_keyboard, written.four_zone_keyboard);
+        assert!(!b.four_zone_default);
+        let mut c = written.clone();
+        c.take_newer(Applied::default());
+        assert_eq!(
+            c, written,
+            "a later apply that left it alone changes nothing"
+        );
+    }
+
+    /// At brightness 0 the four-zone keyboard gets the RGB page's "Turn off keyboard light",
+    /// and its record says what that shows, the zones black at 0, which the
+    /// hotkey service then replays as the same off. A mode change to the same off writes
+    /// nothing again.
+    #[test]
+    fn a_four_zone_keyboard_at_brightness_0_is_turned_off() {
+        let mut setup = with_four_zone(Some(four_zone(true)));
+        setup.brightness.keyboard = 0;
+        let log: Log = Rc::default();
+        let applied = run(&mut Recording::new(&log), &setup, &zones4(), false);
+        assert!(log.borrow().contains(&"four-zone off".to_string()));
+        let shown = applied.four_zone_keyboard.clone().expect("written");
+        assert!(shown.is_static && shown.brightness == 0);
+        assert_eq!(shown.zone_colours(), [[0; 3]; 4]);
+        let mut cfg = AppConfig::default();
+        applied.record(&mut cfg);
+        assert_eq!(cfg.rgb_brightness, 0);
+        assert!(cfg
+            .rgb_static_zones
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|z| (z.red, z.green, z.blue) == (0, 0, 0)));
+
+        let mut unless = UnlessShown {
+            inner: &mut Recording::new(&log),
+            shown: ManualSetup::record(&cfg),
+            rewrite: LightSet::default(),
+            wrote: LightSet::default(),
+        };
+        log.borrow_mut().clear();
+        let off = four_zone(true).at_brightness(0);
+        assert_eq!(unless.four_zone_keyboard(&off), Some(Ok(())));
+        assert!(log.borrow().is_empty(), "already off: {:?}", log.borrow());
+        assert_eq!(
+            unless.four_zone_keyboard(&four_zone(true)),
+            Some(Ok(())),
+            "lit again: written"
+        );
+        assert_eq!(*log.borrow(), ["four-zone static true at 60"]);
+    }
+
+    /// A lid logo at brightness 0 goes out as its page's off went: the Darfon
+    /// logo's off sequence, the ENE logo's power switched off, which is also what the ENE
+    /// logo's record then says, for the hotkey service to replay. A logo already off is not
+    /// switched off again, and Off and effects otherwise go out as they are.
+    #[test]
+    fn a_logo_at_brightness_0_is_turned_off_as_its_page_did() {
+        use crate::hardware::effects::themes::LogoKind;
+        use crate::hardware::magic_rgb::LogoEffect;
+        use crate::hardware::rgb::{RgbConfig, RgbMode};
+        let lit = MagicRgbLogoState {
+            effect: Some(LogoEffect::Breathing),
+            brightness: 40,
+            speed: 3,
+            red: 1,
+            green: 2,
+            blue: 3,
+        };
+        let off = MagicRgbLogoState {
+            effect: None,
+            brightness: 0,
+            speed: 0,
+            red: 0,
+            green: 0,
+            blue: 0,
+        };
+        assert_eq!(lighting_model::magic_logo_command(&lit), lit);
+        for dark in [
+            MagicRgbLogoState {
+                brightness: 0,
+                ..lit
+            },
+            MagicRgbLogoState {
+                effect: None,
+                ..lit
+            },
+        ] {
+            assert_eq!(lighting_model::magic_logo_command(&dark), off);
+        }
+        let ene = CoverLogoSettings {
+            enabled: true,
+            config: RgbConfig {
+                mode: RgbMode::Neon,
+                brightness: 70,
+                ..RgbConfig::default()
+            },
+        };
+        assert_eq!(lighting_model::cover_logo_command(&ene), ene);
+        let at_0 = CoverLogoSettings {
+            enabled: true,
+            config: RgbConfig {
+                brightness: 0,
+                ..ene.config.clone()
+            },
+        };
+        let switched_off = CoverLogoSettings {
+            enabled: false,
+            config: at_0.config.clone(),
+        };
+        assert_eq!(lighting_model::cover_logo_command(&at_0), switched_off);
+
+        // Planned at brightness 0, sent as off and recorded as sent.
+        let hw = Hardware {
+            keyboard: None,
+            bar: None,
+            logo: Some(LogoKind::Ene),
+        };
+        let mut setup = LightingSetup::from_manual(ManualSetup {
+            cover_logo: Some(ene.clone()),
+            ..ManualSetup::default()
+        });
+        setup.brightness.logo = 0;
+        let log: Log = Rc::default();
+        let mut writers = Recording::new(&log);
+        writers.logo_target = true;
+        let applied = run(&mut writers, &setup, &hw, false);
+        assert!(log.borrow().contains(&"cover logo off".to_string()));
+        assert_eq!(
+            applied.cover_logo,
+            Some(CoverLogoSettings {
+                enabled: false,
+                config: RgbConfig {
+                    brightness: 0,
+                    ..ene.config.clone()
+                },
+            })
+        );
+        let mut cfg = AppConfig::default();
+        applied.record(&mut cfg);
+        assert_eq!(cfg.cover_logo.as_ref().map(|l| l.enabled), Some(false));
+        let mut unless = UnlessShown {
+            inner: &mut writers,
+            shown: ManualSetup::record(&cfg),
+            rewrite: LightSet::default(),
+            wrote: LightSet::default(),
+        };
+        log.borrow_mut().clear();
+        assert_eq!(unless.cover_logo(&at_0), Some(Ok(())));
+        assert!(log.borrow().is_empty(), "already off: {:?}", log.borrow());
+        assert_eq!(unless.cover_logo(&ene), Some(Ok(())));
+        assert_eq!(*log.borrow(), ["cover logo at 70"], "lit again: written");
+
+        // The Darfon logo at brightness 0: its off sequence.
+        let darfon = Hardware {
+            logo: Some(LogoKind::Darfon),
+            ..hw
+        };
+        let mut setup = LightingSetup::from_manual(ManualSetup {
+            magic_logo: Some(lit),
+            ..ManualSetup::default()
+        });
+        setup.brightness.logo = 0;
+        let log: Log = Rc::default();
+        run(&mut Recording::new(&log), &setup, &darfon, false);
+        assert!(log.borrow().contains(&"magic logo off".to_string()));
+    }
+
+    /// Audio Sync off: the capture leaves the four-zone keyboard on its last
+    /// frame, which the record does not hold, so the mode change that stops it writes the
+    /// zones although the record says they show; the next change does not write them again.
+    #[test]
+    fn audio_sync_off_writes_the_zones_once() {
+        use crate::hardware::lighting_renderer::testing;
+        assert!(four_zone_drawn(AudioSync::Stop, true));
+        assert!(!four_zone_drawn(AudioSync::Stop, false), "no capture ran");
+        assert!(
+            !four_zone_drawn(AudioSync::Run((1, 1, 1)), true),
+            "it goes on"
+        );
+        assert!(
+            !four_zone_drawn(AudioSync::Leave, true),
+            "not this keyboard"
+        );
+
+        let mut cfg = AppConfig::default();
+        cfg.lighting_modes = lighting_model::all_modes();
+        let zones = with_four_zone(Some(four_zone(true)));
+        for mode in [PowerProfile::Balanced, PowerProfile::Eco] {
+            cfg.lighting_modes.get_mut(&mode).unwrap().setup = zones.clone();
+        }
+        let renderer = testing::renderer();
+        let lights = Lights::from(zones4());
+        let changes = ModeChanges::new();
+        let apply = |cfg: &AppConfig, mode, capture_ran: bool| {
+            let log: Log = Rc::default();
+            let (_, applied, _) = apply_mode_with(
+                &mut Recording::new(&log),
+                cfg,
+                changes.take(mode),
+                &changes,
+                &lights,
+                &renderer,
+                false,
+                LightSet {
+                    four_zone_keyboard: four_zone_drawn(AudioSync::Stop, capture_ran),
+                    ..LightSet::default()
+                },
+                "test",
+            )
+            .expect("the latest change");
+            let written = log.borrow().clone();
+            (written, applied)
+        };
+        // The zones are written and recorded.
+        let (written, applied) = apply(&cfg, PowerProfile::Balanced, false);
+        assert_eq!(written, ["four-zone static true at 30"]);
+        applied.record(&mut cfg);
+        // The record says they show: without a capture, nothing is written.
+        let (written, _) = apply(&cfg, PowerProfile::Eco, false);
+        assert!(written.is_empty(), "{written:?}");
+        // Audio Sync was on and is turned off: the zones go back on, once.
+        let (written, applied) = apply(&cfg, PowerProfile::Eco, true);
+        assert_eq!(written, ["four-zone static true at 30"]);
+        applied.record(&mut cfg);
+        let (written, _) = apply(&cfg, PowerProfile::Balanced, false);
+        assert!(written.is_empty(), "{written:?}");
+    }
+
+    /// "Show on my laptop" ending: every light the preview wrote is
+    /// kept until the active mode's look is written to it, and the apply that ends it writes
+    /// each whatever the record says (after a suspend the record still says what it showed
+    /// before). A preview's own applies add to it; any other apply takes off what it wrote,
+    /// and keeps a light it could not write.
+    #[test]
+    fn the_end_of_show_on_my_laptop_rewrites_what_it_changed() {
+        use crate::config::MagicRgbKeyboardState;
+        use crate::hardware::lighting_renderer::testing;
+        use crate::hardware::magic_rgb::KeyboardEffect;
+        // The bookkeeping.
+        let four = LightSet {
+            four_zone_keyboard: true,
+            ..LightSet::default()
+        };
+        let logo = LightSet {
+            cover_logo: true,
+            ..LightSet::default()
+        };
+        assert_eq!(after_apply(LightSet::default(), true, four), four);
+        assert_eq!(after_apply(four, true, logo), four.union(logo));
+        assert_eq!(
+            after_apply(four.union(logo), false, four),
+            logo,
+            "the logo failed"
+        );
+        assert_eq!(after_apply(four, false, four), LightSet::default());
+        assert_eq!(after_apply(four, false, LightSet::default()), four);
+
+        // Balanced, the active mode, shows zones at 30; Eco, previewed, Static zones at 60.
+        let mut cfg = AppConfig::default();
+        cfg.lighting_modes = lighting_model::all_modes();
+        let active = with_four_zone(Some(four_zone(true)));
+        let mut eco = with_four_zone(Some(four_zone(true)));
+        eco.brightness.keyboard = 60;
+        cfg.lighting_modes
+            .get_mut(&PowerProfile::Balanced)
+            .unwrap()
+            .setup = active.clone();
+        cfg.lighting_modes
+            .get_mut(&PowerProfile::Eco)
+            .unwrap()
+            .setup = eco;
+        let renderer = testing::renderer();
+        let lights = Lights::from(zones4());
+        let changes = ModeChanges::new();
+        let apply = |cfg: &AppConfig, mode, rewrite: LightSet| {
+            let log: Log = Rc::default();
+            let (_, applied, wrote) = apply_mode_with(
+                &mut Recording::new(&log),
+                cfg,
+                changes.take(mode),
+                &changes,
+                &lights,
+                &renderer,
+                false,
+                rewrite,
+                "test",
+            )
+            .expect("the latest change");
+            let written = log.borrow().clone();
+            (written, applied, wrote)
+        };
+        let (written, applied, _) = apply(&cfg, PowerProfile::Balanced, LightSet::default());
+        assert_eq!(written, ["four-zone static true at 30"]);
+        applied.record(&mut cfg);
+        let before = cfg.clone();
+        // The preview writes Eco's zones and notes the keyboard.
+        let (written, applied, wrote) = apply(&cfg, PowerProfile::Eco, LightSet::default());
+        assert_eq!(written, ["four-zone static true at 60"]);
+        assert!(wrote.four_zone_keyboard && !wrote.cover_logo);
+        let previewed = after_apply(LightSet::default(), true, wrote);
+        applied.record(&mut cfg);
+        // A suspend: the record says Balanced's zones again (as before the preview), the
+        // keyboard still shows Eco's. A plain apply of Balanced would skip it...
+        let (written, _, _) = apply(&before, PowerProfile::Balanced, LightSet::default());
+        assert!(written.is_empty(), "{written:?}");
+        // ...the end of the preview writes it, and leaves nothing to write after.
+        let (written, _, wrote) = apply(&before, PowerProfile::Balanced, previewed);
+        assert_eq!(written, ["four-zone static true at 30"]);
+        assert_eq!(after_apply(previewed, false, wrote), LightSet::default());
+
+        // A light the preview skipped (it already showed that state) was not changed by it:
+        // it is not noted.
+        let mut same = before.clone();
+        same.lighting_modes
+            .get_mut(&PowerProfile::Eco)
+            .unwrap()
+            .setup = active.clone();
+        let (written, _, wrote) = apply(&same, PowerProfile::Eco, LightSet::default());
+        assert!(
+            written.is_empty() && !wrote.four_zone_keyboard,
+            "{written:?}"
+        );
+
+        // The one-colour keyboard alike.
+        let ph16_72 = Hardware {
+            keyboard: Some(KeyboardKind::OneColour),
+            bar: None,
+            logo: None,
+        };
+        let one = MagicRgbKeyboardState {
+            effect: KeyboardEffect::Wave,
+            brightness: 100,
+            speed: 4,
+            reverse: false,
+            red: 1,
+            green: 2,
+            blue: 3,
+        };
+        let mut cfg = AppConfig::default();
+        cfg.lighting_modes = lighting_model::all_modes();
+        cfg.lighting_modes
+            .get_mut(&PowerProfile::Balanced)
+            .unwrap()
+            .setup = LightingSetup::from_manual(ManualSetup {
+            magic_keyboard: Some(one),
+            ..ManualSetup::default()
+        });
+        cfg.magic_rgb_keyboard = Some(one);
+        let lights = Lights::from(ph16_72);
+        let log: Log = Rc::default();
+        let rewrite = LightSet {
+            magic_keyboard: true,
+            ..LightSet::default()
+        };
+        let (_, _, wrote) = apply_mode_with(
+            &mut Recording::new(&log),
+            &cfg,
+            changes.take(PowerProfile::Balanced),
+            &changes,
+            &lights,
+            &renderer,
+            false,
+            rewrite,
+            "test",
+        )
+        .expect("the latest change");
+        assert_eq!(*log.borrow(), ["magic keyboard Wave at 100"]);
+        assert!(wrote.magic_keyboard);
+    }
+
+    /// The resume restore ends "Show on my laptop" too: it writes, besides what it always
+    /// puts back, the lights the preview changed and nothing else.
+    #[test]
+    fn the_resume_restore_writes_what_the_preview_changed() {
+        use crate::hardware::effects::themes::LogoKind;
+        let all = Lights::from(Hardware {
+            keyboard: Some(KeyboardKind::Zones4),
+            bar: None,
+            logo: Some(LogoKind::Ene),
+        });
+        assert_eq!(restored(all, LightSet::default()).hw, Hardware::default());
+        let keyboard = LightSet {
+            four_zone_keyboard: true,
+            ..LightSet::default()
+        };
+        assert_eq!(
+            restored(all, keyboard).hw.keyboard,
+            Some(KeyboardKind::Zones4)
+        );
+        assert_eq!(restored(all, keyboard).hw.logo, None);
+        let logo = LightSet {
+            cover_logo: true,
+            ..LightSet::default()
+        };
+        assert_eq!(restored(all, logo).hw.logo, Some(LogoKind::Ene));
+        assert_eq!(restored(all, logo).hw.keyboard, None);
+        let ph16_72 = Lights::from(Hardware {
+            keyboard: Some(KeyboardKind::OneColour),
+            bar: None,
+            logo: Some(LogoKind::Darfon),
+        });
+        let both = LightSet {
+            magic_keyboard: true,
+            magic_logo: true,
+            ..LightSet::default()
+        };
+        assert_eq!(restored(ph16_72, both).hw, ph16_72.hw);
+        // A flag for another kind of light brings nothing back.
+        assert_eq!(
+            restored(ph16_72, keyboard.union(logo)).hw,
+            Hardware::default()
+        );
+    }
+
+    /// The restore puts back only what the app always put back itself: the PH16-71's and the
+    /// Helios 300's keyboards and the bar, never the four-zone or one-colour keyboard or a
+    /// logo (inventory: the hotkey service restores the ENE ones, nothing the rest).
+    #[test]
+    fn the_restore_writes_only_the_lights_the_app_always_put_back() {
+        use crate::hardware::effects::themes::{BarKind, LogoKind};
+        for keyboard in [
+            KeyboardKind::PerKey,
+            KeyboardKind::Zones4,
+            KeyboardKind::OneColour,
+            KeyboardKind::Palette,
+        ] {
+            for logo in [None, Some(LogoKind::Darfon), Some(LogoKind::Ene)] {
+                let all = Lights::from(Hardware {
+                    keyboard: Some(keyboard),
+                    bar: Some(BarKind::OneColour),
+                    logo,
+                });
+                let kept = restored(all, LightSet::default());
+                let wanted = matches!(keyboard, KeyboardKind::PerKey | KeyboardKind::Palette)
+                    .then_some(keyboard);
+                assert_eq!(kept.hw.keyboard, wanted, "{keyboard:?}");
+                assert_eq!(kept.hw.logo, None);
+                assert_eq!(kept.hw.bar, Some(BarKind::OneColour));
+                assert_eq!(
+                    (kept.keyboard_drawable, kept.react_to_typing),
+                    (all.keyboard_drawable, all.react_to_typing)
+                );
+            }
+        }
+        // So restoring a PHN16-73's setup writes nothing, and clears no record.
+        let phn16_73 = Hardware {
+            keyboard: Some(KeyboardKind::Zones4),
+            bar: None,
+            logo: Some(LogoKind::Ene),
+        };
+        let log: Log = Rc::default();
+        let applied = apply_with(
+            &mut Recording::new(&log),
+            &with_four_zone(None),
+            &restored(phn16_73.into(), LightSet::default()),
+            true,
+            &Recorder(log.clone()),
+            &mut |_| false,
+            "test",
+        );
+        assert_eq!(*log.borrow(), ["renderer stop"]);
+        assert!(!applied.wrote_anything());
+    }
+
+    /// Audio Sync runs while the lights show the four-zone keyboard's zone colours, lit, from
+    /// a Manual setup, with the setting on, in zone 1's colour; anything else stops it; with
+    /// no four-zone keyboard among the lights it is left alone.
+    #[test]
+    fn audio_sync_follows_the_zone_colours_the_lights_show() {
+        let lights = Lights::from(zones4());
+        let static_zones = with_four_zone(Some(four_zone(true)));
+        assert_eq!(
+            audio_sync_for(&static_zones, &lights, true),
+            AudioSync::Run((10, 0, 0))
+        );
+        assert_eq!(
+            audio_sync_for(&static_zones, &lights, false),
+            AudioSync::Stop
+        );
+        let mut dark = static_zones.clone();
+        dark.brightness.keyboard = 0;
+        assert_eq!(audio_sync_for(&dark, &lights, true), AudioSync::Stop);
+        let effect = with_four_zone(Some(four_zone(false)));
+        assert_eq!(audio_sync_for(&effect, &lights, true), AudioSync::Stop);
+        assert_eq!(
+            audio_sync_for(&with_four_zone(None), &lights, true),
+            AudioSync::Stop
+        );
+        let theme = LightingSetup {
+            kind: SetupKind::Theme(ThemeChoice::new(find("solid").unwrap())),
+            ..LightingSetup::default()
+        };
+        assert_eq!(audio_sync_for(&theme, &lights, true), AudioSync::Stop);
+        // The PH16-71, and today's other models (their pages drive it).
+        for hw in [Hardware::PH16_71, Hardware::default()] {
+            assert_eq!(
+                audio_sync_for(&static_zones, &Lights::from(hw), true),
+                AudioSync::Leave
+            );
+        }
+    }
+
     #[test]
     fn the_lights_are_found_from_the_capabilities() {
         use crate::hardware::effects::themes::BarKind;
@@ -1937,6 +3103,7 @@ mod tests {
             ..Found::default()
         });
         assert_eq!(helios.hw.keyboard, Some(KeyboardKind::Palette));
+        assert_eq!((helios.hw.bar, helios.hw.logo), (None, None));
         assert!(!helios.keyboard_drawable);
         // The 24-bit keyboard wins over the palette one, as on the restore before.
         let both = lights_from(Found {
@@ -1944,38 +3111,104 @@ mod tests {
             ..ph16_71
         });
         assert_eq!(both.hw.keyboard, Some(KeyboardKind::PerKey));
-        // A PH16-72's lights and a PHN16-73's, as the mapping names them.
-        let ph16_72 = lights_from(Found {
-            light_bar: true,
-            one_colour_keyboard: true,
-            darfon_logo: true,
-            ..Found::default()
-        });
-        assert_eq!(ph16_72.hw.keyboard, Some(KeyboardKind::OneColour));
-        assert_eq!(ph16_72.hw.logo, Some(LogoKind::Darfon));
-        let phn16_73 = lights_from(Found {
-            four_zone_keyboard: true,
-            ene_logo: true,
-            ..Found::default()
-        });
-        assert_eq!(phn16_73.hw.keyboard, Some(KeyboardKind::Zones4));
-        assert_eq!(phn16_73.hw.logo, Some(LogoKind::Ene));
 
-        // A PH16-72 or PH18-72: the bar only, its keyboard and logo keep their page.
-        let ph16_72 = lights_from(Found {
+        // A PH18-72: the bar only.
+        let ph18_72 = lights_from(Found {
             light_bar: true,
             ..Found::default()
         });
         assert_eq!(
-            ph16_72.hw,
+            ph18_72.hw,
             Hardware {
                 keyboard: None,
                 bar: Some(BarKind::OneColour),
                 logo: None
             }
         );
-        // Nothing found: no lights.
+        // A PH16-72: the bar, another model's, the one-colour keyboard and the Darfon logo,
+        // on one page.
+        let ph16_72 = lights_from(Found {
+            light_bar: true,
+            other_bar: true,
+            one_colour_keyboard: true,
+            darfon_logo: true,
+            ..Found::default()
+        });
+        assert!(ph16_72.other_bar);
+        assert!(
+            !lights_from(Found {
+                other_bar: true,
+                ..Found::default()
+            })
+            .other_bar,
+            "no bar, no other bar"
+        );
+        assert_eq!(
+            ph16_72.hw,
+            Hardware {
+                keyboard: Some(KeyboardKind::OneColour),
+                bar: Some(BarKind::OneColour),
+                logo: Some(LogoKind::Darfon)
+            }
+        );
+        assert!(!ph16_72.keyboard_drawable, "never drawn on");
+        // A PHN16-73: the four-zone keyboard and the ENE logo.
+        let phn16_73 = lights_from(Found {
+            four_zone_keyboard: true,
+            ene_logo: true,
+            ..Found::default()
+        });
+        assert_eq!(
+            phn16_73.hw,
+            Hardware {
+                keyboard: Some(KeyboardKind::Zones4),
+                bar: None,
+                logo: Some(LogoKind::Ene)
+            }
+        );
+        assert!(!phn16_73.keyboard_drawable);
+        // What its logo advertises reaches the plan.
+        let static_only = lights_from(Found {
+            four_zone_keyboard: true,
+            ene_logo: true,
+            ene_logo_effects: lighting_model::LogoEffects::default(),
+            ..Found::default()
+        });
+        assert_eq!(
+            static_only.cover_logo,
+            lighting_model::LogoEffects::default()
+        );
+        // The keyboards' order: the 24-bit, the palette, the one-colour, the four-zone one.
+        let all = Found {
+            palette_keyboard: true,
+            one_colour_keyboard: true,
+            four_zone_keyboard: true,
+            darfon_logo: true,
+            ene_logo: true,
+            ..Found::default()
+        };
+        assert_eq!(lights_from(all).hw.keyboard, Some(KeyboardKind::Palette));
+        assert_eq!(lights_from(all).hw.logo, Some(LogoKind::Darfon));
+        let found = Found {
+            palette_keyboard: false,
+            ..all
+        };
+        assert_eq!(
+            lights_from(found).hw.keyboard,
+            Some(KeyboardKind::OneColour)
+        );
+        assert_eq!(
+            lights_from(Found {
+                one_colour_keyboard: false,
+                ..found
+            })
+            .hw
+            .keyboard,
+            Some(KeyboardKind::Zones4)
+        );
+        // Nothing found: no lights (the page's empty state).
         assert_eq!(lights_from(Found::default()).hw, Hardware::default());
+        assert!(!lights_from(Found::default()).hw.has_lights());
 
         // The renderer stopped for good: the same lights, neither drawn on.
         let stopped = lights_from(Found {
@@ -1994,6 +3227,179 @@ mod tests {
         });
         assert_eq!(no_route.hw, Hardware::PH16_71);
         assert!(!no_route.bar_drawable && no_route.keyboard_drawable);
+    }
+
+    /// The other models' lights keep the gates that chose their old pages: the one-colour
+    /// keyboard and the Darfon logo by their USB ids wherever they are; the four-zone keyboard
+    /// (ENE controller or WMI node) and the ENE logo only on a machine none of the other pages
+    /// took, so the WMI node that carries the PH16-71 generation's bar never makes a four-zone
+    /// keyboard, and the ENE logo's controller is asked only there.
+    #[test]
+    fn the_other_lights_keep_their_old_pages_gates() {
+        // A PHN16-73: the ENE controller, its logo looked for.
+        let phn16_73 = Probe {
+            ene_controller: true,
+            ..Probe::default()
+        };
+        assert_eq!(
+            other_lights_from(phn16_73),
+            OtherLights {
+                four_zone_keyboard: true,
+                ene_logo_wanted: true,
+                ..OtherLights::default()
+            }
+        );
+        // An older WMI model: the node, no ENE controller, so no logo looked for.
+        let wmi = Probe {
+            wmi_node: true,
+            ..Probe::default()
+        };
+        assert_eq!(
+            other_lights_from(wmi),
+            OtherLights {
+                four_zone_keyboard: true,
+                ..OtherLights::default()
+            }
+        );
+        // The PH16-71 and PH16-72/PH18-72 generation: the WMI node carries the bar, which a
+        // four-zone keyboard never comes from, and no logo is looked for there.
+        for probe in [
+            Probe {
+                keyboard_rgb: true,
+                light_bar: true,
+                wmi_node: true,
+                ..Probe::default()
+            },
+            Probe {
+                light_bar: true,
+                wmi_node: true,
+                ene_controller: true,
+                ..Probe::default()
+            },
+        ] {
+            let found = other_lights_from(probe);
+            assert!(!found.four_zone_keyboard && !found.ene_logo_wanted);
+        }
+        // The 2024 devices, with the bar or without, and the Helios 300: no four-zone.
+        let ph16_72 = Probe {
+            light_bar: true,
+            sunrex_keyboard: true,
+            darfon_logo: true,
+            wmi_node: true,
+            ..Probe::default()
+        };
+        assert_eq!(
+            other_lights_from(ph16_72),
+            OtherLights {
+                one_colour_keyboard: true,
+                darfon_logo: true,
+                ..OtherLights::default()
+            }
+        );
+        for probe in [
+            Probe {
+                sunrex_keyboard: true,
+                ene_controller: true,
+                ..Probe::default()
+            },
+            Probe {
+                palette_keyboard: true,
+                ene_controller: true,
+                ..Probe::default()
+            },
+        ] {
+            let found = other_lights_from(probe);
+            assert!(!found.four_zone_keyboard && !found.ene_logo_wanted);
+        }
+        // Nothing at all.
+        assert_eq!(other_lights_from(Probe::default()), OtherLights::default());
+    }
+
+    /// The ENE logo's capability report: an answer that found the logo is kept
+    /// for the session; a failed one, or one listing no logo target (as at login while the
+    /// hotkey service restores the same controller), is asked again on a later call once the
+    /// back-off has passed, 1, 2, 4 ... seconds, at most a minute; three in a row with no
+    /// target mean no logo, except to the page as it is built, which asks once more whatever
+    /// the back-off says, as the RGB page did. Nothing is asked where the logo is not looked
+    /// for (the PH16-71), nor by a caller that may not ask (the UI thread's `lights`), nor
+    /// while a query is under way.
+    #[test]
+    fn a_query_that_panics_leaves_the_ene_logo_to_be_asked_again() {
+        let answers = Mutex::new(LogoAnswers::default());
+        let now = std::time::Instant::now();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            logo_effects_from(&answers, true, Ask::Now, now, || -> LogoReport {
+                panic!("the controller's report crashed the query")
+            })
+        }));
+        assert!(panicked.is_err());
+        assert!(!answers.lock().unwrap().asking, "no query is under way");
+        let effects = logo_effects_from(&answers, true, Ask::Now, now, || {
+            LogoReport::Found(vec![RgbMode::Static])
+        });
+        assert_eq!(effects, [RgbMode::Static], "asked again");
+    }
+
+    #[test]
+    fn the_ene_logo_is_asked_again_after_a_failure_and_kept_once_found() {
+        use std::cell::Cell;
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let found = || LogoReport::Found(vec![RgbMode::Static, RgbMode::Breath]);
+        let never = || -> LogoReport { panic!("not asked here") };
+        // Not looked for: never asked.
+        let answers = Mutex::new(LogoAnswers::default());
+        assert!(logo_effects_from(&answers, false, Ask::WhenDue, t0, never).is_empty());
+        // May not ask: nothing, and nothing asked.
+        assert!(logo_effects_from(&answers, true, Ask::No, t0, never).is_empty());
+        // A failure at login: no logo now, asked again after the back-off.
+        assert!(
+            logo_effects_from(&answers, true, Ask::WhenDue, t0, || LogoReport::Failed).is_empty()
+        );
+        assert!(logo_effects_from(&answers, true, Ask::WhenDue, at(0), never).is_empty());
+        let asked = Cell::new(0);
+        let fail = || {
+            asked.set(asked.get() + 1);
+            LogoReport::Failed
+        };
+        assert!(logo_effects_from(&answers, true, Ask::WhenDue, at(1), fail).is_empty());
+        assert_eq!(asked.get(), 1, "after 1 s");
+        // The next wait is 2 s.
+        assert!(logo_effects_from(&answers, true, Ask::WhenDue, at(2), never).is_empty());
+        let effects = logo_effects_from(&answers, true, Ask::WhenDue, at(3), found);
+        assert_eq!(effects, [RgbMode::Static, RgbMode::Breath]);
+        // Found: kept, never asked again, also for a caller that may not ask.
+        assert_eq!(
+            logo_effects_from(&answers, true, Ask::No, at(4), never),
+            effects
+        );
+        assert_eq!(
+            logo_effects_from(&answers, true, Ask::WhenDue, at(500), never),
+            effects
+        );
+        // No target three times in a row: no logo, and no more questions.
+        let answers = Mutex::new(LogoAnswers::default());
+        for s in [0, 1, 3] {
+            assert!(logo_effects_from(&answers, true, Ask::WhenDue, at(s), || {
+                LogoReport::NoTarget
+            })
+            .is_empty());
+        }
+        assert!(logo_effects_from(&answers, true, Ask::WhenDue, at(1000), never).is_empty());
+        // The page, as it is built, asks once more whatever the back-off says.
+        let effects = logo_effects_from(&answers, true, Ask::Now, at(1000), found);
+        assert_eq!(effects, [RgbMode::Static, RgbMode::Breath]);
+        // While a query is under way no other starts.
+        let answers = Mutex::new(LogoAnswers {
+            asking: true,
+            ..LogoAnswers::default()
+        });
+        assert!(logo_effects_from(&answers, true, Ask::WhenDue, t0, never).is_empty());
+        assert!(logo_effects_from(&answers, true, Ask::Now, t0, never).is_empty());
+        // The back-off.
+        let waits: Vec<u64> = (1..=9).map(|n| logo_backoff(n).as_secs()).collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
     }
 
     #[test]
@@ -2420,7 +3826,7 @@ mod tests {
         let wake = bar_wake(cfg.light_bar);
         let changes = ModeChanges::new();
         let apply = |cfg: &AppConfig, mode: PowerProfile, log: &Log| {
-            apply_mode_with(
+            let (setup, applied, _) = apply_mode_with(
                 &mut Recording::new(log),
                 cfg,
                 changes.take(mode),
@@ -2428,9 +3834,11 @@ mod tests {
                 &lights,
                 &renderer,
                 false,
+                LightSet::default(),
                 "test",
             )
-            .expect("the latest change")
+            .expect("the latest change");
+            (setup, applied)
         };
 
         // Quiet holds the preset Night: its own keyboard and bar, nothing drawn.
@@ -2499,7 +3907,7 @@ mod tests {
         let night_plan = lighting_model::plan(&night, &lights);
         let apply = |cfg: &AppConfig, mode: PowerProfile| {
             let log: Log = Rc::default();
-            let (_, applied) = apply_mode_with(
+            let (_, applied, _) = apply_mode_with(
                 &mut Recording::new(&log),
                 cfg,
                 changes.take(mode),
@@ -2507,6 +3915,7 @@ mod tests {
                 &lights,
                 &renderer,
                 false,
+                LightSet::default(),
                 "test",
             )
             .expect("the latest change");
@@ -2585,7 +3994,7 @@ mod tests {
         let changes = ModeChanges::new();
         let apply = |cfg: &AppConfig, mode: PowerProfile, lights: &Lights| {
             let log: Log = Rc::default();
-            let (_, applied) = apply_mode_with(
+            let (_, applied, _) = apply_mode_with(
                 &mut Recording::new(&log),
                 cfg,
                 changes.take(mode),
@@ -2593,6 +4002,7 @@ mod tests {
                 lights,
                 &renderer,
                 false,
+                LightSet::default(),
                 "test",
             )
             .expect("the latest change");
@@ -2637,7 +4047,7 @@ mod tests {
         let night_plan = lighting_model::plan(&night, &lights);
         let apply = |cfg: &AppConfig, mode: PowerProfile, rewrite: bool| {
             let log: Log = Rc::default();
-            let (_, applied) = apply_mode_with(
+            let (_, applied, _) = apply_mode_with(
                 &mut Recording::new(&log),
                 cfg,
                 changes.take(mode),
@@ -2645,6 +4055,7 @@ mod tests {
                 &lights,
                 &renderer,
                 rewrite,
+                LightSet::default(),
                 "test",
             )
             .expect("the latest change");
@@ -2709,6 +4120,7 @@ mod tests {
             &lights,
             &renderer,
             false,
+            LightSet::default(),
             "test",
         );
         assert!(outcome.is_none(), "nothing to record");
@@ -2725,6 +4137,7 @@ mod tests {
             &lights,
             &renderer,
             false,
+            LightSet::default(),
             "test",
         );
         assert!(outcome.is_some());

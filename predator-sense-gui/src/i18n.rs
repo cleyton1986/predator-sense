@@ -840,6 +840,7 @@ fn t_pt(key: &str) -> &str {
         "lighting_sync_brightness" => "Sincronizar o brilho do teclado e da barra de luz",
         "lighting_approx" => "Layout aproximado",
         "lighting_approx_zones" => "Layout aproximado, 4 zonas",
+        "lighting_approx_zones_own" => "Layout aproximado, 4 zonas. O teclado mostra o próprio padrão",
         "lighting_unavailable_note" => "Salvo num formato que esta versão não lê",
         "lighting_preview_label" => "Pré-visualização de {0}: {1}.",
         "lighting_list_sep" => ", ",
@@ -932,6 +933,10 @@ fn t_pt(key: &str) -> &str {
         "lighting_key_not_chosen" => "{0}, não escolhida",
         "lighting_reset_theme" => "Repor original",
         "lighting_toast_reset" => "{0} voltou ao visual original.",
+        // Other models' keyboards.
+        "lighting_zone_n" => "Zona {0}",
+        "lighting_toast_factory" => "{0}: o padrão de fábrica do teclado volta a valer no próximo login ou reinício.",
+        "lighting_toast_logo_reset" => "{0}: logotipo da tampa restaurado ao padrão.",
         _ => key,
     }
 }
@@ -1714,6 +1719,7 @@ fn t_en(key: &str) -> &str {
         "lighting_sync_brightness" => "Sync keyboard and light bar brightness",
         "lighting_approx" => "Approximate layout",
         "lighting_approx_zones" => "Approximate layout, 4 zones",
+        "lighting_approx_zones_own" => "Approximate layout, 4 zones. The keyboard shows its own default",
         "lighting_unavailable_note" => "Saved in a form this version cannot read",
         "lighting_preview_label" => "Preview of {0}: {1}.",
         "lighting_list_sep" => ", ",
@@ -1806,6 +1812,10 @@ fn t_en(key: &str) -> &str {
         "lighting_key_not_chosen" => "{0}, not chosen",
         "lighting_reset_theme" => "Reset to built-in",
         "lighting_toast_reset" => "{0} is back to its built-in look.",
+        // Other models' keyboards.
+        "lighting_zone_n" => "Zone {0}",
+        "lighting_toast_factory" => "{0}: the keyboard's factory default takes over on your next login or reboot.",
+        "lighting_toast_logo_reset" => "{0}: cover logo reset to default.",
         _ => key,
     }
 }
@@ -2588,6 +2598,7 @@ fn t_es(key: &str) -> &str {
         "lighting_sync_brightness" => "Sincronizar el brillo del teclado y la barra de luz",
         "lighting_approx" => "Distribución aproximada",
         "lighting_approx_zones" => "Distribución aproximada, 4 zonas",
+        "lighting_approx_zones_own" => "Distribución aproximada, 4 zonas. El teclado muestra su propio valor predeterminado",
         "lighting_unavailable_note" => "Guardado en un formato que esta versión no lee",
         "lighting_preview_label" => "Vista previa de {0}: {1}.",
         "lighting_list_sep" => ", ",
@@ -2680,6 +2691,10 @@ fn t_es(key: &str) -> &str {
         "lighting_key_not_chosen" => "{0}, no elegida",
         "lighting_reset_theme" => "Restablecer original",
         "lighting_toast_reset" => "{0} vuelve a su aspecto original.",
+        // Other models' keyboards.
+        "lighting_zone_n" => "Zona {0}",
+        "lighting_toast_factory" => "{0}: el valor de fábrica del teclado se aplicará en el próximo inicio de sesión o reinicio.",
+        "lighting_toast_logo_reset" => "{0}: logo de la tapa restablecido a predeterminado.",
         _ => key,
     }
 }
@@ -3461,6 +3476,7 @@ fn t_zh(key: &str) -> &str {
         "lighting_sync_brightness" => "同步键盘和灯条亮度",
         "lighting_approx" => "示意布局",
         "lighting_approx_zones" => "示意布局，4 个分区",
+        "lighting_approx_zones_own" => "示意布局，4 个分区。键盘显示其自身的默认效果",
         "lighting_unavailable_note" => "以本版本无法读取的格式保存",
         "lighting_preview_label" => "{0} 的预览：{1}。",
         "lighting_list_sep" => "、",
@@ -3553,6 +3569,10 @@ fn t_zh(key: &str) -> &str {
         "lighting_key_not_chosen" => "{0}，未选",
         "lighting_reset_theme" => "恢复内置",
         "lighting_toast_reset" => "{0} 已恢复内置外观。",
+        // Other models' keyboards.
+        "lighting_zone_n" => "分区 {0}",
+        "lighting_toast_factory" => "{0}：下次登录或重启后键盘将恢复出厂默认。",
+        "lighting_toast_logo_reset" => "{0}：顶盖 Logo 已恢复默认。",
         _ => key,
     }
 }
@@ -4334,6 +4354,7 @@ fn t_ja(key: &str) -> &str {
         "lighting_sync_brightness" => "キーボードとライトバーの明るさを同期",
         "lighting_approx" => "おおよその配列",
         "lighting_approx_zones" => "おおよその配列、4 ゾーン",
+        "lighting_approx_zones_own" => "おおよその配列、4 ゾーン。キーボードは本体の既定の表示になります",
         "lighting_unavailable_note" => "このバージョンでは読めない形式で保存されています",
         "lighting_preview_label" => "{0} のプレビュー：{1}。",
         "lighting_list_sep" => "、",
@@ -4426,6 +4447,10 @@ fn t_ja(key: &str) -> &str {
         "lighting_key_not_chosen" => "{0}、未選択",
         "lighting_reset_theme" => "初期設定に戻す",
         "lighting_toast_reset" => "{0} を初期の見た目に戻しました。",
+        // Other models' keyboards.
+        "lighting_zone_n" => "ゾーン {0}",
+        "lighting_toast_factory" => "{0}：次回のログインまたは再起動時にキーボードの工場出荷時設定が適用されます。",
+        "lighting_toast_logo_reset" => "{0}：カバーロゴをデフォルトに戻しました。",
         _ => key,
     }
 }
@@ -5207,6 +5232,7 @@ fn t_ru(key: &str) -> &str {
         "lighting_sync_brightness" => "Синхронизировать яркость клавиатуры и световой полосы",
         "lighting_approx" => "Примерная раскладка",
         "lighting_approx_zones" => "Примерная раскладка, 4 зоны",
+        "lighting_approx_zones_own" => "Примерная раскладка, 4 зоны. Клавиатура показывает свою подсветку по умолчанию",
         "lighting_unavailable_note" => "Сохранено в формате, который эта версия не читает",
         "lighting_preview_label" => "Предпросмотр режима «{0}»: {1}.",
         "lighting_list_sep" => ", ",
@@ -5299,6 +5325,10 @@ fn t_ru(key: &str) -> &str {
         "lighting_key_not_chosen" => "{0}, не выбрана",
         "lighting_reset_theme" => "Сбросить к исходной",
         "lighting_toast_reset" => "{0}: исходный вид восстановлен.",
+        // Other models' keyboards.
+        "lighting_zone_n" => "Зона {0}",
+        "lighting_toast_factory" => "{0}: при следующем входе или перезагрузке будет использовано заводское значение клавиатуры по умолчанию.",
+        "lighting_toast_logo_reset" => "{0}: логотип на крышке сброшен до значений по умолчанию.",
         _ => key,
     }
 }
@@ -6080,6 +6110,7 @@ fn t_de(key: &str) -> &str {
         "lighting_sync_brightness" => "Helligkeit von Tastatur und Lichtleiste synchronisieren",
         "lighting_approx" => "Ungefähres Layout",
         "lighting_approx_zones" => "Ungefähres Layout, 4 Zonen",
+        "lighting_approx_zones_own" => "Ungefähres Layout, 4 Zonen. Die Tastatur zeigt ihre eigene Standardbeleuchtung",
         "lighting_unavailable_note" => "In einer Form gespeichert, die diese Version nicht lesen kann",
         "lighting_preview_label" => "Vorschau von {0}: {1}.",
         "lighting_list_sep" => ", ",
@@ -6172,6 +6203,10 @@ fn t_de(key: &str) -> &str {
         "lighting_key_not_chosen" => "{0}, nicht gewählt",
         "lighting_reset_theme" => "Auf Standard zurücksetzen",
         "lighting_toast_reset" => "{0} sieht wieder aus wie vorgegeben.",
+        // Other models' keyboards.
+        "lighting_zone_n" => "Zone {0}",
+        "lighting_toast_factory" => "{0}: Der Werkszustand der Tastatur gilt ab der nächsten Anmeldung oder dem nächsten Neustart.",
+        "lighting_toast_logo_reset" => "{0}: Deckel-Logo auf Standard zurückgesetzt.",
         _ => key,
     }
 }
@@ -6954,6 +6989,7 @@ fn t_it(key: &str) -> &str {
         "lighting_sync_brightness" => "Sincronizza la luminosità di tastiera e barra luminosa",
         "lighting_approx" => "Layout approssimativo",
         "lighting_approx_zones" => "Layout approssimativo, 4 zone",
+        "lighting_approx_zones_own" => "Layout approssimativo, 4 zone. La tastiera mostra la propria impostazione predefinita",
         "lighting_unavailable_note" => "Salvato in un formato che questa versione non legge",
         "lighting_preview_label" => "Anteprima di {0}: {1}.",
         "lighting_list_sep" => ", ",
@@ -7046,6 +7082,10 @@ fn t_it(key: &str) -> &str {
         "lighting_key_not_chosen" => "{0}, non scelto",
         "lighting_reset_theme" => "Ripristina originale",
         "lighting_toast_reset" => "{0} è tornato all'aspetto originale.",
+        // Other models' keyboards.
+        "lighting_zone_n" => "Zona {0}",
+        "lighting_toast_factory" => "{0}: al prossimo accesso o riavvio subentrerà l'impostazione di fabbrica della tastiera.",
+        "lighting_toast_logo_reset" => "{0}: logo sul coperchio ripristinato al predefinito.",
         _ => key,
     }
 }
@@ -7828,6 +7868,7 @@ fn t_tr(key: &str) -> &str {
         "lighting_sync_brightness" => "Klavye ve ışık çubuğu parlaklığını eşitle",
         "lighting_approx" => "Yaklaşık düzen",
         "lighting_approx_zones" => "Yaklaşık düzen, 4 bölge",
+        "lighting_approx_zones_own" => "Yaklaşık düzen, 4 bölge. Klavye kendi varsayılanını gösterir",
         "lighting_unavailable_note" => "Bu sürümün okuyamadığı bir biçimde kaydedilmiş",
         "lighting_preview_label" => "{0} önizlemesi: {1}.",
         "lighting_list_sep" => ", ",
@@ -7920,6 +7961,10 @@ fn t_tr(key: &str) -> &str {
         "lighting_key_not_chosen" => "{0}, seçili değil",
         "lighting_reset_theme" => "Yerleşik hâline döndür",
         "lighting_toast_reset" => "{0} yerleşik görünümüne döndü.",
+        // Other models' keyboards.
+        "lighting_zone_n" => "Bölge {0}",
+        "lighting_toast_factory" => "{0}: bir sonraki oturum açışınızda veya yeniden başlatmada klavyenin fabrika varsayılanı devreye girer.",
+        "lighting_toast_logo_reset" => "{0}: kapak logosu varsayılana sıfırlandı.",
         _ => key,
     }
 }
@@ -8239,18 +8284,103 @@ mod tests {
         }
     }
 
-    /// The line over the gallery saying how many themes this machine's lights hide.
-    const LIGHTING_HIDDEN_THEMES: &[&str] = &[
+    /// The other models' keyboards on the Lighting control tab: the two new
+    /// strings, and their old pages' names and labels it shows.
+    const LIGHTING_OTHER_KEYBOARDS: &[&str] = &[
+        "lighting_zone_n",
+        "lighting_approx_zones_own",
+        "lighting_toast_factory",
+        "static_mode",
+        "breath",
+        "neon",
+        "wave",
+        "shift",
+        "zoom",
+        "meteor",
+        "twinkling",
+        "effect_snake",
+        "effect_spot",
+        "effect_star",
+        "effect_rainbow",
+        "effect_slash",
+        "effect_slash1",
+        "effect_slash2",
+        "effect_slash3",
+        "effect_slash4",
+        "effect_rowwave",
+        "effect_swiping",
+        "chicony_effect_static",
+        "chicony_effect_pulsating",
+        "chicony_effect_rainbow_wave",
+        "chicony_effect_fast_rainbow_wave",
+        "chicony_effect_snake",
+        "chicony_effect_raindrop_1",
+        "chicony_effect_raindrop_2",
+        "chicony_effect_color_shift_1",
+        "chicony_effect_color_shift_2",
+        "chicony_effect_color_shift_3",
+        "chicony_effect_color_shift_4",
+        "chicony_effect_electro",
+        "chicony_color_red",
+        "chicony_color_green",
+        "chicony_color_yellow",
+        "chicony_color_dark_blue",
+        "chicony_color_bright_blue",
+        "chicony_color_bright_pink",
+        "chicony_color_white",
+        "magic_rgb_reverse_direction",
+        "audio_sync_title",
+        "rgb_reset_default",
+    ];
+
+    /// Of those, the ones a language writes as English does: an effect's name kept as the
+    /// term there (as the old pages already had them), and German's "Zone".
+    const OTHER_KEYBOARDS_SAME_AS_ENGLISH: &[(&str, &str)] = &[
+        ("lighting_zone_n", "de"),
+        ("neon", "pt de it tr"),
+        ("zoom", "pt es de it"),
+        ("meteor", "de tr"),
+        ("effect_spot", "de it tr"),
+        ("effect_slash", "de it tr"),
+        ("effect_slash1", "de it tr"),
+        ("effect_slash2", "de it tr"),
+        ("effect_slash3", "de it tr"),
+        ("effect_slash4", "de it tr"),
+    ];
+
+    #[test]
+    fn the_other_keyboards_controls_are_in_every_language_and_translated() {
+        every_language_has(LIGHTING_OTHER_KEYBOARDS);
+        for key in LIGHTING_OTHER_KEYBOARDS {
+            let allowed = OTHER_KEYBOARDS_SAME_AS_ENGLISH
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, langs)| *langs)
+                .unwrap_or("");
+            for (lang, table) in &TABLES[1..] {
+                let same = table(key) == t_en(key);
+                let expected = allowed.split(' ').any(|l| l == *lang);
+                assert_eq!(same, expected, "{key} in {lang}: {}", table(key));
+            }
+        }
+    }
+
+    /// The other models' lights on the Lighting page: the new strings, and the
+    /// labels the logos' controls reuse.
+    const LIGHTING_OTHER_LIGHTS: &[&str] = &[
+        "lighting_toast_logo_reset",
         "lighting_hidden_per_key",
         "lighting_hidden_per_key_or_bar",
         "lighting_hidden_bar",
         "lighting_hidden_colours",
+        "lighting_light_logo",
+        "light_bar_off",
     ];
 
     #[test]
-    fn the_hidden_themes_strings_are_in_every_language_and_translated() {
-        every_language_has(LIGHTING_HIDDEN_THEMES);
-        for key in LIGHTING_HIDDEN_THEMES {
+    fn the_other_lights_strings_are_in_every_language_and_translated() {
+        every_language_has(LIGHTING_OTHER_LIGHTS);
+        for key in LIGHTING_OTHER_LIGHTS {
             for (lang, table) in &TABLES[1..] {
                 assert_ne!(table(key), t_en(key), "{key} in {lang}: {}", table(key));
             }

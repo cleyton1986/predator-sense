@@ -1,5 +1,6 @@
-//! Colour helpers shared by the lighting pages: HSV and hex conversion, and
-//! the debouncer that turns a slider drag into a few hardware writes.
+//! Colour helpers shared by the lighting pages: HSV conversion, and the
+//! debouncer that turns a slider drag into a few hardware writes. Hex codes
+//! are `lighting_model::hex_colour` and `colour_hex`.
 //!
 //! The inline HSV wheel picker that used to live here went with the old
 //! Lighting page sections; the page's Colour row (`ui::lighting::colour_row`)
@@ -48,22 +49,6 @@ pub fn rgb_to_hsv(red: u8, green: u8, blue: u8) -> (f64, f64, f64) {
     };
     let saturation = if max == 0.0 { 0.0 } else { delta / max };
     (hue.rem_euclid(360.0), saturation, max)
-}
-
-pub fn hex_of(red: u8, green: u8, blue: u8) -> String {
-    format!("#{red:02x}{green:02x}{blue:02x}")
-}
-
-pub fn parse_hex(text: &str) -> Option<(u8, u8, u8)> {
-    let text = text.trim().trim_start_matches('#');
-    if text.len() != 6 || !text.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some((
-        u8::from_str_radix(&text[0..2], 16).ok()?,
-        u8::from_str_radix(&text[2..4], 16).ok()?,
-        u8::from_str_radix(&text[4..6], 16).ok()?,
-    ))
 }
 
 /// Which scheduled run of a debounced action is the live one, and whether
@@ -177,13 +162,5 @@ mod tests {
         let (_, saturation, value) = rgb_to_hsv(128, 128, 128);
         assert_eq!(saturation, 0.0);
         assert!((value - 128.0 / 255.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn hex_parsing_rejects_junk() {
-        assert_eq!(parse_hex("#00aec7"), Some((0, 174, 199)));
-        assert_eq!(parse_hex("00aec7"), Some((0, 174, 199)));
-        assert_eq!(parse_hex("#00aec"), None);
-        assert_eq!(parse_hex("zzzzzz"), None);
     }
 }

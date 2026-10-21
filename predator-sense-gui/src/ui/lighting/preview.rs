@@ -29,7 +29,7 @@ use crate::ui::lighting::nodes;
 use crate::ui::lighting::preview_scene::{
     self, bar_glow_at, bar_zones, chassis_edge, choosing_icon, choosing_legend_size, dim, geometry,
     hit, key_edge, key_icon, keycap, led, legend, logo_outline, short_legend, Geometry, Hit,
-    KeyIcon, Rect, Runner, Spec, HIGH_CONTRAST_EDGE, MAX_STEPS, STEP,
+    KeyIcon, Rect, Run, Runner, Spec, CAP, HIGH_CONTRAST_EDGE, MAX_STEPS, STEP,
 };
 
 /// The drawing's width when nothing limits it, and the narrowest it gets.
@@ -791,6 +791,8 @@ pub struct PreviewCard {
     lights_box: gtk::Box,
     light_buttons: Vec<(PreviewLight, gtk::ToggleButton)>,
     pause: gtk::ToggleButton,
+    /// The caption under another model's keyboard ("Approximate layout").
+    approx: Option<gtk::Label>,
     unavailable: gtk::Label,
     /// Under the preview, above the brightness: the brush bar while painting (Lighting
     /// control) and the Themes tab's key choice bar. Hidden while empty.
@@ -1018,6 +1020,26 @@ fn bar_glow_layer(
         }
     }
     image
+}
+
+/// The caption under another model's keyboard: its layout is approximate (and in four
+/// zones); and when it is left to its own firmware look, that it shows its own default
+/// (the drawing shows it unlit, not dark).
+fn approx_key(keyboard: Option<KeyboardKind>, firmware: bool) -> &'static str {
+    match (keyboard, firmware) {
+        (Some(KeyboardKind::Zones4), true) => "lighting_approx_zones_own",
+        (Some(KeyboardKind::Zones4), false) => "lighting_approx_zones",
+        _ => "lighting_approx",
+    }
+}
+
+/// An unlit key's edge: a neutral grey, the high-contrast one with high contrast.
+fn unlit_edge(high_contrast: bool) -> [f64; 3] {
+    if high_contrast {
+        HIGH_CONTRAST_EDGE
+    } else {
+        [0x3a as f64, 0x3e as f64, 0x48 as f64]
+    }
 }
 
 /// Draws the scene (the reference design's `drawScene` for the large preview), for where it is on
@@ -1279,9 +1301,15 @@ fn paint(snapshot: &gtk::Snapshot, canvas: &mut Canvas, state: &State, device: n
     paint_glow(snapshot, canvas, state, device, high_contrast, bar);
 
     let line = (u * 0.035).max(if high_contrast { 1.5 } else { 1.0 });
+    // A keyboard on its own firmware look: unlit caps with a neutral edge, no colour.
+    let firmware = state.spec.keyboard.as_ref().is_some_and(Run::is_firmware);
     for (key, c) in canvas.geometry.keys.iter().zip(&canvas.colours) {
-        let (edge, alpha) = key_edge(*c, high_contrast);
-        nodes::fill(snapshot, key.rect, 0.12 * u, &nodes::rgba(keycap(*c), 1.0));
+        let (cap, (edge, alpha)) = if firmware {
+            (CAP, (unlit_edge(high_contrast), 1.0))
+        } else {
+            (keycap(*c), key_edge(*c, high_contrast))
+        };
+        nodes::fill(snapshot, key.rect, 0.12 * u, &nodes::rgba(cap, 1.0));
         nodes::stroke(
             snapshot,
             key.rect,
@@ -1591,19 +1619,17 @@ impl PreviewCard {
         });
         widget.append(&stage_box);
 
-        if hw.keyboard.is_some_and(|k| k != KeyboardKind::PerKey) {
-            let approx = gtk::Label::new(Some(crate::i18n::t(
-                if hw.keyboard == Some(KeyboardKind::Zones4) {
-                    "lighting_approx_zones"
-                } else {
-                    "lighting_approx"
-                },
-            )));
-            approx.add_css_class("lighting-approx");
-            approx.set_wrap(true);
-            approx.set_xalign(0.0);
-            widget.append(&approx);
-        }
+        let approx = hw
+            .keyboard
+            .is_some_and(|k| k != KeyboardKind::PerKey)
+            .then(|| {
+                let approx = gtk::Label::new(Some(crate::i18n::t(approx_key(hw.keyboard, false))));
+                approx.add_css_class("lighting-approx");
+                approx.set_wrap(true);
+                approx.set_xalign(0.0);
+                widget.append(&approx);
+                approx
+            });
         let unavailable = gtk::Label::new(Some(crate::i18n::t("lighting_unavailable_note")));
         unavailable.add_css_class("lighting-approx");
         unavailable.add_css_class("lighting-warn-text");
@@ -1709,6 +1735,7 @@ impl PreviewCard {
             lights_box,
             light_buttons,
             pause,
+            approx,
             unavailable,
             context_slot,
             brightness_grid,
@@ -2417,6 +2444,11 @@ impl PreviewCard {
         }
         self.suppress.set(false);
         self.unavailable.set_visible(unavailable);
+        if let Some(approx) = &self.approx {
+            let st = self.state.borrow();
+            let firmware = st.spec.keyboard.as_ref().is_some_and(Run::is_firmware);
+            approx.set_text(crate::i18n::t(approx_key(st.hw.keyboard, firmware)));
+        }
         self.redraw();
     }
 
@@ -2510,6 +2542,14 @@ impl PreviewCard {
         *self.plain_description.borrow_mut() = description.to_string();
         if !self.choosing() {
             self.describe_now();
+        }
+    }
+
+    /// Picks `light` in the switcher, as a click on its button does (the render harness).
+    #[cfg(test)]
+    pub(crate) fn select_for_render(&self, light: PreviewLight) {
+        if let Some((_, button)) = self.light_buttons.iter().find(|(l, _)| *l == light) {
+            button.set_active(true);
         }
     }
 
@@ -3115,6 +3155,28 @@ mod tests {
         assert!(check.due());
         assert!(check.due());
         assert!(!check.due());
+    }
+    /// The caption under another model's keyboard says when it shows its own default
+    /// (after Reset to default), as the drawing shows it unlit rather than dark.
+    #[test]
+    fn the_caption_says_when_the_keyboard_shows_its_own_default() {
+        use super::approx_key;
+        assert_eq!(
+            approx_key(Some(KeyboardKind::Zones4), false),
+            "lighting_approx_zones"
+        );
+        assert_eq!(
+            approx_key(Some(KeyboardKind::Zones4), true),
+            "lighting_approx_zones_own"
+        );
+        assert_eq!(
+            approx_key(Some(KeyboardKind::OneColour), false),
+            "lighting_approx"
+        );
+        assert_eq!(
+            crate::i18n::t("lighting_approx_zones_own"),
+            "Approximate layout, 4 zones. The keyboard shows its own default"
+        );
     }
 }
 

@@ -4,7 +4,7 @@
 //! language, and the toasts' texts.
 
 use crate::config::AppConfig;
-use crate::hardware::effects::themes::{self, Hardware, KeyboardKind, TextItem};
+use crate::hardware::effects::themes::{self, Hardware, KeyboardKind, LogoKind, TextItem};
 use crate::hardware::keyboard_rgb::Effect;
 use crate::hardware::light_bar::LightBarMode;
 use crate::hardware::lighting_model::{self, LightingSetup, ModeLighting, PresetError, SetupKind};
@@ -72,10 +72,22 @@ fn all_off(setup: &LightingSetup, hw: &Hardware) -> bool {
             states.push(keyboard.effect == Effect::Off);
         }
     }
+    // The one-colour keyboard's Off; the four-zone and Helios 300 keyboards have none.
+    if hw.keyboard == Some(KeyboardKind::OneColour) {
+        if let Some(keyboard) = m.magic_keyboard {
+            states.push(keyboard.effect == crate::hardware::magic_rgb::KeyboardEffect::Off);
+        }
+    }
     if hw.bar.is_some() {
         if let Some(bar) = m.light_bar {
             states.push(bar.mode == LightBarMode::Off);
         }
+    }
+    // The logos' Off: the Darfon logo's off sequence, the ENE logo's power switched off.
+    match hw.logo {
+        Some(LogoKind::Darfon) => states.extend(m.magic_logo.map(|l| l.effect.is_none())),
+        Some(LogoKind::Ene) => states.extend(m.cover_logo.as_ref().map(|l| !l.enabled)),
+        None => {}
     }
     !states.is_empty() && states.iter().all(|off| *off)
 }
@@ -578,6 +590,9 @@ pub fn describe_setup(setup: &LightingSetup, lights: &lighting_model::Lights) ->
                 };
                 sentences.extend(what.map(|what| light("lighting_light_keyboard", what)));
             }
+            if let Some(what) = other_keyboard_words(m, hw.keyboard, sep) {
+                sentences.push(light("lighting_light_keyboard", what));
+            }
             if hw.bar.is_some() {
                 if let Some(bar) = m.light_bar {
                     let mut words = vec![i18n::t(bar.mode.label_key()).to_string()];
@@ -590,6 +605,9 @@ pub fn describe_setup(setup: &LightingSetup, lights: &lighting_model::Lights) ->
                     sentences.push(light("lighting_light_bar", words.join(sep)));
                 }
             }
+            if let Some(what) = logo_words(m, hw.logo, sep) {
+                sentences.push(light("lighting_light_logo", what));
+            }
             sentences.join(" ")
         }
     }
@@ -599,10 +617,86 @@ fn spoken(rgb: [u8; 3]) -> String {
     crate::ui::lighting::colour_model::spoken_name(rgb)
 }
 
+/// Another model's keyboard in words: its effect by its tile's name, then the colours it
+/// shows (the four-zone keyboard's zones, each once, while they show).
+fn other_keyboard_words(
+    m: &lighting_model::ManualSetup,
+    keyboard: Option<KeyboardKind>,
+    sep: &str,
+) -> Option<String> {
+    use crate::hardware::magic_rgb::KeyboardEffect;
+    use crate::hardware::rgb::RgbMode;
+    use crate::ui::lighting::control_model::{Tile, PALETTE_COLOUR_KEYS};
+    let mut words: Vec<String> = Vec::new();
+    match keyboard? {
+        KeyboardKind::Zones4 => {
+            let k = m.four_zone_keyboard.as_ref()?;
+            if k.is_static {
+                words.push(i18n::t(Tile::FourZone(RgbMode::Static).label_key()).to_string());
+                let mut colours: Vec<String> =
+                    k.zone_colours().iter().map(|c| spoken(*c)).collect();
+                colours.dedup();
+                words.extend(colours);
+            } else {
+                let e = k.dynamic_last.as_ref()?;
+                words.push(i18n::t(Tile::FourZone(e.mode).label_key()).to_string());
+                if e.mode.needs_color() {
+                    words.push(spoken([e.red, e.green, e.blue]));
+                }
+            }
+        }
+        KeyboardKind::OneColour => {
+            let k = m.magic_keyboard?;
+            words.push(i18n::t(Tile::OneColour(k.effect).label_key()).to_string());
+            if k.effect != KeyboardEffect::Off {
+                words.push(spoken([k.red, k.green, k.blue]));
+            }
+        }
+        KeyboardKind::Palette => {
+            let p = m.palette_keyboard?;
+            words.push(i18n::t(Tile::Palette(p.effect).label_key()).to_string());
+            let index = p.color.clamp(1, PALETTE_COLOUR_KEYS.len());
+            words.push(i18n::t(PALETTE_COLOUR_KEYS[index - 1]).to_string());
+        }
+        KeyboardKind::PerKey => return None,
+    }
+    Some(words.join(sep))
+}
+
+/// A lid logo in words: its effect by its tile's name, then its colour where its page let it
+/// be chosen (both of the Darfon logo's effects, the ENE logo's Static).
+fn logo_words(
+    m: &lighting_model::ManualSetup,
+    logo: Option<LogoKind>,
+    sep: &str,
+) -> Option<String> {
+    use crate::hardware::rgb::RgbMode;
+    use crate::ui::lighting::control_model::Tile;
+    let mut words: Vec<String> = Vec::new();
+    match logo? {
+        LogoKind::Darfon => {
+            let l = m.magic_logo?;
+            words.push(i18n::t(Tile::MagicLogo(l.effect).label_key()).to_string());
+            if l.effect.is_some() {
+                words.push(spoken([l.red, l.green, l.blue]));
+            }
+        }
+        LogoKind::Ene => {
+            let l = m.cover_logo.as_ref()?;
+            let tile = Tile::CoverLogo(l.enabled.then_some(l.config.mode));
+            words.push(i18n::t(tile.label_key()).to_string());
+            if l.enabled && l.config.mode == RgbMode::Static {
+                words.push(spoken([l.config.red, l.config.green, l.config.blue]));
+            }
+        }
+    }
+    Some(words.join(sep))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hardware::effects::themes::{BarKind, LogoKind};
+    use crate::hardware::effects::themes::BarKind;
     use crate::hardware::keyboard_rgb::KeyboardState;
     use crate::hardware::light_bar::LightBarState;
     use crate::hardware::lighting_model::{LightingPreset, ThemeChoice};
@@ -1140,5 +1234,185 @@ mod tests {
             ),
             "Keyboard: Off."
         );
+    }
+
+    /// A lid logo is said by its effect's name and, where its page let it be chosen, its
+    /// colour; each logo's Off makes the mode "Off", and a machine without a logo says
+    /// nothing of one.
+    #[test]
+    fn the_logos_are_described_and_their_off_counts() {
+        use crate::config::{CoverLogoSettings, MagicRgbLogoState};
+        use crate::hardware::lighting_model::{Lights, ManualSetup};
+        use crate::hardware::magic_rgb::LogoEffect;
+        use crate::hardware::rgb::{RgbConfig, RgbMode};
+        let hw = |logo| Hardware {
+            keyboard: None,
+            bar: None,
+            logo: Some(logo),
+        };
+        let darfon = |effect| {
+            LightingSetup::from_manual(ManualSetup {
+                magic_logo: Some(MagicRgbLogoState {
+                    effect,
+                    brightness: 100,
+                    speed: 4,
+                    red: 255,
+                    green: 0,
+                    blue: 0,
+                }),
+                ..ManualSetup::default()
+            })
+        };
+        let lights = Lights::from(hw(LogoKind::Darfon));
+        assert_eq!(
+            describe_setup(&darfon(Some(LogoEffect::Breathing)), &lights),
+            "Cover logo: Breathing, Red."
+        );
+        assert_eq!(describe_setup(&darfon(None), &lights), "Cover logo: Off.");
+        let lighting = |setup: LightingSetup| ModeLighting {
+            setup,
+            ..ModeLighting::default()
+        };
+        assert_eq!(
+            shows(&lighting(darfon(None)), &hw(LogoKind::Darfon)),
+            Shows::Off
+        );
+        assert_eq!(
+            shows(
+                &lighting(darfon(Some(LogoEffect::Static))),
+                &hw(LogoKind::Darfon)
+            ),
+            Shows::Manual
+        );
+        let ene = |enabled, mode| {
+            LightingSetup::from_manual(ManualSetup {
+                cover_logo: Some(CoverLogoSettings {
+                    enabled,
+                    config: RgbConfig {
+                        mode,
+                        red: 0,
+                        green: 0,
+                        blue: 255,
+                        ..RgbConfig::default()
+                    },
+                }),
+                ..ManualSetup::default()
+            })
+        };
+        let lights = Lights::from(hw(LogoKind::Ene));
+        assert_eq!(
+            describe_setup(&ene(true, RgbMode::Static), &lights),
+            "Cover logo: Static, Blue."
+        );
+        assert_eq!(
+            describe_setup(&ene(true, RgbMode::Neon), &lights),
+            "Cover logo: Neon."
+        );
+        assert_eq!(
+            describe_setup(&ene(false, RgbMode::Static), &lights),
+            "Cover logo: Off."
+        );
+        assert_eq!(
+            shows(&lighting(ene(false, RgbMode::Neon)), &hw(LogoKind::Ene)),
+            Shows::Off
+        );
+        // A machine without a logo says nothing of one.
+        assert_eq!(
+            describe_setup(
+                &ene(true, RgbMode::Static),
+                &Lights::from(Hardware::PH16_71)
+            ),
+            ""
+        );
+    }
+
+    /// Another model's keyboard is said by its effect's name and its colours; the
+    /// one-colour keyboard's Off makes the mode "Off" as the PH16-71's does.
+    #[test]
+    fn the_other_keyboards_are_described_and_their_off_counts() {
+        use crate::config::{ChiconyRgbState, MagicRgbKeyboardState, ZoneColor};
+        use crate::hardware::lighting_model::{FourZoneKeyboardState, Lights, ManualSetup};
+        use crate::hardware::magic_rgb::KeyboardEffect;
+        use crate::hardware::rgb::{RgbConfig, RgbMode};
+        let hw = |keyboard| Hardware {
+            keyboard: Some(keyboard),
+            bar: None,
+            logo: None,
+        };
+        let zones = FourZoneKeyboardState {
+            static_zones: Some(
+                [[255, 0, 0], [255, 0, 0], [0, 0, 255], [0, 0, 255]]
+                    .iter()
+                    .zip(1..)
+                    .map(|(&[red, green, blue], zone)| ZoneColor {
+                        zone,
+                        red,
+                        green,
+                        blue,
+                    })
+                    .collect(),
+            ),
+            brightness: 100,
+            is_static: true,
+            dynamic_last: Some(RgbConfig {
+                mode: RgbMode::Neon,
+                ..RgbConfig::default()
+            }),
+            dynamic_effects: Default::default(),
+        };
+        let mut setup = LightingSetup::from_manual(ManualSetup {
+            four_zone_keyboard: Some(zones.clone()),
+            ..ManualSetup::default()
+        });
+        let zones4 = Lights::from(hw(KeyboardKind::Zones4));
+        assert_eq!(
+            describe_setup(&setup, &zones4),
+            "Keyboard: Static, Red, Blue."
+        );
+        if let SetupKind::Manual(m) = &mut setup.kind {
+            m.four_zone_keyboard = Some(FourZoneKeyboardState {
+                is_static: false,
+                ..zones
+            });
+        }
+        assert_eq!(describe_setup(&setup, &zones4), "Keyboard: Neon.");
+
+        let off = LightingSetup::from_manual(ManualSetup {
+            magic_keyboard: Some(MagicRgbKeyboardState {
+                effect: KeyboardEffect::Off,
+                brightness: 100,
+                speed: 4,
+                reverse: false,
+                red: 1,
+                green: 2,
+                blue: 3,
+            }),
+            ..ManualSetup::default()
+        });
+        let one = hw(KeyboardKind::OneColour);
+        assert_eq!(describe_setup(&off, &Lights::from(one)), "Keyboard: Off.");
+        assert_eq!(shows(&lighting(None, false, off), &one), Shows::Off);
+
+        let helios = LightingSetup::manual(
+            None,
+            None,
+            Some(ChiconyRgbState {
+                effect: 2,
+                color: 5,
+                brightness: 30,
+                speed: 0,
+            }),
+        );
+        let palette = hw(KeyboardKind::Palette);
+        assert_eq!(
+            describe_setup(&helios, &Lights::from(palette)),
+            "Keyboard: Pulsating, Bright Blue."
+        );
+        assert_eq!(
+            shows(&lighting(None, false, helios), &palette),
+            Shows::Manual
+        );
+        // The PH16-71 says nothing of another model's keyboard.
+        assert_eq!(describe_setup(&setup, &Lights::from(Hardware::PH16_71)), "");
     }
 }

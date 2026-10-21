@@ -46,19 +46,6 @@ impl RgbMode {
         }
     }
 
-    pub fn all() -> &'static [RgbMode] {
-        &[
-            Self::Static,
-            Self::Breath,
-            Self::Neon,
-            Self::Wave,
-            Self::Shifting,
-            Self::Zoom,
-            Self::Meteor,
-            Self::Twinkling,
-        ]
-    }
-
     pub fn needs_color(&self) -> bool {
         matches!(
             self,
@@ -68,10 +55,6 @@ impl RgbMode {
 
     pub fn needs_speed(&self) -> bool {
         !matches!(self, Self::Static)
-    }
-
-    pub fn needs_direction(&self) -> bool {
-        matches!(self, Self::Wave | Self::Shifting)
     }
 }
 
@@ -253,8 +236,10 @@ pub enum KeyboardRoute {
 
 /// Writes the four-zone keyboard (WMI, or the ENEK5130 HID controller) as the RGB page's
 /// Apply always has; moved here from the page so the per-mode lighting
-/// (`lighting::apply_setup`) writes it the same way. `hid_only` is the page's
-/// `hid_rgb::is_available()`, taken once when it is built.
+/// (`lighting::apply_setup`) writes it the same way. `hid_only` is
+/// `hid_rgb::is_available()`, taken once by the caller (the page when it is built, the
+/// per-mode lighting once per write), and also decides whether static zone colours go to
+/// the HID controller, which this asked the system for again before.
 pub fn apply_keyboard(write: &KeyboardWrite, hid_only: bool) -> Result<KeyboardRoute, String> {
     if write.is_static {
         // Static mode - matches the controller's documented packet layout:
@@ -298,7 +283,7 @@ pub fn apply_keyboard(write: &KeyboardWrite, hid_only: bool) -> Result<KeyboardR
         // confirmed to be a real 4-zone controller (issue #4). Runs
         // alongside the WMI path above, which is harmless where it's
         // a no-op and unaffected where it isn't.
-        if crate::hardware::hid_rgb::is_available() {
+        if hid_only {
             let mut last_err = None;
             for (i, &(r, g, b)) in write.zone_colors.iter().enumerate() {
                 if let Err(e) = crate::hardware::hid_rgb::set_zone_color(
@@ -349,6 +334,22 @@ pub fn apply_keyboard(write: &KeyboardWrite, hid_only: bool) -> Result<KeyboardR
             blue: write.color.2,
         })
         .map(|()| KeyboardRoute::WmiEffect)
+    }
+}
+
+/// Turns the four-zone keyboard's light off as the RGB page's "Turn off keyboard light"
+/// always has, moved here from the page so the per-mode lighting turns it off the same way
+/// (a mode at brightness 0): with the ENEK5130 HID controller (`hid`), black at brightness 0
+/// on every zone over HID, since the WMI brightness-only call is a confirmed no-op there;
+/// without it, the WMI brightness-only call at 0.
+pub fn turn_off_keyboard(hid: bool) -> Result<(), String> {
+    if hid {
+        for &mask in crate::hardware::hid_rgb::ZONE_MASKS.iter() {
+            crate::hardware::hid_rgb::set_zone_color(mask, 0, 0, 0, 0)?;
+        }
+        Ok(())
+    } else {
+        apply_brightness_only(0)
     }
 }
 

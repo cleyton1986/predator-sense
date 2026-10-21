@@ -6,7 +6,8 @@
 //! in use when it is neither, drawn with a dashed ring; "+" opens the custom picker, and
 //! "Keep this colour" beside it, offered only for that unkept colour, keeps it in one click.
 
-use crate::ui::color_picker::{hex_of, hsv_to_rgb, parse_hex, rgb_to_hsv};
+use crate::hardware::lighting_model::{colour_hex, hex_colour};
+use crate::ui::color_picker::{hsv_to_rgb, rgb_to_hsv};
 
 /// One swatch of the row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +39,7 @@ pub const PALETTE: [([u8; 3], &str); 9] = [
 fn kept_colours(saved: &[String]) -> impl Iterator<Item = [u8; 3]> + '_ {
     saved
         .iter()
-        .filter_map(|text| parse_hex(text).map(|(r, g, b)| [r, g, b]))
+        .filter_map(|text| hex_colour(text))
 }
 
 fn is_kept(saved: &[String], rgb: [u8; 3]) -> bool {
@@ -233,15 +234,15 @@ pub fn picker_for(current: [u8; 3], held: Sliders) -> Sliders {
 /// Whether the hex entry's text already names `current` (in any case, with or without the
 /// `#`), so a show leaves the text and its cursor alone.
 pub fn hex_names(text: &str, current: [u8; 3]) -> bool {
-    parse_hex(text) == Some((current[0], current[1], current[2]))
+    hex_colour(text) == Some(current)
 }
 
-/// Keeps a colour as `#rrggbb`, last; true when it was new.
+/// Keeps a colour as `#RRGGBB`, last; true when it was new.
 pub fn keep(saved: &mut Vec<String>, rgb: [u8; 3]) -> bool {
     if is_kept(saved, rgb) {
         return false;
     }
-    saved.push(hex_of(rgb[0], rgb[1], rgb[2]));
+    saved.push(colour_hex(rgb));
     true
 }
 
@@ -257,10 +258,10 @@ pub struct Forgotten {
 pub fn forget(saved: &mut Vec<String>, rgb: [u8; 3]) -> Option<Forgotten> {
     let index = saved
         .iter()
-        .position(|text| parse_hex(text) == Some((rgb[0], rgb[1], rgb[2])))?;
+        .position(|text| hex_colour(text) == Some(rgb))?;
     let mut entries = Vec::new();
     saved.retain(|text| {
-        let named = parse_hex(text) == Some((rgb[0], rgb[1], rgb[2]));
+        let named = hex_colour(text) == Some(rgb);
         if named {
             entries.push(text.clone());
         }
@@ -274,10 +275,10 @@ pub fn restore(saved: &mut Vec<String>, forgotten: &Forgotten) {
     let Some(first) = forgotten.entries.first() else {
         return;
     };
-    let Some((r, g, b)) = parse_hex(first) else {
+    let Some(rgb) = hex_colour(first) else {
         return;
     };
-    if is_kept(saved, [r, g, b]) {
+    if is_kept(saved, rgb) {
         return;
     }
     let at = forgotten.index.min(saved.len());

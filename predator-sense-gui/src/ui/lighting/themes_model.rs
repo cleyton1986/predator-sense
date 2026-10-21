@@ -23,7 +23,7 @@ use crate::hardware::effects::themes::{
 };
 use crate::hardware::effects::{self, ph16_71, Need, ParamSpec, ParamValue};
 use crate::hardware::lighting_model::{
-    Brightness, LightingSetup, Lights, SetupKind, ThemeChoice, ThemeColours, ThemeValues,
+    self, Brightness, LightingSetup, Lights, SetupKind, ThemeChoice, ThemeColours, ThemeValues,
 };
 use crate::hardware::profile::PowerProfile;
 use crate::i18n::{self, Lang};
@@ -218,18 +218,9 @@ pub fn colourway_name(theme: &Theme, choice: &ThemeChoice) -> String {
     }
 }
 
-/// `#RRGGBB` as bytes; black for anything else.
+/// A palette colour as bytes; black for anything that is not one.
 pub fn rgb_of(hex: &str) -> [u8; 3] {
-    let v = hex
-        .strip_prefix('#')
-        .filter(|h| h.len() == 6)
-        .and_then(|h| u32::from_str_radix(h, 16).ok())
-        .unwrap_or(0);
-    [(v >> 16) as u8, (v >> 8) as u8, v as u8]
-}
-
-fn hex_of([r, g, b]: [u8; 3]) -> String {
-    format!("#{r:02X}{g:02X}{b:02X}")
+    lighting_model::hex_colour(hex).unwrap_or_default()
 }
 
 /// The first [`DOTS`] colours of a palette, for its dots.
@@ -678,7 +669,7 @@ pub fn set_slot(setup: &mut LightingSetup, id: &str, slot: usize, rgb: [u8; 3]) 
     };
     let mut slots = theme.palette_for(&choice.values(theme));
     slots.resize(theme.custom.len(), "#000000".to_string());
-    slots[slot] = hex_of(rgb);
+    slots[slot] = lighting_model::colour_hex(rgb);
     choice.colourway = ThemeColours::Custom { slots };
 }
 
@@ -1639,8 +1630,8 @@ mod tests {
     #[test]
     fn colours_parse_and_dots_stop_at_five() {
         assert_eq!(rgb_of("#00E5FF"), [0x00, 0xE5, 0xFF]);
-        assert_eq!(rgb_of("00E5FF"), [0; 3]);
         assert_eq!(rgb_of("#12345"), [0; 3]);
+        assert_eq!(rgb_of("#+12345"), [0; 3], "a sign is no hex digit");
         let palette: Vec<String> = (0..7).map(|i| format!("#0000{i:02X}")).collect();
         assert_eq!(dots(&palette).len(), DOTS);
     }
