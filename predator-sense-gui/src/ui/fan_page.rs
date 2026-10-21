@@ -1808,7 +1808,12 @@ pub fn build_mode_key_section() -> gtk::Box {
                     let map = c.ppd_sync_map;
                     crate::ui::background::run(
                         move || {
-                            crate::hardware::ppd::sync_to_mode(mode, true, map);
+                            crate::hardware::ppd::sync_to_mode(
+                                mode,
+                                true,
+                                map,
+                                profile::ModeWrite::Always,
+                            );
                         },
                         |_| {},
                     );

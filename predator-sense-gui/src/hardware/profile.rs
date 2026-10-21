@@ -689,6 +689,28 @@ fn write_took_effect(
     state_satisfies_plan(state, plan, capabilities, MinPerfMatch::AtLeast)
 }
 
+/// How a profile switch treats a firmware mode that already holds the target.
+///
+/// The EC on a PH16-71 flashes the light bar each time the firmware mode is
+/// written, even to the value it already has: measured 2026-10-17 by writing
+/// `balanced` to `platform_profile` while it read `balanced`. The app's own
+/// `thermal_profile` attribute ends in the same firmware call in facer.c. For
+/// a switch that flash is the firmware confirming it, and is wanted. The
+/// startup mode is applied on every start, also to a firmware that is
+/// already there, and there it is a flash for nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeWrite {
+    /// Write the firmware mode on every call. Every switch: the Mode page, the
+    /// mode key's completion, the power policy, GameSync, the assistant.
+    Always,
+    /// Leave the firmware mode alone when it already holds the target, and
+    /// leave the desktop's power daemon alone when it already shows the
+    /// matching profile, since telling it can write the firmware mode too. Only
+    /// those: the CPU controls, the GPU wattage and the record of the
+    /// selection are applied as usual.
+    IfChanged,
+}
+
 /// The firmware thermal-profile index the official Windows app uses for a
 /// tier (`OPERATING_MODE`: QUIET=0, DEFAULT=1, EXTREME=4, TURBO=5, ECO=6),
 /// or `None` when the firmware does not list that index as supported.
@@ -720,7 +742,10 @@ fn windows_static_index(profile: PowerProfile, supported: &[u8]) -> Option<u8> {
 ///
 /// Best-effort like the GPU wattage: a machine may not expose the attribute at
 /// all, and that must never fail the whole profile switch.
-fn apply_firmware_profile(profile: PowerProfile) {
+///
+/// `write` and `daemon_told` decide whether an index the firmware already
+/// holds is written again; see [`firmware_write_needed`].
+fn apply_firmware_profile(profile: PowerProfile, write: ModeWrite, daemon_told: bool) {
     if !crate::hardware::thermal_profile::is_available() {
         return;
     }
@@ -739,14 +764,7 @@ fn apply_firmware_profile(profile: PowerProfile) {
             );
             return;
         };
-        if let Err(e) = crate::hardware::thermal_profile::set(index) {
-            crate::hardware::applog::error(&format!(
-                "thermal profile {index} for {} not applied: {e}",
-                profile.to_id()
-            ));
-            return;
-        }
-        crate::hardware::thermal_profile::remember(index);
+        write_firmware_index(profile, index, write, daemon_told);
         return;
     };
     let Some(index) = calibration.index_for_tier(profile.index() as u8) else {
@@ -756,14 +774,55 @@ fn apply_firmware_profile(profile: PowerProfile) {
         );
         return;
     };
-    if let Err(e) = crate::hardware::thermal_profile::set(index) {
-        crate::hardware::applog::error(&format!(
-            "thermal profile {index} for {} not applied: {e}",
+    write_firmware_index(profile, index, write, daemon_told);
+}
+
+/// Writes `index` unless [`firmware_write_needed`] says the firmware already
+/// holds it, and records it for the boot service either way: an index left
+/// alone because it was already there is still the one this mode is on.
+fn write_firmware_index(profile: PowerProfile, index: u8, write: ModeWrite, daemon_told: bool) {
+    if firmware_write_needed(
+        write,
+        daemon_told,
+        crate::hardware::thermal_profile::current,
+        index,
+    ) {
+        if let Err(e) = crate::hardware::thermal_profile::set(index) {
+            crate::hardware::applog::error(&format!(
+                "thermal profile {index} for {} not applied: {e}",
+                profile.to_id()
+            ));
+            return;
+        }
+    } else {
+        crate::hardware::applog::info(&format!(
+            "firmware already on thermal profile {index} for {}; not written again",
             profile.to_id()
         ));
-        return;
     }
     crate::hardware::thermal_profile::remember(index);
+}
+
+/// Whether the firmware mode has to be written to `target`.
+///
+/// A switch always writes it, and does not spend a WMI call reading it first.
+/// The startup mode leaves an index the firmware already holds alone, unless
+/// the desktop's power daemon was just told to change profile
+/// (`daemon_told`): the daemon writes the firmware mode itself when told to
+/// change, so the index read here may be its write or the one before it, and
+/// the app writes its own as it always has, so that its write lands last.
+///
+/// `current` is lazy so that only the startup path pays for the read.
+pub(crate) fn firmware_write_needed(
+    write: ModeWrite,
+    daemon_told: bool,
+    current: impl FnOnce() -> Option<u8>,
+    target: u8,
+) -> bool {
+    match write {
+        ModeWrite::Always => true,
+        ModeWrite::IfChanged => daemon_told || current() != Some(target),
+    }
 }
 
 /// The tier the firmware's own thermal profile currently sits on, if this
@@ -1081,6 +1140,19 @@ fn read_cpu_reading_at(sysfs_root: &Path) -> CpuReading {
 }
 
 pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
+    apply_profile(profile, ModeWrite::Always)
+}
+
+/// [`set_profile`] for the mode applied at startup.
+///
+/// Everything a switch applies is applied, except that a firmware mode already
+/// on the target is not written again, by the app or through the desktop's
+/// power daemon. See [`ModeWrite`].
+pub fn set_profile_at_startup(profile: PowerProfile) -> Result<(), String> {
+    apply_profile(profile, ModeWrite::IfChanged)
+}
+
+fn apply_profile(profile: PowerProfile, write: ModeWrite) -> Result<(), String> {
     let _in_flight = ApplyGuard::new();
 
     // First, before this function writes anything of its own.
@@ -1097,10 +1169,10 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     // (it leans further toward saving once unplugged) was applied *after* this
     // mode's and quietly replaced it. Balanced on battery then ran with the
     // daemon's setting rather than its own.
-    {
+    let daemon_told = {
         let cfg = crate::config::load_app_config();
-        crate::hardware::ppd::sync_to_mode(profile, cfg.ppd_sync_enabled, cfg.ppd_sync_map);
-    }
+        crate::hardware::ppd::sync_to_mode(profile, cfg.ppd_sync_enabled, cfg.ppd_sync_map, write)
+    };
 
     let s = settings_for(profile);
 
@@ -1209,7 +1281,7 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
         }
     }
 
-    apply_firmware_profile(profile);
+    apply_firmware_profile(profile, write, daemon_told);
 
     // Fan mode used to be forced here to match the profile (Performance/Turbo
     // to Max, everything else to Auto), the mapping fan_mode_for() above
@@ -1290,6 +1362,86 @@ mod tests {
     }
 
     use super::*;
+
+    /// The startup mode on a machine that already sits in it. The EC flashes
+    /// the light bar for every write of the firmware mode, changed or not, so
+    /// neither the app nor the desktop's power daemon may write it.
+    #[test]
+    fn an_unchanged_startup_mode_writes_the_firmware_mode_from_neither_side() {
+        let shown = crate::hardware::ppd::DesktopProfile::Balanced;
+        let daemon_told =
+            crate::hardware::ppd::relabel_needed(ModeWrite::IfChanged, || Some(shown), shown);
+        assert!(!daemon_told);
+        assert!(!firmware_write_needed(
+            ModeWrite::IfChanged,
+            daemon_told,
+            || Some(1),
+            1
+        ));
+    }
+
+    /// The startup mode on a machine somewhere else: written as any switch
+    /// writes it.
+    #[test]
+    fn a_changed_startup_mode_is_written_as_a_switch_writes_it() {
+        use crate::hardware::ppd::DesktopProfile;
+        let daemon_told = crate::hardware::ppd::relabel_needed(
+            ModeWrite::IfChanged,
+            || Some(DesktopProfile::Performance),
+            DesktopProfile::Balanced,
+        );
+        assert!(daemon_told);
+        assert!(firmware_write_needed(
+            ModeWrite::IfChanged,
+            daemon_told,
+            || Some(5),
+            1
+        ));
+        // The daemon already right, the firmware not.
+        assert!(firmware_write_needed(
+            ModeWrite::IfChanged,
+            false,
+            || Some(5),
+            1
+        ));
+    }
+
+    /// An index that does not read back is not known to be the target.
+    #[test]
+    fn an_unreadable_firmware_mode_is_written_at_startup() {
+        assert!(firmware_write_needed(
+            ModeWrite::IfChanged,
+            false,
+            || None,
+            1
+        ));
+    }
+
+    /// The daemon writes the firmware mode itself when it is told to change,
+    /// so the index read afterwards may be its write or the one before it.
+    /// The app then writes its own, as it always has, so its write lands last.
+    #[test]
+    fn a_told_daemon_means_the_app_writes_its_own_firmware_mode_after_it() {
+        assert!(firmware_write_needed(
+            ModeWrite::IfChanged,
+            true,
+            || Some(1),
+            1
+        ));
+    }
+
+    /// The mode key, the Mode page, the power policy: every switch writes the
+    /// firmware mode as before, and does not spend a WMI call reading it
+    /// first. The flash there is the firmware confirming the switch.
+    #[test]
+    fn a_switch_always_writes_the_firmware_mode_without_reading_it() {
+        assert!(firmware_write_needed(
+            ModeWrite::Always,
+            false,
+            || panic!("a switch must not read the firmware mode first"),
+            1
+        ));
+    }
 
     /// The mode key cycles the firmware thermal index inside the kernel and
     /// moves nothing else, so the machine ends up displaying one mode while
