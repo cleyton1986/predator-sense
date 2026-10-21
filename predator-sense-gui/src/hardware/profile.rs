@@ -382,7 +382,7 @@ fn settings_for(p: PowerProfile) -> ProfileSettings {
             // +/-0.7 W and changing sign. NVIDIA's driver README says why it
             // cannot: Dynamic Boost shifts power by writing `scaling_max_freq`,
             // a different lever from this one, and the kernel clamps a policy's
-            // minimum down to its maximum. See CHANGELOG §30.
+            // minimum down to its maximum.
             //
             // The PHN16-73 may still behave as the note above describes; this
             // records what a PH16-71 does, not a correction of that machine.
@@ -490,8 +490,8 @@ fn plan_for(profile: PowerProfile, capabilities: &CpuCapabilities) -> CpuProfile
         // "the highest supported turbo P-state". So the policy duplicated the
         // pinning and added an EPP lockout on top: measured here, a write to
         // energy_performance_preference under it fails with EBUSY, which is
-        // what left power-profiles-daemon stuck and unable to switch at all
-        // (CHANGELOG §30). The Windows app has no equivalent of any of this -
+        // what left power-profiles-daemon stuck and unable to switch at all.
+        // The Windows app has no equivalent of any of this -
         // its Turbo sets fan mode, the OC flag and the LED over WMI and
         // leaves CPU frequency to the OS.
         CpuGovernor::Powersave
@@ -1096,7 +1096,7 @@ pub fn set_profile(profile: PowerProfile) -> Result<(), String> {
     // the index and nothing else, so on battery the daemon's own preference
     // (it leans further toward saving once unplugged) was applied *after* this
     // mode's and quietly replaced it. Balanced on battery then ran with the
-    // daemon's setting rather than its own. See CHANGELOG §32.
+    // daemon's setting rather than its own.
     {
         let cfg = crate::config::load_app_config();
         crate::hardware::ppd::sync_to_mode(profile, cfg.ppd_sync_enabled, cfg.ppd_sync_map);
@@ -1442,7 +1442,7 @@ mod tests {
         // Turbo is the powersave policy too, and is told apart from
         // Performance by its floor rather than by its governor: the
         // performance policy only duplicated what min_perf 100 already does,
-        // and cost the ability to write EPP at all (CHANGELOG §30).
+        // and cost the ability to write EPP at all.
         let turbo = plan_for(PowerProfile::Turbo, &capabilities);
         assert_eq!(turbo.governor, CpuGovernor::Powersave);
         assert_eq!(turbo.epp, Some(EnergyPreference::Performance));

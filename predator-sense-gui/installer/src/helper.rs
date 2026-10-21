@@ -1328,7 +1328,7 @@ fn intel_pstate_hwp_active(sysfs: &Path, policies: &[PathBuf]) -> bool {
 /// turbo on and the base clock with it off, giving 16 or 38 on this machine
 /// against a kernel floor that never moves from 17. Verifying against that
 /// estimate made Quiet apply from Balanced and fail from Eco, rolling the
-/// whole profile back (CHANGELOG §31).
+/// whole profile back.
 ///
 /// `None` when this request does not set `min_perf_pct` at all, or the
 /// attribute is absent; the caller then has nothing to compare and says so.
@@ -1478,7 +1478,7 @@ fn verify_cpu_profile(
         // measured a moment ago by `probe_min_perf_floor` rather than derived
         // from a frequency ratio that moves with the turbo bit. So the value
         // to expect is exact, and a mismatch is a real failure again rather
-        // than a mode the machine happened to arrive from (CHANGELOG §31).
+        // than a mode the machine happened to arrive from.
         let expected = match min_perf_floor {
             Some(floor) => min_perf_pct.max(floor),
             // Nothing was probed, so there is no floor to reason about and the
@@ -2413,7 +2413,7 @@ mod tests {
     /// and left a stale value above the request: telling that apart from a
     /// genuine clamp needs the kernel's real floor, and every way of guessing
     /// it from `cpuinfo_max_freq` moves with the turbo bit, which is what made
-    /// Quiet unreachable from Eco (CHANGELOG §31). The governor, EPP and
+    /// Quiet unreachable from Eco. The governor, EPP and
     /// no_turbo written in the same transaction are still compared exactly, so
     /// a write failing for a real reason is still caught.
     #[test]

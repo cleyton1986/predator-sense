@@ -17,7 +17,7 @@
 //! unchanged. That is what it used to do, and a timer that re-applies a target
 //! every minute cannot tell a stale setting from a choice the user just made:
 //! picking Quiet on AC, or Eco on battery with a battery target of Quiet, was
-//! silently undone a grace window later (see CHANGELOG §28).
+//! silently undone a grace window later.
 //!
 //! The two battery-level rules are unchanged and still run on every tick,
 //! because a level crossed while already unplugged is not a transition:
@@ -243,8 +243,7 @@ fn transition_target(
         // not allowed. Leaving it alone keeps whatever the user chose; the
         // alternative, applying the configured target, silently overrode a
         // deliberate choice every time anything made the reading momentarily
-        // unreadable - which on this machine is every single transition, see
-        // CHANGELOG §29.
+        // unreadable - which on this machine is every single transition.
         return None;
     };
     if into.contains(&current) {
@@ -578,7 +577,7 @@ mod tests {
     /// A mode that cannot be read is not a mode that needs moving. Applying
     /// the configured target here is what overrode a deliberate choice on
     /// every transition, because something else on the machine writes a CPU
-    /// control moments after each one (CHANGELOG §29).
+    /// control moments after each one.
     #[test]
     fn an_unreadable_mode_is_left_alone_rather_than_guessed_at() {
         assert_eq!(
@@ -590,7 +589,7 @@ mod tests {
 
     /// The whole point of the rewrite: nothing here fires unless the power
     /// source actually changed, so a mode picked with the key or in the app
-    /// is not undone a grace window later (CHANGELOG §28).
+    /// is not undone a grace window later.
     #[test]
     fn a_mode_outside_the_current_list_is_still_left_alone_without_a_transition() {
         // Performance on battery is not in the battery list at all, and the
