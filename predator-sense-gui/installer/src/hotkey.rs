@@ -1395,9 +1395,35 @@ fn activate_app(logger: &mut Logger) {
 }
 
 fn ensure_display(command: &mut Command) {
-    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
-        command.env("DISPLAY", app::DEFAULT_DISPLAY);
+    if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        return;
     }
+    // The user service can start before the session has exported its display,
+    // so it holds neither variable. Guessing `:0` is wrong on a Wayland
+    // session whose Xwayland is on `:1`: the app then never opens and nothing
+    // is logged. The compositor's socket in the runtime dir is the real answer.
+    match find_wayland_socket() {
+        Some(socket) => command.env("WAYLAND_DISPLAY", socket),
+        None => command.env("DISPLAY", app::DEFAULT_DISPLAY),
+    };
+}
+
+fn find_wayland_socket() -> Option<String> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")?;
+    let mut sockets: Vec<String> = fs::read_dir(runtime)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| is_wayland_socket_name(name))
+        .collect();
+    sockets.sort();
+    sockets.into_iter().next()
+}
+
+/// `wayland-0`, `wayland-1`, ...; not the `wayland-0.lock` file beside it.
+fn is_wayland_socket_name(name: &str) -> bool {
+    name.strip_prefix("wayland-")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn find_enek5130() -> Option<PathBuf> {
@@ -1854,6 +1880,16 @@ fn resumed_since(previous: f64, current: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_compositor_socket_counts_as_a_wayland_display() {
+        assert!(is_wayland_socket_name("wayland-0"));
+        assert!(is_wayland_socket_name("wayland-12"));
+        assert!(!is_wayland_socket_name("wayland-0.lock"), "the lock file");
+        assert!(!is_wayland_socket_name("wayland-"), "no number");
+        assert!(!is_wayland_socket_name("wayland-wm"), "not numbered");
+        assert!(!is_wayland_socket_name("bus"));
+    }
 
     /// `HID_ID` zero-pads to 8 hex digits, but a hand-written override is not
     /// going to, and neither format should be the one that silently fails.
