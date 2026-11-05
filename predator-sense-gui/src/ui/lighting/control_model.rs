@@ -277,12 +277,15 @@ impl FourZoneFacts {
     pub fn found(
         hid: bool,
         runs: impl Fn(RgbMode) -> bool,
+        wmi_runs: impl Fn(RgbMode) -> bool,
         has_direction: impl Fn(RgbMode) -> bool,
         audio_sync: bool,
     ) -> FourZoneFacts {
+        // `runs` is the ENE controller's own report; over WMI `wmi_runs` is what is known
+        // of the chassis: a mode its keyboard leaves dark is not offered.
         let effects = FOUR_ZONE_EFFECTS
             .into_iter()
-            .filter(|mode| !hid || runs(*mode))
+            .filter(|mode| if hid { runs(*mode) } else { wmi_runs(*mode) })
             .collect();
         let directions = if hid {
             FOUR_ZONE_EFFECTS
@@ -1233,6 +1236,22 @@ mod tests {
     }
 
     #[test]
+    fn a_mode_the_chassis_leaves_dark_is_not_offered_over_wmi() {
+        let facts = FourZoneFacts::found(
+            false,
+            |_| false,
+            |mode| mode != RgbMode::Twinkling,
+            |_| false,
+            false,
+        );
+        assert!(!facts.effects.contains(&RgbMode::Twinkling));
+        assert_eq!(facts.effects.len(), FOUR_ZONE_EFFECTS.len() - 1);
+        // The ENE controller answers for itself: the chassis list is not consulted.
+        let ene = FourZoneFacts::found(true, |_| true, |_| false, |_| false, false);
+        assert!(ene.effects.contains(&RgbMode::Twinkling));
+    }
+
+    #[test]
     fn the_keyboard_offers_its_own_effects_per_key_colours_and_off() {
         let tiles = tiles(PreviewLight::Keyboard, &cx());
         assert_eq!(tiles.len(), 15);
@@ -1632,7 +1651,7 @@ mod tests {
     fn wmi() -> Context {
         other(
             KeyboardKind::Zones4,
-            FourZoneFacts::found(false, |_| false, |_| false, true),
+            FourZoneFacts::found(false, |_| false, |_| true, |_| false, true),
         )
     }
 
@@ -1641,7 +1660,7 @@ mod tests {
         let runs = |m: RgbMode| matches!(m, RgbMode::Breath | RgbMode::Neon | RgbMode::Wave);
         other(
             KeyboardKind::Zones4,
-            FourZoneFacts::found(true, runs, |m| m == RgbMode::Wave, false),
+            FourZoneFacts::found(true, runs, |_| true, |m| m == RgbMode::Wave, false),
         )
     }
 
@@ -1707,7 +1726,7 @@ mod tests {
             ]
             .map(Tile::FourZone)
         );
-        let facts = FourZoneFacts::found(false, |_| false, |_| true, false);
+        let facts = FourZoneFacts::found(false, |_| false, |_| true, |_| true, false);
         assert!(
             facts.directions.is_empty(),
             "no Direction over WMI"

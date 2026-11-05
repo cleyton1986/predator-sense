@@ -123,6 +123,7 @@ impl Machine {
                 FourZoneFacts::found(
                     hid,
                     hid_rgb::keyboard_supports_effect,
+                    rgb::wmi_effect_runs,
                     hid_rgb::keyboard_effect_supports_direction,
                     writable && audio_sync::is_available(),
                 )

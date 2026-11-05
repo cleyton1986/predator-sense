@@ -3,6 +3,19 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
+/// Chassis whose four-zone keyboard stays dark on Twinkling (mode 7). The mode was added
+/// from the official app's own device dump and is not part of what these keyboards are
+/// known to run; on the PH315-54 it was seen to leave the keyboard unlit, so the page does
+/// not offer it there. Compared as whole words of DMI `product_name`
+/// ([`crate::hardware::sysinfo::product_matches`]).
+const TWINKLING_DARK_MODELS: &[&str] = &["PH315-54"];
+
+/// Whether the four-zone keyboard over WMI is known to run `mode` on this chassis.
+pub fn wmi_effect_runs(mode: RgbMode) -> bool {
+    !(mode == RgbMode::Twinkling
+        && crate::hardware::sysinfo::product_matches(TWINKLING_DARK_MODELS))
+}
+
 /// Character device for dynamic RGB effects (16-byte payload)
 const DEVICE_DYNAMIC: &str = "/dev/acer-gkbbl-0";
 /// Character device for static zone coloring (4-byte payload)

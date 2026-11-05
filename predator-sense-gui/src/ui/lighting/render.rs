@@ -195,6 +195,7 @@ fn ene(extra: &[RgbMode], wave_direction: bool) -> FourZoneFacts {
     FourZoneFacts::found(
         true,
         |m| matches!(m, RgbMode::Breath | RgbMode::Neon) || extra.contains(&m),
+        |_| true,
         |m| wave_direction && m == RgbMode::Wave && extra.contains(&m),
         true,
     )
@@ -316,7 +317,7 @@ fn models() -> Vec<Model> {
             hw: hw(Some(KeyboardKind::Zones4), None, None),
             facts: facts(
                 None,
-                FourZoneFacts::found(false, |_| false, |_| false, true),
+                FourZoneFacts::found(false, |_| false, |_| true, |_| false, true),
             ),
             idle: (false, false),
             control: four_zone_views(RgbMode::Shifting),
