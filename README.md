@@ -70,8 +70,9 @@ If this app/project helped you and/or you liked it in some way, consider leaving
 <p align="center"><b>Tools</b> — GameSync, Macros, Audio EQ, the AI assistant (beta) and GRUB Splash live here now, grouped into tabs so the sidebar doesn't grow without limit. Shown here: GameSync, which registers a game and its profile so the app switches to it automatically while the game is running and restores whatever was active before once it exits.</p>
 <p align="center"><img src="assets/psense-15.png" width="800" alt="Tools"></p>
 
-<p align="center"><b>Fan Control</b> — Live RPM with animated spinning fans, CoolBoost toggle and Auto/Max modes.</p>
+<p align="center"><b>Fan Control</b> — Live RPM with animated spinning fans and CoolBoost toggle. Pick a power mode in the "Fans for" bar, then choose what its fans do: Automatic, Curve, Fixed or Max. A curve is a bar chart you drag, or nudge with - / + and the arrow keys; changes apply live, with a "Changed" tag and "Discard changes" with Undo. Machines without PWM fan control show Automatic and Max only.</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Fan Control"></p>
+<p align="center"><sub>Redesign contributed by <a href="https://github.com/fawaz7">@fawaz7</a> (#85, following the per-mode fan plans of #84), tested on their own Predator PH16-71. Screenshot by the author.</sub></p>
 
 <p align="center"><b>Battery</b> — Charge percentage, voltage, current, power, cycles, health, manufacturer and 80% charge limit for longevity.</p>
 <p align="center"><img src="assets/psense-8.png" width="800" alt="Battery"></p>
