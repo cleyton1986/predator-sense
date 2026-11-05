@@ -64,6 +64,7 @@ If this app/project helped you and/or you liked it in some way, consider leaving
 <p align="center"><b>Lighting</b>: each power mode has its own lighting, with named presets. Lighting control sets each light's effects, and per-key colours on the PH16-71 keyboard; Themes sets the keyboard, light bar and logo together from 32 built-in themes.</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Lighting"></p>
 <p align="center"><img src="assets/psense-17.png" width="800" alt="Lighting themes"></p>
+<p align="center"><sub>The Lighting page, the themes and the Fan Control redesign were contributed by <a href="https://github.com/fawaz7">@fawaz7</a> (PRs #85 to #95), tested on their own Predator PH16-71. Screenshots by the author. Four-zone keyboards (such as the PH315-54) get the same page with their own flat four-zone preview, and machines without per-fan PWM get an Automatic/Max curve on Fan Control.</sub></p>
 
 <p align="center"><b>Modes</b> — Performance profiles: Quiet, Balanced, Performance and Turbo, plus a battery-only Eco tier (CPU governor + Intel EPP + GPU power limit).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modes"></p>
