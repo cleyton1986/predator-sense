@@ -589,13 +589,14 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             glib::ControlFlow::Continue
         });
 
-        // Software auto fan-curve (fan_control_page.rs "fan_auto_curve"
-        // switch): runs globally rather than only while that page is open,
-        // since pages here are built lazily on first navigation - a
-        // page-local timer would never restart the curve after a fresh
-        // launch until the user visited Fan Control again. Re-reads the
-        // config every tick, same as the game list above: toggling the
-        // switch takes effect on the next tick, no restart needed.
+        // The fan reconciler: the one owner of the fan hardware, applying the
+        // active power mode's `FanPlan` from config. It runs globally rather
+        // than only while the Fan Control page is open, since pages here are
+        // built lazily on first navigation - a page-local timer would never
+        // reapply a plan after a fresh launch until the user visited Fan
+        // Control again. Re-reads the config every tick, same as the game
+        // list above: a plan written by the page, by the AI assistant or by a
+        // settings change takes effect on the next tick, no restart needed.
         // The write goes through the persistent privileged helper (see
         // hardware::helper), which holds a mutex shared with every other
         // privileged caller in the app - calling it straight from this
@@ -968,6 +969,24 @@ fn ensure_page_built(stack: &gtk::Stack, pending: &PendingPages, name: &str) {
 }
 
 /// Build main area matching nova-ui.html: main-area with padding, sidebar + content-panel
+/// Where the keyboard focus is, for the window's Up and Down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArrowFocus {
+    /// No widget has the focus.
+    Nowhere,
+    /// The focus is in the sidebar.
+    Sidebar,
+    /// A widget on a page has the focus.
+    Elsewhere,
+}
+
+/// Whether Up and Down move the sidebar: with the focus in the sidebar or nowhere. A focused
+/// widget on a page keeps its arrows (the Fan Control curve chart, its mode bar and the
+/// sliders all use them).
+fn sidebar_takes_arrows(focus: ArrowFocus) -> bool {
+    focus != ArrowFocus::Elsewhere
+}
+
 fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -> gtk::Overlay {
     // Main area overlay (for the diagonal stripe background)
     let main_overlay = gtk::Overlay::new();
@@ -1241,31 +1260,53 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
         sidebar.append(&item_overlay);
     }
 
-    // Up/Down anywhere in the window move the sidebar selection by one,
-    // same as clicking the item above/below the current one - lets
-    // screenshot-automation (and anyone else) drive the whole sidebar from
-    // the keyboard instead of needing exact per-item pixel coordinates,
-    // which drift with window size/placement in a way mouse clicks can't
-    // route around. Capture phase so it fires before any focused child
-    // widget (e.g. a page's own entry/slider) would otherwise eat the key.
+    // Up/Down move the sidebar selection by one, same as clicking the item
+    // above/below the current one - lets screenshot-automation (and anyone
+    // else) drive the whole sidebar from the keyboard instead of needing
+    // exact per-item pixel coordinates, which drift with window
+    // size/placement in a way mouse clicks can't route around. Capture phase
+    // so it fires before any focused child widget would otherwise eat the
+    // key - but only while the keyboard focus is in the sidebar or nowhere:
+    // a focused widget on a page (a slider, the Fan Control curve chart,
+    // its mode bar) keeps its own Up and Down
+    // (`sidebar_takes_arrows`).
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     {
         let active_for_key = active_idx.clone();
         let navigate_to_key = navigate_to.clone();
         let count = page_names.len();
-        key_controller.connect_key_pressed(move |_, keyval, _, _| match keyval {
-            gtk::gdk::Key::Down => {
-                let cur = *active_for_key.borrow();
-                navigate_to_key((cur + 1).min(count - 1));
-                glib::Propagation::Stop
+        let sidebar_for_key = sidebar.downgrade();
+        key_controller.connect_key_pressed(move |controller, keyval, _, _| {
+            let down = match keyval {
+                gtk::gdk::Key::Down => true,
+                gtk::gdk::Key::Up => false,
+                _ => return glib::Propagation::Proceed,
+            };
+            let focus = controller
+                .widget()
+                .and_downcast::<gtk::Window>()
+                .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window));
+            let at = match (focus, sidebar_for_key.upgrade()) {
+                (None, _) => ArrowFocus::Nowhere,
+                (Some(widget), Some(sidebar))
+                    if widget == *sidebar.upcast_ref::<gtk::Widget>()
+                        || widget.is_ancestor(&sidebar) =>
+                {
+                    ArrowFocus::Sidebar
+                }
+                (Some(_), _) => ArrowFocus::Elsewhere,
+            };
+            if !sidebar_takes_arrows(at) {
+                return glib::Propagation::Proceed;
             }
-            gtk::gdk::Key::Up => {
-                let cur = *active_for_key.borrow();
-                navigate_to_key(cur.saturating_sub(1));
-                glib::Propagation::Stop
-            }
-            _ => glib::Propagation::Proceed,
+            let cur = *active_for_key.borrow();
+            navigate_to_key(if down {
+                (cur + 1).min(count - 1)
+            } else {
+                cur.saturating_sub(1)
+            });
+            glib::Propagation::Stop
         });
     }
     window.add_controller(key_controller);
@@ -2455,4 +2496,19 @@ pub(crate) fn create_setting_row(title: &str, desc: &str) -> gtk::Box {
     text.append(&d);
     row.append(&text);
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sidebar_takes_arrows, ArrowFocus};
+
+    #[test]
+    fn up_and_down_move_the_sidebar_only_without_a_focused_page_widget() {
+        assert!(sidebar_takes_arrows(ArrowFocus::Nowhere));
+        assert!(sidebar_takes_arrows(ArrowFocus::Sidebar));
+        assert!(
+            !sidebar_takes_arrows(ArrowFocus::Elsewhere),
+            "a focused slider, curve chart or mode bar keeps its arrows"
+        );
+    }
 }

@@ -1161,3 +1161,35 @@ scrollbar slider:hover {
 .feature-off .feature-icon { color: #888; }
 .feature-label { font-size: 12px; font-weight: 400; } /* Regular, 12px (label) */
 .info-note { color: #9aa0a6; font-size: 12px; font-weight: 400; } /* Regular, 12px (label) */
+
+/* "Changed" tag beside Discard on the Fan Control page, styled like the Lighting page's. */
+.fan-tag {
+    padding: 3px 8px;
+    border-radius: 999px;
+    background-color: alpha(@accent_bg_color, 0.16);
+    color: mix(@accent_bg_color, #ffffff, 0.45);
+    font-size: 11px;
+    font-weight: 700;
+}
+.fan-tag.fan-tag-warn {
+    background-color: rgba(210, 153, 34, 0.16);
+    color: #e6c372;
+}
+
+/* Mode bar: one button per power mode, shared by the Fan Control page and later the Lighting page. */
+.mode-bar { padding: 4px; border: 1px solid @border_dim; border-radius: 14px; background-color: @bg_dark; }
+.mode-bar-button { min-height: 56px; padding: 6px; border: 1px solid transparent; border-radius: 10px; background: none; box-shadow: none; color: @text_label; font-size: 14px; font-weight: 600; }
+.mode-bar-button:hover, .mode-bar-button.mode-bar-selected { color: @text_main; }
+.mode-bar-caption { color: @text_muted; font-size: 12px; font-weight: 500; }
+.mode-bar-button.mode-bar-selected .mode-bar-caption { color: #cfcfcf; }
+.mode-bar-dot { min-width: 10px; min-height: 10px; border-radius: 999px; }
+.mode-bar-dot.mode-quiet { background-color: #56f2ce; }
+.mode-bar-dot.mode-eco { background-color: #6fcf52; }
+.mode-bar-dot.mode-balanced { background-color: #148bf9; }
+.mode-bar-dot.mode-performance { background-color: #fa6616; }
+.mode-bar-dot.mode-turbo { background-color: #fd164c; }
+.mode-bar-button.mode-quiet.mode-bar-selected { background: rgba(86, 242, 206, 0.14); border-color: #56f2ce; }
+.mode-bar-button.mode-eco.mode-bar-selected { background: rgba(111, 207, 82, 0.14); border-color: #6fcf52; }
+.mode-bar-button.mode-balanced.mode-bar-selected { background: rgba(20, 139, 249, 0.14); border-color: #148bf9; }
+.mode-bar-button.mode-performance.mode-bar-selected { background: rgba(250, 102, 22, 0.14); border-color: #fa6616; }
+.mode-bar-button.mode-turbo.mode-bar-selected { background: rgba(253, 22, 76, 0.14); border-color: #fd164c; }
