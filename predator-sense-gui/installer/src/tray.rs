@@ -14,6 +14,17 @@ struct PredatorTray {
     language: Language,
 }
 
+/// Raw ARGB32 (A,R,G,B per pixel), made from resources/tray/predator-sense-tray-N.png with
+/// `python3 -I -c 'from PIL import Image;im=Image.open(f"predator-sense-tray-{N}.png").convert("RGBA");open(f"tray-{N}.argb","wb").write(b"".join(bytes((a,r,g,b)) for r,g,b,a in im.getdata()))'`.
+/// Sent as pixels because the shell's icon theme, loaded at login, never sees an icon installed later.
+const ICONS: [(i32, &[u8]); 5] = [
+    (16, include_bytes!("../assets/tray-16.argb")),
+    (22, include_bytes!("../assets/tray-22.argb")),
+    (24, include_bytes!("../assets/tray-24.argb")),
+    (32, include_bytes!("../assets/tray-32.argb")),
+    (48, include_bytes!("../assets/tray-48.argb")),
+];
+
 impl ksni::Tray for PredatorTray {
     fn id(&self) -> String {
         service::TRAY_ID.into()
@@ -27,8 +38,15 @@ impl ksni::Tray for PredatorTray {
         ksni::Category::Hardware
     }
 
-    fn icon_name(&self) -> String {
-        app::ICON_NAME.into()
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        ICONS
+            .iter()
+            .map(|&(size, data)| ksni::Icon {
+                width: size,
+                height: size,
+                data: data.to_vec(),
+            })
+            .collect()
     }
 
     fn icon_theme_path(&self) -> String {
@@ -136,5 +154,17 @@ fn activate_application() {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null()),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_embedded_icon_holds_one_argb_pixel_per_point() {
+        for (size, data) in ICONS {
+            assert_eq!(data.len(), (size * size * 4) as usize, "size {size}");
+        }
     }
 }

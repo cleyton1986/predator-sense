@@ -69,8 +69,8 @@ fn rotate_if_needed() {
     let _ = fs::rename(&path, log_dir().join("app.log.1"));
 }
 
-fn write_line(level: &str, msg: &str) {
-    if !is_enabled() {
+fn write_line(level: &str, msg: &str, force: bool) {
+    if !force && !is_enabled() {
         return;
     }
     let _ = fs::create_dir_all(log_dir());
@@ -81,11 +81,27 @@ fn write_line(level: &str, msg: &str) {
 }
 
 pub fn info(msg: &str) {
-    write_line("INFO", msg);
+    write_line("INFO", msg, false);
 }
 
 pub fn error(msg: &str) {
-    write_line("ERROR", msg);
+    write_line("ERROR", msg, false);
+}
+
+/// Write an error even when logging is switched off.
+///
+/// For the one class of failure the gate cannot be trusted to report: a
+/// config.json that will not parse. `debug_logging` is read *from* that file,
+/// so a parse failure leaves the gate at its default of off, and the message
+/// saying every setting just fell back to defaults is the message that gets
+/// swallowed. Measured on a real install: an unparseable config ran on
+/// defaults for eight minutes with nothing in the log, nothing on screen and
+/// no exit code to notice.
+///
+/// Deliberately not a general escape hatch. Everything else stays behind the
+/// switch the user set.
+pub fn error_always(msg: &str) {
+    write_line("ERROR", msg, true);
 }
 
 #[cfg(test)]
@@ -134,6 +150,18 @@ mod tests {
         let _ = fs::remove_file(log_path());
         info("should not appear");
         assert!(!log_path().exists(), "disabled logging must not create the file");
+
+        // ...with one exception, and only one: the message saying the config
+        // could not be read has to survive a switch that is itself read from
+        // that config.
+        error_always("config could not be loaded");
+        let forced =
+            fs::read_to_string(log_path()).expect("error_always must write while disabled");
+        assert!(forced.contains("ERROR config could not be loaded"));
+        assert!(
+            !forced.contains("should not appear"),
+            "only the forced line gets through, not the gated ones"
+        );
 
         std::env::remove_var("PREDATOR_SENSE_LOG_DIR");
         let _ = fs::remove_dir_all(&scratch);

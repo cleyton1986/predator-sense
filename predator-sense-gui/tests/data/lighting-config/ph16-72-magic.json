@@ -1,0 +1,33 @@
+{
+  "last_profile": "balanced",
+  "auto_apply_on_start": false,
+  "minimize_on_close": true,
+  "light_bar": {
+    "mode": "Static",
+    "speed": 3,
+    "brightness": 70,
+    "red": 0,
+    "green": 174,
+    "blue": 199,
+    "per_zone": false,
+    "zones": null,
+    "direction": 1
+  },
+  "magic_rgb_keyboard": {
+    "effect": "Breathing",
+    "brightness": 55,
+    "speed": 2,
+    "reverse": false,
+    "red": 255,
+    "green": 46,
+    "blue": 136
+  },
+  "magic_rgb_logo": {
+    "effect": "Static",
+    "brightness": 35,
+    "speed": 1,
+    "red": 255,
+    "green": 46,
+    "blue": 136
+  }
+}

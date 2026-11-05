@@ -46,19 +46,6 @@ impl RgbMode {
         }
     }
 
-    pub fn all() -> &'static [RgbMode] {
-        &[
-            Self::Static,
-            Self::Breath,
-            Self::Neon,
-            Self::Wave,
-            Self::Shifting,
-            Self::Zoom,
-            Self::Meteor,
-            Self::Twinkling,
-        ]
-    }
-
     pub fn needs_color(&self) -> bool {
         matches!(
             self,
@@ -68,10 +55,6 @@ impl RgbMode {
 
     pub fn needs_speed(&self) -> bool {
         !matches!(self, Self::Static)
-    }
-
-    pub fn needs_direction(&self) -> bool {
-        matches!(self, Self::Wave | Self::Shifting)
     }
 }
 
@@ -90,14 +73,14 @@ pub enum Direction {
 /// `AppConfig::rgb_dynamic_last` alone gives us). Color and brightness stay
 /// global (the real profile's `<Pattern>` color is on the outer element, not
 /// per sub-pattern), only speed/direction are remembered per effect.
-#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EffectParams {
     pub speed: u8,
     pub direction: Option<Direction>,
 }
 
 /// RGB configuration for a single zone or dynamic effect
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RgbConfig {
     pub mode: RgbMode,
     pub speed: u8,        // 0-9
@@ -218,6 +201,156 @@ pub fn apply_static_zone(config: &StaticZoneConfig) -> Result<(), String> {
     ];
 
     write_to_device(DEVICE_STATIC, &payload)
+}
+
+/// What the four-zone keyboard's Apply sends: its page's state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyboardWrite {
+    pub is_static: bool,
+    /// Zones 1 to 4.
+    pub zone_colors: [(u8, u8, u8); 4],
+    pub brightness: u8,
+    pub mode: RgbMode,
+    pub speed: u8,
+    pub direction: Direction,
+    /// The effect's colour.
+    pub color: (u8, u8, u8),
+}
+
+/// How [`apply_keyboard`] reached the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardRoute {
+    /// Static zone colours over the ENEK5130 HID controller, which the hotkey service can
+    /// replay after login or resume.
+    HidZones,
+    /// Static zone colours over WMI only: there is no HID controller.
+    WmiZones,
+    /// An effect the HID controller runs natively.
+    HidEffect,
+    /// An effect with no confirmed native mapping on HID-only hardware: shown on screen
+    /// only, nothing sent.
+    PreviewOnly,
+    /// An effect over WMI.
+    WmiEffect,
+}
+
+/// Writes the four-zone keyboard (WMI, or the ENEK5130 HID controller) as the RGB page's
+/// Apply always has; moved here from the page so the per-mode lighting
+/// (`lighting::apply_setup`) writes it the same way. `hid_only` is
+/// `hid_rgb::is_available()`, taken once by the caller (the page when it is built, the
+/// per-mode lighting once per write), and also decides whether static zone colours go to
+/// the HID controller, which this asked the system for again before.
+pub fn apply_keyboard(write: &KeyboardWrite, hid_only: bool) -> Result<KeyboardRoute, String> {
+    if write.is_static {
+        // Static mode - matches the controller's documented packet layout:
+        // For EACH zone: write zone color, then send dynamic payload
+        // This is how the original script works (called once per zone)
+        let mut last_err = None;
+        for (i, &(r, g, b)) in write.zone_colors.iter().enumerate() {
+            // Step A: Write zone color to static device
+            if let Err(e) = apply_static_zone(&StaticZoneConfig {
+                zone: (i + 1) as u8,
+                red: r,
+                green: g,
+                blue: b,
+            }) {
+                last_err = Some(e);
+                break;
+            }
+            // Step B: Tell WMI to apply static coloring (after each zone)
+            if let Err(e) = apply_dynamic_effect(&RgbConfig {
+                mode: RgbMode::Static,
+                speed: 0,
+                brightness: write.brightness,
+                direction: Direction::RightToLeft,
+                red: 0,
+                green: 0,
+                blue: 0,
+            }) {
+                last_err = Some(e);
+                break;
+            }
+        }
+        let wmi_result = match last_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        };
+
+        // On hardware where the WMI static path is a confirmed no-op
+        // (e.g. PHN16-73), the real RGB controller is a separate
+        // I2C-HID chip (ENEK5130) reachable directly, bypassing WMI
+        // entirely. Try it whenever present - one HID write per zone,
+        // confirmed to be a real 4-zone controller (issue #4). Runs
+        // alongside the WMI path above, which is harmless where it's
+        // a no-op and unaffected where it isn't.
+        if hid_only {
+            let mut last_err = None;
+            for (i, &(r, g, b)) in write.zone_colors.iter().enumerate() {
+                if let Err(e) = crate::hardware::hid_rgb::set_zone_color(
+                    crate::hardware::hid_rgb::ZONE_MASKS[i],
+                    r,
+                    g,
+                    b,
+                    write.brightness,
+                ) {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+            match last_err {
+                Some(e) => Err(e),
+                None => Ok(KeyboardRoute::HidZones),
+            }
+        } else {
+            wmi_result.map(|()| KeyboardRoute::WmiZones)
+        }
+    } else if hid_only && crate::hardware::hid_rgb::keyboard_supports_effect(write.mode) {
+        // Mapping and byte-5 semantics are selected by the HID
+        // backend's model quirk, then checked against A3 before send.
+        crate::hardware::hid_rgb::set_effect(
+            write.mode,
+            write.brightness,
+            write.speed,
+            write.direction,
+            write.color.0,
+            write.color.1,
+            write.color.2,
+        )
+        .map(|()| KeyboardRoute::HidEffect)
+    } else if hid_only {
+        // Module-free HID hardware has no confirmed native effect for
+        // this mode yet (Wave/Shifting/Zoom meant different things on
+        // different hardware generations, see issue #12) - the
+        // animation is on-screen only, nothing to send here.
+        Ok(KeyboardRoute::PreviewOnly)
+    } else {
+        apply_dynamic_effect(&RgbConfig {
+            mode: write.mode,
+            speed: write.speed,
+            brightness: write.brightness,
+            direction: write.direction,
+            red: write.color.0,
+            green: write.color.1,
+            blue: write.color.2,
+        })
+        .map(|()| KeyboardRoute::WmiEffect)
+    }
+}
+
+/// Turns the four-zone keyboard's light off as the RGB page's "Turn off keyboard light"
+/// always has, moved here from the page so the per-mode lighting turns it off the same way
+/// (a mode at brightness 0): with the ENEK5130 HID controller (`hid`), black at brightness 0
+/// on every zone over HID, since the WMI brightness-only call is a confirmed no-op there;
+/// without it, the WMI brightness-only call at 0.
+pub fn turn_off_keyboard(hid: bool) -> Result<(), String> {
+    if hid {
+        for &mask in crate::hardware::hid_rgb::ZONE_MASKS.iter() {
+            crate::hardware::hid_rgb::set_zone_color(mask, 0, 0, 0, 0)?;
+        }
+        Ok(())
+    } else {
+        apply_brightness_only(0)
+    }
 }
 
 /// Apply static coloring to all 4 zones with the same color

@@ -6,6 +6,18 @@ pub mod application {
     pub const DBUS_ID: &str = "com.predator.sense";
     pub const DBUS_OBJECT_PATH: &str = "/com/predator/sense";
     pub const DBUS_ACTIVATE_METHOD: &str = "org.gtk.Application.Activate";
+    /// Runs one of the app's actions without raising its window.
+    pub const DBUS_ACTIVATE_ACTION_METHOD: &str = "org.freedesktop.Application.ActivateAction";
+    /// The app action the hotkey daemon runs when the keyboard's Fn backlight
+    /// keys have changed its brightness. Its parameter is a string naming the
+    /// key, [`KEYBOARD_BRIGHTNESS_UP`] or [`KEYBOARD_BRIGHTNESS_DOWN`]. The app
+    /// reads the new level back, or takes the key's step itself while it draws
+    /// the keyboard, whose frames then carry their own brightness.
+    pub const KEYBOARD_BRIGHTNESS_KEY_ACTION: &str = "keyboard-brightness-key";
+    /// [`KEYBOARD_BRIGHTNESS_KEY_ACTION`]'s parameter for the Fn backlight up key.
+    pub const KEYBOARD_BRIGHTNESS_UP: &str = "up";
+    /// [`KEYBOARD_BRIGHTNESS_KEY_ACTION`]'s parameter for the Fn backlight down key.
+    pub const KEYBOARD_BRIGHTNESS_DOWN: &str = "down";
 }
 
 pub mod binary {
@@ -402,6 +414,12 @@ pub mod helper {
         /// controller's own ranges by the helper. Opcode is this keyboard's
         /// effect id - see `hardware::keyboard_rgb::Effect`.
         ChiconyEffect,
+        /// Switches the keyboard's own 30 s auto-off timer. Args: 0|1
+        /// (1 = on, the firmware default; the setting resets at boot).
+        ChiconyAutoOff,
+        /// Reads the keyboard's current effect back. No args; prints
+        /// `MODE SPEED BRIGHTNESS SEL DIR` as decimal bytes.
+        ChiconyEffectRead,
         /// Mode-key cycles, as comma-separated WMI profile indices, written to
         /// facer's `mode_cycle_ac`/`mode_cycle_battery`. Args: AC BATTERY,
         /// either of which may be `skip` to leave that list alone. The key is
@@ -458,7 +476,7 @@ pub mod helper {
     }
 
     impl Action {
-        pub const ALL: [Self; 48] = [
+        pub const ALL: [Self; 50] = [
             Self::ApplyCpuProfile,
             Self::SetGovernor,
             Self::SetEpp,
@@ -498,6 +516,8 @@ pub mod helper {
             Self::ChiconyRgb,
             Self::ChiconyColor,
             Self::ChiconyEffect,
+            Self::ChiconyAutoOff,
+            Self::ChiconyEffectRead,
             Self::ModeCycle,
             Self::ThermalProfile,
             Self::BootReapplyThermal,
@@ -550,6 +570,8 @@ pub mod helper {
                 "chicony-rgb" => Some(Self::ChiconyRgb),
                 "chicony-color" => Some(Self::ChiconyColor),
                 "chicony-effect" => Some(Self::ChiconyEffect),
+                "chicony-auto-off" => Some(Self::ChiconyAutoOff),
+                "chicony-effect-read" => Some(Self::ChiconyEffectRead),
                 "mode-cycle" => Some(Self::ModeCycle),
                 "thermal-profile" => Some(Self::ThermalProfile),
                 "boot-reapply-thermal" => Some(Self::BootReapplyThermal),
@@ -604,6 +626,8 @@ pub mod helper {
                 Self::ChiconyRgb => "chicony-rgb",
                 Self::ChiconyColor => "chicony-color",
                 Self::ChiconyEffect => "chicony-effect",
+                Self::ChiconyAutoOff => "chicony-auto-off",
+                Self::ChiconyEffectRead => "chicony-effect-read",
                 Self::ModeCycle => "mode-cycle",
                 Self::ThermalProfile => "thermal-profile",
                 Self::BootReapplyThermal => "boot-reapply-thermal",
@@ -657,6 +681,8 @@ pub mod helper {
                 Self::ChiconyRgb => 4,
                 Self::ChiconyColor => 4,
                 Self::ChiconyEffect => 7,
+                Self::ChiconyAutoOff => 1,
+                Self::ChiconyEffectRead => 0,
                 Self::ModeCycle => 2,
                 Self::ThermalProfile => 1,
                 Self::BootReapplyThermal => 1,
@@ -712,6 +738,8 @@ pub mod helper {
                 Self::ChiconyRgb => "chicony-rgb EFFECT BRIGHTNESS COLOR SPEED",
                 Self::ChiconyColor => "chicony-color RED GREEN BLUE BRIGHTNESS",
                 Self::ChiconyEffect => "chicony-effect OPCODE SPEED BRIGHTNESS RED GREEN BLUE DIRECTION",
+                Self::ChiconyAutoOff => "chicony-auto-off 0|1",
+                Self::ChiconyEffectRead => "chicony-effect-read",
                 Self::ModeCycle => "mode-cycle AC|skip BATTERY|skip",
                 Self::ThermalProfile => "thermal-profile INDEX",
                 Self::BootReapplyThermal => "boot-reapply-thermal USER_HOME",
@@ -1658,6 +1686,21 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_firmware_actions_are_wired_up() {
+        assert!(Action::ALL.contains(&Action::ChiconyAutoOff));
+        assert!(Action::ALL.contains(&Action::ChiconyEffectRead));
+        assert_eq!(Action::parse("chicony-auto-off"), Some(Action::ChiconyAutoOff));
+        assert_eq!(
+            Action::parse("chicony-effect-read"),
+            Some(Action::ChiconyEffectRead)
+        );
+        assert_eq!(Action::ChiconyAutoOff.argument_count(), 1);
+        assert_eq!(Action::ChiconyEffectRead.argument_count(), 0);
+        assert_eq!(Action::ChiconyAutoOff.usage(), "chicony-auto-off 0|1");
+        assert_eq!(Action::ChiconyEffectRead.usage(), "chicony-effect-read");
+    }
+
+    #[test]
     fn installed_binary_names_do_not_share_exact_names() {
         let names = [
             super::binary::INSTALLER,
@@ -2455,5 +2498,833 @@ mod temp_limit_tests {
         assert!(!path.with_extension("tmp").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Reading and matching this machine's DMI identity.
+///
+/// Lives here because both the GUI and the installer need it and the installer
+/// cannot depend on the GUI crate. It used to exist twice, and the two copies
+/// had already drifted: only the GUI honoured the `PREDATOR_SENSE_FORCE_MODEL`
+/// override, so the hotkey daemon ignored the documented escape hatch.
+pub mod dmi {
+    /// Chassis with the dedicated PredatorSense key beside NumLock.
+    ///
+    /// One list, used by the daemon that watches the key and by the GUI page
+    /// that offers to rebind it. Add a model only once someone has confirmed
+    /// it on real hardware.
+    pub const PREDATOR_KEY_MODELS: &[&str] = &["PH16-71"];
+
+    /// Chassis whose Chicony keyboard is confirmed to accept the 24-bit
+    /// command family ([`keyboard`](crate::keyboard): `B1..` preamble, `0x14`
+    /// RGB packet, `08 02 ..` effect packet).
+    ///
+    /// Deliberately a model list rather than a USB-ID check: `04F2:0117` is
+    /// also the Helios 300 (PH317-56) generation, which the GUI drives with
+    /// the older `08 00 .. BE` family. Keying off the USB ID alone would send
+    /// this generation's packets to that one and take over its working RGB
+    /// page. One list for the GUI, which drives this keyboard, and for the
+    /// privileged helper, which sends this family only there and hands the
+    /// keyboard's idle timer back there when the GUI is gone.
+    pub const CHICONY_24BIT_MODELS: &[&str] = &["PH16-71"];
+
+    /// True when `product_name` names one of `models`.
+    ///
+    /// Model codes are compared as whole whitespace-separated words, so
+    /// `PH16-71` matches `"Predator PH16-71"` but not `"Predator PH16-71X"` -
+    /// a different chassis whose firmware is not known to behave the same way.
+    /// Pure, so it is testable without touching DMI or the environment.
+    pub fn matches_model(product_name: &str, models: &[&str]) -> bool {
+        product_name
+            .split_whitespace()
+            .any(|part| models.iter().any(|m| part.eq_ignore_ascii_case(m)))
+    }
+
+    /// [`matches_model`] against this machine's DMI `product_name`.
+    ///
+    /// `PREDATOR_SENSE_FORCE_MODEL` overrides the DMI read so someone on an
+    /// unlisted chassis can try a gated path and report back without
+    /// rebuilding.
+    /// This machine's DMI `product_name`, read once.
+    ///
+    /// `PREDATOR_SENSE_FORCE_MODEL` is consulted first and is captured once
+    /// too: it is a developer override read at startup, and re-reading the
+    /// environment four times a second to notice a change nobody makes was the
+    /// cost this removes. Neither value can change without restarting the
+    /// process, or the machine.
+    pub fn product_name() -> &'static str {
+        static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        NAME.get_or_init(|| {
+            std::env::var("PREDATOR_SENSE_FORCE_MODEL")
+                .ok()
+                .or_else(|| {
+                    std::fs::read_to_string("/sys/class/dmi/id/product_name")
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                })
+                .unwrap_or_default()
+        })
+        .as_str()
+    }
+
+    pub fn product_matches(models: &[&str]) -> bool {
+        matches_model(product_name(), models)
+    }
+}
+
+#[cfg(test)]
+mod dmi_tests {
+    use super::dmi;
+
+    #[test]
+    fn a_model_code_matches_as_a_whole_word() {
+        assert!(dmi::matches_model("Predator PH16-71", &["PH16-71"]));
+        assert!(dmi::matches_model("predator ph16-71", &["PH16-71"]));
+    }
+
+    #[test]
+    fn a_longer_code_sharing_a_prefix_does_not_match() {
+        // PH16-71X is a different chassis whose firmware is not known to
+        // behave the same way. This is the whole reason the comparison is
+        // whole-word rather than a substring test.
+        assert!(!dmi::matches_model("Predator PH16-71X", &["PH16-71"]));
+    }
+
+    #[test]
+    fn an_empty_name_or_list_matches_nothing() {
+        assert!(!dmi::matches_model("", &["PH16-71"]));
+        assert!(!dmi::matches_model("Predator PH16-71", &[]));
+    }
+
+    #[test]
+    fn any_listed_model_matches() {
+        assert!(dmi::matches_model("Nitro AN515-58", &["PH16-71", "AN515-58"]));
+    }
+
+    #[test]
+    fn the_dmi_name_is_read_once_and_remembered() {
+        // The 250 ms idle timer asks this four times a second for a value that
+        // cannot change without a reboot. Reading the file every time was pure
+        // cost.
+        let first = dmi::product_name();
+        let second = dmi::product_name();
+        assert_eq!(first, second);
+        assert!(
+            std::ptr::eq(first, second),
+            "the same cached string, not a re-read"
+        );
+    }
+
+    #[test]
+    fn the_predator_key_list_is_the_one_both_crates_use() {
+        assert_eq!(dmi::PREDATOR_KEY_MODELS, &["PH16-71"]);
+    }
+
+    #[test]
+    fn the_24bit_keyboard_list_is_the_one_both_crates_use() {
+        assert_eq!(dmi::CHICONY_24BIT_MODELS, &["PH16-71"]);
+        assert!(!dmi::matches_model(
+            "Predator PH317-56",
+            dmi::CHICONY_24BIT_MODELS
+        ));
+    }
+}
+
+/// The Chicony 24-bit keyboard (04F2:0117, PH16-71): its wire format and the
+/// values that cross the process boundary.
+///
+/// Two processes talk to this controller: the GUI through the hidraw node of
+/// its lighting interface (the `predator-sense-hidraw` crate), and
+/// the privileged helper when the GUI cannot open that node, through the
+/// same node as root, or over USB control transfers when the node cannot be
+/// found. Both send the reports built here, so the two paths put the same
+/// bytes on the wire. The format was read from PredatorSense's own USB
+/// controller library and tested on a PH16-71 (2026-10-16): feature reports
+/// of 8 bytes and output reports of 64, with no report IDs.
+///
+/// The helper also reads the controller back (`chicony-effect-read`) and
+/// prints what it found; the GUI parses that line and stores the brightness
+/// as a percent, which is scaled back down when the keyboard is written. The
+/// line and both directions of the controller's 0..=50 brightness scale are
+/// defined here once, so the two sides cannot disagree about the field order
+/// or the scale.
+pub mod keyboard {
+    /// The controller's own brightness ceiling (`0x32`). Its Fn backlight
+    /// keys step through 0, 12, 25, 37 and 50.
+    pub const BRIGHTNESS_MAX: u8 = 50;
+
+    /// A percent on the controller's scale, rounded down. Above 100 counts as
+    /// 100.
+    pub fn percent_to_raw(percent: u8) -> u8 {
+        ((percent.min(100) as u16 * BRIGHTNESS_MAX as u16) / 100) as u8
+    }
+
+    /// A controller level as a percent, rounded to the nearest. Above
+    /// [`BRIGHTNESS_MAX`] counts as the maximum. Rounding here and flooring
+    /// in [`percent_to_raw`] is what brings every level back as itself, the
+    /// Fn steps included.
+    pub fn raw_to_percent(raw: u8) -> u8 {
+        let raw = raw.min(BRIGHTNESS_MAX) as u16;
+        let max = BRIGHTNESS_MAX as u16;
+        ((raw * 100 + max / 2) / max) as u8
+    }
+
+    /// Bytes in every feature report, sent or read back.
+    pub const FEATURE_LEN: usize = 8;
+    /// Bytes in one output report of a per-key frame.
+    pub const OUTPUT_LEN: usize = 64;
+    /// Key slots in a per-key frame. 103 of them have an LED on the PH16-71.
+    pub const SLOTS: usize = 128;
+    /// Slots in one output report: four bytes each, `00 RR GG BB`.
+    pub const SLOTS_PER_REPORT: usize = OUTPUT_LEN / 4;
+    /// Output reports in one per-key frame.
+    pub const FRAME_REPORTS: usize = SLOTS / SLOTS_PER_REPORT;
+
+    /// Byte 7 of every feature report: the complement of the sum of bytes
+    /// 0..6. The firmware does not check it, but Acer's software always
+    /// sends it.
+    pub fn checksum(report: &mut [u8; FEATURE_LEN]) {
+        let sum = report[..7].iter().fold(0u8, |acc, byte| acc.wrapping_add(*byte));
+        report[7] = !sum;
+    }
+
+    /// `head` with its checksum appended.
+    fn sealed(head: [u8; 7]) -> [u8; FEATURE_LEN] {
+        let mut report = [0u8; FEATURE_LEN];
+        report[..7].copy_from_slice(&head);
+        checksum(&mut report);
+        report
+    }
+
+    /// The reset the controller expects before a colour and effect.
+    pub const PREAMBLE: [u8; FEATURE_LEN] = [0xB1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4E];
+
+    /// Speed runs 1 (fastest) to 9 (slowest) on the wire.
+    const SPEED_FAST: u8 = 1;
+    const SPEED_SLOW: u8 = 9;
+
+    /// Which palette entry an effect shows: 1 is entry 0, the one
+    /// [`colour_packet`] writes (8 would be a random colour).
+    const COLOUR_FROM_PACKET: u8 = 0x01;
+
+    /// A percent, higher faster, as the wire's speed byte.
+    fn scale_speed(percent: u8) -> u8 {
+        if percent >= 100 {
+            return SPEED_FAST;
+        }
+        let range = (SPEED_SLOW - SPEED_FAST) as u16;
+        (SPEED_SLOW - ((percent as u16 * range) / 100) as u8).max(SPEED_FAST)
+    }
+
+    /// `14 00 00 RR GG BB 00 CK`: palette entry 0 as a real 24-bit colour.
+    /// On its own it changes nothing; the effect report after it shows it.
+    pub fn colour_packet(red: u8, green: u8, blue: u8) -> [u8; FEATURE_LEN] {
+        sealed([0x14, 0x00, 0x00, red, green, blue, 0x00])
+    }
+
+    /// Every effect opcode the controller is known to take, in the effect
+    /// report's byte 2: static 01, breathing 02, wave 03, snake 05, ripple
+    /// 06, rainbow 08, rain 0A, lightning 12, spot 25, stars 26, fireball
+    /// 27, snow 28, heartbeat 29. The GUI's `keyboard_rgb::Effect` sends
+    /// these and no other, and the privileged helper refuses any other.
+    pub const EFFECT_OPCODES: [u8; 13] = [
+        0x01, 0x02, 0x03, 0x05, 0x06, 0x08, 0x0A, 0x12, 0x25, 0x26, 0x27, 0x28, 0x29,
+    ];
+
+    /// Whether `opcode` is one of [`EFFECT_OPCODES`].
+    pub fn is_effect_opcode(opcode: u8) -> bool {
+        EFFECT_OPCODES.contains(&opcode)
+    }
+
+    /// One firmware effect in one colour: the preamble, the colour, then
+    /// `08 02 MODE SPEED BRIGHT 01 DIR CK`. `speed` and `brightness` are
+    /// percents (above 100 counts as 100), `direction` 1..=6 (kept to that
+    /// range). The three go out together, in this order.
+    pub fn effect_packets(
+        opcode: u8,
+        speed: u8,
+        brightness: u8,
+        red: u8,
+        green: u8,
+        blue: u8,
+        direction: u8,
+    ) -> [[u8; FEATURE_LEN]; 3] {
+        let effect = sealed([
+            0x08,
+            0x02,
+            opcode,
+            scale_speed(speed),
+            // The scale a brightness is read back on, so a level the GUI
+            // stores comes back here as the same level.
+            percent_to_raw(brightness),
+            COLOUR_FROM_PACKET,
+            direction.clamp(1, 6),
+        ]);
+        [PREAMBLE, colour_packet(red, green, blue), effect]
+    }
+
+    /// `30 01 ST 00 00 00 00 CK`: the keyboard's own auto-off after 30 s
+    /// idle, on or off.
+    pub fn auto_off_packet(on: bool) -> [u8; FEATURE_LEN] {
+        sealed([0x30, 0x01, u8::from(on), 0, 0, 0, 0])
+    }
+
+    /// What turns a command into a query of it.
+    pub const QUERY_BIT: u8 = 0x80;
+
+    /// The query for `command`: its first byte with [`QUERY_BIT`] set,
+    /// sealed. The reply is read with a GET_FEATURE after it.
+    pub fn query_packet(command: [u8; 7]) -> [u8; FEATURE_LEN] {
+        let mut head = command;
+        head[0] |= QUERY_BIT;
+        sealed(head)
+    }
+
+    /// Query `88`: the current firmware effect, read back as
+    /// `88 00 MODE SPD BRT SEL DIR CK` ([`EffectReading::from_reply`]).
+    pub fn effect_query() -> [u8; FEATURE_LEN] {
+        query_packet([0x08, 0, 0, 0, 0, 0, 0])
+    }
+
+    /// A reply shorter than a feature report is no reply.
+    pub fn check_reply_length(read: usize) -> Result<(), String> {
+        if read < FEATURE_LEN {
+            return Err(format!(
+                "keyboard reply too short: {read} of {FEATURE_LEN} bytes"
+            ));
+        }
+        Ok(())
+    }
+
+    /// A reply to `query` echoes it in byte 0. Reply checksums follow a
+    /// different rule per query, so byte 7 is never looked at.
+    pub fn check_reply_echo(query: u8, reply: &[u8; FEATURE_LEN]) -> Result<(), String> {
+        if reply[0] != query {
+            return Err(format!(
+                "keyboard reply byte 0 is {:#04x}, expected {query:#04x}",
+                reply[0]
+            ));
+        }
+        Ok(())
+    }
+
+    /// A usable reply to `query`: a full report (`read` bytes of it arrived)
+    /// whose byte 0 echoes the query. The checksum is deliberately not
+    /// looked at.
+    pub fn check_reply(query: u8, reply: &[u8; FEATURE_LEN], read: usize) -> Result<(), String> {
+        check_reply_length(read)?;
+        check_reply_echo(query, reply)
+    }
+
+    /// `12 00 00 08 00 00 00 CK`: the controller takes a per-key frame next.
+    pub const PER_KEY_ENTER: [u8; FEATURE_LEN] = [0x12, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0xE5];
+
+    /// The mode that shows the stored per-key layout.
+    const PER_KEY_MODE: u8 = 0x33;
+
+    /// `08 02 33 05 BR 08 01 CK`: shows the per-key layout last uploaded at
+    /// `brightness`, on the controller's scale (0..=[`BRIGHTNESS_MAX`];
+    /// above counts as the maximum). It ends a frame upload, and on its own
+    /// it changes only the brightness of what is stored, which is how a
+    /// per-key picture fades or breathes.
+    pub fn brightness_commit(brightness: u8) -> [u8; FEATURE_LEN] {
+        sealed([
+            0x08,
+            0x02,
+            PER_KEY_MODE,
+            0x05,
+            brightness.min(BRIGHTNESS_MAX),
+            0x08,
+            0x01,
+        ])
+    }
+
+    /// One per-key frame: the enter report, the 8 output reports carrying
+    /// `colours_by_slot` (slot `s` in report `s / 16`, as `00 RR GG BB` at
+    /// byte `4 * (s % 16)`), and the commit at `brightness` (as
+    /// [`brightness_commit`]). Sent in that order. Per-key is static only:
+    /// a firmware effect drops the layout, and nothing reads it back.
+    pub fn per_key_reports(
+        colours_by_slot: &[[u8; 3]; SLOTS],
+        brightness: u8,
+    ) -> (
+        [u8; FEATURE_LEN],
+        [[u8; OUTPUT_LEN]; FRAME_REPORTS],
+        [u8; FEATURE_LEN],
+    ) {
+        let mut reports = [[0u8; OUTPUT_LEN]; FRAME_REPORTS];
+        for (slot, [red, green, blue]) in colours_by_slot.iter().copied().enumerate() {
+            let at = 4 * (slot % SLOTS_PER_REPORT);
+            reports[slot / SLOTS_PER_REPORT][at..at + 4].copy_from_slice(&[0, red, green, blue]);
+        }
+        (PER_KEY_ENTER, reports, brightness_commit(brightness))
+    }
+
+    /// What the controller's effect query (`88`) reports, byte for byte.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct EffectReading {
+        pub mode: u8,
+        pub speed: u8,
+        /// On the controller's scale, 0..=[`BRIGHTNESS_MAX`].
+        pub brightness: u8,
+        pub sel: u8,
+        pub dir: u8,
+    }
+
+    /// The field names, in the one order the line has.
+    const FIELDS: [&str; 5] = ["mode", "speed", "brightness", "sel", "dir"];
+
+    impl EffectReading {
+        /// The reading in a reply to [`effect_query`],
+        /// `88 00 MODE SPD BRT SEL DIR CK`, checked first with
+        /// [`check_reply`]. Byte 7 is never looked at.
+        pub fn from_reply(reply: &[u8; FEATURE_LEN]) -> Self {
+            Self {
+                mode: reply[2],
+                speed: reply[3],
+                brightness: reply[4],
+                sel: reply[5],
+                dir: reply[6],
+            }
+        }
+
+        /// The line the helper prints: every field named, in [`FIELDS`]
+        /// order, as `name=decimal`.
+        pub fn to_line(&self) -> String {
+            let values = [self.mode, self.speed, self.brightness, self.sel, self.dir];
+            FIELDS
+                .iter()
+                .zip(values)
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        /// The reading in a line [`to_line`](Self::to_line) printed. Anything
+        /// else is an error: a field missing, extra, renamed or out of order,
+        /// a value that is not a byte, or a brightness beyond the
+        /// controller's scale. So a reply nobody understands is never stored.
+        pub fn parse(line: &str) -> Result<Self, String> {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() != FIELDS.len() {
+                return Err(format!(
+                    "effect read: expected {} fields, got {line:?}",
+                    FIELDS.len()
+                ));
+            }
+            let mut values = [0u8; 5];
+            for ((part, name), value) in parts.iter().zip(FIELDS).zip(values.iter_mut()) {
+                let text = part
+                    .strip_prefix(name)
+                    .and_then(|rest| rest.strip_prefix('='))
+                    .ok_or_else(|| format!("effect read: expected {name}=, got {line:?}"))?;
+                *value = text
+                    .parse()
+                    .map_err(|_| format!("effect read: {name} {text:?} is not a byte"))?;
+            }
+            let [mode, speed, brightness, sel, dir] = values;
+            Self {
+                mode,
+                speed,
+                brightness,
+                sel,
+                dir,
+            }
+            .checked()
+        }
+
+        /// The reading, or an error when its brightness is beyond the
+        /// controller's scale: not a level this controller has, so never one
+        /// to store. [`parse`](Self::parse) applies it to every line, and a
+        /// reply read straight from the keyboard needs it too.
+        pub fn checked(self) -> Result<Self, String> {
+            if self.brightness > BRIGHTNESS_MAX {
+                return Err(format!(
+                    "effect read: brightness {} is not 0..={BRIGHTNESS_MAX}",
+                    self.brightness
+                ));
+            }
+            Ok(self)
+        }
+    }
+}
+
+#[cfg(test)]
+mod keyboard_tests {
+    use super::keyboard::{self, EffectReading};
+
+    #[test]
+    fn only_the_known_effect_opcodes_are_effects() {
+        for opcode in keyboard::EFFECT_OPCODES {
+            assert!(keyboard::is_effect_opcode(opcode));
+        }
+        for opcode in [0x00, 0x04, 0x07, 0x09, 0x0B, 0x11, 0x13, 0x24, 0x2A, 0xFF] {
+            assert!(!keyboard::is_effect_opcode(opcode), "{opcode:#04x}");
+        }
+        let accepted = (0..=255u8)
+            .filter(|&o| keyboard::is_effect_opcode(o))
+            .count();
+        assert_eq!(accepted, keyboard::EFFECT_OPCODES.len());
+    }
+
+    #[test]
+    fn every_controller_level_survives_the_trip_through_a_percent() {
+        // The GUI stores a percent and the helper writes it back as a raw
+        // level, so a level read from the keyboard must come back as itself.
+        for raw in 0..=keyboard::BRIGHTNESS_MAX {
+            assert_eq!(
+                keyboard::percent_to_raw(keyboard::raw_to_percent(raw)),
+                raw,
+                "{raw} of {}",
+                keyboard::BRIGHTNESS_MAX
+            );
+        }
+    }
+
+    #[test]
+    fn the_fn_key_steps_map_to_the_percent_the_app_stores() {
+        for (raw, percent) in [(0, 0), (12, 24), (25, 50), (37, 74), (50, 100)] {
+            assert_eq!(keyboard::raw_to_percent(raw), percent, "{raw} of 50");
+            assert_eq!(keyboard::percent_to_raw(percent), raw, "{percent} %");
+        }
+    }
+
+    #[test]
+    fn the_scale_ends_at_the_controllers_own_ceiling() {
+        assert_eq!(keyboard::BRIGHTNESS_MAX, 0x32);
+        assert_eq!(keyboard::percent_to_raw(100), keyboard::BRIGHTNESS_MAX);
+        assert_eq!(keyboard::percent_to_raw(0), 0);
+        // Floored, as the helper always scaled it.
+        assert_eq!(keyboard::percent_to_raw(99), 49);
+        assert_eq!(keyboard::percent_to_raw(255), keyboard::BRIGHTNESS_MAX);
+        assert_eq!(keyboard::raw_to_percent(255), 100);
+    }
+
+    #[test]
+    fn an_effect_reading_comes_back_from_its_own_line() {
+        let readings = [
+            EffectReading {
+                mode: 37,
+                speed: 6,
+                brightness: 50,
+                sel: 1,
+                dir: 6,
+            },
+            EffectReading {
+                mode: 1,
+                speed: 0,
+                brightness: 0,
+                sel: 1,
+                dir: 1,
+            },
+            EffectReading {
+                mode: 255,
+                speed: 255,
+                brightness: 12,
+                sel: 255,
+                dir: 255,
+            },
+        ];
+        for reading in readings {
+            assert_eq!(
+                EffectReading::parse(&reading.to_line()),
+                Ok(reading),
+                "{reading:?}"
+            );
+        }
+        // As it arrives through the helper session, with a line end.
+        let reading = readings[0];
+        assert_eq!(
+            EffectReading::parse(&format!("{}\n", reading.to_line())),
+            Ok(reading)
+        );
+    }
+
+    #[test]
+    fn the_line_names_every_field() {
+        let line = EffectReading {
+            mode: 37,
+            speed: 6,
+            brightness: 25,
+            sel: 1,
+            dir: 6,
+        }
+        .to_line();
+        assert_eq!(line, "mode=37 speed=6 brightness=25 sel=1 dir=6");
+    }
+
+    #[test]
+    fn a_reordered_line_is_rejected() {
+        // Five small numbers in the wrong order would otherwise pass every
+        // range check and store the speed as the brightness.
+        for reordered in [
+            "speed=6 mode=37 brightness=50 sel=1 dir=6",
+            "mode=37 speed=6 sel=1 brightness=50 dir=6",
+            "dir=6 sel=1 brightness=50 speed=6 mode=37",
+        ] {
+            assert!(EffectReading::parse(reordered).is_err(), "{reordered:?}");
+        }
+    }
+
+    #[test]
+    fn a_garbled_line_is_rejected() {
+        for garbled in [
+            "",
+            // The old positional line: no names, so no way to check the order.
+            "37 6 50 1 6",
+            "mode=37 speed=6 brightness=50 sel=1",
+            "mode=37 speed=6 brightness=50 sel=1 dir=6 extra=0",
+            "mode=37 speed=6 brightness=x sel=1 dir=6",
+            "mode=37 speed=6 brightness=-1 sel=1 dir=6",
+            "mode=37 speed=6 brightness= sel=1 dir=6",
+            "mode=37 speed=6 brightness sel=1 dir=6",
+            "mode=256 speed=6 brightness=50 sel=1 dir=6",
+            "mode=37 speed=6 brightness=50 sel=1 dir=6 dir=6",
+            "mode=37 speed=6 bright=50 sel=1 dir=6",
+            "mode:37 speed:6 brightness:50 sel:1 dir:6",
+        ] {
+            assert!(EffectReading::parse(garbled).is_err(), "{garbled:?}");
+        }
+    }
+
+    #[test]
+    fn a_brightness_beyond_the_controllers_scale_is_rejected() {
+        // Not a level this controller has, so never one to store.
+        assert!(EffectReading::parse("mode=1 speed=0 brightness=51 sel=1 dir=1").is_err());
+        assert!(EffectReading::parse("mode=1 speed=0 brightness=50 sel=1 dir=1").is_ok());
+    }
+
+    fn byte_sum(bytes: &[u8]) -> u8 {
+        bytes.iter().fold(0u8, |acc, byte| acc.wrapping_add(*byte))
+    }
+
+    #[test]
+    fn the_checksum_is_the_complement_of_the_byte_sum() {
+        let cases: [([u8; 7], u8); 4] = [
+            ([0x30, 0x01, 0x00, 0, 0, 0, 0], 0xce),
+            ([0x30, 0x01, 0x01, 0, 0, 0, 0], 0xcd),
+            ([0xb1, 0, 0, 0, 0, 0, 0], 0x4e),
+            ([0x08, 0x02, 0x02, 0x07, 0x32, 0x01, 0x01], 0xb8),
+        ];
+        for (head, expected) in cases {
+            let mut packet = [0u8; 8];
+            packet[..7].copy_from_slice(&head);
+            packet[7] = 0x55;
+            keyboard::checksum(&mut packet);
+            assert_eq!(packet[..7], head, "the data bytes are left alone");
+            assert_eq!(packet[7], expected, "{head:02x?}");
+        }
+    }
+
+    #[test]
+    fn the_preamble_is_the_reset_report() {
+        assert_eq!(keyboard::PREAMBLE, [0xb1, 0, 0, 0, 0, 0, 0, 0x4e]);
+    }
+
+    #[test]
+    fn the_colour_packet_writes_palette_entry_zero() {
+        assert_eq!(
+            keyboard::colour_packet(0xff, 0x80, 0x00),
+            [0x14, 0, 0, 0xff, 0x80, 0x00, 0, 0x6c]
+        );
+        assert_eq!(keyboard::colour_packet(1, 2, 3), [0x14, 0, 0, 1, 2, 3, 0, 0xe5]);
+    }
+
+    #[test]
+    fn an_effect_is_the_preamble_the_colour_and_the_effect_report() {
+        assert_eq!(
+            keyboard::effect_packets(0x02, 50, 100, 1, 2, 3, 1),
+            [
+                [0xb1, 0, 0, 0, 0, 0, 0, 0x4e],
+                [0x14, 0, 0, 1, 2, 3, 0, 0xe5],
+                // Breathing, speed 5, brightness 50, palette entry 0, dir 1.
+                [0x08, 0x02, 0x02, 0x05, 0x32, 0x01, 0x01, 0xba],
+            ]
+        );
+        // Static, as the app sends a solid colour.
+        assert_eq!(
+            keyboard::effect_packets(0x01, 0, 100, 0, 174, 199, 1)[2],
+            [0x08, 0x02, 0x01, 0x09, 0x32, 0x01, 0x01, 0xb7]
+        );
+    }
+
+    #[test]
+    fn the_effect_speed_runs_from_slow_to_fast_on_the_wire() {
+        let speed = |percent| keyboard::effect_packets(0x02, percent, 100, 0, 0, 0, 1)[2][3];
+        assert_eq!(speed(0), 9);
+        assert_eq!(speed(50), 5);
+        assert_eq!(speed(99), 2);
+        assert_eq!(speed(100), 1);
+        assert_eq!(speed(255), 1);
+    }
+
+    #[test]
+    fn the_effect_brightness_is_a_percent_on_the_controllers_scale() {
+        for percent in [0u8, 24, 50, 74, 99, 100, 255] {
+            let packets = keyboard::effect_packets(0x01, 0, percent, 0, 0, 0, 1);
+            assert_eq!(packets[2][4], keyboard::percent_to_raw(percent), "{percent} %");
+        }
+    }
+
+    #[test]
+    fn the_effect_direction_is_kept_to_the_six_the_controller_has() {
+        let direction = |dir| keyboard::effect_packets(0x03, 50, 100, 0, 0, 0, dir)[2][6];
+        for dir in 1..=6 {
+            assert_eq!(direction(dir), dir);
+        }
+        assert_eq!(direction(0), 1);
+        assert_eq!(direction(9), 6);
+    }
+
+    #[test]
+    fn every_effect_report_ends_in_its_checksum() {
+        for packet in keyboard::effect_packets(0x29, 37, 74, 9, 8, 7, 4) {
+            assert_eq!(packet[7], !byte_sum(&packet[..7]), "{packet:02x?}");
+        }
+    }
+
+    #[test]
+    fn the_auto_off_report_carries_the_timer_state_in_byte_two() {
+        assert_eq!(keyboard::auto_off_packet(false), [0x30, 0x01, 0, 0, 0, 0, 0, 0xce]);
+        assert_eq!(keyboard::auto_off_packet(true), [0x30, 0x01, 1, 0, 0, 0, 0, 0xcd]);
+    }
+
+    #[test]
+    fn a_query_is_its_command_with_bit_seven_set() {
+        assert_eq!(keyboard::effect_query(), [0x88, 0, 0, 0, 0, 0, 0, 0x77]);
+        assert_eq!(
+            keyboard::query_packet([0x08, 0, 0, 0, 0, 0, 0]),
+            keyboard::effect_query()
+        );
+        // A palette read (94 00 SLOT) and the auto-off read (b0).
+        assert_eq!(
+            keyboard::query_packet([0x14, 0, 3, 0, 0, 0, 0]),
+            [0x94, 0, 3, 0, 0, 0, 0, 0x68]
+        );
+        assert_eq!(
+            keyboard::query_packet([0x30, 0, 0, 0, 0, 0, 0]),
+            [0xb0, 0, 0, 0, 0, 0, 0, 0x4f]
+        );
+        // Already set is the same query.
+        assert_eq!(
+            keyboard::query_packet([0x88, 0, 0, 0, 0, 0, 0]),
+            keyboard::effect_query()
+        );
+    }
+
+    #[test]
+    fn a_reply_check_accepts_a_normal_reply() {
+        let reply = [0x88, 0x00, 0x25, 0x06, 0x32, 0x01, 0x06, 0x13];
+        assert!(keyboard::check_reply(0x88, &reply, 8).is_ok());
+        // The checksum is never looked at.
+        let reply = [0x88, 0x00, 0x25, 0x06, 0x32, 0x01, 0x06, 0x00];
+        assert!(keyboard::check_reply(0x88, &reply, 8).is_ok());
+    }
+
+    #[test]
+    fn a_reply_check_rejects_short_reads() {
+        let reply = [0x88, 0x00, 0x25, 0x06, 0x32, 0, 0, 0];
+        let error = keyboard::check_reply(0x88, &reply, 5).unwrap_err();
+        assert!(error.contains("5 of 8"), "{error}");
+        assert_eq!(keyboard::check_reply_length(5), Err(error));
+        assert!(keyboard::check_reply_length(8).is_ok());
+    }
+
+    #[test]
+    fn a_reply_check_rejects_a_wrong_first_byte() {
+        let reply = [0x94, 0x00, 0x25, 0x06, 0x32, 0x01, 0x06, 0x13];
+        let error = keyboard::check_reply(0x88, &reply, 8).unwrap_err();
+        assert!(error.contains("0x94") && error.contains("0x88"), "{error}");
+        assert_eq!(keyboard::check_reply_echo(0x88, &reply), Err(error));
+    }
+
+    #[test]
+    fn an_effect_reply_is_read_from_its_data_bytes() {
+        let expected = EffectReading {
+            mode: 37,
+            speed: 6,
+            brightness: 50,
+            sel: 1,
+            dir: 6,
+        };
+        let reply = [0x88, 0x00, 0x25, 0x06, 0x32, 0x01, 0x06, 0x13];
+        assert_eq!(EffectReading::from_reply(&reply), expected);
+        let other = [0x88, 0x00, 0x25, 0x06, 0x32, 0x01, 0x06, 0x00];
+        assert_eq!(EffectReading::from_reply(&other), expected);
+    }
+
+    #[test]
+    fn a_reading_is_checked_against_the_controllers_scale() {
+        // The rule the line parser applies, for a reply read without a line.
+        let reading =
+            |brightness| EffectReading::from_reply(&[0x88, 0, 0x25, 6, brightness, 1, 6, 0]);
+        assert_eq!(reading(50).checked(), Ok(reading(50)));
+        assert_eq!(reading(0).checked(), Ok(reading(0)));
+        let error = reading(51).checked().unwrap_err();
+        assert!(error.contains("51"), "{error}");
+        assert_eq!(
+            EffectReading::parse(&reading(51).to_line()),
+            Err(error),
+            "the same rule and the same words as the line's"
+        );
+    }
+
+    #[test]
+    fn the_per_key_enter_report_is_the_one_acer_sends() {
+        assert_eq!(keyboard::PER_KEY_ENTER, [0x12, 0, 0, 0x08, 0, 0, 0, 0xe5]);
+        assert_eq!(keyboard::PER_KEY_ENTER[7], !byte_sum(&keyboard::PER_KEY_ENTER[..7]));
+    }
+
+    #[test]
+    fn the_brightness_commit_shows_the_stored_layout_at_a_level() {
+        assert_eq!(
+            keyboard::brightness_commit(0x32),
+            [0x08, 0x02, 0x33, 0x05, 0x32, 0x08, 0x01, 0x82]
+        );
+        assert_eq!(
+            keyboard::brightness_commit(25),
+            [0x08, 0x02, 0x33, 0x05, 0x19, 0x08, 0x01, 0x9b]
+        );
+        assert_eq!(
+            keyboard::brightness_commit(0),
+            [0x08, 0x02, 0x33, 0x05, 0x00, 0x08, 0x01, 0xb4]
+        );
+        // Above the controller's ceiling counts as the ceiling.
+        assert_eq!(keyboard::brightness_commit(200), keyboard::brightness_commit(0x32));
+    }
+
+    fn numbered_slots() -> [[u8; 3]; keyboard::SLOTS] {
+        let mut colours = [[0u8; 3]; keyboard::SLOTS];
+        for (slot, colour) in colours.iter_mut().enumerate() {
+            let slot = slot as u8;
+            *colour = [slot, !slot, slot ^ 0x55];
+        }
+        colours
+    }
+
+    #[test]
+    fn a_per_key_frame_is_enter_eight_reports_and_the_commit() {
+        let (enter, reports, commit) = keyboard::per_key_reports(&numbered_slots(), 25);
+        assert_eq!(enter, keyboard::PER_KEY_ENTER);
+        assert_eq!(reports.len(), 8);
+        assert_eq!(commit, keyboard::brightness_commit(25));
+    }
+
+    #[test]
+    fn every_slot_lands_at_its_own_place_in_the_frame() {
+        let colours = numbered_slots();
+        let (_, reports, _) = keyboard::per_key_reports(&colours, 50);
+        // Slot s is report s / 16, bytes 4 (s % 16) .. +4, as 00 RR GG BB.
+        for (slot, [red, green, blue]) in colours.iter().copied().enumerate() {
+            let at = (slot % 16) * 4;
+            assert_eq!(
+                reports[slot / 16][at..at + 4],
+                [0, red, green, blue],
+                "slot {slot}"
+            );
+        }
+        assert_eq!(reports[0][..8], [0, 0, 0xff, 0x55, 0, 1, 0xfe, 0x54]);
+        assert_eq!(reports[1][4..8], [0, 17, !17, 17 ^ 0x55]);
+        assert_eq!(reports[7][60..], [0, 127, 128, 127 ^ 0x55]);
     }
 }

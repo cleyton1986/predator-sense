@@ -394,6 +394,11 @@ fn draw(
     }
 
     // The step in force, so the marker and the bar agree.
+    // The plain band, without the reconciler's hysteresis
+    // (`fan::CURVE_HYSTERESIS_C`, `fan::CURVE_MIN_HOLD_S`): below a border
+    // the fans can still run the step above the one lit here, for up to 3 C
+    // and at least a minute after the write. Cosmetic, and knowing it
+    // would take the reconciler's state.
     let live_step = temp_c.map(|t| geo::step_at_x(plot, geo::x_for_temp(plot, t)));
 
     for (i, &pct) in steps.iter().enumerate() {

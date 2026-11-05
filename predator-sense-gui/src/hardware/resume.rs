@@ -7,11 +7,17 @@
 //! time the machine was asleep. Sampling that gap on a timer turns "we were
 //! suspended" into an ordinary poll.
 //!
-//! Deliberately not a logind/D-Bus subscription: this has to work the same way
-//! whether the session is GNOME, KDE or a bare compositor, and the drift test
-//! has no dependencies at all.
+//! Deliberately not only a logind/D-Bus subscription: this has to work the
+//! same way whether the session is GNOME, KDE or a bare compositor, and the
+//! drift test has no dependencies at all. logind's `PrepareForSleep(false)`,
+//! where there is one, only makes the check run at once on waking
+//! ([`on_wake`]) instead of at the next tick; the drift test still decides,
+//! so a resume is acted on exactly once either way.
 
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use gtk4::gio;
 
 /// How much drift counts as a suspend rather than scheduling noise. Matches
 /// `timing::RESUME_THRESHOLD_SECS` in the daemon.
@@ -51,6 +57,42 @@ pub fn resumed() -> bool {
     let current_ms = (current * 1000.0).max(0.0) as u64;
     let previous_ms = LAST_OFFSET_MS.swap(current_ms, Ordering::Relaxed);
     is_resume(previous_ms, current_ms)
+}
+
+thread_local! {
+    /// The system bus [`on_wake`] listens on, kept for the run.
+    static WAKE_BUS: std::cell::RefCell<Option<gio::DBusConnection>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Calls `check` on the GTK thread when logind says the machine woke
+/// (`PrepareForSleep(false)` on the system bus). Nothing happens without a
+/// system bus or logind; the caller's own tick still catches the resume.
+/// Called on the GTK thread, once.
+pub fn on_wake(check: Rc<dyn Fn()>) {
+    gio::bus_get(gio::BusType::System, gio::Cancellable::NONE, move |bus| {
+        let Ok(bus) = bus else {
+            return;
+        };
+        // GIO holds the shared bus only weakly: dropped here, it would close,
+        // and the subscription with it.
+        WAKE_BUS.with(|kept| *kept.borrow_mut() = Some(bus.clone()));
+        bus.signal_subscribe(
+            Some("org.freedesktop.login1"),
+            Some("org.freedesktop.login1.Manager"),
+            Some("PrepareForSleep"),
+            Some("/org/freedesktop/login1"),
+            None,
+            gio::DBusSignalFlags::NONE,
+            move |_, _, _, _, _, parameters| {
+                // Anyone may send this; it only asks for the drift test,
+                // which a sender cannot fake.
+                if parameters.get::<(bool,)>() == Some((false,)) {
+                    check();
+                }
+            },
+        );
+    });
 }
 
 /// The decision behind [`resumed`], separated from the clock so it can be

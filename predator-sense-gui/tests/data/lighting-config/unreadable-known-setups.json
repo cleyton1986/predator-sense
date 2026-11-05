@@ -1,0 +1,129 @@
+{
+  "last_profile": "performance",
+  "auto_apply_on_start": false,
+  "minimize_on_close": true,
+  "font_scale": 1.25,
+  "idle_enabled": true,
+  "idle_migrated": true,
+  "fan_plans": [
+    {
+      "mode": "turbo",
+      "plan": {
+        "kind": "max"
+      }
+    }
+  ],
+  "keyboard_rgb": {
+    "effect": "Spot",
+    "red": 255,
+    "green": 32,
+    "blue": 0,
+    "brightness": 70,
+    "speed": 60,
+    "direction": 1
+  },
+  "lighting_migrated": true,
+  "lighting_modes": {
+    "quiet": {
+      "preset": null,
+      "changed": false,
+      "setup": {
+        "kind": "manual",
+        "keyboard": {
+          "effect": "Static",
+          "red": 0,
+          "green": 40,
+          "blue": 120,
+          "brightness": 20,
+          "speed": 50,
+          "direction": 1
+        },
+        "brightness": {
+          "keyboard": 20,
+          "bar": 100,
+          "logo": 100
+        }
+      }
+    },
+    "performance": {
+      "preset": "Glow",
+      "changed": false,
+      "setup": {
+        "kind": "manual",
+        "keyboard": {
+          "effect": "Plasma",
+          "red": 255,
+          "green": 0,
+          "blue": 128,
+          "brightness": 90,
+          "speed": 40,
+          "direction": 1
+        },
+        "light_bar": {
+          "mode": "Static",
+          "speed": 3,
+          "brightness": 80,
+          "red": 255,
+          "green": 0,
+          "blue": 128,
+          "per_zone": false,
+          "direction": 1
+        },
+        "brightness": {
+          "keyboard": 90,
+          "bar": 80,
+          "logo": 100
+        }
+      }
+    }
+  },
+  "lighting_presets": [
+    {
+      "name": "Glow",
+      "setup": {
+        "kind": "manual",
+        "keyboard": {
+          "effect": "Plasma",
+          "red": 255,
+          "green": 0,
+          "blue": 128,
+          "brightness": 90,
+          "speed": 40,
+          "direction": 1
+        },
+        "light_bar": {
+          "mode": "Static",
+          "speed": 3,
+          "brightness": 80,
+          "red": 255,
+          "green": 0,
+          "blue": 128,
+          "per_zone": false,
+          "direction": 1
+        },
+        "brightness": {
+          "keyboard": 90,
+          "bar": 80,
+          "logo": 100
+        }
+      }
+    },
+    {
+      "name": "Gradient",
+      "setup": {
+        "kind": "theme",
+        "id": "synthwave",
+        "colourway": {
+          "kind": "gradient",
+          "from": "#FF0000",
+          "to": "#0000FF"
+        },
+        "brightness": {
+          "keyboard": 60,
+          "bar": 60,
+          "logo": 100
+        }
+      }
+    }
+  ]
+}

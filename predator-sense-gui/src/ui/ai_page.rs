@@ -451,6 +451,8 @@ fn build_resource_section() -> gtk::Box {
         return section;
     }
 
+    gpu_page::shows_full_metrics(&section);
+
     let gauges_row = gtk::Box::new(gtk::Orientation::Horizontal, 16);
     gauges_row.set_halign(gtk::Align::Start);
     gauges_row.set_margin_top(4);

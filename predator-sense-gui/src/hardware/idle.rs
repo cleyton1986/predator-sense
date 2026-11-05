@@ -14,43 +14,69 @@
 //! installer's udev rules already rely on); if the nodes cannot be opened,
 //! [`idle_seconds`] reports `None` and callers simply skip the feature.
 
+use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// Key presses and pointer motion are tracked separately so "moving the mouse
+/// Presses and pointer motion are tracked separately so "moving the mouse
 /// wakes the lights" can be a setting rather than an assumption - some people
 /// want the lights to stay off while only the cursor drifts.
 ///
-/// Buttons get a third clock rather than sharing the first. They arrive as
-/// `EV_KEY` exactly like a keystroke, and they have to keep counting as
+/// Mouse buttons and touchpad finger-downs share one clock with key presses.
+/// They arrive as `EV_KEY` exactly like a keystroke, and they count as
 /// activity whatever the pointer setting says - a click is as deliberate as a
-/// keystroke - but they are not what the keyboard's own controller counts.
-/// That controller sleeps its backlight after ~30 s without a press on its own
-/// matrix and cannot see a USB mouse or the I2C touchpad, so
-/// [`key_idle_seconds`] has to report real keys alone: on a touchpad every
-/// finger-down is a `BTN_TOUCH`, which would otherwise keep resetting the very
-/// clock the keepalive watches while the controller quietly slept anyway.
-static LAST_KEY_ACTIVITY: AtomicU64 = AtomicU64::new(0);
-static LAST_BUTTON_ACTIVITY: AtomicU64 = AtomicU64::new(0);
+/// keystroke. They had a clock of their own while the keyboard keepalive had
+/// to watch real keys alone (the keyboard's own controller counts only its
+/// matrix). That controller timer is now kept off while the app runs, so
+/// nothing needs the two told apart.
+static LAST_PRESS_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 static LAST_POINTER_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 static WATCHING: AtomicBool = AtomicBool::new(false);
 
 /// `struct input_event` on 64-bit Linux: two 8-byte timeval fields, then
-/// `u16 type`, `u16 code`, `i32 value`.
+/// `u16 type`, `u16 code`, `i32 value`. Only the type is read: a key code and
+/// a `BTN_*` code count the same.
 const INPUT_EVENT_SIZE: usize = 24;
 const INPUT_EVENT_TYPE_OFFSET: usize = 16;
-const INPUT_EVENT_CODE_OFFSET: usize = 18;
 const EV_KEY: u16 = 0x01;
 const EV_REL: u16 = 0x02;
 const EV_ABS: u16 = 0x03;
-/// First `BTN_*` code. Anything below this in `EV_KEY` is a real key; at or
-/// above it is a mouse button, a touchpad finger-down, or a tablet tool.
-const BTN_MISC: u16 = 0x100;
+
+/// How often the input nodes are opened again, for devices that come and go
+/// (a USB keyboard replugged, a Bluetooth mouse reconnecting). A node that
+/// reports an error (its device was removed) is dropped and brings that
+/// forward to within a second.
+const RESCAN_EVERY: Duration = Duration::from_secs(60);
+
+/// How long the watcher rests after reading input, so a moving mouse costs
+/// about one wakeup a second instead of twenty. Activity is kept in whole
+/// seconds, so a shorter rest measures nothing finer. While a light is
+/// blanked it rests [`BLANKED_PAUSE`] instead. Either way the first input
+/// after a quiet spell is seen at once: the watcher is then waiting in
+/// `poll`, not resting, and while a light is blanked it wakes the GTK
+/// thread's idle check ([`on_input_while_blanked`]).
+const ACTIVE_PAUSE: Duration = Duration::from_secs(1);
+const BLANKED_PAUSE: Duration = Duration::from_millis(50);
+
+/// The rest after reading input, by whether a light is idle-blanked.
+fn pause_after_input(blanked: bool) -> Duration {
+    if blanked {
+        BLANKED_PAUSE
+    } else {
+        ACTIVE_PAUSE
+    }
+}
+
+/// The `poll` timeout until the next rescan is due, in milliseconds.
+fn poll_timeout_ms(until_rescan: Duration) -> libc::c_int {
+    until_rescan.as_millis().clamp(1, RESCAN_EVERY.as_millis()) as libc::c_int
+}
 
 fn monotonic_secs() -> u64 {
     let mut value = libc::timespec {
@@ -69,20 +95,15 @@ fn monotonic_secs() -> u64 {
 /// What one input event counts as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Activity {
-    /// A press on a keyboard matrix - the only thing the keyboard's own
-    /// controller sees before it decides to sleep the backlight.
-    Key,
-    /// A mouse button or a touchpad finger-down. Deliberate, so it always
-    /// counts as activity, but invisible to that controller.
-    Button,
+    /// A key, a mouse button or a touchpad finger-down. Always activity.
+    Press,
     /// Cursor motion.
     Pointer,
 }
 
-fn classify(kind: u16, code: u16) -> Option<Activity> {
+fn classify(kind: u16) -> Option<Activity> {
     match kind {
-        EV_KEY if code >= BTN_MISC => Some(Activity::Button),
-        EV_KEY => Some(Activity::Key),
+        EV_KEY => Some(Activity::Press),
         EV_REL | EV_ABS => Some(Activity::Pointer),
         _ => None,
     }
@@ -98,27 +119,11 @@ pub fn idle_seconds(pointer_counts: bool) -> Option<u64> {
     if !WATCHING.load(Ordering::Relaxed) {
         return None;
     }
-    let mut last = LAST_KEY_ACTIVITY
-        .load(Ordering::Relaxed)
-        .max(LAST_BUTTON_ACTIVITY.load(Ordering::Relaxed));
+    let mut last = LAST_PRESS_ACTIVITY.load(Ordering::Relaxed);
     if pointer_counts {
         last = last.max(LAST_POINTER_ACTIVITY.load(Ordering::Relaxed));
     }
     Some(monotonic_secs().saturating_sub(last))
-}
-
-/// Seconds since the last press on a keyboard matrix, ignoring mouse buttons
-/// and the touchpad, or `None` when the watcher never opened a device.
-///
-/// This is the keyboard controller's own view of the machine, and the only
-/// clock its sleep timer runs on. Measured on PH16-71: mouse-only use blanks
-/// the backlight at ~30 s no matter what the rest of the system is doing, and
-/// the WMI `backlight_timeout` function does not govern it (CHANGELOG §24).
-pub fn key_idle_seconds() -> Option<u64> {
-    if !WATCHING.load(Ordering::Relaxed) {
-        return None;
-    }
-    Some(monotonic_secs().saturating_sub(LAST_KEY_ACTIVITY.load(Ordering::Relaxed)))
 }
 
 /// Marks the machine as active right now. Called after the app itself changes
@@ -126,8 +131,7 @@ pub fn key_idle_seconds() -> Option<u64> {
 /// reading.
 pub fn mark_active() {
     let now = monotonic_secs();
-    LAST_KEY_ACTIVITY.store(now, Ordering::Relaxed);
-    LAST_BUTTON_ACTIVITY.store(now, Ordering::Relaxed);
+    LAST_PRESS_ACTIVITY.store(now, Ordering::Relaxed);
     LAST_POINTER_ACTIVITY.store(now, Ordering::Relaxed);
 }
 
@@ -160,6 +164,30 @@ fn open_input_devices() -> Vec<File> {
     devices
 }
 
+thread_local! {
+    /// The idle check to run at input while a light is blanked, on the GTK thread.
+    static ON_INPUT_WHILE_BLANKED: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
+}
+
+/// Calls `check` on the GTK thread at the first input of each second while a
+/// light is idle-blanked, so it comes back at once rather than at the next
+/// idle tick, which runs only once a second. Called on the GTK thread.
+pub fn on_input_while_blanked(check: Rc<dyn Fn()>) {
+    ON_INPUT_WHILE_BLANKED.with(|slot| *slot.borrow_mut() = Some(check));
+}
+
+fn wake_gtk_thread() {
+    // A timeout source, not `MainContext::invoke`: invoke runs the call on
+    // this thread when the main context happens to be free between two
+    // iterations, where the GTK thread's check is not.
+    gtk4::glib::timeout_add_once(Duration::ZERO, || {
+        let check = ON_INPUT_WHILE_BLANKED.with(|slot| slot.borrow().clone());
+        if let Some(check) = check {
+            check();
+        }
+    });
+}
+
 /// Starts the watcher thread once per process.
 pub fn start() {
     if WATCHING.swap(true, Ordering::SeqCst) {
@@ -178,7 +206,10 @@ pub fn start() {
             );
             return;
         }
-        let mut rescan_countdown = 60;
+        let mut next_rescan = Instant::now() + RESCAN_EVERY;
+        // The second the GTK thread was last woken for input while blanked:
+        // activity is kept in whole seconds, so once a second is enough.
+        let mut woken_at: Option<u64> = None;
         loop {
             let mut fds: Vec<libc::pollfd> = devices
                 .iter()
@@ -188,16 +219,28 @@ pub fn start() {
                     revents: 0,
                 })
                 .collect();
+            let timeout = poll_timeout_ms(next_rescan.saturating_duration_since(Instant::now()));
             // SAFETY: `fds` is a valid, correctly-sized array of pollfd whose
             // descriptors are owned by `devices` and outlive this call.
-            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 1000) };
+            let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+            let mut had_input = false;
+            let mut gone: Vec<usize> = Vec::new();
             if ready > 0 {
                 let now = monotonic_secs();
                 let mut scratch = [0u8; 24 * 32];
                 for (index, fd) in fds.iter().enumerate() {
+                    if fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                        // The device went away: dropped, or poll would report
+                        // it on every call, and the nodes opened again soon
+                        // (at most once a second) for a device that came back.
+                        gone.push(index);
+                        next_rescan = next_rescan.min(Instant::now() + Duration::from_secs(1));
+                        continue;
+                    }
                     if fd.revents & libc::POLLIN == 0 {
                         continue;
                     }
+                    had_input = true;
                     // Drain, or poll would report the same event forever.
                     while let Ok(read) = devices[index].read(&mut scratch) {
                         if read == 0 {
@@ -208,16 +251,9 @@ pub fn start() {
                                 record[INPUT_EVENT_TYPE_OFFSET],
                                 record[INPUT_EVENT_TYPE_OFFSET + 1],
                             ]);
-                            let code = u16::from_ne_bytes([
-                                record[INPUT_EVENT_CODE_OFFSET],
-                                record[INPUT_EVENT_CODE_OFFSET + 1],
-                            ]);
-                            match classify(kind, code) {
-                                Some(Activity::Key) => {
-                                    LAST_KEY_ACTIVITY.store(now, Ordering::Relaxed)
-                                }
-                                Some(Activity::Button) => {
-                                    LAST_BUTTON_ACTIVITY.store(now, Ordering::Relaxed)
+                            match classify(kind) {
+                                Some(Activity::Press) => {
+                                    LAST_PRESS_ACTIVITY.store(now, Ordering::Relaxed)
                                 }
                                 Some(Activity::Pointer) => {
                                     LAST_POINTER_ACTIVITY.store(now, Ordering::Relaxed)
@@ -228,17 +264,26 @@ pub fn start() {
                     }
                 }
             }
-            rescan_countdown -= 1;
-            if rescan_countdown <= 0 {
-                // Devices come and go (a USB keyboard being replugged, the
-                // Bluetooth mouse reconnecting).
-                rescan_countdown = 60;
+            for index in gone.into_iter().rev() {
+                devices.remove(index);
+            }
+            if Instant::now() >= next_rescan {
+                next_rescan = Instant::now() + RESCAN_EVERY;
                 let refreshed = open_input_devices();
                 if !refreshed.is_empty() {
                     devices = refreshed;
                 }
             }
-            thread::sleep(Duration::from_millis(50));
+            if had_input {
+                let blanked = crate::hardware::keyboard_rgb::is_blanked()
+                    || crate::hardware::light_bar::is_blanked();
+                let now = monotonic_secs();
+                if blanked && woken_at != Some(now) {
+                    woken_at = Some(now);
+                    wake_gtk_thread();
+                }
+                thread::sleep(pause_after_input(blanked));
+            }
         }
     });
 }
@@ -248,27 +293,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_keystroke_and_a_click_are_different_clocks() {
-        // KEY_A: the matrix the keyboard controller watches.
-        assert_eq!(classify(EV_KEY, 0x1e), Some(Activity::Key));
-        // BTN_LEFT and BTN_TOUCH arrive as EV_KEY too, but the controller
-        // never sees either - a touchpad user would otherwise look like they
-        // were typing continuously while their backlight slept.
-        assert_eq!(classify(EV_KEY, 0x110), Some(Activity::Button));
-        assert_eq!(classify(EV_KEY, 0x14a), Some(Activity::Button));
+    fn a_keystroke_and_a_click_share_one_clock() {
+        // KEY_A, BTN_LEFT and BTN_TOUCH all arrive as EV_KEY, and all count
+        // as activity whatever the pointer setting says.
+        assert_eq!(classify(EV_KEY), Some(Activity::Press));
     }
 
     #[test]
     fn motion_is_pointer_activity() {
-        assert_eq!(classify(EV_REL, 0x00), Some(Activity::Pointer));
-        assert_eq!(classify(EV_ABS, 0x00), Some(Activity::Pointer));
+        assert_eq!(classify(EV_REL), Some(Activity::Pointer));
+        assert_eq!(classify(EV_ABS), Some(Activity::Pointer));
     }
 
     #[test]
     fn padding_events_are_ignored() {
         // EV_SYN closes every report and EV_MSC carries scancodes; counting
         // either would make an idle machine look busy forever.
-        assert_eq!(classify(0x00, 0x00), None);
-        assert_eq!(classify(0x04, 0x04), None);
+        assert_eq!(classify(0x00), None);
+        assert_eq!(classify(0x04), None);
+    }
+
+    #[test]
+    fn rests_a_second_after_input_unless_a_light_is_blanked() {
+        assert_eq!(pause_after_input(false), Duration::from_secs(1));
+        assert_eq!(pause_after_input(true), Duration::from_millis(50));
+    }
+
+    #[test]
+    fn waits_in_poll_until_the_next_rescan() {
+        assert_eq!(poll_timeout_ms(Duration::from_secs(30)), 30_000);
+        assert_eq!(poll_timeout_ms(Duration::ZERO), 1, "never a busy poll");
+        assert_eq!(poll_timeout_ms(Duration::from_secs(600)), 60_000);
     }
 }

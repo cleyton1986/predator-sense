@@ -64,7 +64,7 @@ pub fn build() -> gtk::Box {
         pulse_phase: 0.0,
     }));
 
-    let sampler = Rc::new(RefCell::new(sampler));
+    let sampler = Rc::new(RefCell::new(Some(sampler)));
 
     // Tabs
     let tab_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -142,17 +142,41 @@ pub fn build() -> gtk::Box {
             if !crate::app_state::is_window_visible() || !page_c.is_mapped() {
                 return glib::ControlFlow::Continue;
             }
-            let mut s = sampler_c.borrow_mut();
-            let sample = s.sample();
-            let disks = storage::list_disks();
-            let mut st = state_c.borrow_mut();
-            // Sincronizar tamanho dos vetores
-            let dlen = disks.len();
-            if st.disk_shown.len() != dlen {
-                st.disk_shown.resize(dlen, 0.0);
-            }
-            st.sample = sample;
-            st.disks = disks;
+            // The /proc scan and the disk sizes take 20 to 30 ms: on a worker. The sampler
+            // goes with it and comes back with the result; while it is away a sample is
+            // under way, and this tick has nothing to do.
+            let Some(mut s) = sampler_c.borrow_mut().take() else {
+                return glib::ControlFlow::Continue;
+            };
+            let state_c = state_c.clone();
+            let sampler_c = sampler_c.clone();
+            crate::ui::background::run_quick(
+                move || {
+                    // A sample that panics must not take the sampler with it, or the page
+                    // would never sample again: a fresh one comes back instead.
+                    let taken = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        (s.sample(), storage::list_disks())
+                    }));
+                    match taken {
+                        Ok(reading) => (s, Some(reading)),
+                        Err(_) => (UsageSampler::new(), None),
+                    }
+                },
+                move |(s, reading)| {
+                    *sampler_c.borrow_mut() = Some(s);
+                    let Some((sample, disks)) = reading else {
+                        return;
+                    };
+                    let mut st = state_c.borrow_mut();
+                    // Sincronizar tamanho dos vetores
+                    let dlen = disks.len();
+                    if st.disk_shown.len() != dlen {
+                        st.disk_shown.resize(dlen, 0.0);
+                    }
+                    st.sample = sample;
+                    st.disks = disks;
+                },
+            );
             glib::ControlFlow::Continue
         });
     }
@@ -161,7 +185,7 @@ pub fn build() -> gtk::Box {
     {
         let state_c = state.clone();
         let page_c = page.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+        crate::ui::ticks::while_mapped(&page_c.clone(), 60, move || {
             if !crate::app_state::is_window_visible() || !page_c.is_mapped() {
                 return glib::ControlFlow::Continue;
             }
@@ -341,7 +365,7 @@ fn build_cpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     let temp_da_c = temp_da.clone();
     let lc_anim = list_container.clone();
     let page_anim = page.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+    crate::ui::ticks::while_mapped(&page_anim.clone(), 60, move || {
         if !crate::app_state::is_window_visible() || !page_anim.is_mapped() {
             return glib::ControlFlow::Continue;
         }
@@ -400,6 +424,8 @@ fn rebuild_cpu_process_list(list: &gtk::Box, state: &Rc<RefCell<AnimState>>) {
 
 fn build_gpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 14);
+    // The sampler reads the GPU on every tab; only this one makes it fresh.
+    crate::ui::gpu_page::shows_full_metrics(&page);
     page.set_margin_top(10);
 
     // Header com nome e driver
@@ -552,7 +578,7 @@ fn build_gpu_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     let vram_da_c = vram_da.clone();
     let power_da_c = power_da.clone();
     let page_c = page.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+    crate::ui::ticks::while_mapped(&page_c.clone(), 60, move || {
         if !crate::app_state::is_window_visible() || !page_c.is_mapped() {
             return glib::ControlFlow::Continue;
         }
@@ -670,7 +696,7 @@ fn build_mem_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     let bar_c = mem_bar.clone();
     let list_anim = list.clone();
     let page_anim = page.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+    crate::ui::ticks::while_mapped(&page_anim.clone(), 60, move || {
         if !crate::app_state::is_window_visible() || !page_anim.is_mapped() {
             return glib::ControlFlow::Continue;
         }
@@ -797,7 +823,7 @@ fn build_storage_tab(state: Rc<RefCell<AnimState>>) -> gtk::Box {
     // Redesenho contínuo para animar donuts
     let flow_c2 = flow.clone();
     let outer_anim = outer.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+    crate::ui::ticks::while_mapped(&outer_anim.clone(), 60, move || {
         if !crate::app_state::is_window_visible() || !outer_anim.is_mapped() {
             return glib::ControlFlow::Continue;
         }
@@ -826,22 +852,25 @@ fn redraw_in_subtree(w: &gtk::Widget) {
 }
 
 fn rebuild_storage_cards(flow: &gtk::FlowBox, state: &Rc<RefCell<AnimState>>) {
-    while let Some(c) = flow.first_child() {
-        flow.remove(&c);
-    }
     let st = state.borrow();
     let disks: Vec<DiskUsage> = st.disks.clone();
     let expanded = st.expanded_disk.clone();
     drop(st);
-    for (i, d) in disks.iter().enumerate() {
-        let card = build_storage_card(
-            d.clone(),
-            i,
-            expanded.as_deref() == Some(&d.mount),
-            state.clone(),
-        );
-        flow.insert(&card, -1);
-    }
+    let cards: Vec<gtk::Widget> = disks
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            build_storage_card(
+                d.clone(),
+                i,
+                expanded.as_deref() == Some(&d.mount),
+                state.clone(),
+            )
+        })
+        .collect();
+    // The cards' wrappers are reused, never removed: GTK leaves its keyboard cursor on a
+    // removed wrapper, and the next arrow key reads freed memory (`ui::flow_box`).
+    crate::ui::flow_box::set_contents(flow, &cards, crate::ui::flow_box::Wrappers::PLAIN);
 }
 
 fn build_storage_card(

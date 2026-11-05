@@ -61,8 +61,9 @@
 <p align="center"><b>网络</b>：实时上传/下载图表，带有峰值追踪和自动网络接口检测（Wi-Fi 或以太网）。</p>
 <p align="center"><img src="assets/psense-4.png" width="800" alt="网络"></p>
 
-<p align="center"><b>灯光</b>：分区静态颜色（4 个分区）以及动态 RGB 键盘效果（Breathing、Neon、Wave、Shifting、Zoom）。</p>
+<p align="center"><b>灯光</b>：每个电源模式都有自己的灯光，并可保存为命名预设。灯光控制设置每个灯的效果，在 PH16-71 键盘上还可设置按键独立颜色；主题从 32 个内置主题中一并设置键盘、灯条和 Logo。</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="灯光"></p>
+<p align="center"><img src="assets/psense-17.png" width="800" alt="灯光主题"></p>
 
 <p align="center"><b>模式</b>：性能模式，静音、均衡、性能和 Turbo，另外还有一个仅限电池模式下使用的 Eco 档位（CPU governor + Intel EPP + GPU 功耗限制）。</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="模式"></p>
@@ -112,6 +113,7 @@
 | **使用情况** | 4 个标签页视图：CPU / GPU / 内存 / 存储，包含占用最高的进程、点击展开的详细信息，以及温度仪表盘上的 CSS 风格火焰动画 |
 | **网络** | 实时上传/下载图表，带有峰值追踪和自动网络接口检测 |
 | **RGB 键盘控制** | 通过 WMI 实现分区静态颜色（4 个分区）和动态效果（Breathing、Neon、Wave、Shifting、Zoom）。在没有内核模块的硬件上，RGB 则通过 USB/I2C-HID 原生工作：ENEK5130 芯片（4 分区静态、Breathing/Neon）、2024+ Sunrex 芯片（单分区、完整效果列表）或 Chicony 芯片（7 色调色板、Helios 300），均为自动检测，参见[兼容性](#兼容性) |
+| **按电源模式的灯光** | 每个电源模式保存自己的灯光，并支持命名预设：每个灯自己的效果，或用于键盘、灯条和 Logo 的 32 个内置主题之一。更改会立即生效。参见[灯光](#灯光) |
 | **RGB 顶盖 Logo** | 为显示器背面的徽标提供独立的开关、纯色、亮度、Breathing 和 Neon 控制，并带有实时矢量预览。仅在运行时完成 HID 能力检测后才会显示 |
 | **性能模式** | 静音 / 均衡 / 性能 / Turbo 模式，另外还有一个仅限电池模式下使用的 Eco 档位（CPU governor + Intel EPP + GPU 功耗限制）|
 | **风扇控制** | 实时转速显示，带有动画旋转的风扇、CoolBoost 开关、Auto/Max 模式，另外还有实验性的单风扇 PWM 控制和自动温度曲线（在支持的机型上）|
@@ -200,7 +202,7 @@
 |---|---|
 | 分区静态颜色、亮度、关闭背光 | ✅ 已确认可用（PHN16S-71、AN16S-61）|
 | 动态效果：Breathing、Neon | ✅ 已确认可用（PHN16S-71、AN16S-61）。原生实现，单次 HID 写入，硬件会自行循环播放图案。在 PHN16S-71 上，Breathing 会忽略所选颜色，改为循环彩虹色；在其他硬件上可能表现不同 |
-| 动态效果：Wave、Shifting、Zoom | 仅提供屏幕预览（不会写入硬件）。这些效果的代码在不同硬件世代之间含义并不相同，所以尚未接入 |
+| 动态效果：Wave、Shifting、Zoom | 只在控制器自身能运行它们时提供（PHN16S-71 经过验证的映射，或控制器能力报告中声明的效果）；这些效果的代码在不同硬件世代之间含义并不相同 |
 | RGB 顶盖 Logo：关闭、纯色、亮度、Breathing、Neon | ✅ 已确认可用（PHN16-73）|
 
 顶盖 Logo 的支持并不是通过机型名称的白名单来启用的。控制器必须在其 A1 目标报告中声明 `0x83` 目标，并返回与之匹配、非空的 A3 能力信息，界面才会显示出来；本应用会在每次写入之前重复执行这项检查。hotkey 守护进程只会恢复应用此前在登录和恢复后成功应用过的设置，如果没有已保存的设置或目标不存在，则会完全跳过 Logo。
@@ -336,24 +338,26 @@ sudo installer/target/release/predator-sense-installer --install
 
 ## 使用方法
 
-### 键盘 RGB
+### 灯光
 
-1. 打开侧边栏中的**灯光**
-2. 选择**静态**（分区颜色）或**动态**（效果）
-3. **静态模式：** 为键盘的 4 个分区分别调整 R/G/B 滑块
-4. **动态模式：** 选择一种效果（Breathing、Neon、Wave、Shifting、Zoom）并调整速度
-5. 点击**应用**
+每个电源模式都有自己的灯光。电源模式改变时（无论是通过本应用、模式键还是桌面），灯光都会换成该模式的灯光。
 
-> 在只有 I2C-HID、没有内核模块的硬件上（参见[兼容性](#兼容性)），Breathing 和 Neon 会真正播放动画；Wave/Shifting/Zoom 目前只提供屏幕预览，并会明确标注为预览，物理键盘暂时还不会随之改变。
+1. 在侧边栏中打开**灯光**。页面会在当前电源模式上打开；在顶部选择其他模式即可编辑它的灯光。
+2. **灯光控制**设置每个灯自己的效果。在预览中选一个灯（键盘、灯条或 Logo，视你的机器而定），再选一个效果，并在该效果支持时设置颜色、速度和方向。在 PH16-71 键盘上，**按键独立颜色**可以在预览中给单个按键上色。
+3. **主题**用一个内置主题同时设置键盘、灯条和 Logo。选一张卡片，再选它的一种配色或你自己的颜色（**自定义**），以及该主题具有的设置。
+4. 在预览下方设置每个灯的亮度。
 
-### RGB 顶盖 Logo
+更改会立即应用并保存；没有“应用”按钮。在你自己的设置之上选择主题、清除涂色和删除预设时，都会提供**撤销**。
 
-1. 打开**灯光**，选择**顶盖 Logo**（只有检测到兼容的 HID 目标时，该选项才会出现）
-2. 使用**灯光**开关来打开或关闭徽标
-3. 选择**静态**、**Breathing** 或 **Neon**，然后一边查看实时预览，一边调整可用的颜色、亮度和速度控制项
-4. 点击**应用到 Logo**
+**预设。** **另存为新预设…**会以一个名称保存某个模式的灯光，**载入预设**会把它放到你正在编辑的模式上。使用某个预设的模式在你编辑后会显示**已更改**：**保存**把更改写入预设，**放弃更改**则回到预设。
 
-上一次成功应用的状态会在用户 hotkey 服务启动时以及挂起/休眠之后被恢复。动态效果的颜色由固件控制，因此对于这些模式，预览展示的是其实际行为，而不是提供一个颜色选择器。
+**在我的笔记本上显示。** 编辑一个不是当前模式的模式时，这个开关会把它的灯光显示到灯上。当你关闭它、离开页面或电源模式改变时，它就会结束。
+
+**由应用绘制的主题。** 在 PH16-71 的按键独立颜色键盘和三区灯条上，应用会自行绘制主题的动态效果。会点亮所按按键的主题在运行时读取内置键盘，前提是主题面板中的**响应打字**已打开，且你的账户在 `input` 组中。在其他所有灯上，以及应用无法绘制时（例如安装程序的设备规则为你的会话授予键盘和灯条访问权限之前），主题会显示最接近的固件效果。**使用电池时暂停动画**会在使用电池时暂停它们。应用退出或你注销时，应用正在播放动画的灯会切换为主题的固件效果；静止的画面（按键独立颜色的涂色，或不会动的主题画面）会保持原样。
+
+**其他机型。** 同一个页面驱动所有受支持机型的灯：四区键盘（WMI 或 ENE 控制器）、带 7 种颜色的 Helios 300 键盘、2024 年机型的单色键盘和 Logo、ENE 顶盖 Logo，以及 PH16-72/PH18-72 的灯条。它只在 PH16-71 上测试过。
+
+只有当控制器的能力报告中包含 ENE 顶盖 Logo 的目标时，它才会出现。它最后一次应用的状态会在用户的 hotkey 服务启动时以及睡眠/休眠之后恢复。动态效果的颜色由固件控制，因此只有静态效果可以设置颜色。
 
 > 在 Linux 启动用户服务之前显示的灯光动画由固件掌控。已保存的“关闭”状态会在登录后被恢复，但本应用无法抑制更早的 BIOS/开机动画。
 
@@ -624,6 +628,7 @@ predator-sense-gui/
 │   └── dkms.conf                # DKMS 自动重新编译配置
 ├── installer/                   # Rust multicall 安装程序与服务
 │   ├── Cargo.toml
+│   ├── assets/                  # 托盘图标像素图（ARGB32，来自 resources/tray）
 │   └── src/
 │       ├── main.rs              # 根据已安装可执行文件名进行的类型化分发
 │       ├── constants.rs         # 集中管理的路径、协议值和硬件常量
@@ -634,7 +639,10 @@ predator-sense-gui/
 │       └── i18n.rs              # 类型化的 EN/PT 消息
 ├── protocol/                    # 共享的类型化 GUI/helper 契约
 │   ├── Cargo.toml
-│   └── src/lib.rs               # 操作、路径、限制和二进制文件名
+│   └── src/lib.rs               # 操作、路径、限制、二进制文件名、键盘报告
+├── hidraw/                      # PH16-71 键盘灯光的 hidraw 节点（一个 ioctl）
+│   ├── Cargo.toml
+│   └── src/lib.rs
 ├── src/                         # Rust GTK4 应用程序
 │   ├── main.rs
 │   ├── app_state.rs             # 全局窗口可见性标志（用于控制定时器）
@@ -644,11 +652,21 @@ predator-sense-gui/
 │   ├── hardware/
 │   │   ├── helper.rs            # 类型化的特权 helper 客户端
 │   │   ├── rgb.rs               # 通过 /dev/acer-gkbbl-* 实现的 RGB
+│   │   ├── keyboard_rgb.rs      # 通过 hidraw 访问的 PH16-71 键盘（Chicony 24 位）
+│   │   ├── chicony_hid.rs       # 保持打开的键盘 hidraw 节点
+│   │   ├── light_bar.rs         # 机身灯条
+│   │   ├── light_bar_zones.rs   # 灯条的三个区域（facer 节点）
+│   │   ├── lighting.rs          # 把每个电源模式的灯光应用到灯上
+│   │   ├── lighting_model/      # 按模式的灯光、预设、设置会写入什么
+│   │   ├── lighting_renderer/   # 绘制主题中由应用绘制的效果
+│   │   ├── effects/             # 效果引擎和主题目录
+│   │   ├── key_input/           # 供响应打字的主题使用的按键
 │   │   ├── hwmon.rs             # /sys/class/hwmon 索引（使用 OnceLock 缓存）
 │   │   ├── sensors.rs           # 温度、风扇、RAM、网络
-│   │   ├── gpu.rs               # 带 TTL 缓存的 nvidia-smi 解析器
+│   │   ├── gpu.rs               # 通过 NVML 获取 GPU 指标，经 helper 设置功率上限
+│   │   ├── nvml.rs              # 运行时加载的 NVML（dlopen）
 │   │   ├── procs.rs             # /proc 采样器（每核 CPU、内存、进程列表）
-│   │   ├── storage.rs           # 通过 df 获取磁盘使用情况
+│   │   ├── storage.rs           # 通过 statvfs 获取磁盘使用情况
 │   │   ├── sysinfo.rs           # DMI + CPU + GPU + 操作系统规格
 │   │   ├── fan.rs               # 风扇模式 + CoolBoost
 │   │   ├── extras.rs            # 电池限制、LCD 超频、USB 充电、开机动画
@@ -656,14 +674,20 @@ predator-sense-gui/
 │   │   ├── ai_assistant.rs      # Ollama tool-calling：固定的白名单，映射到已有的 hardware:: setter
 │   │   ├── ai_snapshot.rs       # 提供给 AI 的临时硬件状态快照，每次读取后清空
 │   │   ├── ai_actionlog.rs      # AI 所有建议/应用操作的持久化、可查看日志
+│   │   ├── quiet_panics.rs      # panic 钩子：不输出读取按键线程的消息
 │   │   └── setup.rs             # 内核模块管理
 │   └── ui/                      # GTK4 页面（Cairo 自定义控件）
 │       ├── window.rs            # 主窗口、侧边栏、霓虹条、隐藏到托盘
+│       ├── still_drawing.rs     # 以像素保存的静态绘制
+│       ├── ticks.rs             # 仅在可见时运行的动画计时器
+│       ├── flow_box.rs          # 不移除子项的 FlowBox 内容更新
+│       ├── toasts.rs            # 窗口级提示（撤销）
 │       ├── dashboard_page.rs    # 主视觉区 + 系统规格
 │       ├── temperatures_page.rs # 全部温度仪表盘
 │       ├── usage_page.rs        # 带占用最高进程的 CPU/GPU/内存/存储
 │       ├── network_page.rs      # 带峰值追踪的下载/上传
-│       ├── rgb_page.rs          # 带可视化分区的键盘 RGB
+│       ├── lighting_page.rs     # 灯光页面：模式、预设、预览
+│       ├── lighting/            # 它的标签页（灯光控制、主题）、预览、各行
 │       ├── fan_control_page.rs  # 动画风扇 + CoolBoost
 │       ├── fan_page.rs          # 性能模式
 │       ├── battery_page.rs      # 电池统计信息 + 充电限制
@@ -672,9 +696,12 @@ predator-sense-gui/
 │       ├── ai_page.rs           # AI 助手：聊天、模型管理器、资源监控、操作日志
 │       ├── setup_page.rs        # 内核模块安装向导
 │       └── gauge_widget.rs      # 虚线圆形仪表盘控件
+├── tests/data/                  # 效果参考帧、主题和配置数据
+├── tools/                       # gen-golden.js 及其运行的 effects.js（gjs）
 └── resources/
+    ├── tray/                    # 托盘图标源文件（PNG）
     ├── style.css                # 游戏风格深色主题
-    └── predator-icon.svg        # 系统托盘图标
+    └── predator-icon.svg        # 应用图标
 ```
 
 ---

@@ -21,14 +21,13 @@
 //! favor of `KeyboardEffect::Off` (wire code 0x40), which runs through the
 //! same four-report pipeline as every other effect and was fully traced.
 //!
-//! `MAG_Direct` (per-key addressing, wire code 0x4F, issue #44) is a
-//! completely different, later addition: it uses a multi-packet bulk
-//! `hid_write` payload instead of feature reports, decoded from
-//! `FUN_180001530` in a full Ghidra decompile (not just disassembly) of
-//! `SunrexUSBKeyboard.dll`. See `set_keyboard_direct_color` and the
-//! `DIRECT_*` constants below - kept separate from `KeyboardEffect` on
-//! purpose, since it is confirmed for only one narrow product family and
-//! has never been tested against real hardware (issue #44 is still open).
+//! The per-key frame (`MAG_Direct` and the LED frame after it, issues #44 and
+//! #76), which the old 2024 models' page offered as an experiment, never
+//! confirmed on real hardware, went with that page when every model moved to
+//! the Lighting page. Its bytes, decoded from `SunrexUSBKeyboard.dll`, are in
+//! this file's history. What that family's effects need from the same
+//! decompile (the init report, the doubled sequence, the brightness range)
+//! stays below.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -58,11 +57,10 @@ const KEYBOARD_VENDOR: u16 = 0x05AF;
 /// per-key layout - but every OTHER base in `KEYBOARD_PRODUCT_BASES` (2024's
 /// `0x666A`, 2025/2026's `0x667A`/`0x668A`/etc.) resolves to a *different*
 /// table id in that same dispatch, meaning they are not necessarily per-key
-/// at all and were never confirmed to share this framing. Gating Direct mode
-/// to just this one family, rather than the whole product range the
-/// zone/effect protocol already covers, is deliberate: a keyboard that is
-/// actually zone-based getting sent a per-key buffer sized for a different
-/// physical layout would silently light up the wrong keys.
+/// at all and were never confirmed to share this framing. Gating this
+/// family's handling (`set_keyboard_effect`) to just this one family, rather
+/// than the whole product range the zone/effect protocol already covers, is
+/// deliberate.
 ///
 /// Independent cross-check, from a different source entirely: the 5.1
 /// Electron app's own model classifier (`re-findings-5.1-RC9/02-modelos/modelos-2025-2026.md`,
@@ -70,8 +68,8 @@ const KEYBOARD_VENDOR: u16 = 0x05AF;
 /// `PT14-51` in the Triton 14 line - as per-key, and explicitly does *not*
 /// list `PHN16-73`/`PHN16S-71` there (those are `Is2025Device_PSPrzone`,
 /// zone-based, matching what issues #4/#12/#33 already found empirically).
-/// Nothing about this PID range specifically, but it corroborates gating
-/// Direct mode narrowly instead of trusting the whole Sunrex product range.
+/// Nothing about this PID range specifically, but it corroborates gating it
+/// narrowly instead of trusting the whole Sunrex product range.
 const DIRECT_KEYBOARD_PRODUCTS: std::ops::Range<u16> = 0x766A..0x766F;
 
 /// Every USB HWID shipped for the cover logo, same source (`RGBDevice.ini`
@@ -289,68 +287,14 @@ fn find_hidraw_direct_keyboard() -> Option<PathBuf> {
         .map(|(path, _)| path)
 }
 
-/// Whether the connected keyboard is confirmed to be part of the one
-/// product family `set_keyboard_direct_color` covers - narrower than
-/// `is_keyboard_available()`, which also matches the zone/effect-only
-/// families. See `DIRECT_KEYBOARD_PRODUCTS`.
-pub fn is_keyboard_direct_available() -> bool {
-    find_hidraw_direct_keyboard().is_some()
-}
-
-/// The 9-byte "priming" feature report `SunrexUSBKeyboard.dll` sends before
-/// any non-Direct LED frame (per-key colour data). Byte 1 and byte 8 move
-/// together: Direct (`MAG_Direct`, 0x4F) uses `0x13`/`0xE4`, every other
-/// mode `0x12`/`0xE5`.
-const PER_KEY_PRIMING: [u8; REPORT_LEN] = [0x00, 0x12, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0xE5];
-
-/// Number of 4-byte `[00, R, G, B]` LED slots in the frame the driver sends:
-/// 126 slots, 504 bytes, written as 8 output reports of 64 bytes (the last
-/// one short). Only slots `0..=PER_KEY_MAX_VALID_SLOT` land on a real key
-/// for this family; the rest are sent as zero.
-const PER_KEY_BUFFER_SLOTS: usize = 126;
-const PER_KEY_MAX_VALID_SLOT: usize = 101;
-
 /// Brightness range of every mode in the driver's tables: 0..=0x32, default
-/// 0x1E. The terminator report carries it, it is not a speed. Sending 0 here
-/// is a black frame that every write still reports as successful.
+/// 0x1E. Sending 0 is a black frame that every write still reports as
+/// successful.
 const BRIGHTNESS_MAX: u8 = 0x32;
-
-/// Wire mode byte the terminator carries for a non-Direct LED frame.
-const PER_KEY_MODE: u8 = 0x33;
 
 /// Scales the 0-100% the UI uses to the driver's 0..=0x32 range.
 fn brightness_byte(brightness_pct: u8) -> u8 {
     ((u16::from(brightness_pct.min(100)) * u16::from(BRIGHTNESS_MAX)) / 100) as u8
-}
-
-fn per_key_color_buffer(color: (u8, u8, u8)) -> Vec<u8> {
-    let mut buffer = vec![0u8; PER_KEY_BUFFER_SLOTS * 4];
-    for slot in 0..=PER_KEY_MAX_VALID_SLOT {
-        let offset = slot * 4;
-        buffer[offset] = 0x00;
-        buffer[offset + 1] = color.0;
-        buffer[offset + 2] = color.1;
-        buffer[offset + 3] = color.2;
-    }
-    buffer
-}
-
-/// The terminator feature report after the LED frame: mode, then the
-/// brightness byte, then the NOT of the sum of bytes 1..=7 (`0x18 + mode +
-/// brightness`, i.e. base `'K'` 0x4B for 0x33 and `'g'` 0x67 for 0x4F).
-fn per_key_terminator(mode: u8, brightness: u8) -> [u8; REPORT_LEN] {
-    let brightness = brightness.min(BRIGHTNESS_MAX);
-    [
-        0x00,
-        0x08,
-        0x02,
-        mode,
-        0x05,
-        brightness,
-        0x08,
-        0x01,
-        !0x18u8.wrapping_add(mode).wrapping_add(brightness),
-    ]
 }
 
 /// The 65-byte output report the driver writes once when it opens the
@@ -377,64 +321,6 @@ fn write_output_report(file: &mut File, path: &Path, packet: &[u8]) -> Result<()
             &[&path.display().to_string(), &error.to_string()],
         )
     })
-}
-
-/// Applies one solid color to every key of this family with the driver's own
-/// per-key frame (issue #44/#76): init report, priming, 126 LED slots as 8
-/// output reports, terminator carrying the brightness. Only available on the
-/// per-key product family - see `DIRECT_KEYBOARD_PRODUCTS`.
-///
-/// This replaces the earlier `0x4F` Direct frame. The decompile shows that
-/// `MAG_Direct` is a 48-byte frame for just four keys (WASD, the magnetic
-/// keys), so it never could cover the whole keyboard, and its terminator
-/// carried 0 as brightness. EXPERIMENTAL: every byte comes from the real
-/// driver, but nobody who owns this keyboard family has confirmed it lights
-/// real hardware yet.
-pub fn set_keyboard_direct_color(color: (u8, u8, u8), brightness_pct: u8) -> Result<(), String> {
-    let path = find_hidraw_direct_keyboard()
-        .ok_or_else(|| t("magic_rgb_err_device_not_found").to_string())?;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-        .map_err(|error| {
-            crate::hardware::applog::error(&format!(
-                "Cannot open Direct keyboard HID device at {}: {}",
-                path.display(),
-                error
-            ));
-            tf(
-                "magic_rgb_err_open_device",
-                &[&path.display().to_string(), &error.to_string()],
-            )
-        })?;
-
-    write_output_report(&mut file, &path, &init_report())?;
-    std::thread::sleep(WRITE_GAP);
-
-    let mut priming = PER_KEY_PRIMING;
-    crate::hardware::hid_rgb::set_feature(&file, &mut priming)?;
-    std::thread::sleep(REPORT_GAP);
-
-    let buffer = per_key_color_buffer(color);
-    for chunk in buffer.chunks(64) {
-        let mut packet = Vec::with_capacity(65);
-        packet.push(0x00); // report ID, same convention as the zone/effect path
-        packet.extend_from_slice(chunk);
-        packet.resize(65, 0); // pad a short final chunk, never truncate a full one
-        write_output_report(&mut file, &path, &packet)?;
-        std::thread::sleep(WRITE_GAP);
-    }
-
-    std::thread::sleep(REPORT_GAP);
-    let mut terminator = per_key_terminator(PER_KEY_MODE, brightness_byte(brightness_pct));
-    crate::hardware::hid_rgb::set_feature(&file, &mut terminator)?;
-
-    crate::hardware::applog::info(&format!(
-        "Per-key HID lighting frame applied via {}",
-        path.display()
-    ));
-    Ok(())
 }
 
 fn open(kind: DeviceKind) -> Result<(File, PathBuf), String> {
@@ -661,33 +547,8 @@ mod tests {
         assert!(!is_known(DeviceKind::Keyboard, 0x0D62, 0x666A)); // right PID, wrong vendor
     }
 
-    // Issues #44/#76 (G-911, PT14-51/Aethon 700): per-key frame, from the
-    // decompile of SunrexUSBKeyboard.dll.
-
-    #[test]
-    fn per_key_priming_is_the_non_direct_pair_and_checksummed() {
-        assert_eq!(
-            PER_KEY_PRIMING,
-            [0x00, 0x12, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0xE5]
-        );
-        let sum = PER_KEY_PRIMING[1..8]
-            .iter()
-            .fold(0u8, |acc, b| acc.wrapping_add(*b));
-        assert_eq!(PER_KEY_PRIMING[8], !sum);
-    }
-
-    #[test]
-    fn per_key_terminator_carries_brightness_and_the_driver_checksum() {
-        // Default brightness 0x1E, mode 0x33: ~(0x4B + 0x1E).
-        let t = per_key_terminator(PER_KEY_MODE, 0x1E);
-        assert_eq!(&t[..8], &[0x00, 0x08, 0x02, 0x33, 0x05, 0x1E, 0x08, 0x01]);
-        assert_eq!(t[8], !(0x4Bu8.wrapping_add(0x1E)));
-        // Direct 0x4F uses base 0x67 in the driver: same formula.
-        let d = per_key_terminator(0x4F, 0x1E);
-        assert_eq!(d[8], !(0x67u8.wrapping_add(0x1E)));
-        // Never a zero brightness by accident of the caller, and clamped.
-        assert_eq!(per_key_terminator(PER_KEY_MODE, 0x7F)[5], BRIGHTNESS_MAX);
-    }
+    // Issues #44/#76 (G-911, PT14-51/Aethon 700): what that family's effects
+    // take from the decompile of SunrexUSBKeyboard.dll.
 
     #[test]
     fn brightness_scales_percent_to_the_driver_range() {
@@ -703,23 +564,6 @@ mod tests {
         assert_eq!(r.len(), 65);
         assert_eq!(&r[..4], &[0x00, 0x41, 0x01, 0x00]);
         assert!(r[3..].iter().all(|b| *b == 0));
-    }
-
-    #[test]
-    fn per_key_buffer_is_126_slots_and_only_fills_the_valid_ones() {
-        let buffer = per_key_color_buffer((0x11, 0x22, 0x33));
-        assert_eq!(buffer.len(), 504);
-        assert_eq!(buffer.chunks(64).count(), 8);
-        for slot in 0..=PER_KEY_MAX_VALID_SLOT {
-            let offset = slot * 4;
-            assert_eq!(
-                &buffer[offset..offset + 4],
-                &[0x00, 0x11, 0x22, 0x33],
-                "slot {slot} not colored"
-            );
-        }
-        let padding_start = (PER_KEY_MAX_VALID_SLOT + 1) * 4;
-        assert!(buffer[padding_start..].iter().all(|b| *b == 0));
     }
 
     #[test]

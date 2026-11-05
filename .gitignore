@@ -11,6 +11,8 @@ predator-sense-gui/target/
 predator-sense-gui/installer/target/
 predator-sense-gui/protocol/target/
 predator-sense-gui/protocol/Cargo.lock
+predator-sense-gui/hidraw/target/
+predator-sense-gui/hidraw/Cargo.lock
 predator-sense-gui/installer/predator-sense-installer
 *.rlib
 outros/

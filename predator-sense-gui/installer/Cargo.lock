@@ -519,11 +519,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "predator-sense-hidraw"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "predator-sense-protocol",
+]
+
+[[package]]
 name = "predator-sense-installer"
 version = "0.3.14-preview"
 dependencies = [
  "ksni",
  "libc",
+ "predator-sense-hidraw",
  "predator-sense-protocol",
  "rusb",
  "serde",

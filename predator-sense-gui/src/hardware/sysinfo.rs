@@ -111,19 +111,13 @@ pub fn is_nitro_brand() -> bool {
 /// `PREDATOR_SENSE_FORCE_MODEL` overrides the DMI read, so someone on an
 /// unlisted chassis can try a gated path and report back without rebuilding.
 pub fn product_matches(models: &[&str]) -> bool {
-    let name = std::env::var("PREDATOR_SENSE_FORCE_MODEL")
-        .ok()
-        .or_else(|| read_trim("/sys/class/dmi/id/product_name"))
-        .unwrap_or_default();
-    matches_model(&name, models)
+    predator_sense_protocol::dmi::product_matches(models)
 }
 
 /// The whole-word comparison behind [`product_matches`], split out so it can
 /// be tested without touching DMI or the process environment.
 fn matches_model(product_name: &str, models: &[&str]) -> bool {
-    product_name
-        .split_whitespace()
-        .any(|part| models.iter().any(|m| part.eq_ignore_ascii_case(m)))
+    predator_sense_protocol::dmi::matches_model(product_name, models)
 }
 
 fn read_trim(path: &str) -> Option<String> {

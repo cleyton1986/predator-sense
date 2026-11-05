@@ -169,6 +169,8 @@ pub fn reload_kernel_module() -> SetupResult {
             .arg(installer_cli::RELOAD_MODULE_ARGUMENT)
             .output()
     } else {
+        // pkexec may show an authentication dialog until it exits: no key is read meanwhile.
+        let _prompt = super::key_input::authentication_prompt();
         Command::new("pkexec")
             .arg(&installer)
             .arg(installer_cli::RELOAD_MODULE_ARGUMENT)
@@ -230,6 +232,8 @@ pub fn install_service() -> SetupResult {
             .arg(installer_cli::RELOAD_MODULE_ARGUMENT)
             .output()
     } else {
+        // pkexec may show an authentication dialog until it exits: no key is read meanwhile.
+        let _prompt = super::key_input::authentication_prompt();
         Command::new("pkexec")
             .arg(&installer)
             .arg(installer_cli::RELOAD_MODULE_ARGUMENT)

@@ -583,6 +583,9 @@ pub fn build() -> gtk::Box {
     // from both the click handler and the periodic reconcile timer further
     // down) reads this instead of walking the GTK tree, since a card is now
     // an Overlay wrapping a faceted_card, not a plain Box it could downcast.
+    // Which click the status line belongs to: completions arrive on their own
+    // threads' schedule, so only the latest click's result is shown.
+    let latest_click: Rc<Cell<u64>> = Rc::new(Cell::new(0));
     let cards: Rc<RefCell<Vec<(crate::ui::faceted_card::FacetedCard, gtk::Button)>>> =
         Rc::new(RefCell::new(Vec::new()));
 
@@ -693,22 +696,47 @@ pub fn build() -> gtk::Box {
         let profile_copy = *profile_val;
         let status_clone = status_label.clone();
         let cards_c = cards.clone();
-        select_btn.connect_clicked(move |_btn| match profile::set_profile(profile_copy) {
-            Ok(()) => {
-                status_clone.set_text(&format!(
-                    "{} '{}'",
-                    crate::i18n::t("profile_activated"),
-                    profile_copy.label()
-                ));
-                status_clone.remove_css_class("status-error");
-                status_clone.add_css_class("status-success");
-                apply_active_visuals(&cards_c.borrow(), profile::get_current_profile());
-            }
-            Err(e) => {
-                status_clone.set_text(&format!("Erro: {}", e));
-                status_clone.remove_css_class("status-success");
-                status_clone.add_css_class("status-error");
-            }
+        let latest_click = latest_click.clone();
+        // The switch runs off the GTK thread (helper round trips, nvidia-smi,
+        // the firmware write): the window stays live, and the card turns
+        // active when it is done.
+        select_btn.connect_clicked(move |_btn| {
+            let switching = profile::request_profile(profile_copy);
+            let click = latest_click.get() + 1;
+            latest_click.set(click);
+            let latest_click = latest_click.clone();
+            let status_clone = status_clone.clone();
+            let cards_c = cards_c.clone();
+            crate::ui::background::run(
+                move || profile::wait_for(switching),
+                move |result| match result {
+                    _ if latest_click.get() != click => {
+                        // A later click's switch is queued or done: its
+                        // result is the one to show.
+                        if let Err(e) = result {
+                            crate::hardware::applog::error(&format!(
+                                "Mode page: switch to {} failed: {e}",
+                                profile_copy.to_id()
+                            ));
+                        }
+                    }
+                    Ok(()) => {
+                        status_clone.set_text(&format!(
+                            "{} '{}'",
+                            crate::i18n::t("profile_activated"),
+                            profile_copy.label()
+                        ));
+                        status_clone.remove_css_class("status-error");
+                        status_clone.add_css_class("status-success");
+                        apply_active_visuals(&cards_c.borrow(), profile::get_current_profile());
+                    }
+                    Err(e) => {
+                        status_clone.set_text(&format!("Erro: {}", e));
+                        status_clone.remove_css_class("status-success");
+                        status_clone.add_css_class("status-error");
+                    }
+                },
+            );
         });
 
         card.append(&select_btn);
@@ -792,10 +820,17 @@ pub fn build() -> gtk::Box {
         if !crate::app_state::is_window_visible() || !page_reconcile.is_mapped() {
             return glib::ControlFlow::Continue;
         }
-        let now = profile::get_current_profile();
-        if now != last_known.get() {
-            last_known.set(now);
-            apply_active_visuals(&cards.borrow(), now);
+        // Not while a switch is part-way through: applying a mode moves the
+        // firmware index in more than one step, so a tick landing inside one
+        // would light up a card for a mode the machine is only passing through.
+        // Skipping leaves `last_known` alone, so the next tick shows the
+        // settled mode.
+        if !profile::apply_in_flight() {
+            let now = profile::get_current_profile();
+            if now != last_known.get() {
+                last_known.set(now);
+                apply_active_visuals(&cards.borrow(), now);
+            }
         }
         info_label.set_text(&cpu_policy_info_text());
         // The power source can change at any moment by unplugging the
@@ -1367,6 +1402,10 @@ const CYCLE_CHOICES: [(PowerProfile, &str); 5] = [
 /// Installs the configured cycles in the kernel module, where the mode key is
 /// actually handled. Off the UI thread: it goes through the privileged helper.
 fn push_cycles(cfg: &config::AppConfig) {
+    // The AC/battery policy reads the same lists - editing one here has to
+    // reach it without a restart, the way every other setting on this page
+    // does.
+    crate::hardware::power_profile::set_cycles(&cfg.mode_cycle_ac, &cfg.mode_cycle_battery);
     let ac = cfg.mode_cycle_ac.clone();
     let battery = cfg.mode_cycle_battery.clone();
     crate::ui::background::run(
@@ -1577,6 +1616,138 @@ pub fn build_mode_key_section() -> gtk::Box {
     });
 
     page.append(&behaviour);
+
+    // What a plug or unplug does. This sits here rather than in Settings
+    // because the two lists below are what it reads: the switch turns on a
+    // rule those lists define, and having the two on different pages left no
+    // way to tell that they were the same feature.
+    let power = adw::PreferencesGroup::new();
+    power.set_title(crate::i18n::t("power_source_section"));
+    power.set_description(Some(crate::i18n::t("power_source_section_desc")));
+
+    // One choice rather than a switch plus two targets that mostly did nothing.
+    // Each option decides for itself whether those targets apply, so they are
+    // only sensitive under the one that reads them.
+    let action_choices = [
+        (config::PowerSourceAction::Keep, "power_action_keep"),
+        (
+            config::PowerSourceAction::MoveIfDisallowed,
+            "power_action_move_if_disallowed",
+        ),
+        (config::PowerSourceAction::AlwaysSet, "power_action_always_set"),
+    ];
+    let action_labels: Vec<&str> = action_choices
+        .iter()
+        .map(|(_, key)| crate::i18n::t(key))
+        .collect();
+    let action_row = adw::ComboRow::new();
+    action_row.set_title(crate::i18n::t("power_action"));
+    action_row.set_subtitle(crate::i18n::t("power_action_desc"));
+    action_row.set_model(Some(&gtk::StringList::new(&action_labels)));
+    let current_action = cfg.power_source_action();
+    action_row.set_selected(
+        action_choices
+            .iter()
+            .position(|(a, _)| *a == current_action)
+            .unwrap_or(1) as u32,
+    );
+    crate::ui::scroll_guard::redirect_scroll_to_page(&action_row);
+    power.add(&action_row);
+
+    // Eco is battery-only in the official app, so the AC list keeps the four
+    // choices it always had and only the battery list carries it. Position is
+    // matched against these arrays directly rather than through
+    // `PowerProfile::index()`, which puts Eco below Quiet.
+    let ac_choices: [(&str, PowerProfile); 4] = [
+        ("quiet", PowerProfile::Quiet),
+        ("balanced", PowerProfile::Balanced),
+        ("performance", PowerProfile::Performance),
+        ("turbo", PowerProfile::Turbo),
+    ];
+    let battery_choices: [(&str, PowerProfile); 5] = [
+        ("quiet", PowerProfile::Quiet),
+        ("balanced", PowerProfile::Balanced),
+        ("performance", PowerProfile::Performance),
+        ("turbo", PowerProfile::Turbo),
+        ("eco", PowerProfile::Eco),
+    ];
+
+    let ac_labels: Vec<&str> = ac_choices.iter().map(|(k, _)| crate::i18n::t(k)).collect();
+    let ac_row = adw::ComboRow::new();
+    ac_row.set_title(crate::i18n::t("profile_when_ac"));
+    ac_row.set_subtitle(crate::i18n::t("profile_when_ac_desc"));
+    ac_row.set_model(Some(&gtk::StringList::new(&ac_labels)));
+    ac_row.set_selected(
+        ac_choices
+            .iter()
+            .position(|(_, p)| *p == cfg.profile_ac)
+            .unwrap_or(1) as u32,
+    );
+    ac_row.set_sensitive(current_action == config::PowerSourceAction::AlwaysSet);
+    // A wheel tick over a dropdown changes its value, and this page
+    // scrolls. See ui::scroll_guard.
+    crate::ui::scroll_guard::redirect_scroll_to_page(&ac_row);
+    ac_row.connect_selected_notify(move |row| {
+        let Some((_, profile)) = ac_choices.get(row.selected() as usize) else {
+            return; // GTK_INVALID_LIST_POSITION, not a real pick
+        };
+        let mut c = config::load_app_config();
+        c.profile_ac = *profile;
+        let _ = config::save_app_config(&c);
+        crate::hardware::power_profile::set_target_profiles(c.profile_ac, c.profile_battery);
+    });
+    power.add(&ac_row);
+
+    let battery_labels: Vec<&str> = battery_choices
+        .iter()
+        .map(|(k, _)| crate::i18n::t(k))
+        .collect();
+    let battery_row = adw::ComboRow::new();
+    battery_row.set_title(crate::i18n::t("profile_when_battery"));
+    battery_row.set_subtitle(crate::i18n::t("profile_when_battery_desc"));
+    battery_row.set_model(Some(&gtk::StringList::new(&battery_labels)));
+    battery_row.set_selected(
+        battery_choices
+            .iter()
+            .position(|(_, p)| *p == cfg.profile_battery)
+            .unwrap_or(1) as u32,
+    );
+    battery_row.set_sensitive(current_action == config::PowerSourceAction::AlwaysSet);
+    // A wheel tick over a dropdown changes its value, and this page
+    // scrolls. See ui::scroll_guard.
+    crate::ui::scroll_guard::redirect_scroll_to_page(&battery_row);
+    battery_row.connect_selected_notify(move |row| {
+        let Some((_, profile)) = battery_choices.get(row.selected() as usize) else {
+            return;
+        };
+        let mut c = config::load_app_config();
+        c.profile_battery = *profile;
+        let _ = config::save_app_config(&c);
+        crate::hardware::power_profile::set_target_profiles(c.profile_ac, c.profile_battery);
+    });
+    power.add(&battery_row);
+
+    {
+        let ac_row = ac_row.clone();
+        let battery_row = battery_row.clone();
+        action_row.connect_selected_notify(move |row| {
+            let Some((action, _)) = action_choices.get(row.selected() as usize) else {
+                return;
+            };
+            let mut c = config::load_app_config();
+            c.power_source_action = Some(*action);
+            // Kept in step so anything still reading the old boolean - and a
+            // downgrade to a build that only knows it - sees the same intent.
+            c.auto_profile_ac = *action != config::PowerSourceAction::Keep;
+            let _ = config::save_app_config(&c);
+            crate::hardware::power_profile::set_action(*action);
+            let targets_apply = *action == config::PowerSourceAction::AlwaysSet;
+            ac_row.set_sensitive(targets_apply);
+            battery_row.set_sensitive(targets_apply);
+        });
+    }
+    page.append(&power);
+
     page.append(&build_cycle_group(
         "cycle_on_ac",
         "cycle_on_ac_desc",
@@ -1589,5 +1760,96 @@ pub fn build_mode_key_section() -> gtk::Box {
         |cfg| cfg.mode_cycle_battery.clone(),
         |cfg, list| cfg.mode_cycle_battery = list,
     ));
+
+    // Telling the desktop's own power indicator which of its three profiles
+    // this app's five modes correspond to. Off by default: it writes to a
+    // daemon this app does not own, and on a system without one there is
+    // nothing to write to. See hardware::ppd.
+    let desktop = adw::PreferencesGroup::new();
+    desktop.set_title(crate::i18n::t("desktop_sync_section"));
+    desktop.set_description(Some(crate::i18n::t("desktop_sync_section_desc")));
+
+    let notify_row = adw::SwitchRow::new();
+    notify_row.set_title(crate::i18n::t("notify_mode_changes"));
+    notify_row.set_subtitle(crate::i18n::t("notify_mode_changes_desc"));
+    notify_row.set_active(cfg.notify_mode_changes);
+    notify_row.connect_active_notify(|row| {
+        let mut c = config::load_app_config();
+        c.notify_mode_changes = row.is_active();
+        let _ = config::save_app_config(&c);
+    });
+    desktop.add(&notify_row);
+
+    let sync_row = adw::SwitchRow::new();
+    sync_row.set_title(crate::i18n::t("ppd_sync"));
+    sync_row.set_subtitle(crate::i18n::t("ppd_sync_desc"));
+    sync_row.set_active(cfg.ppd_sync_enabled);
+    desktop.add(&sync_row);
+
+    let map_choices = [
+        (config::PpdMap::QuietSavesPower, "ppd_map_quiet_saves_power"),
+        (config::PpdMap::QuietIsBalanced, "ppd_map_quiet_is_balanced"),
+    ];
+    let map_labels: Vec<&str> = map_choices
+        .iter()
+        .map(|(_, key)| crate::i18n::t(key))
+        .collect();
+    let map_row = adw::ComboRow::new();
+    map_row.set_title(crate::i18n::t("ppd_map"));
+    map_row.set_subtitle(crate::i18n::t("ppd_map_desc"));
+    map_row.set_model(Some(&gtk::StringList::new(&map_labels)));
+    map_row.set_selected(
+        map_choices
+            .iter()
+            .position(|(m, _)| *m == cfg.ppd_sync_map)
+            .unwrap_or(0) as u32,
+    );
+    map_row.set_sensitive(cfg.ppd_sync_enabled);
+    // A wheel tick over a dropdown changes its value, and this page
+    // scrolls. See ui::scroll_guard.
+    crate::ui::scroll_guard::redirect_scroll_to_page(&map_row);
+    map_row.connect_selected_notify(move |row| {
+        let Some((map, _)) = map_choices.get(row.selected() as usize) else {
+            return;
+        };
+        let mut c = config::load_app_config();
+        c.ppd_sync_map = *map;
+        let _ = config::save_app_config(&c);
+    });
+    desktop.add(&map_row);
+
+    {
+        let map_row = map_row.clone();
+        sync_row.connect_active_notify(move |row| {
+            let active = row.is_active();
+            let mut c = config::load_app_config();
+            c.ppd_sync_enabled = active;
+            let _ = config::save_app_config(&c);
+            map_row.set_sensitive(active);
+            // Reflect it immediately rather than at the next mode change, so
+            // switching this on visibly does something. Off the UI thread here,
+            // unlike the call inside `set_profile`: nothing is being applied
+            // alongside it, so there is no ordering to preserve and no reason
+            // to make a switch toggle wait on a daemon.
+            if active {
+                if let Some(mode) = profile::get_current_profile() {
+                    let map = c.ppd_sync_map;
+                    crate::ui::background::run(
+                        move || {
+                            crate::hardware::ppd::sync_to_mode(
+                                mode,
+                                true,
+                                map,
+                                profile::ModeWrite::Always,
+                            );
+                        },
+                        |_| {},
+                    );
+                }
+            }
+        });
+    }
+    page.append(&desktop);
+
     page
 }

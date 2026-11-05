@@ -222,7 +222,7 @@ fn queue_commit(page: &Rc<Page>) {
 /// Pushes config into every control. The only place that decides what the
 /// page shows, so the mode bar, the buttons and the editors cannot disagree.
 fn refresh(page: &Rc<Page>) {
-    let cfg = config::load_app_config();
+    let cfg = config::load_app_config_cached();
     let editing = page.editing.borrow().clone();
     let plan = plan_of(&cfg, &editing);
     // What the reconciler will run here, so the buttons, the editor shown and
@@ -397,8 +397,7 @@ pub fn build() -> gtk::Widget {
 
     // ---- title row: CoolBoost, the "Changed" tag and Discard on the right ----
     let title = gtk::Label::new(Some(crate::i18n::t("fan_control")));
-    // No page on this branch has a large heading class of its own, so the
-    // page title uses libadwaita's stock title-1.
+    // The page title uses libadwaita's stock title-1.
     title.add_css_class("title-1");
     title.set_halign(gtk::Align::Start);
     title.set_hexpand(true);
@@ -918,7 +917,7 @@ pub fn build() -> gtk::Widget {
     let anim_speed_anim = anim_speed.clone();
 
     let page_anim = page_box.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+    crate::ui::ticks::while_mapped(&page_anim.clone(), 60, move || {
         if !crate::app_state::is_window_visible() || !page_anim.is_mapped() {
             return glib::ControlFlow::Continue;
         }
@@ -946,7 +945,7 @@ pub fn build() -> gtk::Widget {
         if !crate::app_state::is_window_visible() || !page_sense.is_mapped() {
             return glib::ControlFlow::Continue;
         }
-        let data = sensors::read_all_sensors();
+        let data = sensors::read_core_sensors();
         if let Some(r) = data.cpu_fan_rpm {
             *cr2.borrow_mut() = r;
             cpu_rpm_l.set_text(&r.to_string());
@@ -971,7 +970,7 @@ pub fn build() -> gtk::Widget {
         if let Some(page) = weak_sensors.upgrade() {
             page.curve_view.set_temp(live);
         }
-        let cfg = config::load_app_config();
+        let cfg = config::load_app_config_cached();
         let running = fan::plan_for(
             crate::hardware::profile::get_current_profile(),
             &cfg.fan_plans,

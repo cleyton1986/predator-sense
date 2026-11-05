@@ -191,6 +191,13 @@ pub fn check(games: &[GameProfile]) {
     if !is_enabled() || games.is_empty() {
         return;
     }
+    // Sits out a switch queued or running, as the power policy does: its
+    // snapshot of the mode to restore would otherwise be one a queued switch
+    // is about to replace, and its own switch would wait on the GTK thread
+    // behind every queued one.
+    if profile::apply_in_flight() {
+        return;
+    }
     let running = running_executables();
     let matched_index = games
         .iter()

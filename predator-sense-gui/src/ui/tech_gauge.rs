@@ -17,7 +17,6 @@ use gtk4::prelude::*;
 use gtk4::{self as gtk, glib, pango};
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Duration;
 
 /// One animated ring: a set of arc segments at a fixed radius band, spinning
 /// at its own speed. Absolute pixel band widths on purpose, matching the
@@ -357,10 +356,16 @@ pub fn build(
     // meaningful regardless of how often this actually redraws - same
     // technique as fan_control_page.rs's animated fan icon.
     {
-        let da = da.clone();
+        // Weak: the timer lives in `da`'s own map handlers (see
+        // `ticks::while_mapped`), and a strong reference there would keep a
+        // discarded gauge alive.
+        let weak = da.downgrade();
         let phase = phase.clone();
         let frame_s = 0.033;
-        glib::timeout_add_local(Duration::from_millis(33), move || {
+        crate::ui::ticks::while_mapped(&da, 33, move || {
+            let Some(da) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
             if da.root().is_none() {
                 return glib::ControlFlow::Break;
             }

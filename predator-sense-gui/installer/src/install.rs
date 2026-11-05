@@ -5,6 +5,7 @@ use crate::process::{
     terminate_legacy_process, terminate_process,
 };
 use crate::AppResult;
+use predator_sense_protocol::dmi;
 use predator_sense_protocol::helper::Action as HelperAction;
 use predator_sense_protocol::installer as cli;
 use std::collections::BTreeSet;
@@ -13,7 +14,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr;
@@ -471,6 +472,9 @@ struct Installer {
     language: Language,
     user: UserContext,
     gui_dir: Option<PathBuf>,
+    /// The private directory `prepare_release_assets` downloaded the release
+    /// into, removed when the install ends ([`Self::remove_release_dir`]).
+    release_dir: Option<PathBuf>,
 }
 
 pub(crate) fn entrypoint(args: &[String]) -> AppResult {
@@ -524,6 +528,7 @@ impl Installer {
             language: Language::detect(),
             user: UserContext::detect()?,
             gui_dir: detect_gui_dir(),
+            release_dir: None,
         })
     }
 
@@ -548,6 +553,7 @@ impl Installer {
                     started.elapsed()
                 ),
                 Err(error) => {
+                    self.remove_release_dir();
                     println!("    {RED}✗ {error}{RESET}");
                     println!("\n  {YELLOW}{}{RESET}", self.text(Message::DoneWithErrors));
                     if interactive {
@@ -557,6 +563,7 @@ impl Installer {
                 }
             }
         }
+        self.remove_release_dir();
         println!(
             "\n  {} {CYAN}{}%{RESET}",
             render_bar(defaults::COMPLETE_PERCENT),
@@ -750,6 +757,28 @@ fn find_kernel_source_root(gui_dir: Option<&Path>, installed_dir: &Path) -> Opti
         .map(Path::to_path_buf)
 }
 
+/// Asks `still_running` what has not exited yet, every `poll`, until the
+/// answer is empty or `limit` has been waited in all, and returns the last
+/// answer. Sleeps through `sleep`, so a test can run it on a clock of its
+/// own; nothing running at the first look means no wait at all.
+fn wait_until_stopped<T>(
+    limit: Duration,
+    poll: Duration,
+    mut still_running: impl FnMut() -> Vec<T>,
+    mut sleep: impl FnMut(Duration),
+) -> Vec<T> {
+    let mut waited = Duration::ZERO;
+    loop {
+        let running = still_running();
+        if running.is_empty() || waited >= limit {
+            return running;
+        }
+        let step = poll.min(limit - waited);
+        sleep(step);
+        waited += step;
+    }
+}
+
 fn gui_binary_path(gui: &Path) -> PathBuf {
     gui.join(GUI_RELEASE_DIR_RELATIVE).join(binary::APPLICATION)
 }
@@ -886,14 +915,50 @@ impl Installer {
         if self.gui_dir.is_some() {
             return Ok(());
         }
-        let base = std::env::temp_dir().join(format!("{RELEASE_TEMP_PREFIX}{}", app::VERSION));
+        // A directory of its own, made here and root's alone (0700): a
+        // fixed name in the shared temp directory could be made first by
+        // another user, who would then own the tree root downloads into and
+        // runs from. Nothing in it runs as the user: a release brings its
+        // binary, so neither the cargo build nor the Rust bootstrap runs.
+        let base = private_temp_dir(
+            &std::env::temp_dir(),
+            &format!("{RELEASE_TEMP_PREFIX}{}", app::VERSION),
+        )
+        .map_err(|error| format!("falha ao criar diretório temporário: {error}"))?;
+        self.release_dir = Some(base.clone());
+        let result = self.download_release(&base);
+        if result.is_err() {
+            self.remove_release_dir();
+        }
+        result
+    }
+
+    /// Removes the release download directory, if there is one, and forgets
+    /// a GUI directory inside it. At the end of an install, whether it
+    /// succeeded or failed.
+    fn remove_release_dir(&mut self) {
+        let Some(base) = self.release_dir.take() else {
+            return;
+        };
+        fs::remove_dir_all(&base).ok();
+        if self
+            .gui_dir
+            .as_deref()
+            .is_some_and(|gui| gui.starts_with(&base))
+        {
+            self.gui_dir = None;
+        }
+    }
+
+    /// The release's sources and binary into `base`, from
+    /// [`Self::prepare_release_assets`]; sets the GUI directory on success.
+    fn download_release(&mut self, base: &Path) -> AppResult {
         let archive = base.join("source.tar.gz");
         let extracted_root = base.join("source");
         let gui = extracted_root
             .join(format!("predator-sense-{}", app::VERSION))
             .join("predator-sense-gui");
         let binary_path = gui_binary_path(&gui);
-        fs::remove_dir_all(&base).ok();
         fs::create_dir_all(
             binary_path
                 .parent()
@@ -961,9 +1026,23 @@ impl Installer {
                 std::env::consts::ARCH
             )
         })?;
-        let rustup_path =
-            std::env::temp_dir().join(format!("{RUSTUP_TEMP_NAME}-{}", std::process::id()));
+        // A directory of its own, made here: a name in the shared temp
+        // directory that another user could have created first (a link to a
+        // file of theirs, say) is never written or run.
+        let rustup_dir = private_temp_dir(&std::env::temp_dir(), RUSTUP_TEMP_NAME)
+            .map_err(|error| format!("falha ao criar diretório temporário: {error}"))?;
+        // Root's alone to write; the user runs rustup-init from it.
+        set_mode(&rustup_dir, mode::EXECUTABLE)?;
+        let rustup_path = rustup_dir.join("rustup-init");
         let rustup_url = format!("{RUSTUP_BASE_URL}/{target}/rustup-init");
+        let result = self.download_and_run_rustup(&rustup_path, &rustup_url);
+        fs::remove_dir_all(&rustup_dir).ok();
+        result
+    }
+
+    /// Downloads rustup-init to `rustup_path`, in [`Self::install_rust`]'s
+    /// private directory, and runs it as the user.
+    fn download_and_run_rustup(&self, rustup_path: &Path, rustup_url: &str) -> AppResult {
         run(
             command::CURL,
             [
@@ -974,13 +1053,11 @@ impl Installer {
                 "--location",
                 "--output",
                 rustup_path.to_string_lossy().as_ref(),
-                rustup_url.as_str(),
+                rustup_url,
             ],
         )?;
-        set_mode(&rustup_path, mode::EXECUTABLE)?;
-        let result = self.run_as_user(rustup_path.as_os_str(), ["-y", "--no-modify-path"], None);
-        fs::remove_file(rustup_path).ok();
-        result
+        set_mode(rustup_path, mode::EXECUTABLE)?;
+        self.run_as_user(rustup_path.as_os_str(), ["-y", "--no-modify-path"], None)
     }
 
     fn build_application(&self) -> AppResult {
@@ -1059,14 +1136,24 @@ impl Installer {
         for process in [LEGACY_HOTKEY_PROCESS, LEGACY_TRAY_PROCESS] {
             terminate_legacy_process(process);
         }
+        let grace = Duration::from_secs(timing::PROCESS_SHUTDOWN_GRACE_SECS);
         if had_running_tool {
-            thread::sleep(Duration::from_secs(timing::PROCESS_SHUTDOWN_GRACE_SECS));
+            thread::sleep(grace);
         }
 
-        let running = RUST_TOOL_PROCESSES_TO_STOP
-            .into_iter()
-            .filter(|process| process_running(process))
-            .collect::<Vec<_>>();
+        // Then up to PROCESS_STOP_WAIT_SECS in all: on SIGTERM the helper
+        // first finishes the command in flight, which can take 3 s.
+        let running = wait_until_stopped(
+            Duration::from_secs(timing::PROCESS_STOP_WAIT_SECS).saturating_sub(grace),
+            Duration::from_millis(timing::PROCESS_STOP_POLL_MS),
+            || {
+                RUST_TOOL_PROCESSES_TO_STOP
+                    .into_iter()
+                    .filter(|process| process_running(process))
+                    .collect::<Vec<_>>()
+            },
+            thread::sleep,
+        );
         if running.is_empty() {
             Ok(())
         } else {
@@ -1144,6 +1231,30 @@ fn has_kernel_headers() -> bool {
                 .is_dir()
         })
         .unwrap_or(false)
+}
+
+/// A new directory under `parent`, named `prefix-<pid>-<n>`, created by this
+/// call (mode 0700, as mkdtemp makes one): an existing entry of that name,
+/// a link included, is never used, the next name is tried instead.
+fn private_temp_dir(parent: &Path, prefix: &str) -> io::Result<PathBuf> {
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos())
+        .unwrap_or(0);
+    let mut last = None;
+    for attempt in 0..64u32 {
+        let path = parent.join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            seed.wrapping_add(attempt)
+        ));
+        match fs::DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => last = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::other("no free name")))
 }
 
 fn set_mode(path: &Path, bits: u32) -> AppResult {
@@ -1276,6 +1387,78 @@ fn copy_kernel_sources(source: &Path, destination: &Path) -> AppResult {
     Ok(())
 }
 
+/// The udev rules for the lighting and hotkey HID nodes, as written to
+/// `path::HID_UDEV_RULE`. Removed with that file on uninstall. The Chicony
+/// keyboard's lighting interface is not here: see [`seat_rules_for`].
+pub(crate) const HID_RULE: &str = concat!(
+    "SUBSYSTEM==\"hidraw\", ATTRS{name}==\"ENEK5130:*\", MODE=\"0660\", GROUP=\"input\"\n",
+    "SUBSYSTEM==\"hidraw\", KERNELS==\"0018:0CF2:5130.*\", MODE=\"0660\", GROUP=\"input\"\n",
+    // 2024+ generation (issue #26): keyboard/cover-logo RGB moved off
+    // this I2C-HID chip entirely onto plain USB HID feature reports
+    // sent to a Sunrex keyboard controller and a Darfon logo
+    // controller (magic_rgb.rs). Neither ever got a udev rule, so
+    // /dev/hidrawN stayed root-only and every write failed with
+    // "Permission denied" even though the protocol itself was right.
+    "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"05af\", MODE=\"0660\", GROUP=\"input\"\n",
+    "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"0d62\", MODE=\"0660\", GROUP=\"input\"\n",
+    // Acer embedded controller, exposed as an I2C-HID device. The
+    // physical mode-switch key reports here and nowhere else - it
+    // generates no input-subsystem event at all - so without read
+    // access the hotkey daemon cannot see the key and it stays dead,
+    // which is how it shipped.
+    //
+    // Matched on the Acer vendor id rather than one product id, so the
+    // key works on models whose EC reports a different product; the
+    // daemon still only opens the device it recognises (hotkey.rs).
+    // Read-only for the group on purpose - unlike the RGB controllers
+    // above nothing here ever writes to the EC, and this is the one
+    // device on the list that can change machine state.
+    "SUBSYSTEM==\"hidraw\", KERNELS==\"*:1025:*\", MODE=\"0640\", GROUP=\"input\"\n",
+    // The PredatorSense key on the Chicony keyboard (04F2:0117)
+    // reports HID usage 0xC9 on the keyboard interface and a vendor
+    // consumer usage on interface 2. The kernel maps neither, so the
+    // key generates no input event at all and does nothing - the
+    // daemon has to read its raw report instead.
+    //
+    // Interface 2 only: it carries consumer controls, not the
+    // keystroke stream, so this grants sight of the key without
+    // granting sight of what is typed. Matched on
+    // ID_USB_INTERFACE_NUM because the interface number and the
+    // vendor/product ids live on different parent devices, and every
+    // ATTRS match in one rule has to resolve on the same parent.
+    "SUBSYSTEM==\"hidraw\", ENV{ID_VENDOR_ID}==\"04f2\", ENV{ID_MODEL_ID}==\"0117\", ENV{ID_USB_INTERFACE_NUM}==\"02\", MODE=\"0640\", GROUP=\"input\"\n",
+);
+
+/// The Chicony keyboard's vendor lighting interface (3): the GUI streams colour and
+/// per-key frames to it unprivileged, so it needs read and write here, unlike the
+/// read-only interface 2 in [`HID_RULE`]. Through uaccess, for the user of the active
+/// local session only, not through the `input` group: nothing else unprivileged opens
+/// this interface (the hotkey daemon reads interface 2), and a group grant would hand
+/// every feature report of the controller to any process of any member, services
+/// included. The node stays 0660 root:root. Only on the models whose keyboard the app
+/// writes this way (`dmi::CHICONY_24BIT_MODELS`): the Helios 300 generation's keyboard
+/// has the same USB id, and nothing opens its interface 3.
+pub(crate) const CHICONY_LIGHTING_RULE: &str = "SUBSYSTEM==\"hidraw\", ENV{ID_VENDOR_ID}==\"04f2\", ENV{ID_MODEL_ID}==\"0117\", ENV{ID_USB_INTERFACE_NUM}==\"03\", TAG+=\"uaccess\"\n";
+
+/// facer's per-zone light bar node, `/dev/acer-lightbar-0`: facer creates it
+/// 0660 root:root, and this gives the user of the active local session access
+/// (an ACL logind moves with the session), so no other user and no system
+/// service can write it or make it call the firmware. Written everywhere:
+/// facer creates the node only on the chassis it is confirmed for.
+pub(crate) const LIGHT_BAR_SEAT_RULE: &str =
+    "SUBSYSTEM==\"acer-lightbar\", KERNEL==\"acer-lightbar-0\", TAG+=\"uaccess\"\n";
+
+/// The rules written to `path::SEAT_UDEV_RULE` on a machine whose DMI
+/// `product_name` is `product` ([`CHICONY_LIGHTING_RULE`] on the models that
+/// use it). Removed with that file on uninstall.
+fn seat_rules_for(product: &str) -> String {
+    let mut rules = LIGHT_BAR_SEAT_RULE.to_string();
+    if dmi::matches_model(product, dmi::CHICONY_24BIT_MODELS) {
+        rules.push_str(CHICONY_LIGHTING_RULE);
+    }
+    rules
+}
+
 impl Installer {
     fn install_permissions(&self) -> AppResult {
         let policy = format!(
@@ -1308,48 +1491,15 @@ impl Installer {
         )?;
         run(command::USERMOD, ["-aG", "input", self.user.name.as_str()])?;
 
-        const HID_RULE: &str = concat!(
-            "SUBSYSTEM==\"hidraw\", ATTRS{name}==\"ENEK5130:*\", MODE=\"0660\", GROUP=\"input\"\n",
-            "SUBSYSTEM==\"hidraw\", KERNELS==\"0018:0CF2:5130.*\", MODE=\"0660\", GROUP=\"input\"\n",
-            // 2024+ generation (issue #26): keyboard/cover-logo RGB moved off
-            // this I2C-HID chip entirely onto plain USB HID feature reports
-            // sent to a Sunrex keyboard controller and a Darfon logo
-            // controller (magic_rgb.rs). Neither ever got a udev rule, so
-            // /dev/hidrawN stayed root-only and every write failed with
-            // "Permission denied" even though the protocol itself was right.
-            "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"05af\", MODE=\"0660\", GROUP=\"input\"\n",
-            "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"0d62\", MODE=\"0660\", GROUP=\"input\"\n",
-            // Acer embedded controller, exposed as an I2C-HID device. The
-            // physical mode-switch key reports here and nowhere else - it
-            // generates no input-subsystem event at all - so without read
-            // access the hotkey daemon cannot see the key and it stays dead,
-            // which is how it shipped.
-            //
-            // Matched on the Acer vendor id rather than one product id, so the
-            // key works on models whose EC reports a different product; the
-            // daemon still only opens the device it recognises (hotkey.rs).
-            // Read-only for the group on purpose - unlike the RGB controllers
-            // above nothing here ever writes to the EC, and this is the one
-            // device on the list that can change machine state.
-            "SUBSYSTEM==\"hidraw\", KERNELS==\"*:1025:*\", MODE=\"0640\", GROUP=\"input\"\n",
-            // The PredatorSense key on the Chicony keyboard (04F2:0117)
-            // reports HID usage 0xC9 on the keyboard interface and a vendor
-            // consumer usage on interface 2. The kernel maps neither, so the
-            // key generates no input event at all and does nothing - the
-            // daemon has to read its raw report instead.
-            //
-            // Interface 2 only: it carries consumer controls, not the
-            // keystroke stream, so this grants sight of the key without
-            // granting sight of what is typed. Matched on
-            // ID_USB_INTERFACE_NUM because the interface number and the
-            // vendor/product ids live on different parent devices, and every
-            // ATTRS match in one rule has to resolve on the same parent.
-            "SUBSYSTEM==\"hidraw\", ENV{ID_VENDOR_ID}==\"04f2\", ENV{ID_MODEL_ID}==\"0117\", ENV{ID_USB_INTERFACE_NUM}==\"02\", MODE=\"0640\", GROUP=\"input\"\n",
-        );
         const EC_RULE: &str =
             "SUBSYSTEM==\"chardev\", KERNEL==\"ec\", MODE=\"0640\", GROUP=\"input\"\n";
         write_text(Path::new(path::HID_UDEV_RULE), HID_RULE, mode::REGULAR_FILE)?;
         write_text(Path::new(path::EC_UDEV_RULE), EC_RULE, mode::REGULAR_FILE)?;
+        write_text(
+            Path::new(path::SEAT_UDEV_RULE),
+            &seat_rules_for(dmi::product_name()),
+            mode::REGULAR_FILE,
+        )?;
         run(command::UDEVADM, ["control", "--reload-rules"])?;
         run(command::UDEVADM, ["trigger"])
     }
@@ -1392,6 +1542,9 @@ impl Installer {
             app::DBUS_ID,
         );
         write_text(Path::new(path::DESKTOP_ENTRY), &desktop, mode::REGULAR_FILE)?;
+        // An upgrade from the binary-named entry would otherwise list the app
+        // twice in the launcher.
+        fs::remove_file(path::LEGACY_DESKTOP_ENTRY).ok();
         run_optional(command::GTK_UPDATE_ICON_CACHE, [path::ICON_THEME]);
         run_optional(command::UPDATE_DESKTOP_DATABASE, [path::APPLICATIONS_DIR]);
         Ok(())
@@ -1876,8 +2029,10 @@ impl Installer {
             path::MODPROBE_CONFIG,
             path::HID_UDEV_RULE,
             path::EC_UDEV_RULE,
+            path::SEAT_UDEV_RULE,
             path::KEYBOARD_HWDB_FIX,
             path::DESKTOP_ENTRY,
+            path::LEGACY_DESKTOP_ENTRY,
             path::ICON,
             path::POLKIT_POLICY,
             path::POLKIT_RULE,
@@ -2037,8 +2192,112 @@ fn keyboard_hwdb_fix_for(product: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
     use std::os::unix::fs::MetadataExt;
     use tempfile::tempdir;
+
+    #[test]
+    fn the_release_directory_is_private_and_removed_at_the_end() {
+        let parent = tempdir().unwrap();
+        let base = private_temp_dir(parent.path(), "predator-sense-release-v0").unwrap();
+        let meta = fs::symlink_metadata(&base).unwrap();
+        assert!(meta.is_dir());
+        assert_eq!(meta.mode() & 0o777, 0o700);
+        let gui = base.join("source").join("predator-sense-gui");
+        fs::create_dir_all(&gui).unwrap();
+        fs::write(gui.join("file"), b"x").unwrap();
+        let mut installer = Installer {
+            language: Language::detect(),
+            user: UserContext {
+                name: "nobody".into(),
+                home: parent.path().to_path_buf(),
+                uid: 65534,
+            },
+            gui_dir: Some(gui),
+            release_dir: Some(base.clone()),
+        };
+        installer.remove_release_dir();
+        assert!(!base.exists(), "removed");
+        assert_eq!(
+            installer.gui_dir, None,
+            "no GUI directory left pointing into it"
+        );
+        assert_eq!(installer.release_dir, None);
+        // A GUI directory elsewhere (a source checkout) is kept.
+        installer.gui_dir = Some(parent.path().to_path_buf());
+        installer.remove_release_dir();
+        assert_eq!(installer.gui_dir.as_deref(), Some(parent.path()));
+    }
+
+    #[test]
+    fn a_private_temp_dir_is_new_and_owner_only() {
+        let parent = tempdir().unwrap();
+        let first = private_temp_dir(parent.path(), "rustup").unwrap();
+        let second = private_temp_dir(parent.path(), "rustup").unwrap();
+        assert_ne!(first, second);
+        for dir in [&first, &second] {
+            let meta = fs::symlink_metadata(dir).unwrap();
+            assert!(meta.is_dir());
+            assert_eq!(meta.mode() & 0o777, 0o700);
+            assert!(dir.starts_with(parent.path()));
+        }
+    }
+
+    /// `wait_until_stopped` against processes that exit after `exits_after`
+    /// of waiting (`None`: never), on a clock made of the sleeps it asks for.
+    fn simulate_stop(
+        limit: Duration,
+        exits_after: Option<Duration>,
+    ) -> (Vec<&'static str>, Duration) {
+        let waited = Cell::new(Duration::ZERO);
+        let left = wait_until_stopped(
+            limit,
+            Duration::from_millis(timing::PROCESS_STOP_POLL_MS),
+            || match exits_after {
+                Some(after) if waited.get() >= after => Vec::new(),
+                _ => vec![path::HELPER],
+            },
+            |step| waited.set(waited.get() + step),
+        );
+        (left, waited.get())
+    }
+
+    #[test]
+    fn nothing_running_is_not_waited_for() {
+        let (left, waited) = simulate_stop(Duration::from_secs(4), Some(Duration::ZERO));
+        assert!(left.is_empty());
+        assert_eq!(waited, Duration::ZERO);
+    }
+
+    #[test]
+    fn the_wait_ends_as_soon_as_everything_has_exited() {
+        let exits_after = Some(Duration::from_millis(250));
+        let (left, waited) = simulate_stop(Duration::from_secs(4), exits_after);
+        assert!(left.is_empty());
+        assert!(waited < Duration::from_millis(400), "{waited:?}");
+    }
+
+    #[test]
+    fn what_never_exits_is_reported_after_exactly_the_limit() {
+        let limit = Duration::from_millis(4_050);
+        let (left, waited) = simulate_stop(limit, None);
+        assert_eq!(left, [path::HELPER]);
+        assert_eq!(waited, limit);
+    }
+
+    #[test]
+    fn an_upgrade_outwaits_a_helper_finishing_the_command_in_flight() {
+        // On SIGTERM the helper waits up to IN_FLIGHT_WAIT for a command in
+        // flight, then hands back a keyboard timer it switched off and exits.
+        // The upgrade used to give up after its 1 s grace.
+        let grace = Duration::from_secs(timing::PROCESS_SHUTDOWN_GRACE_SECS);
+        let total = Duration::from_secs(timing::PROCESS_STOP_WAIT_SECS);
+        let helper_exit = crate::helper::IN_FLIGHT_WAIT + Duration::from_millis(500);
+        let margin = Duration::from_secs(1);
+        assert!(total >= helper_exit + margin, "a margin to spare");
+        let (left, _) = simulate_stop(total - grace, Some(helper_exit - grace));
+        assert!(left.is_empty(), "the helper was still being waited for");
+    }
 
     #[test]
     fn parses_cli_without_silently_falling_back_to_menu() {
@@ -2294,5 +2553,54 @@ mod tests {
         assert!(rule.contains("pnPredator*PH*315-54:*"));
         assert!(rule.contains(" KEYBOARD_KEY_ef=kbdillumup"));
         assert!(rule.contains(" KEYBOARD_KEY_f0=kbdillumdown"));
+    }
+}
+
+#[cfg(test)]
+mod hid_rule_tests {
+    use super::{seat_rules_for, HID_RULE};
+
+    const LIGHTING_LINE: &str = "SUBSYSTEM==\"hidraw\", ENV{ID_VENDOR_ID}==\"04f2\", ENV{ID_MODEL_ID}==\"0117\", ENV{ID_USB_INTERFACE_NUM}==\"03\", TAG+=\"uaccess\"";
+
+    fn lighting_lines(rules: &str) -> usize {
+        rules.lines().filter(|l| *l == LIGHTING_LINE).count()
+    }
+
+    #[test]
+    fn chicony_lighting_interface_rule_appears_once_on_the_listed_models_only() {
+        assert_eq!(lighting_lines(&seat_rules_for("Predator PH16-71")), 1);
+        // The Helios 300 generation: the same USB id, its interface 3 never opened.
+        assert_eq!(lighting_lines(&seat_rules_for("Predator PH317-56")), 0);
+        assert_eq!(lighting_lines(&seat_rules_for("")), 0, "no DMI name");
+        // Nowhere in the HID rules, which every model gets, and never to a group.
+        assert!(!HID_RULE.contains("ID_USB_INTERFACE_NUM}==\"03\""));
+        assert!(!seat_rules_for("Predator PH16-71").contains("GROUP="));
+    }
+
+    #[test]
+    fn the_light_bar_node_goes_to_the_active_session_only() {
+        assert!(super::path::SEAT_UDEV_RULE.starts_with("/etc/udev/rules.d/70-"));
+        for product in ["Predator PH16-71", "Predator PH317-56", ""] {
+            let rules = seat_rules_for(product);
+            let lines: Vec<_> = rules
+                .lines()
+                .filter(|l| l.contains("acer-lightbar"))
+                .collect();
+            assert_eq!(
+                lines,
+                ["SUBSYSTEM==\"acer-lightbar\", KERNEL==\"acer-lightbar-0\", TAG+=\"uaccess\""]
+            );
+            assert!(!rules.contains("GROUP=") && !rules.contains("MODE="));
+        }
+    }
+
+    #[test]
+    fn chicony_interface_two_rule_stays_read_only() {
+        let lines: Vec<_> = HID_RULE
+            .lines()
+            .filter(|l| l.contains("ID_USB_INTERFACE_NUM}==\"02\""))
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("MODE=\"0640\""));
     }
 }

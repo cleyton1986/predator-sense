@@ -1,0 +1,64 @@
+{
+  "last_profile": "balanced",
+  "auto_apply_on_start": false,
+  "minimize_on_close": true,
+  "rgb_static_zones": [
+    {
+      "zone": 1,
+      "red": 255,
+      "green": 0,
+      "blue": 0
+    },
+    {
+      "zone": 2,
+      "red": 0,
+      "green": 255,
+      "blue": 0
+    },
+    {
+      "zone": 3,
+      "red": 0,
+      "green": 0,
+      "blue": 255
+    },
+    {
+      "zone": 4,
+      "red": 255,
+      "green": 255,
+      "blue": 255
+    }
+  ],
+  "rgb_brightness": 60,
+  "rgb_is_static": true,
+  "rgb_dynamic_last": {
+    "mode": "Breath",
+    "speed": 3,
+    "brightness": 90,
+    "direction": "LeftToRight",
+    "red": 0,
+    "green": 174,
+    "blue": 199
+  },
+  "rgb_dynamic_effects": {
+    "Breath": {
+      "speed": 3,
+      "direction": "LeftToRight"
+    },
+    "Wave": {
+      "speed": 7,
+      "direction": null
+    }
+  },
+  "cover_logo": {
+    "enabled": true,
+    "config": {
+      "mode": "Breath",
+      "speed": 4,
+      "brightness": 45,
+      "direction": "RightToLeft",
+      "red": 138,
+      "green": 43,
+      "blue": 255
+    }
+  }
+}

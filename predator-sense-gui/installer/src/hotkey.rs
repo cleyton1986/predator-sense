@@ -507,7 +507,7 @@ pub(crate) fn run() -> AppResult {
             }
             if devices[index].2 == DeviceKind::PredatorKey {
                 match read_predator_key(&mut devices[index].1) {
-                    Ok(true) => {
+                    Ok(ConsumerReport::PredatorKey) => {
                         if last_activation.elapsed()
                             > Duration::from_secs(timing::HOTKEY_DEBOUNCE_SECS)
                         {
@@ -516,7 +516,13 @@ pub(crate) fn run() -> AppResult {
                             run_predator_key_action(&mut logger, &config);
                         }
                     }
-                    Ok(false) => {}
+                    // No debounce: every press is one step of the keyboard's
+                    // own brightness, and the app reads the level it ends on
+                    // (or takes the step itself while it draws the keyboard).
+                    Ok(ConsumerReport::Brightness(key)) => {
+                        notify_keyboard_brightness(&mut logger, key)
+                    }
+                    Ok(ConsumerReport::Other) => {}
                     Err(error) => {
                         logger.error(format!("Tecla PredatorSense: leitura falhou: {error}"));
                         // Queued for reopening like every other branch here. It
@@ -828,6 +834,12 @@ enum DeviceKind {
 /// carries consumer controls rather than the keystroke stream, so watching it
 /// does not mean watching what is typed.
 const PREDATOR_KEY_HID_REPORT: [u8; 3] = [0x04, 0x81, 0xFF];
+/// The Fn backlight keys, up and down, on the same node (PH16-71). The
+/// keyboard has already changed its own brightness when these arrive; they
+/// only say that it did. With Fn held the node also sends `04 8a ff`, and
+/// `04 00 00` on release; neither means anything here.
+const BACKLIGHT_UP_HID_REPORT: [u8; 3] = [0x04, 0x7C, 0xFF];
+const BACKLIGHT_DOWN_HID_REPORT: [u8; 3] = [0x04, 0x7D, 0xFF];
 const PREDATOR_KEY_HID_VENDOR: &str = "04F2";
 const PREDATOR_KEY_HID_PRODUCT: &str = "0117";
 const PREDATOR_KEY_HID_INTERFACE: &str = "02";
@@ -839,16 +851,17 @@ const PREDATOR_KEY_HID_INTERFACE: &str = "02";
 /// interface 2 there too and treat any report starting `04 81 FF` as the
 /// PredatorSense key, launching the app (or, if the user bound a command,
 /// running it) when some ordinary consumer key is pressed.
-const PREDATOR_KEY_MODELS: &[&str] = &["PH16-71"];
-
-/// True when DMI names one of [`PREDATOR_KEY_MODELS`], compared as whole
+/// True when DMI names one of
+/// [`predator_sense_protocol::dmi::PREDATOR_KEY_MODELS`], compared as whole
 /// whitespace-separated words so `PH16-71` does not match `PH16-71X`.
+///
+/// This now honours `PREDATOR_SENSE_FORCE_MODEL`, which the GUI always did and
+/// this did not: forcing a model used to give you the rebinding page without
+/// the daemon that makes the key work.
 fn chassis_has_predator_key() -> bool {
-    let Ok(name) = fs::read_to_string(path::PRODUCT_NAME) else {
-        return false;
-    };
-    name.split_whitespace()
-        .any(|part| PREDATOR_KEY_MODELS.iter().any(|m| part.eq_ignore_ascii_case(m)))
+    predator_sense_protocol::dmi::product_matches(
+        predator_sense_protocol::dmi::PREDATOR_KEY_MODELS,
+    )
 }
 
 /// Locates that node. `None` when this is not a chassis with the key, when
@@ -886,10 +899,57 @@ fn find_predator_key_hid() -> Option<PathBuf> {
     None
 }
 
-fn read_predator_key(file: &mut File) -> Result<bool, std::io::Error> {
+/// What one report on the PredatorSense key's node was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsumerReport {
+    PredatorKey,
+    /// An Fn backlight key: the keyboard's brightness changed, up or down.
+    Brightness(BacklightKey),
+    Other,
+}
+
+/// Which Fn backlight key was pressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BacklightKey {
+    Up,
+    Down,
+}
+
+impl BacklightKey {
+    /// Its name in the app action's parameter.
+    fn name(self) -> &'static str {
+        match self {
+            BacklightKey::Up => app::KEYBOARD_BRIGHTNESS_UP,
+            BacklightKey::Down => app::KEYBOARD_BRIGHTNESS_DOWN,
+        }
+    }
+}
+
+/// The Fn backlight key a report is, if it is one.
+fn backlight_key(buffer: &[u8]) -> Option<BacklightKey> {
+    if buffer.starts_with(&BACKLIGHT_UP_HID_REPORT) {
+        Some(BacklightKey::Up)
+    } else if buffer.starts_with(&BACKLIGHT_DOWN_HID_REPORT) {
+        Some(BacklightKey::Down)
+    } else {
+        None
+    }
+}
+
+fn classify_consumer_report(buffer: &[u8]) -> ConsumerReport {
+    if buffer.starts_with(&PREDATOR_KEY_HID_REPORT) {
+        ConsumerReport::PredatorKey
+    } else if let Some(key) = backlight_key(buffer) {
+        ConsumerReport::Brightness(key)
+    } else {
+        ConsumerReport::Other
+    }
+}
+
+fn read_predator_key(file: &mut File) -> Result<ConsumerReport, std::io::Error> {
     let mut buffer = [0u8; 64];
     let read = file.read(&mut buffer)?;
-    Ok(buffer[..read].starts_with(&PREDATOR_KEY_HID_REPORT))
+    Ok(classify_consumer_report(&buffer[..read]))
 }
 
 /// Runs whatever the user bound the PredatorSense key to.
@@ -1391,6 +1451,88 @@ fn activate_app(logger: &mut Logger) {
         }
     } else {
         logger.info("Aplicação ativada");
+    }
+}
+
+/// The keyboard-brightness action's parameter for `key`, as `gdbus` takes it:
+/// GVariant text for an array of one variant holding the key's name.
+fn keyboard_brightness_parameter(key: BacklightKey) -> String {
+    format!("[<'{}'>]", key.name())
+}
+
+/// The `gdbus` arguments that run the app's keyboard-brightness action with
+/// `parameter` ([`keyboard_brightness_parameter`]).
+/// `ActivateAction` runs only the action: unlike `Activate` it does not raise
+/// the window. The timeout bounds a call to an app that holds its name but
+/// does not answer, which would otherwise keep `gdbus` waiting 25 s per press.
+fn keyboard_brightness_call_args(parameter: &str) -> [&str; 13] {
+    [
+        "call",
+        "--session",
+        "--timeout",
+        "2",
+        "--dest",
+        app::DBUS_ID,
+        "--object-path",
+        app::DBUS_OBJECT_PATH,
+        "--method",
+        app::DBUS_ACTIVATE_ACTION_METHOD,
+        app::KEYBOARD_BRIGHTNESS_KEY_ACTION,
+        parameter,
+        "{}",
+    ]
+}
+
+/// `gdbus` prints `NameHasOwner`'s reply as `(true,)` or `(false,)`.
+fn name_has_owner_reply(stdout: &str) -> bool {
+    stdout.trim() == "(true,)"
+}
+
+/// Whether a running app owns its bus name. Asked before the brightness call
+/// because that call must never start the app: with nobody to update there is
+/// nothing to do.
+fn app_owns_bus_name() -> bool {
+    let mut bus = Command::new(command::GDBUS);
+    bus.args([
+        "call",
+        "--session",
+        "--timeout",
+        "1",
+        "--dest",
+        "org.freedesktop.DBus",
+        "--object-path",
+        "/org/freedesktop/DBus",
+        "--method",
+        "org.freedesktop.DBus.NameHasOwner",
+        app::DBUS_ID,
+    ])
+    .stdin(Stdio::null())
+    .stderr(Stdio::null());
+    ensure_display(&mut bus);
+    bus.output().is_ok_and(|output| {
+        output.status.success() && name_has_owner_reply(&String::from_utf8_lossy(&output.stdout))
+    })
+}
+
+/// The Fn backlight keys change the brightness inside the keyboard. Tells a
+/// running app which key it was; the app reads the new level and saves it, so
+/// that its next write does not put the old one back. Does nothing when the
+/// app is not running: the new level then goes unsaved, and the
+/// app's restore at its next start brings the saved one back.
+fn notify_keyboard_brightness(logger: &mut Logger, key: BacklightKey) {
+    if !app_owns_bus_name() {
+        logger.debug("Brilho do teclado mudou pelas teclas Fn; aplicação não está rodando");
+        return;
+    }
+    let parameter = keyboard_brightness_parameter(key);
+    let mut bus = Command::new(command::GDBUS);
+    bus.args(keyboard_brightness_call_args(&parameter))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    ensure_display(&mut bus);
+    match spawn_reaped(&mut bus) {
+        Ok(_) => logger.debug("Brilho do teclado mudou pelas teclas Fn; aplicação avisada"),
+        Err(error) => logger.error(format!("Falha ao chamar gdbus: {error}")),
     }
 }
 
@@ -2333,5 +2475,74 @@ mod tests {
     fn resume_detection_ignores_normal_clock_drift() {
         assert!(!resumed_since(2.0, 2.1));
         assert!(resumed_since(2.0, 2.6));
+    }
+
+    #[test]
+    fn only_the_fn_backlight_keys_are_brightness_reports() {
+        assert_eq!(backlight_key(&[0x04, 0x7c, 0xff]), Some(BacklightKey::Up));
+        assert_eq!(
+            backlight_key(&[0x04, 0x7d, 0xff, 0x00, 0x00]),
+            Some(BacklightKey::Down)
+        );
+        // The PredatorSense key, Fn held, and the release.
+        assert_eq!(backlight_key(&[0x04, 0x81, 0xff]), None);
+        assert_eq!(backlight_key(&[0x04, 0x8a, 0xff]), None);
+        assert_eq!(backlight_key(&[0x04, 0x00, 0x00]), None);
+        assert_eq!(backlight_key(&[0x04, 0x7c]), None);
+        assert_eq!(backlight_key(&[]), None);
+    }
+
+    #[test]
+    fn one_read_of_the_consumer_node_tells_the_keys_apart() {
+        use BacklightKey::{Down, Up};
+        use ConsumerReport::{Brightness, Other, PredatorKey};
+        assert_eq!(classify_consumer_report(&[0x04, 0x81, 0xff]), PredatorKey);
+        assert_eq!(classify_consumer_report(&[0x04, 0x81, 0xff, 0x00]), PredatorKey);
+        assert_eq!(
+            classify_consumer_report(&[0x04, 0x7c, 0xff]),
+            Brightness(Up)
+        );
+        assert_eq!(
+            classify_consumer_report(&[0x04, 0x7d, 0xff]),
+            Brightness(Down)
+        );
+        assert_eq!(classify_consumer_report(&[0x04, 0x8a, 0xff]), Other);
+        assert_eq!(classify_consumer_report(&[0x04, 0x00, 0x00]), Other);
+        assert_eq!(classify_consumer_report(&[]), Other);
+    }
+
+    #[test]
+    fn the_bus_answers_whether_the_app_owns_its_name() {
+        assert!(name_has_owner_reply("(true,)\n"));
+        assert!(!name_has_owner_reply("(false,)\n"));
+        assert!(!name_has_owner_reply(""));
+    }
+
+    #[test]
+    fn the_brightness_event_runs_the_app_action_without_activating_it() {
+        let up = keyboard_brightness_parameter(BacklightKey::Up);
+        assert_eq!(up, "[<'up'>]");
+        assert_eq!(
+            keyboard_brightness_parameter(BacklightKey::Down),
+            "[<'down'>]"
+        );
+        assert_eq!(
+            keyboard_brightness_call_args(&up),
+            [
+                "call",
+                "--session",
+                "--timeout",
+                "2",
+                "--dest",
+                "com.predator.sense",
+                "--object-path",
+                "/com/predator/sense",
+                "--method",
+                "org.freedesktop.Application.ActivateAction",
+                "keyboard-brightness-key",
+                "[<'up'>]",
+                "{}",
+            ]
+        );
     }
 }

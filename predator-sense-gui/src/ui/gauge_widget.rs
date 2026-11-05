@@ -1,6 +1,8 @@
 use gtk4::prelude::*;
 use gtk4::{self as gtk};
+use std::cell::Cell;
 use std::f64::consts::PI;
+use std::rc::Rc;
 
 /// Create a circular gauge matching PredatorSense dashed ring style
 pub fn create_gauge(label_text: &str, value: Option<f64>, max_value: f64) -> gtk::Box {
@@ -11,7 +13,14 @@ pub fn create_gauge(label_text: &str, value: Option<f64>, max_value: f64) -> gtk
 /// it. For layouts that show the name/value as text elsewhere (e.g. a card
 /// with a dedicated info column) and only want the ring as a plain visual
 /// indicator on its own.
-pub fn create_bare_ring(value: Option<f64>, max_value: f64, size: i32) -> gtk::DrawingArea {
+///
+/// It draws whatever `value` holds: set it and queue a draw to move the ring
+/// without building it again.
+pub fn create_bare_ring(
+    value: Rc<Cell<Option<f64>>>,
+    max_value: f64,
+    size: i32,
+) -> gtk::DrawingArea {
     let drawing_area = gtk::DrawingArea::new();
     drawing_area.set_size_request(size, size);
     drawing_area.set_halign(gtk::Align::Center);
@@ -33,7 +42,7 @@ pub fn create_bare_ring(value: Option<f64>, max_value: f64, size: i32) -> gtk::D
         cr.arc(cx, cy, radius, 0.0, 2.0 * PI);
         let _ = cr.stroke();
 
-        if let Some(val) = value {
+        if let Some(val) = value.get() {
             let fraction = (val / max_value).clamp(0.0, 1.0);
             let start = -PI / 2.0;
             let end = start + fraction * 2.0 * PI;

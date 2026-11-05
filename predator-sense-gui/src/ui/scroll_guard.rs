@@ -21,7 +21,13 @@ const LINES_PER_TICK: f64 = 3.0;
 
 /// Redirects `widget`'s scroll wheel to the page it sits on.
 ///
-/// Call it on every `Scale` that lives inside a scrollable page.
+/// Call it on every control inside a scrollable page that handles the wheel
+/// itself. `GtkScale` is the obvious one. `AdwComboRow` and `AdwSpinRow` are
+/// the same hazard and worse: a wheel tick over one silently changes which
+/// option is selected, and a dropdown has no visible "handle" to warn the user
+/// it is interactive in that way. That is not hypothetical - three combo rows
+/// were added to the Mode page without this and a scroll past them rewrote the
+/// battery profile setting.
 pub fn redirect_scroll_to_page(widget: &impl IsA<gtk::Widget>) {
     let controller = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     // Capture, so this runs before the range's own scroll handling rather
