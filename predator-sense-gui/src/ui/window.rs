@@ -1451,8 +1451,8 @@ fn build_main_content(app: &adw::Application, window: &gtk::ApplicationWindow) -
     main_overlay.set_hexpand(true);
     main_overlay.set_vexpand(true);
 
-    // Background recovered from the visual-redesign POC (Claude Design
-    // canvas, 2026-09-07, our own design - discarded overall, but the user
+    // Background recovered from the visual-redesign POC (2026-09-07,
+    // our own design - discarded overall, but the user
     // liked this specific background and asked to bring it into the real
     // app): a near-black vertical gradient, a soft cyan glow anchored just
     // above the top-left corner, and a faint 34px technical grid on top.

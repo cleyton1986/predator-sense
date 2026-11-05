@@ -147,6 +147,8 @@ pub struct ThemesPane {
     /// The theme and settings the panel's widgets were built for.
     built_for: RefCell<Option<(String, Vec<String>)>>,
     react_row: gtk::Box,
+    /// "Turn on to light the keys you press.", shown only while the switch is off.
+    react_hint: gtk::Label,
     reset: gtk::Button,
     react_switch: gtk::Switch,
     gallery: Rc<Gallery>,
@@ -269,8 +271,8 @@ impl ThemesPane {
             settings_box.add_css_class("lighting-theme-settings");
             panel.append(&settings_box);
 
-            // "React to typing": for a theme that can react to key presses, the label only.
-            let (react_row, _) = lighting_page::row(t("lighting_react_to_typing"), None);
+            // "React to typing": for a theme that can react to key presses, with a hint while off.
+            let (react_row, react_hint) = lighting_page::row(t("lighting_react_to_typing"), None);
             let react_switch = gtk::Switch::new();
             react_switch.set_valign(gtk::Align::Center);
             react_switch.update_property(&[gtk::accessible::Property::Label(t(
@@ -395,6 +397,7 @@ impl ThemesPane {
                 built_settings: RefCell::new(Vec::new()),
                 built_for: RefCell::new(None),
                 react_row,
+                react_hint,
                 reset,
                 react_switch,
                 gallery,
@@ -432,6 +435,7 @@ impl ThemesPane {
                 let Some(pane) = weak.upgrade() else {
                     return;
                 };
+                pane.show_react_hint();
                 if pane.suppress.get() {
                     return;
                 }
@@ -515,6 +519,16 @@ impl ThemesPane {
         if self.react_switch.is_active() != shown.react_to_typing {
             self.react_switch.set_active(shown.react_to_typing);
         }
+        self.show_react_hint();
+    }
+
+    fn show_react_hint(&self) {
+        let hint = if self.react_switch.is_active() {
+            ""
+        } else {
+            t("lighting_react_to_typing_hint")
+        };
+        lighting_page::set_text_or_hide(&self.react_hint, hint);
     }
 
     // Colours.
