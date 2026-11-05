@@ -22,3 +22,4 @@ pub mod states;
 pub mod theme_gallery;
 pub mod themes;
 pub mod themes_model;
+pub mod zone_sim;

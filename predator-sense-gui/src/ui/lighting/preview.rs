@@ -556,7 +556,7 @@ fn plain_legend_size(u: f64, label: &str) -> f64 {
 /// Lays the plain legends out once with Cairo's own text (Sans at its size,
 /// [`plain_legend_size`]), each centred on its key; the media keys and the PS key as symbols.
 fn lay_plain_legends(geometry: &Geometry) -> Vec<PlainLegend> {
-    if !geometry.real_keys {
+    if !geometry.legends {
         return Vec::new();
     }
     let Some(cr) = cairo::ImageSurface::create(cairo::Format::ARgb32, 1, 1)
@@ -1065,20 +1065,17 @@ fn paint_glow(
     device: nodes::Device,
     high_contrast: bool,
     bar: Option<(Rect, [[f64; 3]; 3])>,
-    flat: bool,
 ) {
     let u = canvas.geometry.u;
     // A machine without a keyboard the app drives has no chassis drawn: its bar, or its
     // logo, alone.
     let chassis = canvas.geometry.chassis;
-    let chassis_fill = chassis.map(|c| (nodes::rounded(c, 0.5 * u), hex_rgb(0x0c0d11)));
-    if flat {
-        // Flat keys carry their own colour: no halo under them, only the chassis.
-        let (width, height) = canvas.size;
-        nodes::glow(snapshot, &[], width, height, chassis_fill);
-    } else {
-        glow(snapshot, canvas, bar, chassis_fill);
-    }
+    glow(
+        snapshot,
+        canvas,
+        bar,
+        chassis.map(|c| (nodes::rounded(c, 0.5 * u), hex_rgb(0x0c0d11))),
+    );
     if let Some(chassis) = chassis {
         let line = (u * 0.03).max(if high_contrast { 1.5 } else { 1.0 });
         let edge = nodes::rgba(chassis_edge(high_contrast), 1.0);
@@ -1301,11 +1298,7 @@ fn paint(snapshot: &gtk::Snapshot, canvas: &mut Canvas, state: &State, device: n
         let zones = bar_zones(state.runner.bar()).map(|c| dim(c, state.brightness.bar));
         (strip, zones)
     });
-    // The four-zone keyboard is drawn the way the app always drew it: flat keys in the
-    // zone's colour, with no glow around them. The glow suits a per-key keyboard, where
-    // each key is its own light; around a zone's worth of keys it only smears.
-    let flat = state.hw.keyboard == Some(KeyboardKind::Zones4);
-    paint_glow(snapshot, canvas, state, device, high_contrast, bar, flat);
+    paint_glow(snapshot, canvas, state, device, high_contrast, bar);
 
     let line = (u * 0.035).max(if high_contrast { 1.5 } else { 1.0 });
     // A keyboard on its own firmware look: unlit caps with a neutral edge, no colour.
@@ -1313,9 +1306,6 @@ fn paint(snapshot: &gtk::Snapshot, canvas: &mut Canvas, state: &State, device: n
     for (key, c) in canvas.geometry.keys.iter().zip(&canvas.colours) {
         let (cap, (edge, alpha)) = if firmware {
             (CAP, (unlit_edge(high_contrast), 1.0))
-        } else if flat {
-            // The key is the zone's colour, edge and all.
-            (led(*c), (led(*c), 1.0))
         } else {
             (keycap(*c), key_edge(*c, high_contrast))
         };
@@ -1328,8 +1318,8 @@ fn paint(snapshot: &gtk::Snapshot, canvas: &mut Canvas, state: &State, device: n
             &nodes::rgba(edge, alpha),
         );
     }
-    if canvas.geometry.real_keys {
-        if state.choosing || high_contrast {
+    if canvas.geometry.legends {
+        if (state.choosing || high_contrast) && canvas.geometry.real_keys {
             paint_big_legends(snapshot, canvas, state.font_scale, device);
         } else {
             paint_plain_legends(snapshot, canvas, device);

@@ -31,6 +31,8 @@ const ZONE_STEP: f64 = 0.1;
 /// At most this many steps catch up in one tick, as the reference design's loop.
 pub const MAX_STEPS: usize = 6;
 
+use super::zone_sim;
+
 /// What one light runs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Run {
@@ -42,6 +44,14 @@ pub enum Run {
     },
     /// The per-key picture, one colour per key slot.
     Picture(Vec<[u8; 3]>),
+    /// A four-zone keyboard's own dynamic effect (`zone_sim`): its effect number, the
+    /// keyboard's speed 0..=9, direction and colour.
+    Zones4 {
+        mode: u8,
+        speed: u8,
+        direction: u8,
+        colour: [u8; 3],
+    },
     /// Nothing lit: Off, or no state for this light.
     Dark,
     /// The light shows its own firmware look, which the app neither sets nor knows: the
@@ -238,7 +248,8 @@ pub fn preview_fps(spec: &Spec) -> u32 {
                 .iter()
                 .find(|(_, ids)| ids.contains(&id.as_str()))
                 .map_or(SLOW_PREVIEW_FPS, |(fps, _)| *fps),
-            Run::Picture(_) | Run::Dark | Run::Firmware => SLOW_PREVIEW_FPS,
+            // The zone effects moved at about 16 frames a second on the page they come from.
+            Run::Zones4 { .. } | Run::Picture(_) | Run::Dark | Run::Firmware => SLOW_PREVIEW_FPS,
         })
         .max()
         .unwrap_or(SLOW_PREVIEW_FPS)
@@ -277,18 +288,13 @@ fn other_keyboard(m: &lighting_model::ManualSetup, kind: Option<KeyboardKind>) -
                 );
             }
             match &keyboard.dynamic_last {
-                Some(e) => {
-                    let id = if e.mode.needs_color() {
-                        "hw.breathing"
-                    } else {
-                        "hw.neon"
-                    };
-                    effect(
-                        id,
-                        speed_of(e.speed, 9),
-                        vec![colour_hex([e.red, e.green, e.blue])],
-                    )
-                }
+                // The keyboard's own effects, drawn the way this keyboard shows them.
+                Some(e) => Run::Zones4 {
+                    mode: e.mode as u8,
+                    speed: e.speed,
+                    direction: e.direction as u8,
+                    colour: [e.red, e.green, e.blue],
+                },
                 None => Run::Dark,
             }
         }
@@ -385,6 +391,15 @@ enum Light {
         start: f64,
     },
     Still(Vec<[u8; 3]>),
+    /// A four-zone keyboard's effect, drawn by `zone_sim` from the time since it started.
+    Zones {
+        mode: u8,
+        speed: u8,
+        direction: u8,
+        colour: [u8; 3],
+        out: Vec<[u8; 3]>,
+        start: f64,
+    },
 }
 
 impl Light {
@@ -408,25 +423,65 @@ impl Light {
                     .map(|key| picture.get(key.slot as usize).copied().unwrap_or([0; 3]))
                     .collect(),
             ),
+            Run::Zones4 {
+                mode,
+                speed,
+                direction,
+                colour,
+            } => {
+                let mut out = vec![[0; 3]; layout.len()];
+                for (slot, c) in out
+                    .iter_mut()
+                    .zip(zone_sim::colours(*mode, 0.0, *speed, *direction, *colour))
+                {
+                    *slot = c;
+                }
+                Light::Zones {
+                    mode: *mode,
+                    speed: *speed,
+                    direction: *direction,
+                    colour: *colour,
+                    out,
+                    start,
+                }
+            }
             Run::Dark | Run::Firmware => Light::Still(vec![[0; 3]; layout.len()]),
         }
     }
 
     fn frame(&mut self, t: f64, dt: f64, input: &Input<'_>) {
-        if let Light::Effect { fx, out, start } = self {
-            let frame = fx.frame(t - *start, dt, input);
-            out.clear();
-            out.extend_from_slice(frame);
+        match self {
+            Light::Effect { fx, out, start } => {
+                let frame = fx.frame(t - *start, dt, input);
+                out.clear();
+                out.extend_from_slice(frame);
+            }
+            Light::Zones {
+                mode,
+                speed,
+                direction,
+                colour,
+                out,
+                start,
+            } => {
+                let frame = zone_sim::colours(*mode, t - *start, *speed, *direction, *colour);
+                for (slot, c) in out.iter_mut().zip(frame) {
+                    *slot = c;
+                }
+            }
+            Light::Still(_) => {}
         }
     }
 
     /// Runs the look `steps` frames further at once, ending at the runner's time `t`, as if
     /// it had started that much earlier.
     fn run_on(&mut self, t: f64, steps: usize, input: &Input<'_>) {
-        let Light::Effect { start, .. } = self else {
-            return;
-        };
-        *start -= STEP * steps as f64;
+        match self {
+            Light::Effect { start, .. } | Light::Zones { start, .. } => {
+                *start -= STEP * steps as f64;
+            }
+            Light::Still(_) => return,
+        }
         for k in 1..=steps {
             self.frame(t - STEP * (steps - k) as f64, STEP, input);
         }
@@ -434,7 +489,7 @@ impl Light {
 
     fn colours(&self) -> &[[u8; 3]] {
         match self {
-            Light::Effect { out, .. } => out,
+            Light::Effect { out, .. } | Light::Zones { out, .. } => out,
             Light::Still(c) => c,
         }
     }
@@ -731,6 +786,9 @@ pub struct Geometry {
     pub keys: Vec<DrawnKey>,
     /// The keys are the PH16-71's (drawn with their legends, clickable one by one).
     pub real_keys: bool,
+    /// The keys carry their legends: the PH16-71's own, and a four-zone keyboard drawn on
+    /// that layout (where a key is a zone's colour and is not a light of its own).
+    pub legends: bool,
     /// The bar: its lit strip, and the area a click selects it in.
     pub bar: Option<(Rect, Rect)>,
     /// The lid logo, where the scene draws it: on a machine whose only light is the logo.
@@ -807,6 +865,7 @@ fn without_keyboard(width: f64, height: f64, with_bar: bool) -> Geometry {
         chassis: None,
         keys: Vec::new(),
         real_keys: false,
+        legends: false,
         bar,
         logo,
     }
@@ -823,20 +882,10 @@ struct Generic {
 /// The generic keyboard, built once.
 fn generic() -> &'static Generic {
     static GENERIC: std::sync::OnceLock<Generic> = std::sync::OnceLock::new();
-    GENERIC.get_or_init(|| build_generic(false))
+    GENERIC.get_or_init(build_generic)
 }
 
-/// The generic keyboard with the numeric keypad of a 15 or 17 inch laptop, built once. The
-/// four zones span all of it, keypad included, as they do on the real keyboard.
-fn generic_with_keypad() -> &'static Generic {
-    static GENERIC: std::sync::OnceLock<Generic> = std::sync::OnceLock::new();
-    GENERIC.get_or_init(|| build_generic(true))
-}
-
-/// Space between the main block and the keypad, in key units.
-const KEYPAD_GAP: f64 = 0.3;
-
-fn build_generic(with_keypad: bool) -> Generic {
+fn build_generic() -> Generic {
     const ROWS: [(f64, &[f64]); 6] = [
         (0.66, &[1.0; 15]),
         (
@@ -863,51 +912,20 @@ fn build_generic(with_keypad: bool) -> Generic {
         ),
         (0.9, &[1.25, 1.0, 1.25, 6.25, 1.25, 1.0, 1.0, 1.0, 1.0]),
     ];
-    // The keypad: per row, its keys' widths and how many rows each spans (`+` and `Enter` are
-    // two rows tall). Row 0 carries the four media keys above it.
-    const KEYPAD: [&[(f64, usize)]; 6] = [
-        &[(1.0, 1), (1.0, 1), (1.0, 1), (1.0, 1)],
-        &[(1.0, 1), (1.0, 1), (1.0, 1), (1.0, 1)],
-        &[(1.0, 1), (1.0, 1), (1.0, 1), (1.0, 2)],
-        &[(1.0, 1), (1.0, 1), (1.0, 1)],
-        &[(1.0, 1), (1.0, 1), (1.0, 1), (1.0, 2)],
-        &[(2.0, 1), (1.0, 1)],
-    ];
-    let total = if with_keypad { 15.0 + KEYPAD_GAP + 4.0 } else { 15.0 };
-    let zone_of = |centre: f64| ((centre / total * 4.0).floor() as usize).min(3);
     let mut keys = Vec::new();
     let mut y = 0.0;
-    let mut row_tops = Vec::new();
-    let mut row_heights = Vec::new();
     for (h, widths) in ROWS {
-        row_tops.push(y);
-        row_heights.push(h);
         let mut x = 0.0;
         for &w in widths {
-            keys.push((x, y, w, h, zone_of(x + w / 2.0)));
+            let zone = (((x + w / 2.0) / 15.0 * 4.0).floor() as usize).min(3);
+            keys.push((x, y, w, h, zone));
             x += w;
         }
         y += h + 0.1;
     }
-    if with_keypad {
-        let x0 = 15.0 + KEYPAD_GAP;
-        for (row, pieces) in KEYPAD.iter().enumerate() {
-            let mut x = x0;
-            // `+` (rows 2 and 3) and `Enter` (rows 4 and 5) are one key each, so the rows
-            // under them list one column less.
-            for &(w, span) in pieces.iter() {
-                let h = row_heights[row..row + span]
-                    .iter()
-                    .sum::<f64>()
-                    + 0.1 * (span as f64 - 1.0);
-                keys.push((x, row_tops[row], w, h, zone_of(x + w / 2.0)));
-                x += w;
-            }
-        }
-    }
     Generic {
         keys,
-        width: total,
+        width: 15.0,
         height: y - 0.1,
     }
 }
@@ -940,7 +958,16 @@ pub fn geometry(
     let gap = 0.07 * u;
     let mut keys = Vec::new();
     let real_keys = kind == KeyboardKind::PerKey;
-    if real_keys {
+    // A four-zone keyboard is drawn on the PH16-71's layout, which has the keypad a laptop of
+    // that size has, each key the colour of the zone its centre is in; the layout is
+    // approximate, which the caption under it says.
+    let zoned = kind == KeyboardKind::Zones4;
+    if real_keys || zoned {
+        let right_edge = ph16_71()
+            .iter()
+            .map(|key| key.x0 + key.w)
+            .fold(0.0_f64, f64::max);
+        let zone_of = |centre: f64| ((centre / right_edge * 4.0).floor() as usize).min(3);
         for (i, key) in ph16_71().iter().enumerate() {
             keys.push(DrawnKey {
                 rect: Rect {
@@ -949,7 +976,11 @@ pub fn geometry(
                     w: key.w * u - 2.0 * gap,
                     h: key.h * u - 2.0 * gap,
                 },
-                colour: i,
+                colour: if zoned {
+                    zone_of(key.x0 + key.w / 2.0)
+                } else {
+                    i
+                },
             });
         }
     } else {
@@ -957,11 +988,7 @@ pub fn geometry(
         // the
         // generic rows at the PH16-71's width came out 0.3 key taller than the drawing and
         // lost half the bottom row), then as tall as fits; centred in the chassis.
-        let g = if kind == KeyboardKind::Zones4 {
-            generic_with_keypad()
-        } else {
-            generic()
-        };
+        let g = generic();
         let gs = (KB_W / g.width * 0.94).min(chassis.h / u * 0.9 / g.height);
         let gx = ox + (KB_W - g.width * gs) * u / 2.0;
         let gy = chassis.y + (chassis.h - g.height * gs * u) / 2.0;
@@ -987,6 +1014,7 @@ pub fn geometry(
         chassis: Some(chassis),
         keys,
         real_keys,
+        legends: real_keys || zoned,
         bar,
         logo: None,
     }
@@ -2033,23 +2061,21 @@ mod tests {
         ));
         assert_eq!(id, "hw.static");
         assert_eq!(colours, ["#00C8E6", "#00C8E6", "#FF0000", "#00C8E6"]);
-        let (id, speed, colours) = id_of(run(
-            both(four(false, RgbMode::Breath, 9)),
-            KeyboardKind::Zones4,
-        ));
+        // A four-zone keyboard's effects are drawn the way that keyboard shows them
+        // (`zone_sim`), with the effect's own number, speed, direction and colour.
         assert_eq!(
-            (id.as_str(), speed),
-            ("hw.breathing", Some(ParamValue::Num(5.0)))
+            run(both(four(false, RgbMode::Breath, 9)), KeyboardKind::Zones4),
+            Some(Run::Zones4 {
+                mode: 1,
+                speed: 9,
+                direction: 1,
+                colour: [0, 0, 0xFF],
+            })
         );
-        assert_eq!(colours, ["#0000FF"]);
-        let (id, speed, _) = id_of(run(
-            both(four(false, RgbMode::Wave, 0)),
-            KeyboardKind::Zones4,
+        assert!(matches!(
+            run(both(four(false, RgbMode::Wave, 0)), KeyboardKind::Zones4),
+            Some(Run::Zones4 { mode: 3, speed: 0, .. })
         ));
-        assert_eq!(
-            (id.as_str(), speed),
-            ("hw.neon", Some(ParamValue::Num(0.0)))
-        );
         // The same setup on the Helios 300: its own state.
         let (id, speed, colours) = id_of(run(
             both(four(true, RgbMode::Breath, 9)),
