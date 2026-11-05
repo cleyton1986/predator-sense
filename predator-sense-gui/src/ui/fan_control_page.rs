@@ -727,7 +727,7 @@ pub fn build() -> gtk::Widget {
     page_box.append(&plan_row);
 
     if !caps.fan_pwm {
-        let note = gtk::Label::new(Some(crate::i18n::t("fan_no_pwm_note")));
+        let note = gtk::Label::new(Some(crate::i18n::t("fan_no_pwm_note_ec")));
         note.add_css_class("info-note");
         note.set_halign(gtk::Align::Start);
         note.set_xalign(0.0);

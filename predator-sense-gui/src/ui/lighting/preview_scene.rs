@@ -823,10 +823,20 @@ struct Generic {
 /// The generic keyboard, built once.
 fn generic() -> &'static Generic {
     static GENERIC: std::sync::OnceLock<Generic> = std::sync::OnceLock::new();
-    GENERIC.get_or_init(build_generic)
+    GENERIC.get_or_init(|| build_generic(false))
 }
 
-fn build_generic() -> Generic {
+/// The generic keyboard with the numeric keypad of a 15 or 17 inch laptop, built once. The
+/// four zones span all of it, keypad included, as they do on the real keyboard.
+fn generic_with_keypad() -> &'static Generic {
+    static GENERIC: std::sync::OnceLock<Generic> = std::sync::OnceLock::new();
+    GENERIC.get_or_init(|| build_generic(true))
+}
+
+/// Space between the main block and the keypad, in key units.
+const KEYPAD_GAP: f64 = 0.3;
+
+fn build_generic(with_keypad: bool) -> Generic {
     const ROWS: [(f64, &[f64]); 6] = [
         (0.66, &[1.0; 15]),
         (
@@ -853,20 +863,51 @@ fn build_generic() -> Generic {
         ),
         (0.9, &[1.25, 1.0, 1.25, 6.25, 1.25, 1.0, 1.0, 1.0, 1.0]),
     ];
+    // The keypad: per row, its keys' widths and how many rows each spans (`+` and `Enter` are
+    // two rows tall). Row 0 carries the four media keys above it.
+    const KEYPAD: [&[(f64, usize)]; 6] = [
+        &[(1.0, 1), (1.0, 1), (1.0, 1), (1.0, 1)],
+        &[(1.0, 1), (1.0, 1), (1.0, 1), (1.0, 1)],
+        &[(1.0, 1), (1.0, 1), (1.0, 1), (1.0, 2)],
+        &[(1.0, 1), (1.0, 1), (1.0, 1)],
+        &[(1.0, 1), (1.0, 1), (1.0, 1), (1.0, 2)],
+        &[(2.0, 1), (1.0, 1)],
+    ];
+    let total = if with_keypad { 15.0 + KEYPAD_GAP + 4.0 } else { 15.0 };
+    let zone_of = |centre: f64| ((centre / total * 4.0).floor() as usize).min(3);
     let mut keys = Vec::new();
     let mut y = 0.0;
+    let mut row_tops = Vec::new();
+    let mut row_heights = Vec::new();
     for (h, widths) in ROWS {
+        row_tops.push(y);
+        row_heights.push(h);
         let mut x = 0.0;
         for &w in widths {
-            let zone = (((x + w / 2.0) / 15.0 * 4.0).floor() as usize).min(3);
-            keys.push((x, y, w, h, zone));
+            keys.push((x, y, w, h, zone_of(x + w / 2.0)));
             x += w;
         }
         y += h + 0.1;
     }
+    if with_keypad {
+        let x0 = 15.0 + KEYPAD_GAP;
+        for (row, pieces) in KEYPAD.iter().enumerate() {
+            let mut x = x0;
+            // `+` (rows 2 and 3) and `Enter` (rows 4 and 5) are one key each, so the rows
+            // under them list one column less.
+            for &(w, span) in pieces.iter() {
+                let h = row_heights[row..row + span]
+                    .iter()
+                    .sum::<f64>()
+                    + 0.1 * (span as f64 - 1.0);
+                keys.push((x, row_tops[row], w, h, zone_of(x + w / 2.0)));
+                x += w;
+            }
+        }
+    }
     Generic {
         keys,
-        width: 15.0,
+        width: total,
         height: y - 0.1,
     }
 }
@@ -916,7 +957,11 @@ pub fn geometry(
         // the
         // generic rows at the PH16-71's width came out 0.3 key taller than the drawing and
         // lost half the bottom row), then as tall as fits; centred in the chassis.
-        let g = generic();
+        let g = if kind == KeyboardKind::Zones4 {
+            generic_with_keypad()
+        } else {
+            generic()
+        };
         let gs = (KB_W / g.width * 0.94).min(chassis.h / u * 0.9 / g.height);
         let gx = ox + (KB_W - g.width * gs) * u / 2.0;
         let gy = chassis.y + (chassis.h - g.height * gs * u) / 2.0;
