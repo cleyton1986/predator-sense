@@ -357,9 +357,9 @@ pub struct AppConfig {
     pub pause_animations_on_battery: bool,
     /// "React to typing" (lighting settings): a theme that lights the keys
     /// you press may read key presses from the built-in keyboard while it runs. Off, such a
-    /// theme runs without presses and the keyboard is never read. Default on, also for a
-    /// config written before the setting existed.
-    #[serde(default = "default_true")]
+    /// theme runs without presses and the keyboard is never read. Default off, also for a
+    /// config written before the setting existed: the user turns it on.
+    #[serde(default)]
     pub lighting_react_to_typing: bool,
     /// Whether the start-up idle migration has run (see
     /// [`AppConfig::migrate_idle_once`]). A config written before this field
@@ -847,7 +847,7 @@ impl Default for AppConfig {
             idle_bar_secs: default_idle_secs(),
             idle_mouse_wakes: true,
             pause_animations_on_battery: true,
-            lighting_react_to_typing: true,
+            lighting_react_to_typing: false,
             idle_migrated: false,
             mode_cycle_ac: Vec::new(),
             mode_cycle_battery: Vec::new(),
@@ -1024,7 +1024,7 @@ pub fn load_app_config_source() -> AppConfigSource {
     source
 }
 
-/// "React to typing" as the key gate starts with: the saved setting, its default (on)
+/// "React to typing" as the key gate starts with: the saved setting, its default (off)
 /// before config.json exists, and off when config.json cannot be read, where nothing says
 /// the user left it on: the key gate fails closed.
 pub fn react_to_typing_at_start(source: &AppConfigSource) -> bool {
@@ -1724,26 +1724,26 @@ mod tests {
         assert!(!back.pause_animations_on_battery);
     }
 
-    /// "React to typing" is on by default, and a config written before the setting existed
-    /// reads it as on too; switched off it stays off.
+    /// "React to typing" is off by default, and a config written before the setting existed
+    /// reads it as off too; switched on it stays on.
     #[test]
-    fn reacting_to_typing_is_on_unless_switched_off() {
-        assert!(AppConfig::default().lighting_react_to_typing);
+    fn reacting_to_typing_is_off_unless_switched_on() {
+        assert!(!AppConfig::default().lighting_react_to_typing);
         let mut value = serde_json::to_value(AppConfig::default()).expect("serialize");
         value
             .as_object_mut()
             .expect("a config is a JSON object")
             .remove("lighting_react_to_typing");
         let old: AppConfig = serde_json::from_value(value).expect("an older config still reads");
-        assert!(old.lighting_react_to_typing);
+        assert!(!old.lighting_react_to_typing);
 
-        let off = AppConfig {
-            lighting_react_to_typing: false,
+        let on = AppConfig {
+            lighting_react_to_typing: true,
             ..AppConfig::default()
         };
-        let text = serde_json::to_string(&off).expect("serialize");
+        let text = serde_json::to_string(&on).expect("serialize");
         let back: AppConfig = serde_json::from_str(&text).expect("read back");
-        assert!(!back.lighting_react_to_typing);
+        assert!(back.lighting_react_to_typing);
     }
 
     /// A config.json written by a build that asked a one-time question before flashing looks
@@ -1836,11 +1836,13 @@ mod tests {
             ..AppConfig::default()
         };
         assert!(!react_to_typing_at_start(&AppConfigSource::Loaded(off)));
-        assert!(react_to_typing_at_start(&AppConfigSource::Loaded(
-            AppConfig::default()
-        )));
+        let on = AppConfig {
+            lighting_react_to_typing: true,
+            ..AppConfig::default()
+        };
+        assert!(react_to_typing_at_start(&AppConfigSource::Loaded(on)));
         assert!(
-            react_to_typing_at_start(&AppConfigSource::Missing),
+            !react_to_typing_at_start(&AppConfigSource::Missing),
             "a fresh install starts with the default"
         );
         assert!(!react_to_typing_at_start(&AppConfigSource::Unreadable(
