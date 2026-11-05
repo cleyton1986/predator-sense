@@ -21,6 +21,12 @@ use crate::ui::mode_bar::ModeBar;
 const PRESET_SILENT: [u8; 6] = [0, 0, 30, 45, 65, 100];
 const PRESET_AGGRESSIVE: [u8; 6] = [40, 55, 70, 85, 100, 100];
 
+/// The same three starting points for a machine with no per-fan PWM, where a
+/// bar is only the EC's Automatic (0) or Max (100): Max from 85, 75 or 65 C.
+const EC_PRESET_SILENT: [u8; 6] = [0, 0, 0, 0, 0, 100];
+const EC_PRESET_BALANCED: [u8; 6] = [0, 0, 0, 0, 100, 100];
+const EC_PRESET_AGGRESSIVE: [u8; 6] = [0, 0, 0, 100, 100, 100];
+
 /// Where the Fixed slider starts for a mode that has no fixed speed yet.
 /// The old custom slider's default, and deliberately not 0: a fixed 0 is a
 /// firmware handoff (see `fan::plan_target`), so landing there by default
@@ -81,6 +87,10 @@ struct Page {
     /// mode saved as Curve runs as Automatic without PWM, so it says so.
     fan_pwm: bool,
     mode_bar: ModeBar,
+    /// Makes the mode being edited the machine's active one. Shown only for a
+    /// mode that is not running: the fans follow the active mode's plan, so a
+    /// plan edited on any other mode does nothing until it is switched to.
+    use_mode: gtk::Button,
     plan_buttons: Vec<(gtk::Button, PlanKind)>,
     plan_desc: gtk::Label,
     fixed_box: gtk::Box,
@@ -175,8 +185,14 @@ fn sync_step_row(page: &Rc<Page>) {
     let index = page.curve_view.selected();
     let steps = page.curve_view.steps();
     page.band_label.set_text(&model::band_label(index));
-    page.step_value
-        .set_text(&format!("{} %", steps.get(index).copied().unwrap_or(0)));
+    let pct = steps.get(index).copied().unwrap_or(0);
+    page.step_value.set_text(&if page.fan_pwm {
+        format!("{pct} %")
+    } else if pct == 0 {
+        crate::i18n::t("fan_level_auto").to_string()
+    } else {
+        crate::i18n::t("max").to_string()
+    });
 }
 
 /// Writes whatever a drag, a nudge or the slider left pending, then shows
@@ -241,10 +257,13 @@ fn refresh(page: &Rc<Page>) {
     // back into the slider on each of those ticks would fight the user's
     // hands. Any real change - a mode, a plan button, a step edit, the mode
     // key - lands in one of these, so the comparison lets it through.
+    let shown_active = active_id.clone();
     let state = (editing.clone(), plan, active_id, plans.clone());
     if page.shown.borrow().as_ref() == Some(&state) {
         return;
     }
+
+    page.use_mode.set_visible(shown_active.is_some_and(|id| id != editing));
 
     let dirty = page.baselines.borrow().discard_to(&editing, plan).is_some();
     page.changed.set_visible(dirty);
@@ -276,6 +295,10 @@ fn refresh(page: &Rc<Page>) {
         // firmware, because a manual pwm of 0 is the EC floor, not off.
         FanPlan::Fixed { percent: 0 } if kind == PlanKind::Fixed => {
             crate::i18n::t("fan_plan_fixed_zero_desc")
+        }
+        // Without PWM a curve picks Automatic or Max per band.
+        _ if kind == PlanKind::Curve && !page.fan_pwm => {
+            crate::i18n::t("fan_plan_curve_ec_desc")
         }
         _ => kind.description(),
     });
@@ -403,6 +426,11 @@ pub fn build() -> gtk::Widget {
     title.set_hexpand(true);
     let title_row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     title_row.append(&title);
+    let use_mode = gtk::Button::with_label(crate::i18n::t("fan_use_mode"));
+    use_mode.add_css_class("accent-button");
+    use_mode.set_valign(gtk::Align::Center);
+    use_mode.set_visible(false);
+    title_row.append(&use_mode);
 
     // CoolBoost is a firmware boost, not a plan and not per mode, so it sits
     // with the page title rather than under "Fans for".
@@ -459,9 +487,9 @@ pub fn build() -> gtk::Widget {
     title_row.append(&discard_button);
 
     // ---- plan selector ----
-    // Curve and Fixed need per-fan PWM. Without it the EC has only its own
-    // Auto and Max presets, so offering the other two would be offering
-    // something `fan::plan_for_hardware` immediately resolves away.
+    // Fixed needs per-fan PWM. Without it the EC has only its own Auto and Max
+    // presets, so Fixed would resolve away (`fan::plan_for_hardware`). Curve
+    // is still offered, as a curve of those two presets per temperature band.
     let kinds: Vec<PlanKind> = if caps.fan_pwm {
         vec![
             PlanKind::Automatic,
@@ -470,7 +498,7 @@ pub fn build() -> gtk::Widget {
             PlanKind::Max,
         ]
     } else {
-        vec![PlanKind::Automatic, PlanKind::Max]
+        vec![PlanKind::Automatic, PlanKind::Curve, PlanKind::Max]
     };
     let plan_buttons: Vec<(gtk::Button, PlanKind)> = kinds
         .into_iter()
@@ -516,6 +544,7 @@ pub fn build() -> gtk::Widget {
         _ => cfg.fan_curve_points,
     };
     let curve_view = fan_curve_widget::build(seed);
+    curve_view.set_two_level(!caps.fan_pwm);
 
     let band_label = gtk::Label::new(None);
     band_label.add_css_class("info-text-dim");
@@ -533,18 +562,23 @@ pub fn build() -> gtk::Widget {
         "fan_step_raise",
     ))]);
 
+    let (silent, balanced, aggressive) = if caps.fan_pwm {
+        (PRESET_SILENT, fan::DEFAULT_FAN_CURVE, PRESET_AGGRESSIVE)
+    } else {
+        (EC_PRESET_SILENT, EC_PRESET_BALANCED, EC_PRESET_AGGRESSIVE)
+    };
     let preset_buttons: Vec<(gtk::Button, [u8; 6])> = vec![
         (
             gtk::Button::with_label(crate::i18n::t("fan_curve_preset_silent")),
-            PRESET_SILENT,
+            silent,
         ),
         (
             gtk::Button::with_label(crate::i18n::t("fan_curve_preset_balanced")),
-            fan::DEFAULT_FAN_CURVE,
+            balanced,
         ),
         (
             gtk::Button::with_label(crate::i18n::t("fan_curve_preset_aggressive")),
-            PRESET_AGGRESSIVE,
+            aggressive,
         ),
     ];
 
@@ -613,6 +647,7 @@ pub fn build() -> gtk::Widget {
             commit_queued: Cell::new(false),
             fan_pwm: caps.fan_pwm,
             mode_bar,
+            use_mode,
             plan_buttons,
             plan_desc,
             fixed_box,
@@ -736,6 +771,37 @@ pub fn build() -> gtk::Widget {
                 }
             }
             refresh(&page);
+        });
+    }
+
+    {
+        let weak: Weak<Page> = Rc::downgrade(&page);
+        page.use_mode.connect_clicked(move |_| {
+            let Some(page) = weak.upgrade() else { return };
+            flush_pending(&page);
+            let Some(profile) = PowerProfile::from_id(&page.editing.borrow()) else {
+                return;
+            };
+            // Off the GTK thread like the Mode page's Select: the switch is
+            // helper round trips and a firmware write.
+            let switching = crate::hardware::profile::request_profile(profile);
+            let weak = weak.clone();
+            background::run(
+                move || crate::hardware::profile::wait_for(switching),
+                move |result| {
+                    let Some(page) = weak.upgrade() else { return };
+                    if let Err(error) = result {
+                        crate::hardware::applog::error(&format!(
+                            "Fan Control: switch to {} failed: {error}",
+                            profile.to_id()
+                        ));
+                        report(&page, Err(error));
+                    }
+                    // The mode bar and the button follow the machine again.
+                    *page.shown.borrow_mut() = None;
+                    refresh(&page);
+                },
+            );
         });
     }
 

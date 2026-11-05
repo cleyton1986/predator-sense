@@ -806,19 +806,82 @@ fn plan_from_fan_mode(mode: FanMode) -> crate::config::FanPlan {
 
 /// Narrows a plan to what this machine can actually do.
 ///
-/// `Curve` and `Fixed` need per-fan PWM. Without `ACER_CAP_PWM` there is no
-/// `pwm1` to write, so they are unreachable through the UI, but they can still
-/// arrive in a config copied from a machine that has it. Resolving to
-/// `Automatic` keeps the fans governed by something rather than leaving a plan
-/// that silently does nothing.
+/// Where a bar of an EC-only curve flips from Automatic to Max, in percent.
+/// A curve copied from a machine with PWM keeps its shape: the bars at or above
+/// this become Max, the lower ones Automatic.
+pub const EC_LEVEL_THRESHOLD_PCT: u8 = 50;
+
+/// How far below a Max band's lower edge the EC curve keeps Max once it has
+/// it, in degrees. Max cools quickly, so without a gap a temperature sitting
+/// on the edge would flip the EC between its two presets every few seconds.
+pub const EC_LEVEL_HYSTERESIS_C: f64 = 5.0;
+
+/// `steps` with every bar either 0 (Automatic) or 100 (Max), which is all an
+/// EC with no per-fan PWM can do.
+pub fn snap_to_levels(steps: [u8; 6]) -> [u8; 6] {
+    steps.map(|pct| if pct >= EC_LEVEL_THRESHOLD_PCT { 100 } else { 0 })
+}
+
+/// What a plan means on this hardware.
+///
+/// `Fixed` needs per-fan PWM. Without `ACER_CAP_PWM` there is no `pwm1` to
+/// write, so it is unreachable through the UI, but it can still arrive in a
+/// config copied from a machine that has it. Resolving to `Automatic` keeps
+/// the fans governed by something rather than leaving a plan that silently
+/// does nothing.
+///
+/// `Curve` survives without PWM as a two-level curve: each temperature band is
+/// the EC's Automatic or its Max preset, nothing in between (see
+/// `ec_levels_action`). Its bars are snapped to those two levels.
 pub fn plan_for_hardware(
     plan: crate::config::FanPlan,
     pwm_available: bool,
 ) -> crate::config::FanPlan {
     use crate::config::FanPlan;
     match plan {
-        FanPlan::Curve { .. } | FanPlan::Fixed { .. } if !pwm_available => FanPlan::Automatic,
+        FanPlan::Fixed { .. } if !pwm_available => FanPlan::Automatic,
+        FanPlan::Curve { steps } if !pwm_available => FanPlan::Curve {
+            steps: snap_to_levels(steps),
+        },
         other => other,
+    }
+}
+
+/// The two-level curve of an EC with no per-fan PWM: Max in a Max band,
+/// Automatic in an Automatic one, and Max kept for `EC_LEVEL_HYSTERESIS_C`
+/// below the band it started in.
+///
+/// `handed_off` is whether the EC currently holds the fans in Automatic.
+pub fn ec_levels_action(temp_c: f64, steps: &[u8; 6], handed_off: bool) -> CurveAction {
+    if fan_curve_pct(temp_c, steps) >= EC_LEVEL_THRESHOLD_PCT {
+        return CurveAction::Manual(100);
+    }
+    if handed_off {
+        return CurveAction::Hold;
+    }
+    // Max is in force: keep it until the temperature has cleared the band it
+    // came from by the hysteresis gap, so it does not chatter on the edge.
+    if fan_curve_pct(temp_c + EC_LEVEL_HYSTERESIS_C, steps) >= EC_LEVEL_THRESHOLD_PCT {
+        CurveAction::Hold
+    } else {
+        CurveAction::Firmware
+    }
+}
+
+/// `plan_target`, for the hardware the reconciler is really on: an EC-only
+/// machine runs a curve by its own two-level rule.
+pub fn target_for_hardware(
+    plan: crate::config::FanPlan,
+    temp_c: Option<f64>,
+    handed_off: bool,
+    pwm_available: bool,
+) -> CurveAction {
+    use crate::config::FanPlan;
+    match (plan, temp_c, pwm_available) {
+        (FanPlan::Curve { steps }, Some(temp_c), false) => {
+            ec_levels_action(temp_c, &snap_to_levels(steps), handed_off)
+        }
+        _ => plan_target(plan, temp_c, handed_off),
     }
 }
 
@@ -1407,21 +1470,69 @@ mod tests {
     }
 
     #[test]
-    fn pwm_plans_are_unavailable_without_pwm() {
+    fn fixed_is_unavailable_without_pwm_and_a_curve_becomes_two_level() {
         use crate::config::FanPlan;
         // Reachable from a config copied off a machine that does have PWM.
         // Resolving to Automatic beats doing nothing silently.
         assert_eq!(
-            plan_for_hardware(FanPlan::Curve { steps: DEFAULT_FAN_CURVE }, false),
-            FanPlan::Automatic
-        );
-        assert_eq!(
             plan_for_hardware(FanPlan::Fixed { percent: 40 }, false),
             FanPlan::Automatic
+        );
+        // A curve keeps its shape as Automatic and Max bars.
+        assert_eq!(
+            plan_for_hardware(FanPlan::Curve { steps: [25, 35, 50, 65, 80, 100] }, false),
+            FanPlan::Curve { steps: [0, 0, 100, 100, 100, 100] }
+        );
+        // With PWM nothing is touched.
+        assert_eq!(
+            plan_for_hardware(FanPlan::Curve { steps: DEFAULT_FAN_CURVE }, true),
+            FanPlan::Curve { steps: DEFAULT_FAN_CURVE }
         );
         // These two work through the EC preset path on any model.
         assert_eq!(plan_for_hardware(FanPlan::Max, false), FanPlan::Max);
         assert_eq!(plan_for_hardware(FanPlan::Automatic, false), FanPlan::Automatic);
+    }
+
+    #[test]
+    fn snapping_sends_each_bar_to_automatic_or_max() {
+        assert_eq!(snap_to_levels([0, 49, 50, 51, 99, 100]), [0, 0, 100, 100, 100, 100]);
+    }
+
+    #[test]
+    fn an_ec_curve_is_max_in_a_max_band_and_automatic_elsewhere() {
+        let steps = [0, 0, 0, 0, 100, 100];
+        // Automatic below 75 C, and nothing to write when the EC already has it.
+        assert_eq!(ec_levels_action(60.0, &steps, true), CurveAction::Hold);
+        assert_eq!(ec_levels_action(60.0, &steps, false), CurveAction::Firmware);
+        // Max from 75 C whoever holds the fans.
+        assert_eq!(ec_levels_action(76.0, &steps, true), CurveAction::Manual(100));
+        assert_eq!(ec_levels_action(76.0, &steps, false), CurveAction::Manual(100));
+    }
+
+    #[test]
+    fn an_ec_curve_keeps_max_a_few_degrees_below_its_band() {
+        let steps = [0, 0, 0, 0, 100, 100];
+        // Max is in force (not handed off): 72 C is within the gap, 69 C is not.
+        assert_eq!(ec_levels_action(72.0, &steps, false), CurveAction::Hold);
+        assert_eq!(ec_levels_action(69.0, &steps, false), CurveAction::Firmware);
+    }
+
+    #[test]
+    fn target_for_hardware_uses_the_ec_rule_only_without_pwm() {
+        use crate::config::FanPlan;
+        let plan = FanPlan::Curve { steps: [0, 0, 0, 0, 100, 100] };
+        assert_eq!(
+            target_for_hardware(plan, Some(80.0), true, false),
+            CurveAction::Manual(100)
+        );
+        // With PWM the ordinary curve rule applies: this step is 100 here too,
+        // but a 0 step hands off through the PWM hysteresis, not the EC gap.
+        assert_eq!(
+            target_for_hardware(plan, Some(60.0), false, true),
+            plan_target(plan, Some(60.0), false)
+        );
+        // No sensor: never guess.
+        assert_eq!(target_for_hardware(plan, None, false, false), CurveAction::Hold);
     }
 
     #[test]
@@ -1470,9 +1581,9 @@ mod tests {
 
     #[test]
     fn ec_only_hardware_gets_preset_writes() {
-        // plan_for_hardware narrows Curve and Fixed to Automatic when there is
-        // no PWM, so only Automatic and Max can reach here, which is why
-        // Manual maps to the Max preset rather than a duty cycle.
+        // Without PWM a curve is two-level and Fixed is Automatic, so only
+        // Automatic and Max can reach here, which is why Manual maps to the
+        // Max preset rather than a duty cycle.
         assert_eq!(write_for(CurveAction::Firmware, false), Some(FanWrite::PresetAuto));
         assert_eq!(write_for(CurveAction::Manual(100), false), Some(FanWrite::PresetMax));
     }

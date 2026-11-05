@@ -1122,12 +1122,24 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
                     None
                 }
             };
-            let target = crate::hardware::fan::plan_target_held(
-                plan,
-                temp,
-                applied == FanState::Firmware,
-                hold,
-            );
+            let pwm_now = crate::hardware::capabilities::get().fan_pwm;
+            // Without per-fan PWM a curve is Automatic or Max per band: the
+            // PWM smoothing and hold below do not apply to it.
+            let target = if pwm_now {
+                crate::hardware::fan::plan_target_held(
+                    plan,
+                    temp,
+                    applied == FanState::Firmware,
+                    hold,
+                )
+            } else {
+                crate::hardware::fan::target_for_hardware(
+                    plan,
+                    temp,
+                    applied == FanState::Firmware,
+                    false,
+                )
+            };
             if !crate::hardware::fan::needs_write(target, applied) {
                 return glib::ControlFlow::Continue;
             }
@@ -1165,7 +1177,7 @@ fn build_main_ui(app: &adw::Application, window: &gtk::ApplicationWindow) {
             let failed = failures.clone();
             let intended = target;
             let remember = match (plan, temp, target) {
-                (config::FanPlan::Curve { steps }, Some(t), CurveAction::Manual(_)) => {
+                (config::FanPlan::Curve { steps }, Some(t), CurveAction::Manual(_)) if pwm_now => {
                     Some(crate::hardware::fan::CurveMemory {
                         mode: active,
                         steps,

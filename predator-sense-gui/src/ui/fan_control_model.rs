@@ -229,7 +229,9 @@ mod tests {
     fn captions_follow_what_the_hardware_can_run() {
         let curve = FanPlan::Curve { steps: [0, 20, 40, 60, 80, 100] };
         let fixed = FanPlan::Fixed { percent: 40 };
-        assert_eq!(caption_kind(curve, false), PlanKind::Automatic);
+        // Without PWM a curve still runs, as Automatic or Max per band; only
+        // Fixed has nothing to run as.
+        assert_eq!(caption_kind(curve, false), PlanKind::Curve);
         assert_eq!(caption_kind(fixed, false), PlanKind::Automatic);
         assert_eq!(caption_kind(fixed, true), PlanKind::Fixed);
         assert_eq!(caption_kind(curve, true), PlanKind::Curve);

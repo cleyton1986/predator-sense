@@ -28,6 +28,9 @@ struct State {
     hover_edge: Option<usize>,
     /// The bar a drag took hold of by its edge, until the button is released.
     grabbed: Option<usize>,
+    /// A machine with no per-fan PWM can only do the EC's Automatic or Max
+    /// preset, so every bar is one of those two: 0 or 100.
+    two_level: bool,
 }
 
 pub struct FanCurveView {
@@ -59,6 +62,7 @@ pub fn build(steps: [u8; geo::STEP_COUNT]) -> FanCurveView {
         on_select: None,
         hover_edge: None,
         grabbed: None,
+        two_level: false,
     }));
 
     {
@@ -66,7 +70,7 @@ pub fn build(steps: [u8; geo::STEP_COUNT]) -> FanCurveView {
         widget.set_draw_func(move |_area, cr, w, h| {
             let s = state.borrow();
             let edge = s.grabbed.or(s.hover_edge);
-            draw(cr, w as f64, h as f64, s.steps, s.temp_c, s.selected, edge);
+            draw(cr, w as f64, h as f64, s.steps, s.temp_c, s.selected, edge, s.two_level);
         });
     }
 
@@ -77,6 +81,11 @@ pub fn build(steps: [u8; geo::STEP_COUNT]) -> FanCurveView {
         let state = state.clone();
         let widget = widget.clone();
         Rc::new(move |next: [u8; geo::STEP_COUNT]| {
+            let next = if state.borrow().two_level {
+                fan::snap_to_levels(next)
+            } else {
+                next
+            };
             if state.borrow().steps == next {
                 return;
             }
@@ -268,7 +277,8 @@ pub fn build(steps: [u8; geo::STEP_COUNT]) -> FanCurveView {
                     glib::Propagation::Stop
                 }
                 Key::Up | Key::Down => {
-                    change(model::nudge(steps, current, keyval == Key::Up));
+                    let two_level = state.borrow().two_level;
+                    change(nudged(two_level, steps, current, keyval == Key::Up));
                     glib::Propagation::Stop
                 }
                 _ => glib::Propagation::Proceed,
@@ -298,14 +308,32 @@ impl FanCurveView {
     /// Moves the selected bar one notch through the same path as a drag and
     /// Up/Down, so `on_change` fires only when the value really moved.
     pub fn nudge_selected(&self, up: bool) {
-        let (selected, steps) = {
+        let (selected, steps, two_level) = {
             let s = self.state.borrow();
-            (s.selected, s.steps)
+            (s.selected, s.steps, s.two_level)
         };
-        (self.change)(model::nudge(steps, selected, up));
+        (self.change)(nudged(two_level, steps, selected, up));
+    }
+
+    /// Whether every bar is the EC's Automatic (0) or Max (100) preset, as on
+    /// a machine with no per-fan PWM. Existing bars are snapped to match.
+    pub fn set_two_level(&self, two_level: bool) {
+        {
+            let mut s = self.state.borrow_mut();
+            s.two_level = two_level;
+            if two_level {
+                s.steps = fan::snap_to_levels(s.steps);
+            }
+        }
+        self.widget.queue_draw();
     }
 
     pub fn set_steps(&self, steps: [u8; geo::STEP_COUNT]) {
+        let steps = if self.state.borrow().two_level {
+            fan::snap_to_levels(steps)
+        } else {
+            steps
+        };
         if self.state.borrow().steps == steps {
             return;
         }
@@ -327,6 +355,32 @@ impl FanCurveView {
     }
 }
 
+/// One step of an Up/Down or +/-: five percent on a PWM machine, and straight
+/// to Max (up) or Automatic (down) when every bar is one of those two.
+fn nudged(
+    two_level: bool,
+    mut steps: [u8; geo::STEP_COUNT],
+    index: usize,
+    up: bool,
+) -> [u8; geo::STEP_COUNT] {
+    if !two_level {
+        return model::nudge(steps, index, up);
+    }
+    if let Some(step) = steps.get_mut(index) {
+        *step = if up { 100 } else { 0 };
+    }
+    steps
+}
+
+/// What a bar says: its percent, or Auto / Max on a two-level chart.
+fn bar_text(pct: u8, two_level: bool) -> String {
+    match (two_level, pct) {
+        (false, pct) => format!("{pct}%"),
+        (true, 0) => crate::i18n::t("fan_level_auto").to_string(),
+        (true, _) => crate::i18n::t("max").to_string(),
+    }
+}
+
 fn label(cr: &cairo::Context, x: f64, y: f64, text: &str, size: f64) {
     cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
     cr.set_font_size(size);
@@ -342,6 +396,7 @@ fn draw(
     temp_c: Option<f64>,
     selected: usize,
     edge: Option<usize>,
+    two_level: bool,
 ) {
     let plot = geo::plot_for(width, height);
     if plot.w <= 0.0 || plot.h <= 0.0 {
@@ -382,7 +437,8 @@ fn draw(
     }
 
     // Percent gridlines.
-    for pct in [0u8, 25, 50, 75, 100] {
+    let gridlines: &[u8] = if two_level { &[0, 100] } else { &[0, 25, 50, 75, 100] };
+    for &pct in gridlines {
         let y = geo::y_for_pct(plot, pct);
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.08);
         cr.set_line_width(1.0);
@@ -390,7 +446,7 @@ fn draw(
         cr.line_to(plot.x + plot.w, y);
         let _ = cr.stroke();
         cr.set_source_rgba(0.72, 0.76, 0.82, 0.85);
-        label(cr, 4.0, y + 3.0, &format!("{pct}%"), 9.0);
+        label(cr, 4.0, y + 3.0, &bar_text(pct, two_level), 9.0);
     }
 
     // The step in force, so the marker and the bar agree.
@@ -424,7 +480,7 @@ fn draw(
             cr,
             left + 6.0,
             (top - 4.0).max(plot.y + 9.0),
-            &format!("{pct}%"),
+            &bar_text(pct, two_level),
             10.0,
         );
 
