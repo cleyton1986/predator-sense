@@ -64,6 +64,7 @@ Si esta app/proyecto te ayudó y/o te gustó de alguna manera, considera dejar u
 <p align="center"><b>Iluminación</b>: cada modo de energía tiene su propia iluminación, con preajustes con nombre. Control de iluminación ajusta los efectos de cada luz, y los colores por tecla en el teclado del PH16-71; Temas ajusta a la vez el teclado, la barra de luz y el logo con uno de 32 temas integrados.</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Iluminación"></p>
 <p align="center"><img src="assets/psense-17.png" width="800" alt="Temas de iluminación"></p>
+<p align="center"><sub>La página de Iluminación, los temas y el rediseño del Control de Ventiladores fueron aportados por <a href="https://github.com/fawaz7">@fawaz7</a> (PRs #85 a #95), probados en su propio Predator PH16-71. Capturas del autor. Los teclados de cuatro zonas (como el del PH315-54) usan la misma página, dibujada con sus zonas, y los equipos sin PWM por ventilador reciben una curva Automático/Máx en el Control de Ventiladores.</sub></p>
 
 <p align="center"><b>Modos</b> — Perfiles de rendimiento: Silencioso, Equilibrado, Rendimiento y Turbo, más un nivel Eco exclusivo para batería (CPU governor + Intel EPP + límite de potencia de la GPU).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modos"></p>
@@ -71,8 +72,9 @@ Si esta app/proyecto te ayudó y/o te gustó de alguna manera, considera dejar u
 <p align="center"><b>Herramientas</b> — GameSync, Macros, Ecualizador de audio, el asistente de IA (beta) y GRUB Splash viven aquí ahora, agrupados en pestañas para que la barra lateral no crezca sin límite. Se muestra aquí: GameSync, que registra un juego y su perfil para que la app cambie a él automáticamente mientras el juego está en ejecución y restaure lo que estuviera activo antes en cuanto se cierra.</p>
 <p align="center"><img src="assets/psense-15.png" width="800" alt="Herramientas"></p>
 
-<p align="center"><b>Control de Ventiladores</b> — RPM en tiempo real con ventiladores animados girando, interruptor de CoolBoost y modos Auto/Max.</p>
+<p align="center"><b>Control de Ventiladores</b>: RPM en vivo con ventiladores animados y botón de CoolBoost. Elige un modo de energía en la barra «Ventiladores para» y después qué hacen sus ventiladores: Automático, Curva, Fijo o Máx. La curva es un gráfico de barras que arrastras, o ajustas con - / + y las flechas; los cambios se aplican al instante, con la etiqueta «Modificado» y «Descartar cambios» con Deshacer. Los equipos sin PWM por ventilador ofrecen Automático, Máx o una curva que alterna entre ambos.</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Control de Ventiladores"></p>
+<p align="center"><sub>Rediseño aportado por <a href="https://github.com/fawaz7">@fawaz7</a> (#85, a partir de los planes de ventilador por modo de la #84), probado en su propio Predator PH16-71. Captura del autor.</sub></p>
 
 <p align="center"><b>Batería</b> — Porcentaje de carga, voltaje, corriente, potencia, ciclos, salud, fabricante y límite de carga al 80% para mayor longevidad.</p>
 <p align="center"><img src="assets/psense-8.png" width="800" alt="Batería"></p>

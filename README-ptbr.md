@@ -64,6 +64,7 @@ Se este app/projeto te ajudou e/ou gostou de alguma forma, considere deixar uma 
 <p align="center"><b>Iluminação</b>: cada modo de energia tem a sua própria iluminação, com predefinições com nome. Controle de iluminação define os efeitos de cada luz, e as cores por tecla no teclado do PH16-71; Temas define o teclado, a barra de luz e o logo juntos a partir de um de 32 temas embutidos.</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Iluminação"></p>
 <p align="center"><img src="assets/psense-17.png" width="800" alt="Temas de iluminação"></p>
+<p align="center"><sub>A página Iluminação, os temas e o redesign do Controle de Ventoinha foram contribuídos por <a href="https://github.com/fawaz7">@fawaz7</a> (PRs #85 a #95), testados no próprio Predator PH16-71. Capturas de tela do autor. Teclados de quatro zonas (como o do PH315-54) usam a mesma página, desenhada com as suas zonas, e máquinas sem PWM por ventoinha ganham uma curva Automático/Máx no Controle de Ventoinha.</sub></p>
 
 <p align="center"><b>Modos</b> — Perfis de desempenho: Silencioso, Balanceado, Performance e Turbo, mais um Eco exclusivo de bateria (CPU governor + Intel EPP + limite de potência da GPU).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modos"></p>
@@ -71,8 +72,9 @@ Se este app/projeto te ajudou e/ou gostou de alguma forma, considere deixar uma 
 <p align="center"><b>Ferramentas</b> — GameSync, Macros, Equalizador de áudio, o assistente de IA (beta) e GRUB Splash moram aqui agora, agrupados em abas pra sidebar não crescer sem limite. Mostrado aqui: GameSync, que cadastra um jogo e o perfil desejado pro app trocar automaticamente enquanto o jogo está rodando e restaurar o que estava ativo antes assim que ele fecha.</p>
 <p align="center"><img src="assets/psense-15.png" width="800" alt="Ferramentas"></p>
 
-<p align="center"><b>Controle de Ventoinha</b> — RPM ao vivo com animação girando, toggle do CoolBoost e modos Auto/Max.</p>
+<p align="center"><b>Controle de Ventoinha</b>: RPM ao vivo com animação girando e toggle do CoolBoost. Escolha um modo de energia na barra «Ventoinhas para» e depois o que as ventoinhas fazem: Automático, Curva, Fixo ou Máx. A curva é um gráfico de barras que você arrasta, ou ajusta com - / + e as setas; as mudanças valem na hora, com a marca «Alterado» e «Descartar alterações» com Desfazer. Máquinas sem PWM por ventoinha oferecem Automático, Máx ou uma curva que alterna entre os dois.</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Controle de Ventoinha"></p>
+<p align="center"><sub>Redesign contribuído por <a href="https://github.com/fawaz7">@fawaz7</a> (#85, a partir dos planos de ventoinha por modo da #84), testado no próprio Predator PH16-71. Captura de tela do autor.</sub></p>
 
 <p align="center"><b>Bateria</b> — Percentual de carga, voltagem, corrente, potência, ciclos, saúde, fabricante e limite de carga em 80% para preservar a longevidade.</p>
 <p align="center"><img src="assets/psense-8.png" width="800" alt="Bateria"></p>

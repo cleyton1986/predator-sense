@@ -64,6 +64,7 @@ Wenn diese App/dieses Projekt Ihnen geholfen hat und/oder Ihnen auf irgendeine W
 <p align="center"><b>Beleuchtung</b>: Jeder Energiemodus hat seine eigene Beleuchtung, mit benannten Voreinstellungen. Beleuchtungssteuerung legt die Effekte jeder Leuchte fest, auf der Tastatur des PH16-71 auch Farben pro Taste; Designs legt Tastatur, Lichtleiste und Logo gemeinsam über eines von 32 eingebauten Designs fest.</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Lighting"></p>
 <p align="center"><img src="assets/psense-17.png" width="800" alt="Lighting themes"></p>
+<p align="center"><sub>Die Beleuchtungsseite, die Designs und die Neugestaltung der Lüftersteuerung stammen von <a href="https://github.com/fawaz7">@fawaz7</a> (PRs #85 bis #95), getestet auf seinem eigenen Predator PH16-71. Screenshots vom Autor. Tastaturen mit vier Zonen (wie beim PH315-54) bekommen dieselbe Seite, mit ihren eigenen Zonen gezeichnet, und Geräte ohne PWM pro Lüfter erhalten in der Lüftersteuerung eine Automatik/Max-Kurve.</sub></p>
 
 <p align="center"><b>Modi</b>: Leistungsprofile: Quiet, Balanced, Performance und Turbo, dazu eine nur im Akkubetrieb verfügbare Eco-Stufe (CPU-Governor + Intel EPP + GPU-Leistungslimit).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modes"></p>
@@ -71,8 +72,9 @@ Wenn diese App/dieses Projekt Ihnen geholfen hat und/oder Ihnen auf irgendeine W
 <p align="center"><b>Werkzeuge</b>: GameSync, Makros, Audio-EQ, der KI-Assistent (beta) und GRUB Splash leben jetzt hier, als Tabs gruppiert, damit die Seitenleiste nicht unbegrenzt wächst. Hier gezeigt: GameSync, das ein Spiel und sein Profil registriert, damit die App automatisch dazu wechselt, während das Spiel läuft, und beim Beenden wiederherstellt, was zuvor aktiv war.</p>
 <p align="center"><img src="assets/psense-15.png" width="800" alt="Werkzeuge"></p>
 
-<p align="center"><b>Lüftersteuerung</b>: Live-Drehzahl mit animierten, rotierenden Lüftern, CoolBoost-Schalter und Auto-/Max-Modi.</p>
+<p align="center"><b>Lüftersteuerung</b>: Live-Drehzahl mit animierten, rotierenden Lüftern und CoolBoost-Schalter. Wähle in der Leiste „Lüfter für“ einen Energiemodus und dann, was seine Lüfter tun: Automatisch, Kurve, Fest oder Max. Eine Kurve ist ein Balkendiagramm, das du ziehst oder mit - / + und den Pfeiltasten anpasst; Änderungen gelten sofort, mit der Markierung „Geändert“ und „Änderungen verwerfen“ samt Rückgängig. Geräte ohne PWM pro Lüfter bieten Automatisch, Max oder eine Kurve, die zwischen beiden wechselt.</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Fan Control"></p>
+<p align="center"><sub>Neugestaltung von <a href="https://github.com/fawaz7">@fawaz7</a> (#85, aufbauend auf den Lüfterplänen pro Modus aus #84), getestet auf seinem eigenen Predator PH16-71. Screenshot vom Autor.</sub></p>
 
 <p align="center"><b>Akku</b>: Ladestand in Prozent, Spannung, Stromstärke, Leistung, Ladezyklen, Zustand, Hersteller und 80%-Ladelimit für eine längere Lebensdauer.</p>
 <p align="center"><img src="assets/psense-8.png" width="800" alt="Battery"></p>

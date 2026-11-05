@@ -64,6 +64,7 @@ Bu uygulama/proje işinize yaradıysa ve/veya bir şekilde beğendiyseniz, bir y
 <p align="center"><b>Aydınlatma</b>: her güç modunun kendi aydınlatması ve adlandırılmış ön ayarları vardır. Aydınlatma kontrolü her ışığın efektlerini, PH16-71 klavyesinde de tuş başına renkleri ayarlar; Temalar klavyeyi, ışık çubuğunu ve logoyu 32 yerleşik temadan biriyle birlikte ayarlar.</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Aydınlatma"></p>
 <p align="center"><img src="assets/psense-17.png" width="800" alt="Aydınlatma temaları"></p>
+<p align="center"><sub>Aydınlatma sayfası, temalar ve Fan Kontrolü yeniden tasarımı <a href="https://github.com/fawaz7">@fawaz7</a> tarafından katkıda bulunuldu (PR #85 ile #95), kendi Predator PH16-71 cihazında test edildi. Ekran görüntüleri yazara aittir. Dört bölgeli klavyeler (PH315-54 gibi) aynı sayfayı kendi bölgeleriyle çizilmiş olarak kullanır; fan başına PWM'i olmayan cihazlar Fan Kontrolü'nde Otomatik/Maks eğrisi alır.</sub></p>
 
 <p align="center"><b>Modlar</b> — Performans profilleri: Sessiz, Dengeli, Performans ve Turbo, artı yalnızca pilde kullanılabilen bir Eco katmanı (CPU governor + Intel EPP + GPU güç limiti).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modlar"></p>
@@ -71,8 +72,9 @@ Bu uygulama/proje işinize yaradıysa ve/veya bir şekilde beğendiyseniz, bir y
 <p align="center"><b>Araçlar</b> — GameSync, Makrolar, Ses Ekolayzırı, yapay zeka asistanı (beta) ve GRUB Splash artık burada, kenar çubuğu sınırsız büyümesin diye sekmeler halinde gruplanmış. Burada gösterilen: GameSync — bir oyun ve profilini kaydedin, oyun çalışırken uygulama otomatik olarak o profile geçer, oyun kapandığında önceki profili geri yükler.</p>
 <p align="center"><img src="assets/psense-15.png" width="800" alt="Araçlar"></p>
 
-<p align="center"><b>Fan Kontrolü</b> — Animasyonlu dönen fanlarla canlı RPM, CoolBoost anahtarı ve Auto/Max modları.</p>
+<p align="center"><b>Fan Kontrolü</b>: dönen animasyonlu fanlarla canlı RPM ve CoolBoost anahtarı. «Fanlar için» çubuğundan bir güç modu seçin, sonra fanlarının ne yapacağını seçin: Otomatik, Eğri, Sabit veya Maks. Eğri, sürükleyebileceğiniz ya da - / + ve ok tuşlarıyla ayarlayabileceğiniz bir çubuk grafiktir; değişiklikler anında uygulanır, «Değişti» etiketi ve Geri Al'lı «Değişiklikleri at» ile. Fan başına PWM'i olmayan cihazlar Otomatik, Maks veya ikisi arasında geçiş yapan bir eğri sunar.</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Fan Kontrolü"></p>
+<p align="center"><sub>Yeniden tasarım <a href="https://github.com/fawaz7">@fawaz7</a> tarafından katkıda bulunuldu (#85, #84'teki moda göre fan planlarının devamı), kendi Predator PH16-71 cihazında test edildi. Ekran görüntüsü yazara aittir.</sub></p>
 
 <p align="center"><b>Pil</b> — Şarj yüzdesi, voltaj, akım, güç, döngü sayısı, sağlık durumu, üretici ve uzun ömür için %80 şarj limiti.</p>
 <p align="center"><img src="assets/psense-8.png" width="800" alt="Pil"></p>

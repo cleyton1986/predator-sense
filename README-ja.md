@@ -64,6 +64,7 @@
 <p align="center"><b>ライティング</b>：電源モードごとに独自のライティングがあり、名前付きのプリセットに保存できます。ライティング操作では各ライトのエフェクトを、PH16-71のキーボードではキーごとの色も設定します。テーマでは32種類の内蔵テーマからキーボード、ライトバー、ロゴをまとめて設定します。</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Lighting"></p>
 <p align="center"><img src="assets/psense-17.png" width="800" alt="Lighting themes"></p>
+<p align="center"><sub>ライティングページ、テーマ、ファン制御の再設計は <a href="https://github.com/fawaz7">@fawaz7</a> さん（PR #85〜#95）による貢献で、ご自身のPredator PH16-71で検証されています。スクリーンショットも作者によるものです。4ゾーンキーボード（PH315-54など）も同じページを使い、各ゾーンに合わせて描画されます。ファンごとのPWMがない機種では、ファン制御に自動/Maxのカーブが追加されます。</sub></p>
 
 <p align="center"><b>モード</b> — パフォーマンスプロファイル：Quiet、Balanced、Performance、Turbo、さらにバッテリー駆動時専用のEco階層（CPUガバナー + Intel EPP + GPU電力制限）です。</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modes"></p>
@@ -71,8 +72,9 @@
 <p align="center"><b>ツール</b> — GameSync、マクロ、オーディオEQ、AIアシスタント（ベータ版)、GRUB Splashは今はここにまとめられ、サイドバーが際限なく増えないようタブとしてグループ化されています。ここに表示されているのはGameSync：ゲームとそのプロファイルを登録すると、ゲームの実行中はアプリが自動的にそのプロファイルへ切り替え、終了すると直前まで有効だったプロファイルに復元します。</p>
 <p align="center"><img src="assets/psense-15.png" width="800" alt="ツール"></p>
 
-<p align="center"><b>ファン制御</b> — アニメーションで回転するファンによるライブRPM表示、CoolBoostの切り替え、Auto/Maxモードです。</p>
+<p align="center"><b>ファン制御</b>: アニメーションで回転するファンによるライブRPM表示とCoolBoostの切り替え。「ファン設定の対象」バーで電源モードを選び、そのファンの動作（自動、カーブ、固定、Max）を選びます。カーブはドラッグ、または - / + と矢印キーで調整できる棒グラフで、変更はすぐ反映され、「変更あり」の表示と、元に戻せる「変更を破棄」が出ます。ファンごとのPWMがない機種では、自動、Max、またはその二つを切り替えるカーブを選べます。</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Fan Control"></p>
+<p align="center"><sub>再設計は <a href="https://github.com/fawaz7">@fawaz7</a> さんによる貢献です（#85、#84のモード別ファンプランに続くもの）。ご自身のPredator PH16-71で検証されています。スクリーンショットは作者によるものです。</sub></p>
 
 <p align="center"><b>バッテリー</b> — 充電率、電圧、電流、電力、サイクル数、劣化状態、製造元、そして長寿命化のための80%充電制限です。</p>
 <p align="center"><img src="assets/psense-8.png" width="800" alt="Battery"></p>

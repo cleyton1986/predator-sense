@@ -64,6 +64,7 @@ Se questa app/progetto ti è stata utile e/o ti è piaciuta in qualche modo, con
 <p align="center"><b>Illuminazione</b>: ogni modalità di alimentazione ha la propria illuminazione, con preset con nome. Controllo illuminazione imposta gli effetti di ogni luce, e i colori per tasto sulla tastiera del PH16-71; Temi imposta insieme tastiera, barra luminosa e logo da uno di 32 temi integrati.</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="Illuminazione"></p>
 <p align="center"><img src="assets/psense-17.png" width="800" alt="Temi di illuminazione"></p>
+<p align="center"><sub>La pagina Illuminazione, i temi e il redesign del Controllo Ventole sono stati contribuiti da <a href="https://github.com/fawaz7">@fawaz7</a> (PR #85 a #95), testati sul suo Predator PH16-71. Screenshot dell'autore. Le tastiere a quattro zone (come quella del PH315-54) usano la stessa pagina, disegnata con le proprie zone, e le macchine senza PWM per ventola ottengono una curva Automatico/Max nel Controllo Ventole.</sub></p>
 
 <p align="center"><b>Modalità</b> — Profili di prestazioni: Silenzioso, Bilanciato, Prestazioni e Turbo, più un livello Eco esclusivo per la batteria (CPU governor + Intel EPP + limite di potenza della GPU).</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="Modalità"></p>
@@ -71,8 +72,9 @@ Se questa app/progetto ti è stata utile e/o ti è piaciuta in qualche modo, con
 <p align="center"><b>Strumenti</b> — GameSync, Macro, Equalizzatore audio, l'assistente IA (beta) e GRUB Splash vivono ora qui, raggruppati in schede così la barra laterale non cresce senza limiti. Mostrato qui: GameSync, che registra un gioco e il suo profilo così l'app passa automaticamente a quel profilo mentre il gioco è in esecuzione e ripristina quello attivo in precedenza non appena si chiude.</p>
 <p align="center"><img src="assets/psense-15.png" width="800" alt="Strumenti"></p>
 
-<p align="center"><b>Controllo Ventole</b> — RPM in tempo reale con ventole animate, interruttore CoolBoost e modalità Auto/Max.</p>
+<p align="center"><b>Controllo Ventole</b>: RPM in tempo reale con ventole animate e interruttore CoolBoost. Scegli una modalità di alimentazione nella barra «Ventole per» e poi cosa fanno le sue ventole: Automatico, Curva, Fisso o Max. La curva è un grafico a barre che trascini, o regoli con - / + e le frecce; le modifiche si applicano subito, con l'etichetta «Modificato» e «Annulla modifiche» con Annulla. Le macchine senza PWM per ventola offrono Automatico, Max o una curva che alterna tra i due.</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="Controllo Ventole"></p>
+<p align="center"><sub>Redesign contribuito da <a href="https://github.com/fawaz7">@fawaz7</a> (#85, a partire dai piani ventola per modalità della #84), testato sul suo Predator PH16-71. Screenshot dell'autore.</sub></p>
 
 <p align="center"><b>Batteria</b> — Percentuale di carica, voltaggio, corrente, potenza, cicli, salute, produttore e limite di carica all'80% per la longevità.</p>
 <p align="center"><img src="assets/psense-8.png" width="800" alt="Batteria"></p>

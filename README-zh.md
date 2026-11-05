@@ -64,6 +64,7 @@
 <p align="center"><b>灯光</b>：每个电源模式都有自己的灯光，并可保存为命名预设。灯光控制设置每个灯的效果，在 PH16-71 键盘上还可设置按键独立颜色；主题从 32 个内置主题中一并设置键盘、灯条和 Logo。</p>
 <p align="center"><img src="assets/psense-5.png" width="800" alt="灯光"></p>
 <p align="center"><img src="assets/psense-17.png" width="800" alt="灯光主题"></p>
+<p align="center"><sub>灯光页面、主题和风扇控制的重新设计由 <a href="https://github.com/fawaz7">@fawaz7</a> 贡献（PR #85 至 #95），并在其自己的 Predator PH16-71 上测试。截图由作者提供。四区键盘（如 PH315-54）使用同一页面，按其自身分区绘制；没有单风扇 PWM 的机器在风扇控制中获得自动/最大曲线。</sub></p>
 
 <p align="center"><b>模式</b>：性能模式，静音、均衡、性能和 Turbo，另外还有一个仅限电池模式下使用的 Eco 档位（CPU governor + Intel EPP + GPU 功耗限制）。</p>
 <p align="center"><img src="assets/psense-6.png" width="800" alt="模式"></p>
@@ -71,8 +72,9 @@
 <p align="center"><b>工具</b>：GameSync、宏、音频均衡器、AI 助手（beta）和 GRUB Splash 现在都归到这里，以标签页分组，这样侧边栏就不会无限增长。这里展示的是 GameSync：为某个游戏注册一个专属模式，游戏运行时应用会自动切换到该模式，游戏退出后再恢复之前生效的模式。</p>
 <p align="center"><img src="assets/psense-15.png" width="800" alt="工具"></p>
 
-<p align="center"><b>风扇控制</b>：实时转速显示，带有动画旋转的风扇、CoolBoost 开关以及 Auto/Max 模式。</p>
+<p align="center"><b>风扇控制</b>: 带旋转动画风扇的实时转速和 CoolBoost 开关。在“风扇用于”栏选择电源模式，再选择其风扇的行为：自动、曲线、固定或最大。曲线是可拖动、或用 - / + 和方向键调整的条形图；更改立即生效，并显示“已更改”标记和带撤销的“放弃更改”。没有单风扇 PWM 的机器提供自动、最大，或在两者之间切换的曲线。</p>
 <p align="center"><img src="assets/psense-7.png" width="800" alt="风扇控制"></p>
+<p align="center"><sub>重新设计由 <a href="https://github.com/fawaz7">@fawaz7</a> 贡献（#85，承接 #84 的按模式风扇方案），并在其自己的 Predator PH16-71 上测试。截图由作者提供。</sub></p>
 
 <p align="center"><b>电池</b>：充电百分比、电压、电流、功率、循环次数、健康状况、制造商信息，以及用于延长寿命的 80% 充电限制。</p>
 <p align="center"><img src="assets/psense-8.png" width="800" alt="电池"></p>
