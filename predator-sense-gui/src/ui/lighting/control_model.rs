@@ -47,6 +47,8 @@ pub enum Tile {
     /// The four-zone keyboard (ENE, or the older WMI keyboards): its zone colours
     /// (`RgbMode::Static`, "Static" as its page named them) or one of its effects.
     FourZone(RgbMode),
+    /// The four-zone keyboard turned off (its zones and effect are kept behind it).
+    FourZoneOff,
     /// The 2024 models' one-colour keyboard (Sunrex): its own effect, Off included.
     OneColour(KeyboardEffect),
     /// The Helios 300's keyboard: its effect, by its 1-based wire index into
@@ -186,6 +188,7 @@ impl Tile {
             Tile::PerKey => "lighting_per_key",
             Tile::Bar(mode) => mode.label_key(),
             Tile::FourZone(mode) => four_zone_label(mode),
+            Tile::FourZoneOff => "light_bar_off",
             Tile::OneColour(effect) => one_colour_label(effect),
             Tile::Palette(index) => PALETTE_EFFECT_KEYS
                 .get(index.wrapping_sub(1))
@@ -212,7 +215,8 @@ impl Tile {
             | Tile::Palette(PALETTE_STATIC)
             | Tile::MagicLogo(Some(LogoEffect::Static))
             | Tile::CoverLogo(Some(RgbMode::Static)) => STATIC,
-            Tile::OneColour(KeyboardEffect::Off)
+            Tile::FourZoneOff
+            | Tile::OneColour(KeyboardEffect::Off)
             | Tile::MagicLogo(None)
             | Tile::CoverLogo(None) => TileIcon::Effect("lighting-off-symbolic"),
             Tile::FourZone(_)
@@ -361,6 +365,7 @@ pub fn tiles(light: PreviewLight, cx: &Context) -> Vec<Tile> {
             std::iter::once(RgbMode::Static)
                 .chain(cx.four_zone.effects.iter().copied())
                 .map(Tile::FourZone)
+                .chain([Tile::FourZoneOff])
                 .collect()
         }
         PreviewLight::Keyboard if cx.hw().keyboard == Some(KeyboardKind::OneColour) => {
@@ -698,6 +703,10 @@ fn other_keyboard_view(view: &mut View, m: &ManualSetup, cx: &Context) {
                 return;
             };
             view.reset = true;
+            if k.off {
+                view.selected = Some(Tile::FourZoneOff);
+                return;
+            }
             if k.is_static {
                 view.selected = Some(Tile::FourZone(RgbMode::Static));
                 view.colour = Some(Colour::Zones4(k.zone_colours()));
@@ -851,6 +860,7 @@ fn four_zone(m: &mut ManualSetup) -> &mut FourZoneKeyboardState {
             is_static: true,
             dynamic_last: None,
             dynamic_effects: Default::default(),
+            off: false,
         })
 }
 
@@ -962,12 +972,28 @@ pub fn choose(setup: &mut LightingSetup, cx: &Context, tile: Tile) {
                 set_zones(k, zones);
             }
             k.is_static = true;
+            k.off = false;
+        }
+        // Off is a switch, like the lid logo's: what shows is kept behind it. Something has
+        // to be there to keep (a state that shows nothing is the firmware's own look).
+        Tile::FourZoneOff => {
+            let k = four_zone(m);
+            if k.is_static {
+                if k.static_zones.is_none() {
+                    let zones = k.zone_colours();
+                    set_zones(k, zones);
+                }
+            } else {
+                four_zone_effect(k);
+            }
+            k.off = true;
         }
         // An effect takes back the speed and direction it had (its page's memory), else
         // keeps the ones shown; its colour stays.
         Tile::FourZone(mode) => {
             let k = four_zone(m);
             k.is_static = false;
+            k.off = false;
             let had = k.dynamic_effects.get(&mode).copied();
             let effect = four_zone_effect(k);
             effect.mode = mode;
@@ -1695,6 +1721,7 @@ mod tests {
                 ..RgbConfig::default()
             }),
             dynamic_effects: Default::default(),
+            off: false,
         }
     }
 
@@ -1706,25 +1733,27 @@ mod tests {
     }
 
     /// The four-zone keyboard offers its zone colours ("Static") and the effects it runs:
-    /// all seven over WMI, on the ENE controller only those it advertises; never Off.
+    /// all seven over WMI, on the ENE controller only those it advertises, then Off.
     #[test]
     fn the_four_zone_keyboard_offers_its_zone_colours_and_the_effects_it_runs() {
         let all = tiles(PreviewLight::Keyboard, &wmi());
         assert_eq!(all[0], Tile::FourZone(RgbMode::Static));
+        let n = all.len();
+        assert_eq!(all[n - 1], Tile::FourZoneOff, "Off last");
         assert_eq!(
-            all[1..],
+            all[1..n - 1],
             FOUR_ZONE_EFFECTS.map(Tile::FourZone),
             "the old page's order"
         );
         assert_eq!(
             tiles(PreviewLight::Keyboard, &ene()),
             [
-                RgbMode::Static,
-                RgbMode::Breath,
-                RgbMode::Neon,
-                RgbMode::Wave
+                Tile::FourZone(RgbMode::Static),
+                Tile::FourZone(RgbMode::Breath),
+                Tile::FourZone(RgbMode::Neon),
+                Tile::FourZone(RgbMode::Wave),
+                Tile::FourZoneOff
             ]
-            .map(Tile::FourZone)
         );
         let facts = FourZoneFacts::found(false, |_| false, |_| true, |_| true, false);
         assert!(
@@ -1743,13 +1772,16 @@ mod tests {
                 "shift",
                 "zoom",
                 "meteor",
-                "twinkling"
+                "twinkling",
+                "light_bar_off"
             ],
-            "the old page's names"
+            "the old page's names, then Off"
         );
         for tile in all {
             let expected = if tile == Tile::FourZone(RgbMode::Static) {
                 TileIcon::Effect("lighting-static-symbolic")
+            } else if tile == Tile::FourZoneOff {
+                TileIcon::Effect("lighting-off-symbolic")
             } else {
                 TileIcon::Neutral
             };
@@ -2281,6 +2313,48 @@ mod tests {
             )
             .speed_ends
         );
+    }
+
+    /// Off turns the four-zone keyboard off and keeps its zones, effect and brightness behind
+    /// it: any other tile lights it again as it was, and Off alone never reads as "leave it to
+    /// the firmware".
+    #[test]
+    fn the_four_zone_keyboards_off_keeps_what_was_behind_it() {
+        let cx = ene();
+        // On a config with nothing applied yet: Off is written, not left to the firmware.
+        let mut fresh = LightingSetup::default();
+        choose(&mut fresh, &cx, Tile::FourZoneOff);
+        let k = four_zone_of(&fresh);
+        assert!(k.off && k.shows_something() && k.is_off());
+        assert_eq!(k.command(), crate::hardware::lighting_model::FourZoneCommand::Off);
+        assert_eq!(k.shown_brightness(), 100, "the brightness is kept");
+        let v = view(&fresh, PreviewLight::Keyboard, &cx);
+        assert_eq!(v.selected, Some(Tile::FourZoneOff));
+        assert!(v.colour.is_none() && v.speed.is_none() && v.direction.is_none());
+
+        // Over an effect: Off keeps it, and choosing it again lights it as it was.
+        let mut setup = LightingSetup::default();
+        choose(&mut setup, &cx, Tile::FourZone(RgbMode::Wave));
+        set_speed(&mut setup, &cx, PreviewLight::Keyboard, 30);
+        let lit = four_zone_of(&setup).clone();
+        choose(&mut setup, &cx, Tile::FourZoneOff);
+        let k = four_zone_of(&setup);
+        assert!(k.off && k.is_off());
+        assert_eq!(k.dynamic_last, lit.dynamic_last, "the effect is kept");
+        choose(&mut setup, &cx, Tile::FourZone(RgbMode::Wave));
+        assert_eq!(four_zone_of(&setup), &lit);
+
+        // Over the zone colours: any other tile lights them.
+        let mut zones = LightingSetup::default();
+        choose(&mut zones, &cx, Tile::FourZone(RgbMode::Static));
+        let lit = four_zone_of(&zones).clone();
+        choose(&mut zones, &cx, Tile::FourZoneOff);
+        assert!(four_zone_of(&zones).is_off());
+        choose(&mut zones, &cx, Tile::FourZone(RgbMode::Static));
+        assert_eq!(four_zone_of(&zones), &lit);
+        choose(&mut zones, &cx, Tile::FourZoneOff);
+        choose(&mut zones, &cx, Tile::FourZone(RgbMode::Neon));
+        assert!(!four_zone_of(&zones).off);
     }
 
     /// The four-zone keyboard's edits: Static fills the zones it shows, an effect takes back

@@ -604,6 +604,7 @@ fn four_zone_nearest(kind: NearestKind, colour: &str, brightness: u8) -> FourZon
             blue,
         }),
         dynamic_effects: Default::default(),
+        off: false,
     }
 }
 
@@ -801,6 +802,7 @@ mod tests {
                     ..RgbConfig::default()
                 }),
                 dynamic_effects: Default::default(),
+                off: false,
             }),
             magic_keyboard: Some(MagicRgbKeyboardState {
                 effect: KeyboardEffect::Static,

@@ -490,6 +490,12 @@ pub struct FourZoneKeyboardState {
     /// shows it.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub dynamic_effects: HashMap<RgbMode, EffectParams>,
+    /// The "Off" tile: the keyboard is turned off whatever the brightness, as the lid logo's
+    /// power switch is. The zones, the effect and the brightness are kept behind it, so any
+    /// other tile lights the keyboard again as it was. Not part of the config's `rgb_*`
+    /// record ([`FourZoneKeyboardState::as_written`] writes it as brightness 0).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub off: bool,
 }
 
 impl FourZoneKeyboardState {
@@ -503,6 +509,7 @@ impl FourZoneKeyboardState {
                 is_static: cfg.rgb_is_static,
                 dynamic_last: cfg.rgb_dynamic_last.clone(),
                 dynamic_effects: cfg.rgb_dynamic_effects.clone(),
+                off: false,
             }
         })
     }
@@ -564,10 +571,10 @@ impl FourZoneKeyboardState {
         self.write().zone_colors.map(|(r, g, b)| [r, g, b])
     }
 
-    /// It shows at brightness 0: the RGB page's "Turn off keyboard light" is what reaches
-    /// the keyboard ([`FourZoneKeyboardState::command`]).
+    /// It is turned off, or shows at brightness 0: the RGB page's "Turn off keyboard light"
+    /// is what reaches the keyboard ([`FourZoneKeyboardState::command`]).
     pub fn is_off(&self) -> bool {
-        self.shown_brightness() == 0
+        self.off || self.shown_brightness() == 0
     }
 
     /// What the per-mode lighting sends for it: at brightness 0, exactly what the RGB page's
@@ -604,6 +611,7 @@ impl FourZoneKeyboardState {
             ),
             brightness: 0,
             is_static: true,
+            off: false,
             ..self.clone()
         }
     }
@@ -1694,6 +1702,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            off: false,
         }
     }
 
@@ -2474,6 +2483,7 @@ mod tests {
                 ..RgbConfig::default()
             }),
             dynamic_effects: HashMap::new(),
+            off: false,
         };
         assert_eq!(lit.command(), FourZoneCommand::Write(lit.write()));
         assert_eq!(lit.as_written(), lit);
@@ -2506,6 +2516,32 @@ mod tests {
             ..lit.clone()
         };
         assert!(!effect_dark.is_off(), "the zones show");
+    }
+
+    /// The four-zone keyboard's Off tile turns it off at any brightness, is recorded as the
+    /// RGB page's off (brightness 0, zones black), keeps what it hides, and stays out of a
+    /// saved config while unset (and reads back as unset from one saved before it existed).
+    #[test]
+    fn a_four_zone_keyboard_turned_off_is_off_at_any_brightness() {
+        let lit = tests::four_zone();
+        let off = FourZoneKeyboardState {
+            off: true,
+            ..lit.clone()
+        };
+        assert!(off.shown_brightness() > 0 && off.is_off());
+        assert_eq!(off.command(), FourZoneCommand::Off);
+        // The per-mode brightness is applied over it, and it stays off.
+        assert!(off.at_brightness(80).off && off.at_brightness(80).is_off());
+        let shown = off.as_written();
+        assert!(!shown.off && shown.is_static && shown.brightness == 0);
+        assert_eq!(shown.zone_colours(), [[0; 3]; 4]);
+        assert_eq!(shown.dynamic_last, off.dynamic_last, "the effect is kept");
+        assert_eq!(shown.static_zones.as_ref().map(Vec::len), Some(4));
+        let json = serde_json::to_string(&lit).unwrap();
+        assert!(!json.contains("\"off\""), "{json}");
+        assert!(!serde_json::from_str::<FourZoneKeyboardState>(&json).unwrap().off);
+        let json = serde_json::to_string(&off).unwrap();
+        assert!(serde_json::from_str::<FourZoneKeyboardState>(&json).unwrap().off);
     }
 
     /// The one-colour keyboard's Off, and any effect at brightness 0, go out as its page's

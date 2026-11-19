@@ -631,7 +631,9 @@ fn other_keyboard_words(
     match keyboard? {
         KeyboardKind::Zones4 => {
             let k = m.four_zone_keyboard.as_ref()?;
-            if k.is_static {
+            if k.off {
+                words.push(i18n::t(Tile::FourZoneOff.label_key()).to_string());
+            } else if k.is_static {
                 words.push(i18n::t(Tile::FourZone(RgbMode::Static).label_key()).to_string());
                 let mut colours: Vec<String> =
                     k.zone_colours().iter().map(|c| spoken(*c)).collect();
@@ -1359,6 +1361,7 @@ mod tests {
                 ..RgbConfig::default()
             }),
             dynamic_effects: Default::default(),
+            off: false,
         };
         let mut setup = LightingSetup::from_manual(ManualSetup {
             four_zone_keyboard: Some(zones.clone()),
