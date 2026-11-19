@@ -2166,6 +2166,7 @@ mod tests {
                 ..RgbConfig::default()
             }),
             dynamic_effects: Default::default(),
+            off: false,
         }
     }
 

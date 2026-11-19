@@ -280,6 +280,9 @@ fn other_keyboard(m: &lighting_model::ManualSetup, kind: Option<KeyboardKind>) -
             let Some(keyboard) = &m.four_zone_keyboard else {
                 return Run::Dark;
             };
+            if keyboard.off {
+                return Run::Dark;
+            }
             if keyboard.is_static {
                 return effect(
                     "hw.static",
@@ -2035,6 +2038,7 @@ mod tests {
                 ..RgbConfig::default()
             }),
             dynamic_effects: Default::default(),
+            off: false,
         };
         let palette = Some(ChiconyRgbState {
             effect: 2,

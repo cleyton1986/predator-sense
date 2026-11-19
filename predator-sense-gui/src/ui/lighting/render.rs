@@ -152,6 +152,7 @@ fn zone_colours(colours: [[u8; 3]; 4], mode: RgbMode, is_static: bool) -> FourZo
             blue: 0x88,
         }),
         dynamic_effects: Default::default(),
+        off: false,
     }
 }
 
